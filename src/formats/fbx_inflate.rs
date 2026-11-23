@@ -4,9 +4,7 @@
 //! offset moved to match. Anything not laid out as binary FBX 7 should be is left for the reader as it was, so it says
 //! what's wrong.
 
-use std::io::Read as _;
-
-use flate2::read::ZlibDecoder;
+use flate2::{Decompress, FlushDecompress, Status};
 
 /// The file with its arrays stored rather than compressed, or `None` if it has none, isn't binary FBX 7, or isn't laid
 /// out as one should be.
@@ -23,6 +21,7 @@ pub(super) fn inflated(data: &[u8]) -> Option<Vec<u8>> {
         wide: version >= 7500,
         out: Vec::with_capacity(data.len().saturating_mul(2)),
         any: false,
+        zlib: Decompress::new(true),
     };
     w.out.extend_from_slice(&data[..27]);
     let end = w.records(27, data.len())?;
@@ -38,6 +37,8 @@ struct Writer<'a> {
     out: Vec<u8>,
     /// Whether any array was inflated.
     any: bool,
+    /// One decoder for every array, reset between them.
+    zlib: Decompress,
 }
 
 impl Writer<'_> {
@@ -137,12 +138,14 @@ impl Writer<'_> {
                         self.out.extend_from_slice(&0u32.to_le_bytes());
                         self.out.extend_from_slice(&size32.to_le_bytes());
                         let before = self.out.len();
-                        // No more than the array says it holds, however much the stream would inflate to.
-                        ZlibDecoder::new(&self.data[body..body_end])
-                            .take(u64::from(size32) + 1)
-                            .read_to_end(&mut self.out)
+                        // Room for a byte more than the array says it holds, to tell a stream that inflates to more.
+                        self.out.reserve(size + 1);
+                        self.zlib.reset(true);
+                        let status = self
+                            .zlib
+                            .decompress_vec(&self.data[body..body_end], &mut self.out, FlushDecompress::Finish)
                             .ok()?;
-                        if self.out.len() - before != size {
+                        if status != Status::StreamEnd || self.out.len() - before != size {
                             return None;
                         }
                         self.any = true;

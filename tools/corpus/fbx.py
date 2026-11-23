@@ -995,6 +995,25 @@ write("skin_two_bones", s, "a cube skinned to two bones; the top bone's translat
       {"vertices": 24, "document": {"skins": 1, "joints": 3, "animations": 1, "node_names": ["Root", "Tip"]},
        "poses": [{"animation": 0, "time": 1, "bounds": box((0, 0, 0), (2, 1, 1))}]})
 
+# Two corners of the cube's top on the second bone, the other two on no bone: those stay with the mesh's own model,
+# as the FBX SDK leaves them, when the bone slides 1 m along Z.
+s = Scene()
+s.model(10, "Body")
+s.model(11, "Root", kind="LimbNode")
+s.model(12, "Tip", kind="LimbNode", parent=11, T=(0, 50, 0))
+s.geometry(cube_geometry(), 10)
+s.obj(Node("Deformer", L(40), ON("Deformer", "Skin"), S("Skin"), children=[Node("Version", I(101))]), ("OO", 40, 1))
+for cid, bone, verts, link, transform in [(41, 11, [0, 1, 4, 5], IDENT, IDENT),
+                                          (42, 12, [2, 3], IDENT[:13] + [50, 0, 1], IDENT[:13] + [-50, 0, 1])]:
+    s.obj(Node("Deformer", L(cid), ON("SubDeformer", f"Cluster {cid}"), S("Cluster"), children=[
+        Node("Version", I(100)), Node("Indexes", AI(verts)), Node("Weights", AD([1] * len(verts))),
+        Node("Transform", AD(transform)), Node("TransformLink", AD(link))]), ("OO", cid, 40), ("OO", bone, cid))
+anim_stack(s)
+anim_curves(s, 12, "Lcl Translation", 70, {"d|Z": ([0, 1], [0, 100], False)}, defaults={"d|Y": 50})
+write("skin_partly_weighted", s, "a cube skinned to two bones with two corners on neither, which stay with the mesh",
+      {"vertices": 24, "document": {"skins": 1, "joints": 3, "animations": 1, "node_names": ["Root", "Tip"]},
+       "poses": [{"animation": 0, "time": 1, "bounds": box((0, 0, 0), (1, 1, 1))}]})
+
 # The same skin bound away from where the file leaves its bones: the bind pose comes from the clusters.
 s = Scene()
 s.model(10, "Body")

@@ -40,7 +40,7 @@ Early. What exists today:
   `Document::images` gives a handle on each image that says where it is (a file, an archive
   entry, inside the model) and loads it on request, and `Document::embed_images` reads
   them all.
-- **Conformance corpus**: 577 cases under `tests/corpus`, each a file and the GLB it must
+- **Conformance corpus**: 586 cases under `tests/corpus`, each a file and the GLB it must
   become. They cover every format above and the variants exporters really write: OBJ's face
   forms and MTL dialects, both PLY byte orders, every FBX version and axis system, and USD's
   three encodings and its composition, glTF's accessor types, node hierarchy, skins and extensions, and files SketchUp itself

@@ -21,7 +21,7 @@ use crate::assets::Assets;
 use crate::document::{Builder, Document, Keep, Part};
 use crate::images::{Images, Location};
 use crate::material::{self, Alpha, Clearcoat, Factor, Full, Sheen, Tex, UvTransform};
-use crate::mesh::{GRAY, Material, Prim, smooth_normals, srgb_to_linear, triangulate};
+use crate::mesh::{FastMap, GRAY, Material, Prim, smooth_normals, srgb_to_linear, triangulate};
 use crate::num::f32_of;
 
 use super::xform::{IDENTITY, M4, Trs, column_major, decompose, det3, inverse, mul, scale, set_transform, translate};
@@ -142,8 +142,29 @@ fn scalar(p: &HashMap<String, Vec<A>>, name: &str) -> Option<f64> {
 struct Layer {
     values: Vec<f64>,
     index: Option<Vec<i64>>,
-    mapping: String,
+    mapping: Mapping,
     width: usize,
+}
+
+/// What a layer element holds a value for.
+#[derive(Clone, Copy)]
+enum Mapping {
+    ControlPoint,
+    Polygon,
+    AllSame,
+    PolygonVertex,
+}
+
+impl Mapping {
+    fn of(el: NodeHandle<'_>, default: Self) -> Self {
+        match child_attr(el, "MappingInformationType").and_then(string) {
+            Some("ByVertice" | "ByVertex" | "ByControlPoint") => Self::ControlPoint,
+            Some("ByPolygon") => Self::Polygon,
+            Some("AllSame") => Self::AllSame,
+            Some(_) => Self::PolygonVertex,
+            None => default,
+        }
+    }
 }
 
 impl Layer {
@@ -154,21 +175,18 @@ impl Layer {
         Some(Self {
             values: floats(child_attr(el, values)?)?,
             index: child_attr(el, index).and_then(ints),
-            mapping: child_attr(el, "MappingInformationType")
-                .and_then(string)
-                .unwrap_or("ByPolygonVertex")
-                .to_owned(),
+            mapping: Mapping::of(el, Mapping::PolygonVertex),
             width,
         })
     }
 
     /// The value for polygon-vertex `pv` (control point `cp`, polygon `poly`).
     fn get(&self, pv: usize, cp: usize, poly: usize) -> Option<(usize, &[f64])> {
-        let i = match self.mapping.as_str() {
-            "ByVertice" | "ByVertex" | "ByControlPoint" => cp,
-            "ByPolygon" => poly,
-            "AllSame" => 0,
-            _ => pv,
+        let i = match self.mapping {
+            Mapping::ControlPoint => cp,
+            Mapping::Polygon => poly,
+            Mapping::AllSame => 0,
+            Mapping::PolygonVertex => pv,
         };
         let i = match &self.index {
             Some(ix) => usize::try_from(*ix.get(i)?).ok()?,
@@ -470,27 +488,54 @@ fn name_of(node: NodeHandle<'_>) -> Option<&str> {
 /// A model's local transform: `T * Roff * Rp * Rpre * R * Rpost^-1 * Rp^-1 * Soff * Sp * S * Sp^-1`, the FBX SDK's
 /// order, with `t`, `r` and `s` standing in for its `Lcl` properties when given.
 fn local_of(p: &Props, t: Option<[f64; 3]>, r: Option<[f64; 3]>, s: Option<[f64; 3]>) -> M4 {
-    #[allow(clippy::cast_possible_truncation, reason = "an enum value; `as` saturates bad ones")]
-    let order = scalar(p, "RotationOrder").map_or(0, |v| v as i32);
-    let r_pre = rotate(vec3(p, "PreRotation", [0.0; 3]), 0);
-    let r_post_inv = transpose3(&rotate(vec3(p, "PostRotation", [0.0; 3]), 0));
-    let rp = vec3(p, "RotationPivot", [0.0; 3]);
-    let sp = vec3(p, "ScalingPivot", [0.0; 3]);
-    [
-        translate(t.unwrap_or_else(|| vec3(p, "Lcl Translation", [0.0; 3]))),
-        translate(vec3(p, "RotationOffset", [0.0; 3])),
-        translate(rp),
-        r_pre,
-        rotate(r.unwrap_or_else(|| vec3(p, "Lcl Rotation", [0.0; 3])), order),
-        r_post_inv,
-        translate(rp.map(|c| -c)),
-        translate(vec3(p, "ScalingOffset", [0.0; 3])),
-        translate(sp),
-        scale(s.unwrap_or_else(|| vec3(p, "Lcl Scaling", [1.0; 3]))),
-        translate(sp.map(|c| -c)),
-    ]
-    .iter()
-    .fold(IDENTITY, |acc, m| mul(&acc, m))
+    Local::new(p).at(t, r, s)
+}
+
+/// A model's local transform with its fixed parts (offsets, pivots, pre- and post-rotation) multiplied out, for
+/// evaluating it again at each animation time: `T · before · R · between · S · after`.
+struct Local {
+    t: [f64; 3],
+    r: [f64; 3],
+    s: [f64; 3],
+    order: i32,
+    before: M4,
+    between: M4,
+    after: M4,
+}
+
+impl Local {
+    fn new(p: &Props) -> Self {
+        #[allow(clippy::cast_possible_truncation, reason = "an enum value; `as` saturates bad ones")]
+        let order = scalar(p, "RotationOrder").map_or(0, |v| v as i32);
+        let r_pre = rotate(vec3(p, "PreRotation", [0.0; 3]), 0);
+        let r_post_inv = transpose3(&rotate(vec3(p, "PostRotation", [0.0; 3]), 0));
+        let rp = vec3(p, "RotationPivot", [0.0; 3]);
+        let sp = vec3(p, "ScalingPivot", [0.0; 3]);
+        let product = |ms: &[M4]| ms.iter().fold(IDENTITY, |acc, m| mul(&acc, m));
+        Self {
+            t: vec3(p, "Lcl Translation", [0.0; 3]),
+            r: vec3(p, "Lcl Rotation", [0.0; 3]),
+            s: vec3(p, "Lcl Scaling", [1.0; 3]),
+            order,
+            before: product(&[translate(vec3(p, "RotationOffset", [0.0; 3])), translate(rp), r_pre]),
+            between: product(&[
+                r_post_inv,
+                translate(rp.map(|c| -c)),
+                translate(vec3(p, "ScalingOffset", [0.0; 3])),
+                translate(sp),
+            ]),
+            after: translate(sp.map(|c| -c)),
+        }
+    }
+
+    /// The transform with translation, rotation and scale as given, or as the model holds them.
+    fn at(&self, t: Option<[f64; 3]>, r: Option<[f64; 3]>, s: Option<[f64; 3]>) -> M4 {
+        let m = mul(&translate(t.unwrap_or(self.t)), &self.before);
+        let m = mul(&m, &rotate(r.unwrap_or(self.r), self.order));
+        let m = mul(&m, &self.between);
+        let m = mul(&m, &scale(s.unwrap_or(self.s)));
+        mul(&m, &self.after)
+    }
 }
 
 /// The transpose of a rotation (its inverse).
@@ -1015,10 +1060,10 @@ impl Reader<'_, '_, '_> {
         let geom = self.objs.node(g).context("missing geometry")?;
         let prims = geometry(geom)?;
         // Skin weights per control point: (joint, weight), heaviest first.
-        let influences = if self.keep.skins {
+        let (clusters, influences) = if self.keep.skins {
             self.influences(g)
         } else {
-            HashMap::new()
+            (0, Vec::new())
         };
         let channels = if self.keep.morph_targets {
             self.morph_channels(g)
@@ -1027,12 +1072,7 @@ impl Reader<'_, '_, '_> {
         };
         let (morph_ids, shapes): (Vec<i64>, Vec<Shape>) =
             channels.iter().filter_map(|&c| Some((c, self.shape(c)?))).unzip();
-        let joint_sets = influences
-            .values()
-            .map(|v| v.len().div_ceil(4))
-            .max()
-            .unwrap_or(0)
-            .min(4);
+        let joint_sets = influences.iter().map(|v| v.len().div_ceil(4)).max().unwrap_or(0).min(4);
         let mut primitives = Vec::new();
         for (slot, prim, cps) in prims {
             let material = match mats.get(slot) {
@@ -1047,12 +1087,12 @@ impl Reader<'_, '_, '_> {
             };
             json["material"] = json!(material);
             if joint_sets > 0 {
-                let unweighted = influences.len() + 1; // stands for the model itself; see `skin`
+                let unweighted = clusters; // stands for the model itself, after the clusters; see `skin`
                 for set in 0..joint_sets {
                     let mut joints = Vec::with_capacity(cps.len() * 4);
                     let mut weights = Vec::with_capacity(cps.len() * 4);
                     for cp in &cps {
-                        let inf = influences.get(cp).map_or(&[][..], Vec::as_slice);
+                        let inf = influences.get(*cp).map_or(&[][..], Vec::as_slice);
                         for k in set * 4..set * 4 + 4 {
                             match inf.get(k) {
                                 Some(&(j, w)) => {
@@ -1113,30 +1153,49 @@ impl Reader<'_, '_, '_> {
         Ok(i)
     }
 
-    /// The skin deformer's clusters on geometry `g`, as control point → (cluster number, weight), heaviest first and
-    /// summing to one. Clusters whose bone isn't a model are left out.
-    fn influences(&self, g: i64) -> HashMap<usize, Vec<(usize, f32)>> {
-        let mut out: HashMap<usize, Vec<(usize, f32)>> = HashMap::new();
+    /// The skin deformer's clusters on geometry `g`: how many there are, and by control point, (cluster number,
+    /// weight), heaviest first and summing to one. Clusters whose bone isn't a model are left out.
+    fn influences(&self, g: i64) -> (usize, Vec<Vec<(usize, f32)>>) {
+        let mut out: Vec<Vec<(usize, f32)>> = Vec::new();
         let Some(skin) = self
             .objs
             .children_of(g)
             .find(|d| self.objs.is_kind("Deformer", *d, "Skin"))
         else {
-            return out;
+            return (0, out);
         };
-        for (j, cluster) in self.clusters(skin).into_iter().enumerate() {
+        let clusters = self.clusters(skin);
+        // Indexes past the control points weight nothing: no more room than those take.
+        let cps = self
+            .objs
+            .node(g)
+            .and_then(|n| child_attr(n, "Vertices"))
+            .map_or(0, |v| match v {
+                A::ArrF64(a) => a.len() / 3,
+                A::ArrF32(a) => a.len() / 3,
+                _ => 0,
+            });
+        for (j, &cluster) in clusters.iter().enumerate() {
             let Some(node) = self.objs.node(cluster) else { continue };
-            let idx = child_attr(node, "Indexes").and_then(ints).unwrap_or_default();
-            let w = child_attr(node, "Weights").and_then(floats).unwrap_or_default();
+            let (Some(idx), Some(w)) = (child_attr(node, "Indexes"), child_attr(node, "Weights")) else {
+                continue;
+            };
+            let (Some(idx), Some(w)) = (ints(idx), floats(w)) else {
+                continue;
+            };
             for (&cp, &w) in idx.iter().zip(&w) {
                 if let Ok(cp) = usize::try_from(cp)
+                    && cp < cps
                     && w > 0.0
                 {
-                    out.entry(cp).or_default().push((j, f32_of(w)));
+                    if out.len() <= cp {
+                        out.resize_with(cp + 1, Vec::new);
+                    }
+                    out[cp].push((j, f32_of(w)));
                 }
             }
         }
-        for inf in out.values_mut() {
+        for inf in &mut out {
             inf.sort_by(|a, b| b.1.total_cmp(&a.1));
             inf.truncate(16);
             let sum: f32 = inf.iter().map(|x| x.1).sum();
@@ -1144,7 +1203,7 @@ impl Reader<'_, '_, '_> {
                 x.1 /= sum;
             }
         }
-        out
+        (clusters.len(), out)
     }
 
     /// A skin deformer's clusters that name a bone.
@@ -1379,9 +1438,10 @@ impl Reader<'_, '_, '_> {
         }
         let shift = times[0].min(0.0);
         let at = |k: usize, t: f64| tracks[k].as_ref().map(|a| a.at(t));
+        let local = Local::new(p);
         let mut trs: Vec<Trs> = times
             .iter()
-            .map(|&t| decompose(&local_of(p, at(0, t), at(1, t), at(2, t))))
+            .map(|&t| decompose(&local.at(at(0, t), at(1, t), at(2, t))))
             .collect();
         // Keep each quaternion on the same side as the last, so slerp takes the short way.
         for i in 1..trs.len() {
@@ -1394,7 +1454,7 @@ impl Reader<'_, '_, '_> {
         let input = self
             .b
             .floats(times.iter().map(|&t| f32_of(t - shift)).collect(), "SCALAR", true);
-        let rest = decompose(&local_of(p, None, None, None));
+        let rest = decompose(&local.at(None, None, None));
         let paths: [(&str, Vec<f64>, Vec<f64>); 3] = [
             ("translation", trs.iter().flat_map(|x| x.t).collect(), rest.t.to_vec()),
             ("rotation", trs.iter().flat_map(|x| x.r).collect(), rest.r.to_vec()),
@@ -1778,7 +1838,7 @@ fn texture_image(id: i64, objs: &Objects<'_>, dir: &Path, assets: &dyn Assets, i
 }
 
 /// Vertices already emitted for a primitive, by (control point, normal index, uv index, color index).
-type Seen = HashMap<(usize, usize, usize, usize), u32>;
+type Seen = FastMap<(usize, usize, usize, usize), u32>;
 
 /// A geometry's triangles in its own space, a primitive per material slot (sorted), each vertex's control point
 /// alongside so skins and blend shapes can find it.
@@ -1802,28 +1862,32 @@ fn geometry(geom: NodeHandle<'_>) -> Result<Vec<(usize, Prim, Vec<usize>)>> {
                 })
                 .collect(),
             index: None,
-            mapping: child_attr(el, "MappingInformationType")
-                .and_then(string)
-                .unwrap_or("AllSame")
-                .to_owned(),
+            mapping: Mapping::of(el, Mapping::AllSame),
             width: 1,
         })
     });
+    // A layer holding a value per polygon vertex, unindexed, gives every corner its own vertex: no need to look for
+    // one already made.
+    let unique = [&normals, &uvs, &colors]
+        .into_iter()
+        .flatten()
+        .any(|l| matches!(l.mapping, Mapping::PolygonVertex) && l.index.is_none());
     // Per material slot: a primitive with de-duplicated vertices, and each vertex's control point.
     let mut prims: HashMap<usize, (Prim, Seen, Vec<usize>)> = HashMap::new();
     let mut poly_start = 0;
     let mut poly = 0;
+    let mut corners: Vec<(usize, usize)> = Vec::new();
+    let mut ids = Vec::new();
     for (k, &raw) in poly_index.iter().enumerate() {
         if raw >= 0 {
             continue;
         }
         // A negative index ends a polygon (stored as !index).
-        let corners: Vec<(usize, usize)> = (poly_start..=k)
-            .map(|pv| {
-                let v = poly_index[pv];
-                (pv, usize::try_from(if v < 0 { !v } else { v }).unwrap_or(usize::MAX))
-            })
-            .collect();
+        corners.clear();
+        corners.extend((poly_start..=k).map(|pv| {
+            let v = poly_index[pv];
+            (pv, usize::try_from(if v < 0 { !v } else { v }).unwrap_or(usize::MAX))
+        }));
         poly_start = k + 1;
         poly += 1;
         // A polygon naming a control point that isn't there, or too few to make a triangle, is left out.
@@ -1848,11 +1912,11 @@ fn geometry(geom: NodeHandle<'_>) -> Result<Vec<(usize, Prim, Vec<usize>)>> {
                     material: slot,
                     ..Prim::default()
                 },
-                HashMap::new(),
+                Seen::default(),
                 Vec::new(),
             )
         });
-        let mut ids = Vec::with_capacity(corners.len());
+        ids.clear();
         corner_pos.clear();
         for &(pv, cp) in &corners {
             let pos = &verts[cp * 3..cp * 3 + 3];
@@ -1867,7 +1931,7 @@ fn geometry(geom: NodeHandle<'_>) -> Result<Vec<(usize, Prim, Vec<usize>)>> {
                 t.map_or(usize::MAX, |x| x.0),
                 c.map_or(usize::MAX, |x| x.0),
             );
-            let id = *seen.entry(key).or_insert_with(|| {
+            let mut new = || {
                 prim.positions.push(p);
                 cps.push(cp);
                 if let Some((_, nv)) = n {
@@ -1883,7 +1947,12 @@ fn geometry(geom: NodeHandle<'_>) -> Result<Vec<(usize, Prim, Vec<usize>)>> {
                         .push([srgb_to_linear(r), srgb_to_linear(g), srgb_to_linear(b), a]);
                 }
                 u32::try_from(prim.positions.len() - 1).unwrap_or(u32::MAX)
-            });
+            };
+            let id = if unique {
+                new()
+            } else {
+                *seen.entry(key).or_insert_with(new)
+            };
             ids.push(id);
         }
         tris.clear();
