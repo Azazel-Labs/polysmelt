@@ -23,6 +23,8 @@ use crate::document::{Document, Keep};
 mod fbx;
 #[cfg(feature = "fbx")]
 pub mod fbx_ascii;
+#[cfg(feature = "fbx")]
+mod fbx_inflate;
 #[cfg(feature = "gltf")]
 mod gltf;
 #[cfg(feature = "gltf")]

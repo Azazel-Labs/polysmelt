@@ -31,7 +31,7 @@ vox = []
 obj = []
 3ds = []
 gltf = []
-fbx = ["dep:fbxcel", "dep:base64"]
+fbx = ["dep:fbxcel", "dep:base64", "dep:flate2"]
 3mf = ["dep:zip", "dep:quick-xml"]
 usd = ["dep:openusd", "dep:openusd-schemas", "dep:zip"]
 # Draco-compressed glTF meshes (KHR_draco_mesh_compression).

@@ -203,6 +203,9 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
             v % 1000 / 100
         );
     }
+    if let Some(stored) = super::fbx_inflate::inflated(&data) {
+        data = stored.into();
+    }
     let fbxcel::tree::any::AnyTree::V7400(version, tree, _) =
         fbxcel::tree::any::AnyTree::from_seekable_reader(std::io::Cursor::new(data))
             .map_err(|e| invalid!("not a readable FBX file: {e}"))?
