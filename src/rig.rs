@@ -113,16 +113,34 @@ impl Channel {
         .map(|v| v.into_iter().map(crate::num::f32_of).collect())
     }
 
-    /// [`Channel::sample`] for a channel at most four wide, without allocating.
-    fn sample_small(&self, t: f32) -> Option<([f32; 4], usize)> {
+    /// [`Channel::sample`] for a channel at most four wide, without allocating, given how many of its keys are at or
+    /// before `t`.
+    fn sample_small(&self, t: f32, k: usize) -> Option<([f32; 4], usize)> {
         let interpolation = self.interpolation.name();
         let w = crate::flatten::width(&self.times, &self.values, interpolation)?;
         let mut v = [0.0f64; 4];
         let rotation = self.path == Path::Rotation;
-        if w > 4 || !crate::flatten::sample_into(&self.times, &self.values, interpolation, t, rotation, &mut v[..w]) {
+        if w > 4 || !crate::flatten::sample_after(&self.times, &self.values, interpolation, t, rotation, k, &mut v[..w])
+        {
             return None;
         }
         Some((v.map(crate::num::f32_of), w))
+    }
+
+    /// Sets what this channel animates of `o` to its value at `t`, given how many of its keys are at or before it.
+    fn pose(&self, t: f32, k: usize, o: &mut Trs) {
+        if self.path == Path::Weights {
+            return;
+        }
+        let Some((v, w)) = self.sample_small(t, k) else {
+            return;
+        };
+        match (self.path, w) {
+            (Path::Translation, 3) => o.translation = [v[0], v[1], v[2]],
+            (Path::Scale, 3) => o.scale = [v[0], v[1], v[2]],
+            (Path::Rotation, 4) => o.rotation = v,
+            _ => {}
+        }
     }
 }
 
@@ -151,10 +169,58 @@ impl Animation {
     /// Every key time any channel has, ascending, each once.
     #[must_use]
     pub fn key_times(&self) -> Vec<f32> {
-        let mut t: Vec<f32> = self.channels.iter().flat_map(|c| c.times.iter().copied()).collect();
-        t.sort_by(f32::total_cmp);
+        // Channels mostly share their times, every bone keyed on the same frames: each set is gathered once.
+        let mut sets: Vec<&[f32]> = Vec::new();
+        for c in &self.channels {
+            if !sets.contains(&c.times.as_slice()) {
+                sets.push(&c.times);
+            }
+        }
+        let mut t: Vec<f32> = sets.concat();
+        if sets.len() > 1 || !t.is_sorted_by(|a, b| a.total_cmp(b).is_le()) {
+            t.sort_unstable_by(f32::total_cmp);
+        }
         t.dedup();
         t
+    }
+}
+
+/// Poses one animation at time after time, as [`Rig::pose_into`] does, each channel keeping its place in its keys:
+/// times in order, as when a clip is played or baked, step to their keys rather than searching for them. Times in any
+/// order pose the same, just no faster.
+#[derive(Debug, Clone)]
+pub struct Poser<'a> {
+    rig: &'a Rig,
+    channels: &'a [Channel],
+    /// For each channel, how many of its keys were at or before the last time posed.
+    keys: Vec<usize>,
+}
+
+impl Poser<'_> {
+    /// Every node's transform relative to its parent at `time` seconds, into `out`, which is cleared first.
+    pub fn pose_into(&mut self, time: f32, out: &mut Vec<Trs>) {
+        out.clear();
+        out.extend(self.rig.nodes.iter().map(|n| n.rest));
+        for (c, k) in self.channels.iter().zip(&mut self.keys) {
+            let times = &c.times;
+            if *k > 0 && times.get(*k - 1).is_none_or(|&x| x > time) {
+                *k = times.partition_point(|&x| x <= time);
+            } else {
+                // Forward a few keys at most at a time in order; a search if it's far ahead.
+                let mut steps = 0;
+                while times.get(*k).is_some_and(|&x| x <= time) {
+                    *k += 1;
+                    steps += 1;
+                    if steps == 4 {
+                        *k += times[*k..].partition_point(|&x| x <= time);
+                        break;
+                    }
+                }
+            }
+            if let Some(o) = out.get_mut(c.node) {
+                c.pose(time, *k, o);
+            }
+        }
     }
 }
 
@@ -198,18 +264,24 @@ impl Rig {
         out.extend(self.nodes.iter().map(|n| n.rest));
         let Some(a) = animation else { return };
         for c in &self.animations[a].channels {
-            if c.path == Path::Weights {
-                continue;
+            if let Some(o) = out.get_mut(c.node) {
+                c.pose(time, c.times.partition_point(|&x| x <= time), o);
             }
-            let (Some(o), Some((v, w))) = (out.get_mut(c.node), c.sample_small(time)) else {
-                continue;
-            };
-            match (c.path, w) {
-                (Path::Translation, 3) => o.translation = [v[0], v[1], v[2]],
-                (Path::Scale, 3) => o.scale = [v[0], v[1], v[2]],
-                (Path::Rotation, 4) => o.rotation = v,
-                _ => {}
-            }
+        }
+    }
+
+    /// A [`Poser`] for animation `animation`, to pose it at one time after another.
+    ///
+    /// # Panics
+    ///
+    /// If there's no animation `animation`.
+    #[must_use]
+    pub fn poser(&self, animation: usize) -> Poser<'_> {
+        let channels = &self.animations[animation].channels;
+        Poser {
+            rig: self,
+            channels,
+            keys: vec![0; channels.len()],
         }
     }
 
@@ -309,6 +381,57 @@ mod tests {
         assert_eq!(out.as_ptr(), at, "allocated again");
         rig.pose_into(None, 0.5, &mut out);
         assert_eq!(out, vec![Trs::IDENTITY; 2]);
+    }
+
+    #[test]
+    fn key_times_holds_every_channels_keys_once_in_order() {
+        let mut rig = rig();
+        assert_eq!(rig.animations[0].key_times(), [0.0, 1.0]);
+        let channel = rig.animations[0].channels[0].clone();
+        for times in [vec![0.5, 1.0, 3.0], vec![0.0, 1.0], vec![-1.0, 0.25]] {
+            let values = channel.values[..4].repeat(times.len());
+            rig.animations[0].channels.push(Channel {
+                times,
+                values,
+                ..channel.clone()
+            });
+        }
+        assert_eq!(rig.animations[0].key_times(), [-1.0, 0.0, 0.25, 0.5, 1.0, 3.0]);
+        assert_eq!(
+            Animation {
+                name: None,
+                channels: Vec::new()
+            }
+            .key_times(),
+            Vec::<f32>::new()
+        );
+    }
+
+    #[test]
+    fn a_poser_poses_as_pose_does_at_times_in_any_order() {
+        let mut rig = rig();
+        // A long channel, for steps of one key, several and many.
+        let times: Vec<f32> = (0..40u8).map(|k| f32::from(k) * 0.05).collect();
+        let values: Vec<f32> = (0..40u8).flat_map(|k| [f32::from(k), 0.0, -f32::from(k)]).collect();
+        rig.animations[0].channels.push(Channel {
+            node: 1,
+            path: Path::Translation,
+            interpolation: Interpolation::Linear,
+            times,
+            values,
+        });
+        let mut poser = rig.poser(0);
+        let mut out = Vec::new();
+        let mut check = |t: f32| {
+            poser.pose_into(t, &mut out);
+            assert_eq!(out, rig.pose(Some(0), t), "at {t}");
+        };
+        let forward = (-2..50i8).map(|k| f32::from(k) * 0.05);
+        let jumps = [0.0, 0.01, 0.9, 0.9, 1.95, 2.5, 0.3, -1.0, 1.0, 0.05, 0.0];
+        let backward = (-2..50i8).rev().map(|k| f32::from(k) * 0.037);
+        for t in forward.chain(jumps).chain(backward) {
+            check(t);
+        }
     }
 
     #[test]

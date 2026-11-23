@@ -99,34 +99,79 @@ pub(crate) enum Blob<'a> {
 /// A stretch of a file: `len` bytes from `base`.
 #[cfg(feature = "fs")]
 pub(crate) struct FileSpan {
-    /// The file, and where its cursor is relative to `base`, to skip needless seeks.
-    file: Mutex<(File, u64)>,
+    file: Mutex<Cursor>,
     base: u64,
     len: u64,
 }
+
+/// A [`FileSpan`]'s file and what was last read ahead of it.
+#[cfg(feature = "fs")]
+struct Cursor {
+    file: File,
+    /// Where the file's cursor is relative to the span's base, to skip needless seeks.
+    at: u64,
+    /// Bytes read ahead from `ahead_at`: small reads (animation keys, a skin's matrices, little meshes' accessors), one
+    /// after another through the file, come from here rather than each its own system call.
+    ahead: Vec<u8>,
+    ahead_at: u64,
+}
+
+/// How far a small read reads ahead.
+#[cfg(feature = "fs")]
+const AHEAD: usize = 64 * 1024;
 
 #[cfg(feature = "fs")]
 impl FileSpan {
     /// `len` bytes of `file` from `base`; its cursor is at `base + at`.
     pub(crate) fn new(file: File, base: u64, len: u64, at: u64) -> Self {
         Self {
-            file: Mutex::new((file, at)),
+            file: Mutex::new(Cursor {
+                file,
+                at,
+                ahead: Vec::new(),
+                ahead_at: 0,
+            }),
             base,
             len,
         }
     }
 
+    /// Copies the bytes from `off` into `out`, which must lie within the span.
     fn read_at(&self, off: u64, out: &mut [u8]) -> Result<()> {
+        let mut c = self.file.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let end = off + out.len() as u64;
+        if off >= c.ahead_at && end <= c.ahead_at + c.ahead.len() as u64 {
+            let from = usize_of(off - c.ahead_at);
+            out.copy_from_slice(&c.ahead[from..from + out.len()]);
+            return Ok(());
+        }
+        if out.len() >= AHEAD / 2 {
+            return self.read_file(&mut c, off, out);
+        }
+        let n = usize_of((self.len - off).min(AHEAD as u64));
+        let mut ahead = std::mem::take(&mut c.ahead);
+        ahead.resize(n, 0);
+        c.ahead_at = 0;
+        let read = self.read_file(&mut c, off, &mut ahead);
+        if read.is_ok() {
+            out.copy_from_slice(&ahead[..out.len()]);
+            c.ahead_at = off;
+        } else {
+            ahead.clear();
+        }
+        c.ahead = ahead;
+        read
+    }
+
+    fn read_file(&self, c: &mut Cursor, off: u64, out: &mut [u8]) -> Result<()> {
         use std::io::{Read, Seek, SeekFrom};
-        let mut guard = self.file.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let (file, at) = &mut *guard;
-        if *at != off {
-            file.seek(SeekFrom::Start(self.base + off))?;
+        if c.at != off {
+            c.file.seek(SeekFrom::Start(self.base + off))?;
         }
         // Until the read succeeds, the cursor isn't known.
-        *at = u64::MAX;
-        file.read_exact(out)?;
-        *at = off + out.len() as u64;
+        c.at = u64::MAX;
+        c.file.read_exact(out)?;
+        c.at = off + out.len() as u64;
         Ok(())
     }
 }
@@ -806,5 +851,42 @@ impl Builder {
         self.accessors
             .push(json!({ "bufferView": v, "componentType": ctype, "count": count, "type": kind }));
         self.accessors.len() - 1
+    }
+}
+
+#[cfg(all(test, feature = "fs"))]
+mod tests {
+    use std::io::Write as _;
+
+    use super::{AHEAD, FileSpan};
+
+    #[test]
+    fn a_file_span_reads_what_the_file_holds_however_it_is_read() {
+        let bytes: Vec<u8> = (0..3 * AHEAD + 77)
+            .map(|i| (i * 7 + i / 251).to_le_bytes()[0])
+            .collect();
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(b"head").unwrap();
+        file.write_all(&bytes).unwrap();
+        let span = FileSpan::new(file, 4, bytes.len() as u64, u64::MAX);
+        let len = bytes.len();
+        // Forward in small steps, backward, across the read-ahead's end, big reads, the very end.
+        let mut reads: Vec<(usize, usize)> = (0..200).map(|k| (k * 997 % len, 1 + k % 300)).collect();
+        reads.extend([
+            (AHEAD - 3, 10),
+            (5, AHEAD),
+            (0, len),
+            (len - 1, 1),
+            (len - 40, 40),
+            (100, 0),
+            (AHEAD, 2),
+        ]);
+        reads.extend((0..50).rev().map(|k| (k * 3989, 64)));
+        for (off, n) in reads {
+            let n = n.min(len - off);
+            let mut out = vec![0; n];
+            span.read_at(off as u64, &mut out).unwrap();
+            assert_eq!(out, bytes[off..off + n], "{n} bytes at {off}");
+        }
     }
 }

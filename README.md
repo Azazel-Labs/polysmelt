@@ -55,8 +55,9 @@ Early. What exists today:
   plays or retargets motion rather than drawing triangles. `Document::rig` gives a `Rig`:
   nodes with names, parents and rest `Trs`, skins with their joints and inverse bind
   matrices, and animations as keyed channels (step, linear or cubic spline) that
-  `Channel::sample` and `Rig::pose(animation, time)` evaluate. An FBX armature, a `UsdSkel`
-  skeleton and a glTF skin all come out the same way.
+  `Channel::sample` and `Rig::pose(animation, time)` evaluate; `Rig::poser` poses one
+  animation time after time, stepping through each channel's keys rather than searching
+  them. An FBX armature, a `UsdSkel` skeleton and a glTF skin all come out the same way.
 - **`mesh`**: the flat triangle-list model `flatten` produces (primitives, materials,
   images), written out as a plain GLB by `mesh::to_glb`.
 - **`assets`**: the `Assets` trait readers use to find and read referenced files (MTL

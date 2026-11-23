@@ -1554,6 +1554,21 @@ pub(crate) fn sample_into(
     rotation: bool,
     out: &mut [f64],
 ) -> bool {
+    let k = times.partition_point(|&x| x <= t);
+    sample_after(times, values, interpolation, t, rotation, k, out)
+}
+
+/// [`sample_into`] given `k`, how many keys are at or before `t`, as a caller walking through time in order can
+/// know without searching.
+pub(crate) fn sample_after(
+    times: &[f32],
+    values: &[f32],
+    interpolation: &str,
+    t: f32,
+    rotation: bool,
+    k: usize,
+    out: &mut [f64],
+) -> bool {
     let Some(w) = width(times, values, interpolation) else {
         return false;
     };
@@ -1574,7 +1589,6 @@ pub(crate) fn sample_into(
             *o = f64::from(x);
         }
     };
-    let k = times.partition_point(|&x| x <= t);
     if k == 0 {
         copy(out, value(0));
     } else if k == keys {
@@ -1584,6 +1598,9 @@ pub(crate) fn sample_into(
         let dt = t1 - t0;
         let s = if dt > 0.0 { (f64::from(t) - t0) / dt } else { 0.0 };
         match interpolation {
+            // On a key every interpolation gives its value: sampling at the keys, as a clip baked frame by frame
+            // does, needs no slerp or spline.
+            _ if s == 0.0 => copy(out, value(k)),
             "STEP" => copy(out, value(k)),
             "CUBICSPLINE" => {
                 // Hermite, per the glTF 2.0 specification's appendix C.

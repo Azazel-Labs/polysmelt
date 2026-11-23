@@ -1,5 +1,8 @@
 //! [`Document::rig`]: the node tree, skins and animations as typed values.
 
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
+
 use serde_json::Value;
 
 use super::{Reader, floats, index, items, list, list_of};
@@ -69,6 +72,8 @@ impl Document<'_> {
         }
 
         let mut animations = Vec::new();
+        // Key times by accessor: channels mostly share them, every bone keyed on the same frames.
+        let mut read_times: HashMap<usize, Vec<f32>> = HashMap::new();
         for (k, a) in list(json, "animations").iter().enumerate() {
             let samplers = items(a, "samplers");
             let mut channels = Vec::new();
@@ -101,7 +106,10 @@ impl Document<'_> {
                     "CUBICSPLINE" => Interpolation::CubicSpline,
                     _ => Interpolation::Linear,
                 };
-                let times = r.read::<1>(input, [0.0])?.into_flattened();
+                let times = match read_times.entry(input) {
+                    Entry::Occupied(t) => t.get().clone(),
+                    Entry::Vacant(v) => v.insert(r.read::<1>(input, [0.0])?.into_flattened()).clone(),
+                };
                 let values = match path {
                     Path::Translation | Path::Scale => r.read::<3>(output, [0.0; 3])?.into_flattened(),
                     Path::Rotation => r.read::<4>(output, [0.0, 0.0, 0.0, 1.0])?.into_flattened(),
