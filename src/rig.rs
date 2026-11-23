@@ -74,6 +74,17 @@ pub enum Interpolation {
     CubicSpline,
 }
 
+impl Interpolation {
+    /// Its glTF name.
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Linear => "LINEAR",
+            Self::Step => "STEP",
+            Self::CubicSpline => "CUBICSPLINE",
+        }
+    }
+}
+
 /// One animated property of one node.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Channel {
@@ -92,13 +103,26 @@ impl Channel {
     /// out unit length. `None` for a channel without keys or with values that don't fit them.
     #[must_use]
     pub fn sample(&self, t: f32) -> Option<Vec<f32>> {
-        let interpolation = match self.interpolation {
-            Interpolation::Linear => "LINEAR",
-            Interpolation::Step => "STEP",
-            Interpolation::CubicSpline => "CUBICSPLINE",
-        };
-        crate::flatten::sample(&self.times, &self.values, interpolation, t, self.path == Path::Rotation)
-            .map(|v| v.into_iter().map(crate::num::f32_of).collect())
+        crate::flatten::sample(
+            &self.times,
+            &self.values,
+            self.interpolation.name(),
+            t,
+            self.path == Path::Rotation,
+        )
+        .map(|v| v.into_iter().map(crate::num::f32_of).collect())
+    }
+
+    /// [`Channel::sample`] for a channel at most four wide, without allocating.
+    fn sample_small(&self, t: f32) -> Option<([f32; 4], usize)> {
+        let interpolation = self.interpolation.name();
+        let w = crate::flatten::width(&self.times, &self.values, interpolation)?;
+        let mut v = [0.0f64; 4];
+        let rotation = self.path == Path::Rotation;
+        if w > 4 || !crate::flatten::sample_into(&self.times, &self.values, interpolation, t, rotation, &mut v[..w]) {
+            return None;
+        }
+        Some((v.map(crate::num::f32_of), w))
     }
 }
 
@@ -158,20 +182,35 @@ impl Rig {
     /// If there's no animation `animation`.
     #[must_use]
     pub fn pose(&self, animation: Option<usize>, time: f32) -> Vec<Trs> {
-        let mut out: Vec<Trs> = self.nodes.iter().map(|n| n.rest).collect();
-        let Some(a) = animation else { return out };
+        let mut out = Vec::with_capacity(self.nodes.len());
+        self.pose_into(animation, time, &mut out);
+        out
+    }
+
+    /// [`Rig::pose`] into `out`, which is cleared first: posing frame after frame into the same
+    /// vector allocates nothing after the first.
+    ///
+    /// # Panics
+    ///
+    /// If there's no animation `animation`.
+    pub fn pose_into(&self, animation: Option<usize>, time: f32, out: &mut Vec<Trs>) {
+        out.clear();
+        out.extend(self.nodes.iter().map(|n| n.rest));
+        let Some(a) = animation else { return };
         for c in &self.animations[a].channels {
-            let (Some(o), Some(v)) = (out.get_mut(c.node), c.sample(time)) else {
+            if c.path == Path::Weights {
+                continue;
+            }
+            let (Some(o), Some((v, w))) = (out.get_mut(c.node), c.sample_small(time)) else {
                 continue;
             };
-            match (c.path, v.as_slice()) {
-                (Path::Translation, &[x, y, z]) => o.translation = [x, y, z],
-                (Path::Scale, &[x, y, z]) => o.scale = [x, y, z],
-                (Path::Rotation, &[x, y, z, w]) => o.rotation = [x, y, z, w],
+            match (c.path, w) {
+                (Path::Translation, 3) => o.translation = [v[0], v[1], v[2]],
+                (Path::Scale, 3) => o.scale = [v[0], v[1], v[2]],
+                (Path::Rotation, 4) => o.rotation = v,
                 _ => {}
             }
         }
-        out
     }
 
     /// The nodes in an order where each comes after its parent, and so every joint after the
@@ -192,5 +231,96 @@ impl Rig {
             stack.extend(self.nodes[i].children.iter().rev().filter(|&&c| c < seen.len()));
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Animation, Channel, Interpolation, Node, Path, Rig, Trs};
+
+    fn rig() -> Rig {
+        let node = |name: &str, parent| Node {
+            name: Some(name.into()),
+            parent,
+            children: Vec::new(),
+            rest: Trs::IDENTITY,
+            mesh: None,
+            skin: None,
+        };
+        let channel = |node, path, interpolation, times: &[f32], values: &[f32]| Channel {
+            node,
+            path,
+            interpolation,
+            times: times.to_vec(),
+            values: values.to_vec(),
+        };
+        Rig {
+            nodes: vec![node("root", None), node("arm", Some(0))],
+            skins: Vec::new(),
+            animations: vec![Animation {
+                name: None,
+                channels: vec![
+                    // Written twice too long at its first key.
+                    channel(
+                        0,
+                        Path::Rotation,
+                        Interpolation::Linear,
+                        &[0.0, 1.0],
+                        &[0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 1.0, 0.0],
+                    ),
+                    channel(
+                        0,
+                        Path::Translation,
+                        Interpolation::Step,
+                        &[0.0, 1.0],
+                        &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+                    ),
+                    channel(
+                        1,
+                        Path::Scale,
+                        Interpolation::CubicSpline,
+                        &[0.0, 1.0],
+                        &[
+                            0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 3.0, 3.0, 3.0, 0.0, 0.0, 0.0,
+                        ],
+                    ),
+                    channel(
+                        1,
+                        Path::Weights,
+                        Interpolation::Linear,
+                        &[0.0],
+                        &[0.5, 0.5, 0.5, 0.5, 0.5],
+                    ),
+                ],
+            }],
+        }
+    }
+
+    #[test]
+    fn pose_into_reuses_its_vector_and_poses_as_pose_does() {
+        let rig = rig();
+        let mut out = Vec::new();
+        for t in [-1.0, 0.0, 0.25, 0.5, 1.0, 2.0] {
+            rig.pose_into(Some(0), t, &mut out);
+            assert_eq!(out, rig.pose(Some(0), t), "at {t}");
+        }
+        let at = out.as_ptr();
+        rig.pose_into(Some(0), 0.5, &mut out);
+        assert_eq!(out.as_ptr(), at, "allocated again");
+        rig.pose_into(None, 0.5, &mut out);
+        assert_eq!(out, vec![Trs::IDENTITY; 2]);
+    }
+
+    #[test]
+    fn rotations_come_out_unit_length_at_the_first_and_last_keys_too() {
+        let rig = rig();
+        for t in [-1.0, 0.0, 0.5, 1.0, 2.0] {
+            let q = rig.pose(Some(0), t)[0].rotation;
+            let len = q.iter().map(|c| c * c).sum::<f32>().sqrt();
+            assert!((len - 1.0).abs() < 1e-6, "{q:?} at {t}");
+        }
+        assert_eq!(rig.pose(Some(0), 0.0)[0].rotation, [0.0, 0.0, 0.0, 1.0]);
+        assert_eq!(rig.pose(Some(0), 0.5)[0].translation, [1.0, 2.0, 3.0]);
+        assert_eq!(rig.pose(Some(0), 0.5)[1].scale, [2.0, 2.0, 2.0]);
     }
 }

@@ -1532,65 +1532,97 @@ impl Reader<'_> {
 /// first key it's the first value, after the last the last. `None` for a sampler without keys
 /// or with values that don't fit them.
 pub(crate) fn sample(times: &[f32], values: &[f32], interpolation: &str, t: f32, rotation: bool) -> Option<Vec<f64>> {
+    let mut out = vec![0.0; width(times, values, interpolation)?];
+    sample_into(times, values, interpolation, t, rotation, &mut out).then_some(out)
+}
+
+/// How wide each of a sampler's elements is: `None` for a sampler without keys or with values
+/// that don't fit them.
+pub(crate) fn width(times: &[f32], values: &[f32], interpolation: &str) -> Option<usize> {
+    let keys = times.len() * if interpolation == "CUBICSPLINE" { 3 } else { 1 };
+    (keys > 0 && !values.is_empty() && values.len().is_multiple_of(keys)).then(|| values.len() / keys)
+}
+
+/// [`sample`] written into `out`, which must be the sampler's [`width`]: `false`, leaving `out`
+/// as it was, if it isn't or the sampler can't be read. Allocates nothing. A rotation comes out
+/// unit length at every time, its first and last keys too.
+pub(crate) fn sample_into(
+    times: &[f32],
+    values: &[f32],
+    interpolation: &str,
+    t: f32,
+    rotation: bool,
+    out: &mut [f64],
+) -> bool {
+    let Some(w) = width(times, values, interpolation) else {
+        return false;
+    };
+    if out.len() != w {
+        return false;
+    }
     let keys = times.len();
     let cubic = interpolation == "CUBICSPLINE";
     let per = if cubic { 3 } else { 1 };
-    if keys == 0 || values.is_empty() || !values.len().is_multiple_of(keys * per) {
-        return None;
-    }
-    let w = values.len() / (keys * per);
     // The value of key k (its middle element for a cubic spline), and its tangents.
-    let at = |k: usize, part: usize| -> Vec<f64> {
+    let at = |k: usize, part: usize| -> &[f32] {
         let e = k * per + part;
-        values[e * w..(e + 1) * w].iter().map(|&x| f64::from(x)).collect()
+        &values[e * w..(e + 1) * w]
     };
     let value = |k: usize| at(k, usize::from(cubic));
-    let k = times.partition_point(|&x| x <= t);
-    if k == 0 {
-        return Some(value(0));
-    }
-    if k == keys {
-        return Some(value(keys - 1));
-    }
-    let (k, (t0, t1)) = (k - 1, (f64::from(times[k - 1]), f64::from(times[k])));
-    let dt = t1 - t0;
-    let s = if dt > 0.0 { (f64::from(t) - t0) / dt } else { 0.0 };
-    let mut out = match interpolation {
-        "STEP" => value(k),
-        "CUBICSPLINE" => {
-            // Hermite, per the glTF 2.0 specification's appendix C.
-            let (v0, b0, a1, v1) = (at(k, 1), at(k, 2), at(k + 1, 0), at(k + 1, 1));
-            let (s2, s3) = (s * s, s * s * s);
-            let h = [
-                2.0 * s3 - 3.0 * s2 + 1.0,
-                (s3 - 2.0 * s2 + s) * dt,
-                -2.0 * s3 + 3.0 * s2,
-                (s3 - s2) * dt,
-            ];
-            (0..w)
-                .map(|c| h[0] * v0[c] + h[1] * b0[c] + h[2] * v1[c] + h[3] * a1[c])
-                .collect()
-        }
-        _ if rotation && w == 4 => slerp(&value(k), &value(k + 1), s),
-        _ => {
-            let (a, b) = (value(k), value(k + 1));
-            a.iter().zip(&b).map(|(x, y)| x + (y - x) * s).collect()
+    let copy = |out: &mut [f64], v: &[f32]| {
+        for (o, &x) in out.iter_mut().zip(v) {
+            *o = f64::from(x);
         }
     };
+    let k = times.partition_point(|&x| x <= t);
+    if k == 0 {
+        copy(out, value(0));
+    } else if k == keys {
+        copy(out, value(keys - 1));
+    } else {
+        let (k, (t0, t1)) = (k - 1, (f64::from(times[k - 1]), f64::from(times[k])));
+        let dt = t1 - t0;
+        let s = if dt > 0.0 { (f64::from(t) - t0) / dt } else { 0.0 };
+        match interpolation {
+            "STEP" => copy(out, value(k)),
+            "CUBICSPLINE" => {
+                // Hermite, per the glTF 2.0 specification's appendix C.
+                let (v0, b0, a1, v1) = (at(k, 1), at(k, 2), at(k + 1, 0), at(k + 1, 1));
+                let (s2, s3) = (s * s, s * s * s);
+                let h = [
+                    2.0 * s3 - 3.0 * s2 + 1.0,
+                    (s3 - 2.0 * s2 + s) * dt,
+                    -2.0 * s3 + 3.0 * s2,
+                    (s3 - s2) * dt,
+                ];
+                for (c, o) in out.iter_mut().enumerate() {
+                    let f = |v: &[f32]| f64::from(v[c]);
+                    *o = h[0] * f(v0) + h[1] * f(b0) + h[2] * f(v1) + h[3] * f(a1);
+                }
+            }
+            _ if rotation && w == 4 => slerp(value(k), value(k + 1), s, out),
+            _ => {
+                for ((o, &x), &y) in out.iter_mut().zip(value(k)).zip(value(k + 1)) {
+                    let (x, y) = (f64::from(x), f64::from(y));
+                    *o = x + (y - x) * s;
+                }
+            }
+        }
+    }
     if rotation && w == 4 {
         let len = out.iter().map(|c| c * c).sum::<f64>().sqrt();
         if len > 0.0 {
-            for c in &mut out {
+            for c in out.iter_mut() {
                 *c /= len;
             }
         }
     }
-    Some(out)
+    true
 }
 
-/// Spherical linear interpolation between unit quaternions, the short way round.
-fn slerp(a: &[f64], b: &[f64], s: f64) -> Vec<f64> {
-    let mut d: f64 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+/// Spherical linear interpolation between unit quaternions, the short way round, into `out`.
+fn slerp(a: &[f32], b: &[f32], s: f64, out: &mut [f64]) {
+    let mut d: f64 = a.iter().zip(b).map(|(&x, &y)| f64::from(x) * f64::from(y)).sum();
     let sign = if d < 0.0 { -1.0 } else { 1.0 };
     d *= sign;
     let (wa, wb) = if d > 0.9995 {
@@ -1601,7 +1633,9 @@ fn slerp(a: &[f64], b: &[f64], s: f64) -> Vec<f64> {
         let sin = theta.sin();
         (((1.0 - s) * theta).sin() / sin, (s * theta).sin() / sin)
     };
-    a.iter().zip(b).map(|(x, y)| wa * x + wb * sign * y).collect()
+    for ((o, &x), &y) in out.iter_mut().zip(a).zip(b) {
+        *o = wa * f64::from(x) + wb * sign * f64::from(y);
+    }
 }
 
 #[cfg(all(test, feature = "fs"))]
