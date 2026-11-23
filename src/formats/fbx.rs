@@ -2514,7 +2514,7 @@ Connections:  {{
                 fixed: std::array::from_fn(|_| angle(&mut rng)),
             };
             let mut last = [0.0; 3];
-            for k in 0..3 {
+            for (k, last) in last.iter_mut().enumerate() {
                 if rng.below(4) == 0 {
                     continue;
                 }
@@ -2523,8 +2523,8 @@ Connections:  {{
                         if rng.below(3) == 0 {
                             return angle(&mut rng);
                         }
-                        last[k] += f64::from(rng.f32()) * 20.0 - 10.0;
-                        if rng.below(5) == 0 { baked(last[k]) } else { last[k] }
+                        *last += f64::from(rng.f32()) * 20.0 - 10.0;
+                        if rng.below(5) == 0 { baked(*last) } else { *last }
                     })
                     .collect::<Vec<_>>();
                 let mut c = curve(&values);
