@@ -40,6 +40,7 @@ jobs:
           - --no-default-features --features draco
           - --no-default-features --features webp
           - --no-default-features --features skp
+          - --no-default-features --features fbx
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install && rustup component add clippy
