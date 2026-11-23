@@ -58,8 +58,11 @@ Early. What exists today:
   `Channel::sample` and `Rig::pose(animation, time)` evaluate; `Rig::poser` poses one
   animation time after time, stepping through each channel's keys rather than searching
   them. An FBX armature, a `UsdSkel` skeleton and a glTF skin all come out the same way.
+  `Document::flatten_nodes` draws the mesh in a pose handed in (one `Trs` per node, from a
+  retarget, say) rather than one played from the file.
 - **`mesh`**: the flat triangle-list model `flatten` produces (primitives, materials,
-  images), written out as a plain GLB by `mesh::to_glb`.
+  images), written out as a plain GLB by `mesh::to_glb`. A skinned primitive keeps each
+  vertex's most-weighted joint (`Prim::joints`), so the skin can be bound back to its bones.
 - **`assets`**: the `Assets` trait readers use to find and read referenced files (MTL
   libraries, textures, glTF buffers, USD layers) and turn texture bytes into embeddable
   images. `Folder` searches a pack's folder tree; `Memory` holds files by path, for models

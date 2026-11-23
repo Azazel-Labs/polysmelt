@@ -123,6 +123,70 @@ mod armature {
         check(&load("fbx/blender_armature_animated/armature_animated.fbx", "fbx"));
     }
 
+    /// A pose handed in draws the mesh as the same pose played from the file does.
+    #[test]
+    #[cfg(feature = "fbx")]
+    fn a_pose_handed_in_draws_as_the_animation_does() {
+        use polysmelt::document::Pose;
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/corpus/fbx/blender_armature_animated/armature_animated.fbx");
+        let doc = formats::load(&path, "fbx", &Folder::new(path.parent().unwrap()), Keep::ALL).unwrap();
+        let rig = doc.rig().unwrap();
+        let positions =
+            |m: polysmelt::mesh::Mesh| -> Vec<[f32; 3]> { m.prims.into_iter().flat_map(|p| p.positions).collect() };
+        let rest: Vec<Trs> = rig.nodes.iter().map(|n| n.rest).collect();
+        let (a, b) = (
+            positions(doc.flatten(Pose::Rest).unwrap().unwrap()),
+            positions(doc.flatten_nodes(&rest).unwrap().unwrap()),
+        );
+        assert_eq!(a.len(), b.len());
+        for (x, y) in a.iter().zip(&b) {
+            assert!(
+                x.iter().zip(y).all(|(x, y)| (x - y).abs() < 1e-4),
+                "{x:?} at rest, {y:?} handed in"
+            );
+        }
+        let times = rig.animations[0].key_times();
+        let mut moved = false;
+        for t in [times[0], times[times.len() / 2], times[times.len() - 1]] {
+            let played = positions(doc.flatten(Pose::Animation { index: 0, time: t }).unwrap().unwrap());
+            let handed = positions(doc.flatten_nodes(&rig.pose(Some(0), t)).unwrap().unwrap());
+            assert_eq!(played.len(), handed.len());
+            for (x, y) in played.iter().zip(&handed) {
+                assert!(
+                    x.iter().zip(y).all(|(x, y)| (x - y).abs() < 1e-4),
+                    "{x:?} played, {y:?} handed in at {t}"
+                );
+            }
+            moved |= played
+                .iter()
+                .zip(&a)
+                .any(|(x, y)| x.iter().zip(y).any(|(x, y)| (x - y).abs() > 1e-3));
+        }
+        assert!(moved, "the animation never moved the mesh");
+    }
+
+    #[test]
+    #[cfg(feature = "fbx")]
+    fn each_skinned_vertex_names_its_joint() {
+        use polysmelt::document::Pose;
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/corpus/fbx/blender_armature_animated/armature_animated.fbx");
+        let doc = formats::load(&path, "fbx", &Folder::new(path.parent().unwrap()), Keep::ALL).unwrap();
+        let rig = doc.rig().unwrap();
+        let joints: Vec<usize> = rig.skins.iter().flat_map(|s| s.joints.iter().copied()).collect();
+        let mesh = doc.flatten(Pose::Rest).unwrap().unwrap();
+        let mut seen = std::collections::BTreeSet::new();
+        for p in &mesh.prims {
+            assert_eq!(p.joints.len(), p.positions.len());
+            for &j in &p.joints {
+                assert!(joints.contains(&(j as usize)), "vertex on node {j}, not a joint");
+                seen.insert(j);
+            }
+        }
+        assert!(seen.len() > 1, "every vertex on one joint: {seen:?}");
+    }
+
     #[test]
     #[cfg(feature = "usd")]
     fn usd_armature() {

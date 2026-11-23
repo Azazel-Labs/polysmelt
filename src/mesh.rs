@@ -19,6 +19,9 @@ pub struct Prim {
     pub colors: Vec<[f32; 4]>,
     pub indices: Vec<u32>,
     pub material: usize,
+    /// Each vertex's most-weighted joint, as a node index (the order of `Rig::nodes`), when the primitive is skinned;
+    /// empty otherwise. Tells which bone each part of the surface moves with, for fitting a body to its skeleton.
+    pub joints: Vec<u32>,
 }
 
 /// A material: a base color, optionally textured, an optional normal map, and the metallic-roughness scalars.

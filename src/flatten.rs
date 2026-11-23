@@ -61,6 +61,29 @@ impl Document<'_> {
         r.mesh()
     }
 
+    /// The triangles the default scene draws with each node in the transform `nodes` gives it,
+    /// as [`Document::flatten`] does: for a pose worked out elsewhere, such as one retargeted
+    /// from another rig, blended, or solved by IK. `nodes` is indexed as [`Rig::nodes`] (as
+    /// [`Rig::pose_into`] fills it); nodes past its end keep their own transforms, and morph
+    /// weights are the nodes' own.
+    ///
+    /// # Errors
+    ///
+    /// As [`Document::flatten`].
+    ///
+    /// [`Rig::nodes`]: crate::rig::Rig::nodes
+    /// [`Rig::pose_into`]: crate::rig::Rig::pose_into
+    pub fn flatten_nodes(&self, nodes: &[crate::rig::Trs]) -> Result<Option<Mesh>> {
+        let mut r = Reader::new(self)?;
+        for (p, n) in r.posed.iter_mut().zip(nodes) {
+            p.translation = Some(n.translation.map(f64::from));
+            p.rotation = Some(n.rotation.map(f64::from));
+            p.scale = Some(n.scale.map(f64::from));
+            p.given = true;
+        }
+        r.mesh()
+    }
+
     /// How many triangles, points and line segments the default scene draws (every instance
     /// counted), from the JSON alone: nothing is read or decoded.
     #[must_use]
@@ -275,6 +298,9 @@ struct Posed {
     rotation: Option<[f64; 4]>,
     scale: Option<[f64; 3]>,
     weights: Option<Vec<f32>>,
+    /// Set by the caller rather than an animation, so it holds for a node written as a matrix
+    /// too.
+    given: bool,
 }
 
 fn list<'v>(obj: &'v Map<String, Value>, key: &str) -> &'v [Value] {
@@ -979,6 +1005,7 @@ struct Geometry {
     uvs: Vec<[f32; 2]>,
     colors: Vec<[f32; 4]>,
     indices: Vec<u32>,
+    joints: Vec<u32>,
 }
 
 /// Triangle lists from a primitive's indices, by mode (4 triangles, 5 strip, 6 fan), per the
@@ -1140,8 +1167,9 @@ impl Reader<'_> {
                 }
             }
         }
+        let mut joints = Vec::new();
         if let Some(skin) = u.skin {
-            self.skin(skin, &attrs, &mut positions, &mut normals)?;
+            joints = self.skin(skin, &attrs, &mut positions, &mut normals)?;
         } else if !u.weights.is_empty() {
             normals.iter_mut().for_each(normalize);
         }
@@ -1152,6 +1180,7 @@ impl Reader<'_> {
             uvs,
             colors,
             indices,
+            joints,
         };
         let material = self.material(material, mesh);
         self.budget -= g.indices.len() / 3 * u.transforms.len();
@@ -1227,8 +1256,14 @@ impl Reader<'_> {
     }
 
     /// Poses a skinned primitive: each vertex goes through its joints' matrices, blended by
-    /// weight.
-    fn skin(&mut self, skin: usize, attrs: &Value, positions: &mut [[f32; 3]], normals: &mut [[f32; 3]]) -> Result<()> {
+    /// weight. Gives each vertex's most-weighted joint node, or nothing if the weights can't be read.
+    fn skin(
+        &mut self,
+        skin: usize,
+        attrs: &Value,
+        positions: &mut [[f32; 3]],
+        normals: &mut [[f32; 3]],
+    ) -> Result<Vec<u32>> {
         let s = self.get("skins", skin)?.clone();
         let joints = list_of(&s, "joints");
         let ibm = match index(&s, "inverseBindMatrices") {
@@ -1245,15 +1280,26 @@ impl Reader<'_> {
             })
             .collect();
         let (Some(ja), Some(wa)) = (index(attrs, "JOINTS_0"), index(attrs, "WEIGHTS_0")) else {
-            return Ok(());
+            return Ok(Vec::new());
         };
         // Joint indices are integers, read as floats exactly.
         let ji = self.read(ja, [0.0; 4])?;
         let wi = self.read(wa, [0.0; 4])?;
         if ji.len() != positions.len() || wi.len() != positions.len() {
-            return Ok(());
+            return Ok(Vec::new());
         }
+        let node = |j: f32| {
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "joint indices are small whole numbers; `as` saturates bad ones and `get` refuses them"
+            )]
+            joints.get(j as usize).map_or(u32::MAX, |&n| u32_of(n))
+        };
+        let mut strongest = Vec::with_capacity(positions.len());
         for (v, (j, w)) in ji.iter().zip(&wi).enumerate() {
+            let top = (0..4).fold(0, |a, k| if w[k] > w[a] { k } else { a });
+            strongest.push(node(j[top]));
             let sum: f32 = w.iter().sum();
             if sum <= 0.0 {
                 continue;
@@ -1279,7 +1325,7 @@ impl Reader<'_> {
                 *nv = apply_normal(&normal_matrix(&m), *nv);
             }
         }
-        Ok(())
+        Ok(strongest)
     }
 
     /// The texture coordinate set a material's color texture reads, and its
@@ -1433,6 +1479,7 @@ fn place(g: Geometry, transforms: &[M4], material: usize) -> Prim {
             colors: g.colors,
             indices: g.indices,
             material,
+            joints: g.joints,
         };
     }
     let n = g.positions.len();
@@ -1444,6 +1491,7 @@ fn place(g: Geometry, transforms: &[M4], material: usize) -> Prim {
         colors: Vec::with_capacity(g.colors.len() * k),
         indices: Vec::with_capacity(g.indices.len() * k),
         material,
+        joints: Vec::with_capacity(g.joints.len() * k),
     };
     for t in transforms {
         let base = u32_of(p.positions.len());
@@ -1452,6 +1500,7 @@ fn place(g: Geometry, transforms: &[M4], material: usize) -> Prim {
         p.normals.extend(g.normals.iter().map(|&v| apply_normal(&nm, v)));
         p.uvs.extend_from_slice(&g.uvs);
         p.colors.extend_from_slice(&g.colors);
+        p.joints.extend_from_slice(&g.joints);
         let flip = det3(t) < 0.0;
         for tri in g.indices.chunks_exact(3) {
             let [a, b, c] = [tri[0] + base, tri[1] + base, tri[2] + base];
@@ -1510,7 +1559,11 @@ impl Reader<'_> {
     fn local(&self, i: usize, node: &Value) -> M4 {
         let p = &self.posed[i];
         // A node with a matrix can't be animated.
-        if let Some(m) = node.get("matrix").and_then(Value::as_array).filter(|m| m.len() == 16) {
+        if let Some(m) = node
+            .get("matrix")
+            .and_then(Value::as_array)
+            .filter(|m| m.len() == 16 && !p.given)
+        {
             let mut out = IDENTITY;
             for (o, x) in out.iter_mut().zip(m) {
                 *o = x.as_f64().unwrap_or(*o);
