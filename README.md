@@ -51,6 +51,12 @@ Early. What exists today:
 - **Benchmarks**: `bench/` races Polysmelt's readers against tobj, stl_io, ply-rs and gltf on load
   time and peak heap. Run it on a clean GitHub runner with `gh workflow run bench.yml` (or
   from the Actions tab); the tables land in the run summary.
+- **`rig`**: typed views of a document's node tree, skins and animations, for code that
+  plays or retargets motion rather than drawing triangles. `Document::rig` gives a `Rig`:
+  nodes with names, parents and rest `Trs`, skins with their joints and inverse bind
+  matrices, and animations as keyed channels (step, linear or cubic spline) that
+  `Channel::sample` and `Rig::pose(animation, time)` evaluate. An FBX armature, a `UsdSkel`
+  skeleton and a glTF skin all come out the same way.
 - **`mesh`**: the flat triangle-list model `flatten` produces (primitives, materials,
   images), written out as a plain GLB by `mesh::to_glb`.
 - **`assets`**: the `Assets` trait readers use to find and read referenced files (MTL
@@ -113,9 +119,8 @@ Rust 1.88, with any features but `usd`. The `usd` feature, and so the default bu
   `KHR_texture_transform`, from each format's own values. Readers skip what the `Keep`
   drops: texture files, material libraries and shaders, animation, skins and morphs; and
   with `image_bytes` off, they find textures without reading them.
-- **Typed views** over the document's meshes, accessors, nodes, skins and animations.
-- **Accessors**: typed access through the document (the mesh reader already reads every
-  component type, normalized and sparse).
+- **Typed views** over the document's meshes and accessors (nodes, skins and animations
+  have theirs in `rig`).
 - **Compression**: writing `KHR_mesh_quantization`, with the filtered streams it enables
   (octahedral normals, quaternion rotations, exponential floats).
 - **Scene**: animations read and written, and instancing kept rather than baked.

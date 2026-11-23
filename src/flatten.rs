@@ -27,6 +27,7 @@
 //! file, so the peak is little more than the mesh.
 
 mod decode;
+mod rig;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -343,8 +344,14 @@ impl<'d> Reader<'d> {
         {
             bail!("glTF requires the `{e}` extension, which polysmelt can't draw");
         }
+        Ok(Self::bare(doc))
+    }
+
+    /// A reader that only reads accessors: none of the checks drawing needs.
+    fn bare(doc: &'d Document<'d>) -> Self {
+        let json = &doc.json;
         let n = |key| list(json, key).len();
-        Ok(Self {
+        Self {
             doc,
             json,
             scratch: Vec::new(),
@@ -356,7 +363,7 @@ impl<'d> Reader<'d> {
             posed: vec![Posed::default(); n("nodes")],
             budget: MAX_TRIANGLES,
             draco: Vec::new(),
-        })
+        }
     }
 
     fn get(&self, key: &str, i: usize) -> Result<&'d Value> {
@@ -511,10 +518,11 @@ impl<'d> Reader<'d> {
             stride >= esize,
             "glTF buffer view stride {stride} is under an element's {esize} bytes"
         );
+        // The elements' bytes, from the first: the accessor's offset into its view is checked here, not counted twice.
         let span = (a.count as u64 - 1)
             .checked_mul(stride as u64)
-            .and_then(|s| s.checked_add(a.offset + esize as u64))
-            .filter(|&s| s <= vlen)
+            .and_then(|s| s.checked_add(esize as u64))
+            .filter(|&s| a.offset.checked_add(s).is_some_and(|end| end <= vlen))
             .with_context(|| format!("glTF accessor's {} elements run past their buffer view", a.count))?;
         if self.meshopt(view)? {
             let bytes = &self.meshopt[&view];
@@ -530,7 +538,12 @@ impl<'d> Reader<'d> {
             .buffers
             .get(buffer)
             .context("glTF buffer view names a missing buffer")?;
-        ensure!(start + span <= b.len(), "glTF buffer view runs past its buffer");
+        ensure!(
+            start + span <= b.len(),
+            "glTF accessor runs past its buffer: bytes {start}..{} of buffer {buffer}, which holds {}",
+            start + span,
+            b.len()
+        );
         if let Some(s) = b.slice(start, span) {
             f(0, s, stride);
             return Ok(());
@@ -1518,7 +1531,7 @@ impl Reader<'_> {
 /// value and out-tangent, for `CUBICSPLINE`), each `values.len() / keys` wide. Before the
 /// first key it's the first value, after the last the last. `None` for a sampler without keys
 /// or with values that don't fit them.
-fn sample(times: &[f32], values: &[f32], interpolation: &str, t: f32, rotation: bool) -> Option<Vec<f64>> {
+pub(crate) fn sample(times: &[f32], values: &[f32], interpolation: &str, t: f32, rotation: bool) -> Option<Vec<f64>> {
     let keys = times.len();
     let cubic = interpolation == "CUBICSPLINE";
     let per = if cubic { 3 } else { 1 };

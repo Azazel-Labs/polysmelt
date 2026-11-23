@@ -1,0 +1,220 @@
+//! [`Document::rig`]: the node tree, skins and animations as typed values.
+
+use serde_json::Value;
+
+use super::{Reader, floats, index, items, list, list_of};
+use crate::document::Document;
+use crate::num::f32_of;
+use crate::rig::{Animation, Channel, Interpolation, Node, Path, Rig, Skin, Trs};
+use crate::{Context as _, Result};
+
+impl Document<'_> {
+    /// The document's nodes, skins and animations, accessors read. A document loaded with a
+    /// [`Keep`](crate::document::Keep) that drops animation, skins or morphs has none of those.
+    ///
+    /// # Errors
+    ///
+    /// When a skin or animation names an accessor, buffer or node that doesn't exist, or
+    /// whose data runs past its buffer.
+    pub fn rig(&self) -> Result<Rig> {
+        let mut r = Reader::bare(self);
+        let json = &self.json;
+        let name = |v: &Value| v.get("name").and_then(Value::as_str).map(str::to_owned);
+
+        let raw = list(json, "nodes");
+        let mut nodes: Vec<Node> = raw
+            .iter()
+            .map(|n| Node {
+                name: name(n),
+                parent: None,
+                children: list_of(n, "children").into_iter().filter(|&c| c < raw.len()).collect(),
+                rest: rest(n),
+                mesh: index(n, "mesh"),
+                skin: index(n, "skin"),
+            })
+            .collect();
+        for i in 0..nodes.len() {
+            for c in nodes[i].children.clone() {
+                if c != i && nodes[c].parent.is_none() {
+                    nodes[c].parent = Some(i);
+                }
+            }
+        }
+
+        let mut skins = Vec::new();
+        for (k, s) in list(json, "skins").iter().enumerate() {
+            let joints = list_of(s, "joints");
+            if let Some(&j) = joints.iter().find(|&&j| j >= nodes.len()) {
+                bail!("glTF skin {k} names node {j}, which doesn't exist");
+            }
+            let inverse_bind = match index(s, "inverseBindMatrices") {
+                Some(a) => {
+                    let m = r.read::<16>(a, IDENTITY)?;
+                    ensure!(
+                        m.len() >= joints.len(),
+                        "glTF skin {k} has {} inverse bind matrices for {} joints",
+                        m.len(),
+                        joints.len()
+                    );
+                    m.into_iter().take(joints.len()).collect()
+                }
+                None => vec![IDENTITY; joints.len()],
+            };
+            skins.push(Skin {
+                name: name(s),
+                joints,
+                inverse_bind,
+                skeleton: index(s, "skeleton").filter(|&n| n < nodes.len()),
+            });
+        }
+
+        let mut animations = Vec::new();
+        for (k, a) in list(json, "animations").iter().enumerate() {
+            let samplers = items(a, "samplers");
+            let mut channels = Vec::new();
+            for ch in items(a, "channels") {
+                let Some(target) = ch.get("target") else { continue };
+                let (Some(node), Some(path)) = (index(target, "node"), target.get("path").and_then(Value::as_str))
+                else {
+                    // A KHR_animation_pointer target, or none.
+                    continue;
+                };
+                let path = match path {
+                    "translation" => Path::Translation,
+                    "rotation" => Path::Rotation,
+                    "scale" => Path::Scale,
+                    "weights" => Path::Weights,
+                    _ => continue,
+                };
+                ensure!(
+                    node < nodes.len(),
+                    "glTF animation {k} animates node {node}, which doesn't exist"
+                );
+                let s = index(ch, "sampler")
+                    .and_then(|s| samplers.get(s))
+                    .with_context(|| format!("glTF animation {k}: a channel names a missing sampler"))?;
+                let (Some(input), Some(output)) = (index(s, "input"), index(s, "output")) else {
+                    bail!("glTF animation {k}: a sampler has no input or output");
+                };
+                let interpolation = match s.get("interpolation").and_then(Value::as_str).unwrap_or("LINEAR") {
+                    "STEP" => Interpolation::Step,
+                    "CUBICSPLINE" => Interpolation::CubicSpline,
+                    _ => Interpolation::Linear,
+                };
+                let times = r.read::<1>(input, [0.0])?.into_flattened();
+                let values = match path {
+                    Path::Translation | Path::Scale => r.read::<3>(output, [0.0; 3])?.into_flattened(),
+                    Path::Rotation => r.read::<4>(output, [0.0, 0.0, 0.0, 1.0])?.into_flattened(),
+                    Path::Weights => r.read::<1>(output, [0.0])?.into_flattened(),
+                };
+                channels.push(Channel {
+                    node,
+                    path,
+                    interpolation,
+                    times,
+                    values,
+                });
+            }
+            animations.push(Animation {
+                name: name(a),
+                channels,
+            });
+        }
+        Ok(Rig {
+            nodes,
+            skins,
+            animations,
+        })
+    }
+}
+
+const IDENTITY: [f32; 16] = [
+    1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+];
+
+/// A node's own transform; a matrix is decomposed.
+fn rest(n: &Value) -> Trs {
+    if let Some(m) = n.get("matrix").and_then(Value::as_array).filter(|m| m.len() == 16) {
+        let mut out = [0.0f64; 16];
+        for (o, x) in out.iter_mut().zip(m) {
+            *o = x.as_f64().unwrap_or(0.0);
+        }
+        return decompose(&out);
+    }
+    Trs {
+        translation: floats(n.get("translation"), [0.0; 3]).map(f32_of),
+        rotation: floats(n.get("rotation"), [0.0, 0.0, 0.0, 1.0]).map(f32_of),
+        scale: floats(n.get("scale"), [1.0; 3]).map(f32_of),
+    }
+}
+
+/// A column-major affine matrix as translation, rotation and scale. A mirroring matrix
+/// negates the x scale; shear is lost.
+fn decompose(m: &[f64; 16]) -> Trs {
+    let col = |c: usize| [m[4 * c], m[4 * c + 1], m[4 * c + 2]];
+    let len = |v: [f64; 3]| (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    let (x, y, z) = (col(0), col(1), col(2));
+    let det =
+        x[0] * (y[1] * z[2] - y[2] * z[1]) - y[0] * (x[1] * z[2] - x[2] * z[1]) + z[0] * (x[1] * y[2] - x[2] * y[1]);
+    let mut s = [len(x), len(y), len(z)];
+    if det < 0.0 {
+        s[0] = -s[0];
+    }
+    let unit = |v: [f64; 3], k: f64| if k == 0.0 { [0.0; 3] } else { v.map(|c| c / k) };
+    let (x, y, z) = (unit(x, s[0]), unit(y, s[1]), unit(z, s[2]));
+    // Element (row, column) of the rotation.
+    let (m00, m01, m02) = (x[0], y[0], z[0]);
+    let (m10, m11, m12) = (x[1], y[1], z[1]);
+    let (m20, m21, m22) = (x[2], y[2], z[2]);
+    let trace = m00 + m11 + m22;
+    let q = if trace > 0.0 {
+        let k = 0.5 / (trace + 1.0).sqrt();
+        [(m21 - m12) * k, (m02 - m20) * k, (m10 - m01) * k, 0.25 / k]
+    } else if m00 > m11 && m00 > m22 {
+        let k = 2.0 * (1.0 + m00 - m11 - m22).sqrt();
+        [0.25 * k, (m01 + m10) / k, (m02 + m20) / k, (m21 - m12) / k]
+    } else if m11 > m22 {
+        let k = 2.0 * (1.0 + m11 - m00 - m22).sqrt();
+        [(m01 + m10) / k, 0.25 * k, (m12 + m21) / k, (m02 - m20) / k]
+    } else {
+        let k = 2.0 * (1.0 + m22 - m00 - m11).sqrt();
+        [(m02 + m20) / k, (m12 + m21) / k, 0.25 * k, (m10 - m01) / k]
+    };
+    let ql = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]).sqrt();
+    let q = if ql > 0.0 {
+        q.map(|c| c / ql)
+    } else {
+        [0.0, 0.0, 0.0, 1.0]
+    };
+    Trs {
+        translation: [m[12], m[13], m[14]].map(f32_of),
+        rotation: q.map(f32_of),
+        scale: s.map(f32_of),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decompose;
+
+    #[test]
+    fn decompose_undoes_trs() {
+        // Scale 2, 3, 4; 90° about z; moved 1, 2, 3.
+        let m = [
+            0.0, 2.0, 0.0, 0.0, //
+            -3.0, 0.0, 0.0, 0.0, //
+            0.0, 0.0, 4.0, 0.0, //
+            1.0, 2.0, 3.0, 1.0,
+        ];
+        let t = decompose(&m);
+        let h = std::f32::consts::FRAC_1_SQRT_2;
+        assert_eq!(t.translation, [1.0, 2.0, 3.0]);
+        assert!(t.scale.iter().zip([2.0, 3.0, 4.0]).all(|(a, b)| (a - b).abs() < 1e-6));
+        assert!(
+            t.rotation
+                .iter()
+                .zip([0.0, 0.0, h, h])
+                .all(|(a, b)| (a - b).abs() < 1e-6)
+        );
+    }
+}

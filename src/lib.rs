@@ -7,6 +7,8 @@
 //!   as it is, flattened into a posed [`Mesh`](mesh::Mesh) on demand, and pruned to what a
 //!   [`Keep`](document::Keep) asks for.
 //! - [`mesh`]: the flat triangle-list model, written out as a GLB.
+//! - [`rig`]: typed views of a document's node tree, skins and animations, for playing and
+//!   retargeting motion.
 //! - [`assets`]: how readers find the textures and material libraries a model refers to.
 //! - [`images`]: handles on a document's images, for those a load found but didn't read.
 //! - [`gltf`]: GLB packing, and meshopt compression added to or decoded away from a GLB.
@@ -49,6 +51,7 @@ mod material;
 pub mod mesh;
 pub mod meshopt;
 mod num;
+pub mod rig;
 
 #[cfg(test)]
 mod test_rng;
