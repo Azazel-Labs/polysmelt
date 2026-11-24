@@ -71,7 +71,7 @@ const COLOR: u32 = 6;
 /// Reads an `.iqm` model.
 pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document<'static>> {
     let data = input.read()?;
-    let file = parse(&data)?;
+    let file = parse(&data, keep.animations)?;
     let stem = input
         .path
         .file_stem()
@@ -177,23 +177,40 @@ fn half(h: u16) -> f32 {
     }
 }
 
-/// One number of `format` from `b`; integers are fractions of their range when `normalized`.
-fn number(b: &mut Bin<'_>, format: u32, normalized: bool) -> Result<f32> {
-    let (v, range) = match format {
-        0 => (f64::from(b.i8()?), 127.0),
-        1 => (f64::from(b.u8()?), 255.0),
-        2 => (f64::from(b.i16()?), 32_767.0),
-        3 => (f64::from(b.u16()?), 65_535.0),
-        4 => (f64::from(b.i32()?), 2_147_483_647.0),
-        5 => (f64::from(b.u32()?), 4_294_967_295.0),
-        6 => return Ok(half(b.u16()?)),
-        7 => return b.f32(),
-        _ => return Ok(f32_of(b.f64()?)),
-    };
-    Ok(f32_of(if normalized { (v / range).max(-1.0) } else { v }))
+/// The numbers of `format` in `raw`, end to end; integers are fractions of their range when `normalized`.
+fn numbers(raw: &[u8], format: u32, normalized: bool) -> Vec<f32> {
+    fn ints<const N: usize>(raw: &[u8], range: f64, normalized: bool, int: impl Fn([u8; N]) -> f64) -> Vec<f32> {
+        raw.chunks_exact(N)
+            .map(|c| {
+                let v = int(c.try_into().unwrap_or([0; N]));
+                f32_of(if normalized { (v / range).max(-1.0) } else { v })
+            })
+            .collect()
+    }
+    match format {
+        0 => ints(raw, 127.0, normalized, |b: [u8; 1]| f64::from(i8::from_le_bytes(b))),
+        1 => ints(raw, 255.0, normalized, |b: [u8; 1]| f64::from(b[0])),
+        2 => ints(raw, 32_767.0, normalized, |b| f64::from(i16::from_le_bytes(b))),
+        3 => ints(raw, 65_535.0, normalized, |b| f64::from(u16::from_le_bytes(b))),
+        4 => ints(raw, 2_147_483_647.0, normalized, |b| f64::from(i32::from_le_bytes(b))),
+        5 => ints(raw, 4_294_967_295.0, normalized, |b| f64::from(u32::from_le_bytes(b))),
+        6 => raw
+            .chunks_exact(2)
+            .map(|c| half(u16::from_le_bytes([c[0], c[1]])))
+            .collect(),
+        7 => raw
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect(),
+        _ => raw
+            .chunks_exact(8)
+            .map(|c| f32_of(f64::from_le_bytes(c.try_into().unwrap_or([0; 8]))))
+            .collect(),
+    }
 }
 
-fn parse(data: &[u8]) -> Result<File> {
+/// The file's lists; its frames only when `frames`.
+fn parse(data: &[u8], frames: bool) -> Result<File> {
     ensure!(
         data.starts_with(b"INTERQUAKEMODEL\0"),
         "not an IQM file: no INTERQUAKEMODEL signature"
@@ -272,12 +289,14 @@ fn parse(data: &[u8]) -> Result<File> {
                 .ok_or_else(|| invalid!("IQM vertex array {i} is too large"))?;
             a.count(total as u64, bytes)?;
             let normalized = matches!(kind, TEXCOORD | BLENDWEIGHTS | COLOR);
+            let mut values = numbers(a.bytes(total * bytes)?, format, normalized);
             // Integer colors are sRGB; the alpha, the fourth component, isn't.
-            let srgb = kind == COLOR && format <= 5;
-            let mut values = Vec::with_capacity(total);
-            for k in 0..total {
-                let v = number(&mut a, format, normalized)?;
-                values.push(if srgb && k % size < 3 { srgb_to_linear(v) } else { v });
+            if kind == COLOR && format <= 5 {
+                for (k, v) in values.iter_mut().enumerate() {
+                    if k % size < 3 {
+                        *v = srgb_to_linear(*v);
+                    }
+                }
             }
             arrays.push(Array { kind, size, values });
         }
@@ -287,10 +306,11 @@ fn parse(data: &[u8]) -> Result<File> {
     if num_triangles > 0 {
         b.seek(usize_of(ofs_triangles))?;
         let n = b.count(u64::from(num_triangles), 12)?;
-        triangles.reserve(n);
-        for _ in 0..n {
-            triangles.push([b.u32()?, b.u32()?, b.u32()?]);
-        }
+        triangles = b
+            .bytes(n * 12)?
+            .chunks_exact(12)
+            .map(|c| std::array::from_fn(|k| u32::from_le_bytes([c[4 * k], c[4 * k + 1], c[4 * k + 2], c[4 * k + 3]])))
+            .collect();
     }
 
     let mut meshes = Vec::new();
@@ -363,8 +383,9 @@ fn parse(data: &[u8]) -> Result<File> {
     }
 
     let num_frames = usize_of(num_frames);
+    let read_frames = frames;
     let mut frames = Vec::new();
-    if num_frames > 0 && !poses.is_empty() {
+    if read_frames && num_frames > 0 && !poses.is_empty() {
         let channels: u32 = poses.iter().map(|p| (p.mask & 0x3ff).count_ones()).sum();
         ensure!(
             channels == num_framechannels,
@@ -379,14 +400,19 @@ fn parse(data: &[u8]) -> Result<File> {
         );
         b.seek(usize_of(ofs_frames))?;
         let values = (num_frames as u64).saturating_mul(u64::from(num_framechannels));
-        b.count(values, 2)?;
+        let values = b.count(values, 2)?;
+        // As many as the poses animate, frame after frame, as checked above.
+        let mut words = b
+            .bytes(values * 2)?
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]));
         frames.reserve(num_frames * poses.len() * 10);
         for _ in 0..num_frames {
             for p in &poses {
                 for c in 0..10 {
                     let mut v = p.offset[c];
                     if p.mask & (1 << c) != 0 {
-                        v += f32::from(b.u16()?) * p.scale[c];
+                        v += f32::from(words.next().unwrap_or(0)) * p.scale[c];
                     }
                     frames.push(v);
                 }
@@ -456,7 +482,7 @@ fn build(f: &File, stem: &str, input: &Input<'_>, assets: &dyn Assets, keep: Kee
             f.meshes.iter().all(|m| m.num_triangles == 0),
             "IQM file has meshes but no positions"
         );
-        return finish_anims(scene, f);
+        return finish_anims(scene, f, keep.animations);
     };
     let normals = first(NORMAL).filter(|a| a.size >= 3);
     for (mi, m) in f.meshes.iter().enumerate() {
@@ -583,7 +609,7 @@ fn build(f: &File, stem: &str, input: &Input<'_>, assets: &dyn Assets, keep: Kee
         });
     }
     scene.facts.insert("meshes".into(), json!(f.meshes.len()));
-    finish_anims(scene, f)
+    finish_anims(scene, f, keep.animations)
 }
 
 /// A blend index, checked to be a joint, as one.
@@ -607,12 +633,17 @@ fn color(c: &[f32]) -> [f32; 4] {
     [get(0, 0.0), get(1, 0.0), get(2, 0.0), get(3, 1.0)]
 }
 
-/// Adds the skeleton's facts and the animations.
-fn finish_anims(mut scene: Scene, f: &File) -> Result<Scene> {
+/// Adds the skeleton's facts and, when `keep`, the animations.
+fn finish_anims(mut scene: Scene, f: &File, keep: bool) -> Result<Scene> {
     let n = f.joints.len();
     scene.facts.insert("joints".into(), json!(n));
     scene.facts.insert("frames".into(), json!(f.num_frames));
     if f.anims.is_empty() {
+        return Ok(scene);
+    }
+    if !keep {
+        // Their frames weren't read.
+        scene.facts.insert("animations".into(), json!(f.anims.len()));
         return Ok(scene);
     }
     ensure!(

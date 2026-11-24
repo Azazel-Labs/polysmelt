@@ -621,7 +621,8 @@ impl Scene {
         // Animations.
         let mut animations_json = Vec::new();
         if keep.animations {
-            let mut inputs: HashMap<Vec<u32>, usize> = HashMap::new();
+            // Each distinct set of times is written once, by a hash of their bits: channels usually share theirs.
+            let mut inputs: HashMap<u64, Vec<(Vec<f32>, usize)>> = HashMap::new();
             for a in std::mem::take(&mut self.animations) {
                 let mut channels = Vec::new();
                 let mut samplers = Vec::new();
@@ -642,33 +643,41 @@ impl Scene {
                     if c.node >= n {
                         continue;
                     }
-                    let Some((times, values)) = clean_keys(&c, width) else {
+                    let (node, cpath, cinterp) = (c.node, c.path, c.interp);
+                    let Some((times, values)) = clean_keys(c, width) else {
                         continue;
                     };
                     let count = times.len();
-                    let key: Vec<u32> = times.iter().map(|t| t.to_bits()).collect();
-                    let input = if let Some(&i) = inputs.get(&key) {
+                    let hash = times.iter().fold(times.len() as u64, |h, t| {
+                        (h.rotate_left(5) ^ u64::from(t.to_bits())).wrapping_mul(0x9e37_79b9_7f4a_7c15)
+                    });
+                    let list = inputs.entry(hash).or_default();
+                    let found = list
+                        .iter()
+                        .find(|(t, _)| t.iter().map(|x| x.to_bits()).eq(times.iter().map(|x| x.to_bits())));
+                    let input = if let Some(&(_, i)) = found {
                         i
                     } else {
+                        let kept = times.clone();
                         let i = floats(&mut b, times, "SCALAR", true);
-                        inputs.insert(key, i);
+                        list.push((kept, i));
                         i
                     };
-                    let (path, kind) = match c.path {
+                    let (path, kind) = match cpath {
                         Path::Translation => ("translation", "VEC3"),
                         Path::Rotation => ("rotation", "VEC4"),
                         Path::Scale => ("scale", "VEC3"),
                         Path::Weights => ("weights", "SCALAR"),
                     };
-                    let output = if c.path == Path::Weights {
+                    let output = if cpath == Path::Weights {
                         b.accessor(Part::f32(values), 5126, count * width, "SCALAR", None)
                     } else {
                         floats(&mut b, values, kind, false)
                     };
-                    let interp = match c.interp {
+                    let interp = match cinterp {
                         Interp::Linear => "LINEAR",
                     };
-                    channels.push(json!({ "sampler": samplers.len(), "target": { "node": c.node, "path": path } }));
+                    channels.push(json!({ "sampler": samplers.len(), "target": { "node": node, "path": path } }));
                     samplers.push(json!({ "input": input, "output": output, "interpolation": interp }));
                 }
                 if channels.is_empty() {
@@ -741,34 +750,57 @@ pub(crate) fn floats(b: &mut Builder, v: Vec<f32>, kind: &str, bounds: bool) -> 
 }
 
 /// A channel's keys as glTF wants them: finite, times strictly increasing (a key at or before the last moves just
-/// after it), rotations unit length and each on the same side as the last. `None` when no key is left.
-fn clean_keys(c: &Channel, width: usize) -> Option<(Vec<f32>, Vec<f32>)> {
-    let keys = c.times.len().min(c.values.len() / width.max(1));
-    let mut times: Vec<f32> = Vec::with_capacity(keys);
-    let mut values = Vec::with_capacity(keys * width);
-    let mut last = [0.0f64, 0.0, 0.0, 1.0];
-    for k in 0..keys {
-        let mut t = c.times[k];
-        let v = &c.values[k * width..(k + 1) * width];
-        if !t.is_finite() || v.iter().any(|x| !x.is_finite()) {
-            continue;
+/// after it), rotations unit length and each on the same side as the last. `None` when no key is left. Keys that
+/// are already in order are cleaned where they are.
+fn clean_keys(c: Channel, width: usize) -> Option<(Vec<f32>, Vec<f32>)> {
+    let Channel {
+        mut times,
+        mut values,
+        path,
+        ..
+    } = c;
+    let width = width.max(1);
+    let keys = times.len().min(values.len() / width);
+    times.truncate(keys);
+    values.truncate(keys * width);
+    let tidy = times.iter().all(|t| t.is_finite())
+        && times.windows(2).all(|w| w[0] < w[1])
+        && values.iter().all(|x| x.is_finite());
+    if !tidy {
+        let mut kept: Vec<f32> = Vec::with_capacity(keys);
+        let mut out = Vec::with_capacity(keys * width);
+        for (&t, v) in times.iter().zip(values.chunks_exact(width)) {
+            if !t.is_finite() || v.iter().any(|x| !x.is_finite()) {
+                continue;
+            }
+            kept.push(match kept.last() {
+                Some(&p) if t <= p => p.next_up(),
+                _ => t,
+            });
+            out.extend_from_slice(v);
         }
-        if let Some(&p) = times.last()
-            && t <= p
-        {
-            t = p.next_up();
-        }
-        times.push(t);
-        if c.path == Path::Rotation {
-            let mut q = normalize(std::array::from_fn(|i| f64::from(v[i]))).map(f64::from);
+        times = kept;
+        values = out;
+    }
+    if path == Path::Rotation {
+        let mut last = [0.0f64, 0.0, 0.0, 1.0];
+        for v in values.chunks_exact_mut(4) {
+            let mut q: [f64; 4] = std::array::from_fn(|i| f64::from(v[i]));
+            // Already unit length to within half a float's step: normalizing wouldn't change it.
+            let unit = (q.iter().map(|c| c * c).sum::<f64>() - 1.0).abs() <= 1e-7;
+            if !unit {
+                q = normalize(q).map(f64::from);
+            }
             let dot: f64 = (0..4).map(|i| q[i] * last[i]).sum();
             if dot < 0.0 {
                 q = q.map(|x| -x);
             }
             last = q;
-            values.extend(q.map(f32_of));
-        } else {
-            values.extend_from_slice(v);
+            if !unit || dot < 0.0 {
+                for (o, x) in v.iter_mut().zip(q) {
+                    *o = f32_of(x);
+                }
+            }
         }
     }
     (!times.is_empty()).then_some((times, values))
@@ -1047,7 +1079,10 @@ fn sparse_vec3(b: &mut Builder, mut v: Vec<[f32; 3]>, n: usize, bounds: bool) ->
 fn skin_sets(p: &Primitive, count: usize) -> (Vec<u32>, Vec<f32>, usize) {
     let n = p.positions.len().max(p.joints.len() / p.influences.max(1));
     let w = p.influences;
-    let mut lists: Vec<Vec<(u32, f32)>> = Vec::with_capacity(n);
+    // Every vertex's list, end to end, and where each ends: no list of its own for each vertex.
+    let mut flat: Vec<(u32, f32)> = Vec::with_capacity(n * w.clamp(1, 4));
+    let mut ends: Vec<usize> = Vec::with_capacity(n);
+    let mut list: Vec<(u32, f32)> = Vec::with_capacity(w);
     let mut most = 1;
     let rest = if (p.rest_joint as usize) < count {
         p.rest_joint
@@ -1055,7 +1090,7 @@ fn skin_sets(p: &Primitive, count: usize) -> (Vec<u32>, Vec<f32>, usize) {
         0
     };
     for v in 0..n {
-        let mut list: Vec<(u32, f32)> = Vec::new();
+        list.clear();
         for k in 0..w {
             let (j, wt) = (p.joints[v * w + k], p.weights[v * w + k]);
             if !(wt > 0.0 && wt.is_finite()) || j as usize >= count {
@@ -1070,20 +1105,19 @@ fn skin_sets(p: &Primitive, count: usize) -> (Vec<u32>, Vec<f32>, usize) {
         list.truncate(MAX_INFLUENCES);
         let sum: f32 = list.iter().map(|e| e.1).sum();
         if list.is_empty() || sum <= 0.0 || !sum.is_finite() {
-            list = vec![(rest, 1.0)];
+            flat.push((rest, 1.0));
         } else {
-            for e in &mut list {
-                e.1 /= sum;
-            }
+            flat.extend(list.iter().map(|&(j, wt)| (j, wt / sum)));
         }
-        most = most.max(list.len());
-        lists.push(list);
+        most = most.max(flat.len() - ends.last().copied().unwrap_or(0));
+        ends.push(flat.len());
     }
     let sets = most.div_ceil(4);
     let mut js = vec![0u32; sets * n * 4];
     let mut ws = vec![0f32; sets * n * 4];
-    for (v, list) in lists.iter().enumerate() {
-        for (k, &(j, wt)) in list.iter().enumerate() {
+    let starts = std::iter::once(0).chain(ends.iter().copied());
+    for (v, (start, end)) in starts.zip(ends.iter().copied()).enumerate() {
+        for (k, &(j, wt)) in flat[start..end].iter().enumerate() {
             let at = (k / 4) * n * 4 + v * 4 + k % 4;
             js[at] = j;
             ws[at] = wt;
