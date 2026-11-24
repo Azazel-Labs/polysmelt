@@ -495,7 +495,15 @@ fn time(opts: &BTreeMap<String, Vec<String>>) {
         // where Polysmelt itself did.
         let wanted: Vec<String> = match &only {
             Some(o) => o.clone(),
-            None => loaders_for(&ext).into_iter().map(str::to_owned).collect(),
+            None => {
+                let mut w: Vec<String> = loaders_for(&ext).into_iter().map(str::to_owned).collect();
+                // The gltf crate's no-image loader reads no image files, so it's timed against
+                // Polysmelt reading none either, as well as against Polysmelt's full load.
+                if ext == "gltf" || ext == "glb" {
+                    w.push(loaders::POLYSMELT_NO_IMAGES.to_owned());
+                }
+                w
+            }
         };
         let ls: Vec<Loader> = wanted
             .iter()

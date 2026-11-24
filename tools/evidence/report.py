@@ -31,6 +31,8 @@ PG = "polysmelt → GLB"
 A = "assimp"
 AG = "assimp → GLB"
 B = "blender"
+PNI = "polysmelt (no image bytes)"
+GNI = "gltf (no image decode)"
 FAIL = ("err", "panic", "crash", "oom", "timeout", "empty")
 HARD = ("triangles",)
 SOFT = ("vertices", "materials", "nodes", "joints", "animations")
@@ -47,6 +49,7 @@ PARTIAL = {
     "fbxcel-dom": "only parses the node tree; Polysmelt also decodes the geometry, materials, skins and animation",
     "bvh_anim": "only parses the joints and frames; Polysmelt also builds the glTF skeleton and animation",
     "ply-rs": "parses into a generic map per element; Polysmelt builds an indexed mesh",
+    "gltf (no image decode)": "reads no image files, where Polysmelt's load reads every one; the like-for-like row is against `polysmelt (no image bytes)`",
 }
 
 def load_jsonl(path):
@@ -585,21 +588,30 @@ def main():
             for o, lm in m.items():
                 if o.startswith("polysmelt"):
                     continue
-                side = PG if o == AG else P
-                if side in m:
-                    pairs[(side, o)][f["ext"]].append((k, m[side]["median_ms"], lm["median_ms"]))
+                sides = [PG] if o == AG else [P]
+                # The gltf crate's no-image loader reads no image files: also timed against
+                # Polysmelt reading none, the like-for-like pairing.
+                if o == GNI:
+                    sides.append(PNI)
+                for side in sides:
+                    if side in m:
+                        pairs[(side, o)][f["ext"]].append((k, m[side]["median_ms"], lm["median_ms"]))
         rows, csv_rows = [], []
         for (side, o), exts in sorted(pairs.items(), key=lambda x: (x[0][1] != A, x[0][1] != AG, x[0][1])):
             for ext, xs in sorted(exts.items(), key=lambda x: (-len(x[1]), x[0])):
                 ratios = [oo / pp for _, pp, oo in xs if pp > 0]
                 w = sum(1 for r in ratios if r > 1)
                 tp, to = sum(x[1] for x in xs), sum(x[2] for x in xs)
-                rows.append([code(o) + (" †" if o in PARTIAL else ""), ext, len(xs), fmt_ratio(geomean(ratios)),
+                label = code(o) + (" †" if o in PARTIAL else "")
+                if side == PNI:
+                    label += f" vs {code(PNI)}"
+                rows.append([label, ext, len(xs), fmt_ratio(geomean(ratios)),
                              fmt_ratio(min(ratios) if ratios else None),
                              fmt_ratio(max(ratios) if ratios else None), f"{w}/{len(xs)}", fmt_ms(tp), fmt_ms(to)])
                 for k, pp, oo in xs:
                     csv_rows.append([side, o, ext, k, pp, oo, oo / pp if pp else ""])
-                    if oo < pp:
+                    # Against the no-image loader, the losses that count are the like-for-like pairing's.
+                    if oo < pp and not (o == GNI and side == P):
                         speed_loss.append((k, side, o, pp, oo))
         md.append(table(["Against", "Format", "Files", "× geomean", "× worst", "× best", "Polysmelt faster",
                          "Polysmelt total ms", "Other total ms"], rows,

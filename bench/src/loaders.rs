@@ -88,6 +88,7 @@ fn n(x: usize) -> u64 {
 
 pub const POLYSMELT: &str = "polysmelt";
 pub const POLYSMELT_GLB: &str = "polysmelt → GLB";
+pub const POLYSMELT_NO_IMAGES: &str = "polysmelt (no image bytes)";
 
 pub fn polysmelt_reads(ext: &str) -> bool {
     polysmelt::formats::EXTENSIONS.contains(&ext)
@@ -977,7 +978,7 @@ pub fn by_name(name: &str, ext: &str) -> Option<Loader> {
         POLYSMELT => l(POLYSMELT, polysmelt),
         POLYSMELT_GLB => l(POLYSMELT_GLB, polysmelt_glb),
         "polysmelt (threads: 0, all cores)" => l("polysmelt (threads: 0, all cores)", polysmelt_all_cores),
-        "polysmelt (no image bytes)" => l("polysmelt (no image bytes)", polysmelt_no_image_bytes),
+        POLYSMELT_NO_IMAGES => l(POLYSMELT_NO_IMAGES, polysmelt_no_image_bytes),
         "polysmelt (convert)" => l("polysmelt (convert)", polysmelt_convert),
         _ => competitors(ext).into_iter().chain(assimp_glb(ext)).find(|c| c.name == name),
     }
