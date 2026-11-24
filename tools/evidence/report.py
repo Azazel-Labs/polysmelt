@@ -584,7 +584,9 @@ def main():
             f"memory. Threads alive after the run: {timing.get('threads_after')}.\n\n"
         )
         md.append("† Not like for like: " + "; ".join(f"{code(o)} {w}" for o, w in PARTIAL.items()) + "; "
-                  f"{code(A)} reads only the first frame of {', '.join(sorted(FIRST_FRAME)).upper()} files, where "
+                  f"{code(A)} keeps texture files' paths and reads none, where Polysmelt's load reads every one "
+                  f"(and converts those glTF can't embed to PNG): the like-for-like row is against {code(PNI)}; "
+                  f"and it reads only the first frame of {', '.join(sorted(FIRST_FRAME)).upper()} files, where "
                   f"Polysmelt's load makes every frame a morph target with its animation: the like-for-like row is "
                   f"against {code(PFF)}.\n\n")
         pairs = defaultdict(lambda: defaultdict(list))  # (polysmelt side, other) -> ext -> [(file, p, o)]
@@ -599,10 +601,10 @@ def main():
                 # Polysmelt reading none, the like-for-like pairing.
                 if o == GNI:
                     sides.append(PNI)
-                # assimp reads a vertex-animated model's first frame alone: also timed against
-                # Polysmelt doing the same.
-                if o == A and f["ext"] in FIRST_FRAME:
-                    sides.append(PFF)
+                # assimp reads no texture files, and a vertex-animated model's first frame alone: also
+                # timed against Polysmelt doing the same.
+                if o == A:
+                    sides.append(PFF if f["ext"] in FIRST_FRAME else PNI)
                 for side in sides:
                     if side in m:
                         pairs[(side, o)][f["ext"]].append((k, m[side]["median_ms"], lm["median_ms"]))
@@ -612,7 +614,7 @@ def main():
                 ratios = [oo / pp for _, pp, oo in xs if pp > 0]
                 w = sum(1 for r in ratios if r > 1)
                 tp, to = sum(x[1] for x in xs), sum(x[2] for x in xs)
-                partial = o in PARTIAL or (o == A and side == P and ext in FIRST_FRAME)
+                partial = o in PARTIAL or (o == A and side == P)
                 label = f"{code(o)} vs {code(side)}" if side in (PNI, PFF) else code(o) + (" †" if partial else "")
                 rows.append([label, ext, len(xs), fmt_ratio(geomean(ratios)),
                              fmt_ratio(min(ratios) if ratios else None),
@@ -620,7 +622,7 @@ def main():
                 for k, pp, oo in xs:
                     csv_rows.append([side, o, ext, k, pp, oo, oo / pp if pp else ""])
                     # Against the no-image loader, the losses that count are the like-for-like pairing's.
-                    if oo < pp and not (o == GNI and side == P) and not (o == A and side == P and ext in FIRST_FRAME):
+                    if oo < pp and not (o in (GNI, A) and side == P):
                         speed_loss.append((k, side, o, pp, oo))
         md.append(table(["Against", "Format", "Files", "× geomean", "× worst", "× best", "Polysmelt faster",
                          "Polysmelt total ms", "Other total ms"], rows,

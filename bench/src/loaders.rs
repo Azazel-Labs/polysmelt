@@ -250,11 +250,15 @@ pub fn polysmelt_no_image_bytes(src: &Src) -> Out {
     polysmelt_keep(src, Keep { threads: 1, image_bytes: false, ..Keep::ALL })
 }
 
-/// The first frame alone, without morph targets or animation: the work a library that reads a
-/// vertex-animated model's first frame (assimp's MD2, MD3 and MDC) does.
+/// The first frame alone, without morph targets, animation or texture files read: the work a
+/// library that reads a vertex-animated model's first frame and keeps its skin's path (assimp's
+/// MD2, MD3 and MDC) does.
 pub fn polysmelt_first_frame(src: &Src) -> Out {
     use polysmelt::document::Keep;
-    polysmelt_keep(src, Keep { threads: 1, morph_targets: false, animations: false, ..Keep::ALL })
+    polysmelt_keep(
+        src,
+        Keep { threads: 1, morph_targets: false, animations: false, image_bytes: false, ..Keep::ALL },
+    )
 }
 
 /// A conversion: load, and write the document as a GLB in memory.

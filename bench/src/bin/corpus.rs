@@ -497,15 +497,15 @@ fn time(opts: &BTreeMap<String, Vec<String>>) {
             Some(o) => o.clone(),
             None => {
                 let mut w: Vec<String> = loaders_for(&ext).into_iter().map(str::to_owned).collect();
-                // The gltf crate's no-image loader reads no image files, so it's timed against
-                // Polysmelt reading none either, as well as against Polysmelt's full load.
-                if ext == "gltf" || ext == "glb" {
-                    w.push(loaders::POLYSMELT_NO_IMAGES.to_owned());
-                }
-                // assimp reads these formats' first frame alone: timed against Polysmelt doing the
-                // same, as well as against its full load.
+                // assimp reads these formats' first frame alone (and keeps the skin's path): timed
+                // against Polysmelt doing the same, as well as against its full load.
                 if loaders::first_frame_only(&ext) {
                     w.push(loaders::POLYSMELT_FIRST_FRAME.to_owned());
+                } else if ext == "gltf" || ext == "glb" || loaders::assimp_reads(&ext) {
+                    // The gltf crate's no-image loader and assimp read no texture files (assimp keeps
+                    // their paths), so they're timed against Polysmelt reading none either, as well
+                    // as against Polysmelt's full load.
+                    w.push(loaders::POLYSMELT_NO_IMAGES.to_owned());
                 }
                 w
             }
