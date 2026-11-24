@@ -3,10 +3,14 @@
 //! glTF (`.gltf` and `.glb`), `SketchUp` (`.skp`), BVH motion capture, COLLADA (`.dae`, and
 //! the `.zae` and `.kmz` archives that hold one), VRM (`.vrm`, `.vrma`), OFF, X3D and VRML97
 //! (`.x3d`, `.x3dv`, `.wrl`, and gzipped `.x3dz`, `.wrz`), DXF meshes, and gaussian splats
-//! (`.splat`, `.spz`, and PLY's own, as `KHR_gaussian_splatting`).
+//! (`.splat`, `.spz`, and PLY's own, as `KHR_gaussian_splatting`). Game and animation formats:
+//! `MikuMikuDance` (`.pmx`, `.pmd`, `.vmd`), `DirectX` `.x`, MD2, MD3, MD5 (`.md5mesh`,
+//! `.md5anim`), IQM, SMD (`.smd`, `.vta`), `MilkShape` 3D (`.ms3d`), `Blitz3D` (`.b3d`), and
+//! motion capture: ASF/AMC, C3D, TRC and HTR.
 //! Each becomes a [`Document`]: glTF as it is, the others converted; textures are embedded so the
 //! document stands on its own. Each format is behind a cargo feature of its name (`3ds` and
-//! `3mf` for those two). A [`Keep`] says what to keep; by default, everything.
+//! `3mf` for those two, `mmd` for PMX, PMD and VMD, `directx` for `.x`, `asf` for ASF and AMC).
+//! A [`Keep`] says what to keep; by default, everything.
 //!
 //! [`load_bytes`] reads a model already in memory, with the files it refers to found through
 //! [`Assets`] (such as [`Memory`](crate::assets::Memory)). [`load`] reads a file, and needs the
@@ -23,10 +27,18 @@ use crate::assets::Assets;
 use crate::document::{Document, Keep};
 use crate::mesh::MAX_TRIANGLES;
 
+#[cfg(feature = "asf")]
+mod asf;
+#[cfg(feature = "b3d")]
+mod b3d;
 #[cfg(feature = "bvh")]
 mod bvh;
+#[cfg(feature = "c3d")]
+mod c3d;
 #[cfg(feature = "dae")]
 mod dae;
+#[cfg(feature = "directx")]
+mod directx;
 #[cfg(feature = "dxf")]
 mod dxf;
 #[cfg(feature = "fbx")]
@@ -39,6 +51,20 @@ mod fbx_tree;
 mod gltf;
 #[cfg(feature = "gltf")]
 mod gltf1;
+#[cfg(feature = "htr")]
+mod htr;
+#[cfg(feature = "iqm")]
+mod iqm;
+#[cfg(feature = "md2")]
+mod md2;
+#[cfg(feature = "md3")]
+mod md3;
+#[cfg(feature = "md5")]
+mod md5;
+#[cfg(feature = "mmd")]
+mod mmd;
+#[cfg(feature = "ms3d")]
+mod ms3d;
 #[cfg(any(feature = "dxf", feature = "fbx"))]
 mod nurbs;
 #[cfg(feature = "obj")]
@@ -47,8 +73,44 @@ mod obj;
 mod off;
 #[cfg(feature = "ply")]
 mod ply;
+#[cfg(any(
+    feature = "mmd",
+    feature = "directx",
+    feature = "md2",
+    feature = "md3",
+    feature = "md5",
+    feature = "iqm",
+    feature = "smd",
+    feature = "ms3d",
+    feature = "b3d",
+    feature = "asf",
+    feature = "c3d",
+    feature = "trc",
+    feature = "htr"
+))]
+#[cfg_attr(
+    not(all(
+        feature = "mmd",
+        feature = "directx",
+        feature = "md2",
+        feature = "md3",
+        feature = "md5",
+        feature = "iqm",
+        feature = "smd",
+        feature = "ms3d",
+        feature = "b3d",
+        feature = "asf",
+        feature = "c3d",
+        feature = "trc",
+        feature = "htr"
+    )),
+    allow(dead_code, reason = "each reader uses the parts its format needs")
+)]
+mod scene;
 #[cfg(feature = "skp")]
 mod skp;
+#[cfg(feature = "smd")]
+mod smd;
 #[cfg(feature = "splat")]
 mod splat;
 #[cfg(feature = "spz")]
@@ -73,6 +135,8 @@ mod stream;
 mod tds;
 #[cfg(feature = "3mf")]
 mod threemf;
+#[cfg(feature = "trc")]
+mod trc;
 #[cfg(feature = "usd")]
 mod usd;
 #[cfg(feature = "vox")]
@@ -87,7 +151,9 @@ mod xform;
 /// The extensions [`load`] handles, whether or not this build has their feature.
 pub const EXTENSIONS: &[&str] = &[
     "stl", "ply", "vox", "obj", "fbx", "3ds", "3mf", "usd", "usda", "usdc", "usdz", "gltf", "glb", "skp", "bvh", "dae",
-    "zae", "kmz", "off", "vrm", "vrma", "x3d", "x3dv", "x3dz", "wrl", "wrz", "dxf", "splat", "spz",
+    "zae", "kmz", "off", "vrm", "vrma", "x3d", "x3dv", "x3dz", "wrl", "wrz", "dxf", "splat", "spz", "pmx", "pmd",
+    "vmd", "x", "md2", "md3", "md5mesh", "md5anim", "iqm", "smd", "vta", "ms3d", "b3d", "asf", "amc", "c3d", "trc",
+    "htr",
 ];
 
 /// Reads the model at `path`, whose format is named by `ext` (lowercase, without the dot),
@@ -340,6 +406,32 @@ fn convert<'a>(input: Input<'a>, ext: &str, assets: &'a dyn Assets, keep: Keep) 
         "spz" => spz::load(input, keep),
         #[cfg(feature = "dxf")]
         "dxf" => dxf::load(input),
+        #[cfg(feature = "mmd")]
+        "pmx" | "pmd" | "vmd" => mmd::load(input, ext, assets, keep),
+        #[cfg(feature = "directx")]
+        "x" => directx::load(input, assets, keep),
+        #[cfg(feature = "md2")]
+        "md2" => md2::load(input, assets, keep),
+        #[cfg(feature = "md3")]
+        "md3" => md3::load(input, assets, keep),
+        #[cfg(feature = "md5")]
+        "md5mesh" | "md5anim" => md5::load(input, ext, assets, keep),
+        #[cfg(feature = "iqm")]
+        "iqm" => iqm::load(input, assets, keep),
+        #[cfg(feature = "smd")]
+        "smd" | "vta" => smd::load(input, ext, assets, keep),
+        #[cfg(feature = "ms3d")]
+        "ms3d" => ms3d::load(input, assets, keep),
+        #[cfg(feature = "b3d")]
+        "b3d" => b3d::load(input, assets, keep),
+        #[cfg(feature = "asf")]
+        "asf" | "amc" => asf::load(input, ext, assets, keep),
+        #[cfg(feature = "c3d")]
+        "c3d" => c3d::load(input, keep),
+        #[cfg(feature = "trc")]
+        "trc" => trc::load(input, keep),
+        #[cfg(feature = "htr")]
+        "htr" => htr::load(input, keep),
         e if EXTENSIONS.contains(&e) => bail!("built without the `{}` feature", feature_for(e)),
         _ => bail!("not a model format handled here: .{ext}"),
     }
@@ -352,6 +444,11 @@ fn feature_for(ext: &str) -> &str {
         "zae" | "kmz" => "dae",
         "glb" | "vrm" | "vrma" => "gltf",
         "x3dv" | "x3dz" | "wrl" | "wrz" => "x3d",
+        "pmx" | "pmd" | "vmd" => "mmd",
+        "x" => "directx",
+        "md5mesh" | "md5anim" => "md5",
+        "vta" => "smd",
+        "amc" => "asf",
         e => e,
     }
 }

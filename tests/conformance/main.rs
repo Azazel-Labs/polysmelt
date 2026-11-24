@@ -49,6 +49,19 @@ fn enabled(ext: &str) -> bool {
         "dxf" => cfg!(feature = "dxf"),
         "splat" => cfg!(feature = "splat"),
         "spz" => cfg!(feature = "spz"),
+        "pmx" | "pmd" | "vmd" => cfg!(feature = "mmd"),
+        "x" => cfg!(feature = "directx"),
+        "md2" => cfg!(feature = "md2"),
+        "md3" => cfg!(feature = "md3"),
+        "md5mesh" | "md5anim" => cfg!(feature = "md5"),
+        "iqm" => cfg!(feature = "iqm"),
+        "smd" | "vta" => cfg!(feature = "smd"),
+        "ms3d" => cfg!(feature = "ms3d"),
+        "b3d" => cfg!(feature = "b3d"),
+        "asf" | "amc" => cfg!(feature = "asf"),
+        "c3d" => cfg!(feature = "c3d"),
+        "trc" => cfg!(feature = "trc"),
+        "htr" => cfg!(feature = "htr"),
         _ => false,
     }
 }
@@ -83,7 +96,9 @@ fn has_feature(name: &str) -> bool {
 /// Every model extension a full build reads, so cases are found in builds without some readers.
 const ALL_EXTENSIONS: &[&str] = &[
     "stl", "ply", "vox", "obj", "3ds", "fbx", "3mf", "usd", "usda", "usdc", "usdz", "gltf", "glb", "skp", "bvh", "dae",
-    "zae", "kmz", "off", "vrm", "vrma", "x3d", "x3dv", "x3dz", "wrl", "wrz", "dxf", "splat", "spz",
+    "zae", "kmz", "off", "vrm", "vrma", "x3d", "x3dv", "x3dz", "wrl", "wrz", "dxf", "splat", "spz", "pmx", "pmd",
+    "vmd", "x", "md2", "md3", "md5mesh", "md5anim", "iqm", "smd", "vta", "ms3d", "b3d", "asf", "amc", "c3d", "trc",
+    "htr",
 ];
 
 fn ext_of(p: &Path) -> String {
@@ -1123,6 +1138,58 @@ fn splat() {
 #[test]
 fn spz() {
     check("spz");
+}
+#[test]
+fn mmd() {
+    check("mmd");
+}
+#[test]
+fn directx() {
+    check("x");
+}
+#[test]
+fn md2() {
+    check("md2");
+}
+#[test]
+fn md3() {
+    check("md3");
+}
+#[test]
+fn md5() {
+    check("md5");
+}
+#[test]
+fn iqm() {
+    check("iqm");
+}
+#[test]
+fn smd() {
+    check("smd");
+}
+#[test]
+fn ms3d() {
+    check("ms3d");
+}
+#[test]
+fn b3d() {
+    check("b3d");
+}
+#[test]
+fn asf() {
+    check("asf");
+}
+#[test]
+fn c3d() {
+    check("c3d");
+}
+#[test]
+fn trc() {
+    check("trc");
+}
+#[test]
+fn htr() {
+    check("htr");
 }
 
 /// Every extension `formats::load` takes has cases, and every format a corpus folder.

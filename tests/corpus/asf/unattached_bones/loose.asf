@@ -1,0 +1,50 @@
+:version 1.10
+:name test
+:units
+  mass 1
+  length 1
+  angle deg
+:documentation
+  made for a test
+:root
+  order 
+  axis XYZ
+  position 0 0 0
+  orientation 0 0 0
+:bonedata
+  begin
+     id 1
+     name a
+     direction 1 0 0
+     length 1
+     axis 0 0 0 XYZ
+  end
+  begin
+     id 2
+     name b
+     direction 0 1 0
+     length 1
+     axis 0 0 0 XYZ
+  end
+  begin
+     id 3
+     name c
+     direction 0 0 1
+     length 1
+     axis 0 0 0 XYZ
+  end
+  begin
+     id 4
+     name d
+     direction 0 1 0
+     length 2
+     axis 0 0 0 XYZ
+  end
+:hierarchy
+  begin
+    root a
+    a b a
+    c d
+    ghost c
+    d c
+  end

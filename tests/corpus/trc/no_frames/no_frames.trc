@@ -1,0 +1,6 @@
+PathFileType	4	(X/Y/Z)	t.trc
+DataRate	CameraRate	NumFrames	NumMarkers	Units	OrigDataRate	OrigDataStartFrame	OrigNumFrames
+100	100	0	3	mm	100	1	0
+Frame#	Time	LASI			R.Knee			Toe Tip		
+		X1	Y1	Z1	X2	Y2	Z2	X3	Y3	Z3
+

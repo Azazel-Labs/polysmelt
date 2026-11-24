@@ -1,0 +1,5 @@
+{
+  "spec": "DirectX .x (X File Format Reference, DirectX 9 SDK): SkinWeights naming vertices past the mesh's: those weights are skipped",
+  "source": "test/models/X/malformed_skinweights_oob.x from the Open Asset Import Library's test models (BSD-3-Clause)",
+  "triangles": 12
+}

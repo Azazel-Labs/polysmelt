@@ -1,0 +1,5 @@
+{
+  "spec": "DirectX .x (X File Format Reference, DirectX 9 SDK): FVFData declaring more texture coordinates than it holds: the set is padded",
+  "source": "test/models/X/malformed_fvf_texcoord_oob.x from the Open Asset Import Library's test models (BSD-3-Clause)",
+  "triangles": 1
+}

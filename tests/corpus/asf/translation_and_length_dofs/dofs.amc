@@ -1,0 +1,11 @@
+#!made for a test
+:FULLY-SPECIFIED
+:DEGREES
+1
+root 0 0 0 0 0 0
+hips 0 0 0 0
+neck 0 1
+2
+root 0 0 0 0 0 0
+hips 1 2 3 30
+neck 45 1.5
