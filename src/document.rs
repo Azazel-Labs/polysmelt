@@ -324,6 +324,10 @@ impl Part {
 
     /// The part as a GLB stores it, when it's in memory. Typed parts exist only on little-endian
     /// targets, where their memory is that.
+    #[cfg_attr(
+        not(feature = "fs"),
+        allow(clippy::unnecessary_wraps, reason = "only a file part isn't in memory")
+    )]
     fn as_bytes(&self) -> Option<&[u8]> {
         Some(match self {
             Part::F32(v) => bytemuck::cast_slice(v),
@@ -345,6 +349,10 @@ impl Part {
     }
 
     /// Copies the part's bytes `from..from + out.len()` into `out`.
+    #[cfg_attr(
+        not(feature = "fs"),
+        allow(clippy::unnecessary_wraps, reason = "only reading a file part can fail")
+    )]
     fn read_at(&self, from: u64, out: &mut [u8]) -> Result<()> {
         #[cfg(feature = "fs")]
         if let Part::File(f) = self {
