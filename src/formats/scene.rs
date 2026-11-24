@@ -623,6 +623,18 @@ impl Scene {
         if keep.animations {
             // Each distinct set of times is written once, by a hash of their bits: channels usually share theirs.
             let mut inputs: HashMap<u64, Vec<(Vec<f32>, usize)>> = HashMap::new();
+            // Every key is written to one buffer view, each accessor at its offset into it: one part and one view,
+            // where a view per accessor would cost far more than the keys of a short channel.
+            let mut data: Vec<f32> = Vec::new();
+            let mut placed: Vec<usize> = Vec::new();
+            let mut place = |b: &mut Builder, v: &[f32], count: usize, kind: &str| {
+                b.accessors.push(json!({
+                    "byteOffset": data.len() * 4, "componentType": 5126, "count": count, "type": kind
+                }));
+                data.extend_from_slice(v);
+                placed.push(b.accessors.len() - 1);
+                b.accessors.len() - 1
+            };
             for a in std::mem::take(&mut self.animations) {
                 let mut channels = Vec::new();
                 let mut samplers = Vec::new();
@@ -658,9 +670,11 @@ impl Scene {
                     let input = if let Some(&(_, i)) = found {
                         i
                     } else {
-                        let kept = times.clone();
-                        let i = floats(&mut b, times, "SCALAR", true);
-                        list.push((kept, i));
+                        let i = place(&mut b, &times, count, "SCALAR");
+                        // Strictly increasing, so the first and last are the bounds.
+                        b.accessors[i]["min"] = json!([times[0]]);
+                        b.accessors[i]["max"] = json!([times[count - 1]]);
+                        list.push((times, i));
                         i
                     };
                     let (path, kind) = match cpath {
@@ -670,9 +684,9 @@ impl Scene {
                         Path::Weights => ("weights", "SCALAR"),
                     };
                     let output = if cpath == Path::Weights {
-                        b.accessor(Part::f32(values), 5126, count * width, "SCALAR", None)
+                        place(&mut b, &values, count * width, "SCALAR")
                     } else {
-                        floats(&mut b, values, kind, false)
+                        place(&mut b, &values, count, kind)
                     };
                     let interp = match cinterp {
                         Interp::Linear => "LINEAR",
@@ -693,6 +707,12 @@ impl Scene {
                     aj["extras"] = e;
                 }
                 animations_json.push(aj);
+            }
+            if !data.is_empty() {
+                let view = b.view(Part::f32(data), None);
+                for a in placed {
+                    b.accessors[a]["bufferView"] = json!(view);
+                }
             }
         }
 
@@ -718,35 +738,6 @@ impl Scene {
         facts.entry("triangles").or_insert(json!(tris));
         Ok(b.finish(json, facts))
     }
-}
-
-/// A float accessor of `kind` with no target; `bounds` adds the `min` and `max` an animation's times need.
-pub(crate) fn floats(b: &mut Builder, v: Vec<f32>, kind: &str, bounds: bool) -> usize {
-    let width = match kind {
-        "VEC2" => 2,
-        "VEC3" => 3,
-        "VEC4" => 4,
-        "MAT4" => 16,
-        _ => 1,
-    };
-    let count = v.len() / width;
-    let range = bounds.then(|| {
-        let mut min = vec![f32::MAX; width];
-        let mut max = vec![f32::MIN; width];
-        for e in v.chunks_exact(width) {
-            for k in 0..width {
-                min[k] = min[k].min(e[k]);
-                max[k] = max[k].max(e[k]);
-            }
-        }
-        (min, max)
-    });
-    let a = b.accessor(Part::f32(v), 5126, count, kind, None);
-    if let Some((min, max)) = range {
-        b.accessors[a]["min"] = json!(min);
-        b.accessors[a]["max"] = json!(max);
-    }
-    a
 }
 
 /// A channel's keys as glTF wants them: finite, times strictly increasing (a key at or before the last moves just
