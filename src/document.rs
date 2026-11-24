@@ -296,13 +296,18 @@ impl Parts {
     }
 }
 
-/// A GLB ready to write (see [`Document::write_glb`]): its header and JSON chunk, and where each
-/// of the document's buffers goes in its binary chunk.
+/// A GLB ready to write (see [`Document::write_glb`]): its header and JSON chunk, and its
+/// binary chunk.
 struct Glb {
     /// The 12-byte header, the JSON chunk's header and the JSON, padded.
     head: Vec<u8>,
     /// The whole GLB's length.
     total: u32,
+    bin: Bin,
+}
+
+/// Where each of the document's buffers goes in a GLB's binary chunk.
+struct Bin {
     /// The binary chunk's length, padded; `None` for none.
     padded: Option<u64>,
     /// Each buffer in the binary chunk: (buffer, offset, length).
@@ -318,23 +323,30 @@ impl Glb {
     )]
     fn write(&self, doc: &Document, w: &mut dyn Write) -> Result<()> {
         w.write_all(&self.head)?;
-        if let Some(padded) = self.padded {
+        if let Some(padded) = self.bin.padded {
             w.write_all(&(padded as u32).to_le_bytes())?;
             w.write_all(b"BIN\0")?;
-            let mut pos = 0;
-            for &(i, at, len) in &self.layout {
-                write_zeros(w, at - pos)?;
-                let blob = doc
-                    .buffers
-                    .get(i)
-                    .or(self.extra.as_ref())
-                    .context("glTF buffer is missing")?;
-                blob.write_to(len, w)?;
-                pos = at + len;
-            }
-            write_zeros(w, padded - pos)?;
+            self.bin.write(doc, w)?;
         }
         Ok(())
+    }
+}
+
+impl Bin {
+    /// The binary chunk's bytes, padded, without its chunk header.
+    fn write(&self, doc: &Document, w: &mut dyn Write) -> Result<()> {
+        let mut pos = 0;
+        for &(i, at, len) in &self.layout {
+            write_zeros(w, at - pos)?;
+            let blob = doc
+                .buffers
+                .get(i)
+                .or(self.extra.as_ref())
+                .context("glTF buffer is missing")?;
+            blob.write_to(len, w)?;
+            pos = at + len;
+        }
+        write_zeros(w, self.padded.unwrap_or(0) - pos)
     }
 }
 
@@ -621,6 +633,27 @@ impl Document {
         Ok(out)
     }
 
+    /// The document as a GLB, meshopt-compressed as `options` say: as
+    /// [`gltf::compress_with`](crate::gltf::compress_with) on [`Document::to_glb`]'s bytes, without
+    /// writing them out and parsing them back first.
+    ///
+    /// ```
+    /// use polysmelt::gltf::CompressOptions;
+    /// # let doc = polysmelt::read(&b"v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n"[..], "t.obj")?;
+    /// let small = doc.to_glb_with(&CompressOptions::KHR)?;
+    /// # Ok::<(), polysmelt::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// As [`Document::to_glb`] and [`compress_with`](crate::gltf::compress_with).
+    pub fn to_glb_with(&self, options: &container::CompressOptions) -> Result<Vec<u8>> {
+        let (json, bin) = self.packed()?;
+        let mut bytes = Vec::with_capacity(bin.padded.map_or(0, usize_of));
+        bin.write(self, &mut bytes)?;
+        container::compress_parts(json, bin.padded.map(|_| &bytes[..]), *options)
+    }
+
     /// Writes the document as a GLB: the JSON with every buffer's bytes in its binary chunk,
     /// each where its buffer views (and meshopt data) now point. Writes go straight to `w`, a
     /// piece at a time: wrap a file in a [`BufWriter`](std::io::BufWriter).
@@ -648,28 +681,29 @@ impl Document {
         reason = "the JSON chunk is smaller than `total`, which is checked to fit"
     )]
     fn glb(&self) -> Result<Glb> {
-        let mut json = self.json.clone();
-        let extra = crate::flatten::repaired(self, &mut json).map(|b| Blob::Bytes(b.into()));
-        let (json, layout, bin_len) = self.glb_json(json, extra.as_ref())?;
+        let (json, bin) = self.packed()?;
         let mut head = vec![0; 20];
         serde_json::to_writer(&mut head, &Value::Object(json))?;
         head.resize(head.len().next_multiple_of(4), b' ');
         let text = head.len() - 20;
-        let padded = bin_len.map(|n| n.next_multiple_of(4));
-        let total = head.len() as u64 + padded.map_or(0, |n| 8 + n);
+        let total = head.len() as u64 + bin.padded.map_or(0, |n| 8 + n);
         let total = u32::try_from(total).map_err(|_| invalid!("GLB would be over 4 GiB"))?;
         head[..4].copy_from_slice(b"glTF");
         head[4..8].copy_from_slice(&2u32.to_le_bytes());
         head[8..12].copy_from_slice(&total.to_le_bytes());
         head[12..16].copy_from_slice(&(text as u32).to_le_bytes());
         head[16..20].copy_from_slice(b"JSON");
-        Ok(Glb {
-            head,
-            total,
-            padded,
-            layout,
-            extra,
-        })
+        Ok(Glb { head, total, bin })
+    }
+
+    /// The GLB's JSON, its buffers merged into the first (repair's bytes included), and where
+    /// each goes in its binary chunk.
+    fn packed(&self) -> Result<(Map<String, Value>, Bin)> {
+        let mut json = self.json.clone();
+        let extra = crate::flatten::repaired(self, &mut json).map(|b| Blob::Bytes(b.into()));
+        let (json, layout, bin_len) = self.glb_json(json, extra.as_ref())?;
+        let padded = bin_len.map(|n| n.next_multiple_of(4));
+        Ok((json, Bin { padded, layout, extra }))
     }
 
     /// The GLB's JSON (from `json`, the document's, with `extra` its last buffer if given),
@@ -1357,5 +1391,37 @@ impl Builder {
         self.accessors
             .push(json!({ "bufferView": v, "componentType": ctype, "count": count, "type": kind }));
         self.accessors.len() - 1
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Compressing a document straight from its parts gives the bytes compressing its GLB does.
+    #[test]
+    fn a_document_compresses_as_its_glb_does() {
+        let prim = Prim {
+            positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [1.0, 1.0, 0.0]],
+            indices: vec![0, 1, 2, 2, 1, 3],
+            ..Prim::default()
+        };
+        let mesh = Mesh {
+            prims: vec![prim],
+            materials: vec![Material::plain("m", [1.0; 4])],
+            ..Mesh::default()
+        };
+        let doc = Document::from(mesh);
+        for options in [container::CompressOptions::EXT, container::CompressOptions::KHR] {
+            let direct = doc.to_glb_with(&options).unwrap();
+            let reparsed = container::compress_with(&doc.to_glb().unwrap(), options).unwrap();
+            assert_eq!(direct, reparsed);
+            assert!(container::decompress(&direct).is_ok());
+        }
+        assert!(
+            Document::default()
+                .to_glb_with(&container::CompressOptions::EXT)
+                .is_ok()
+        );
     }
 }

@@ -164,17 +164,39 @@ impl Default for CompressOptions {
 /// When `input` isn't glTF that parses, already-compressed data doesn't decode, or
 /// `options.color_filter` is set with `EXT_meshopt_compression`, which has no `COLOR` filter.
 pub fn compress_with(input: &[u8], options: CompressOptions) -> Result<Vec<u8>> {
+    let doc = Doc::parse(input)?;
+    let packed = doc.glb_len.is_some();
+    compress_doc(doc, packed, options)
+}
+
+/// [`compress_with`] on a GLB's JSON and binary chunk, as a document has them.
+pub(crate) fn compress_parts(
+    json: Map<String, Value>,
+    bin: Option<&[u8]>,
+    options: CompressOptions,
+) -> Result<Vec<u8>> {
+    compress_doc(
+        Doc {
+            json,
+            bin,
+            glb_len: None,
+        },
+        true,
+        options,
+    )
+}
+
+/// [`compress_with`] on `doc`, `packed` when its buffers are all in its binary chunk.
+fn compress_doc(doc: Doc<'_>, packed: bool, options: CompressOptions) -> Result<Vec<u8>> {
     ensure!(
         !options.color_filter || options.extension == MeshoptExtension::Khr,
         "the meshopt COLOR filter needs KHR_meshopt_compression"
     );
-    let plain;
-    let mut doc = Doc::parse(input)?;
-    if doc.uses_meshopt() || doc.glb_len.is_none() {
-        plain = decompress(input)?;
-        doc = Doc::parse(&plain)?;
+    if packed && !doc.uses_meshopt() {
+        return doc.compress(options);
     }
-    doc.compress(options)
+    let plain = doc.decompress(&mut no_fetch, false)?;
+    Doc::parse(&plain)?.compress(options)
 }
 
 /// A `fetch` for [`pack_glb`] and [`pack_glb_decompressed`] that reads URIs as paths relative
