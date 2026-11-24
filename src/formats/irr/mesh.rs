@@ -31,13 +31,19 @@ pub(super) struct Mesh {
 pub(super) fn parse(text: &str, limit: usize) -> Result<Mesh> {
     let xml = Xml::parse(text)?;
     let root = xml.root();
-    ensure!(root.is("mesh"), "not an Irrlicht mesh: the root is <{}>", root.name());
+    ensure!(
+        root.is("mesh"),
+        UnknownFormat,
+        "not an Irrlicht mesh: the root is <{}>",
+        root.name()
+    );
     // Other formats' roots are `<mesh>` too: an Irrlicht mesh names its namespace, or at least has buffers.
     let named = root
         .attr("xmlns")
         .is_some_and(|n| n.to_ascii_lowercase().contains("irrlicht"));
     ensure!(
         named || root.children().any(|c| c.is("buffer")),
+        UnknownFormat,
         "not an Irrlicht mesh: <mesh> has neither Irrlicht's namespace nor buffers"
     );
     let mut mesh = Mesh {
@@ -48,7 +54,11 @@ pub(super) fn parse(text: &str, limit: usize) -> Result<Mesh> {
     for b in root.children().filter(|c| c.is("buffer")) {
         let buffer = read_buffer(b, &mut mesh.dropped);
         total += buffer.prim.indices.len() / 3;
-        ensure!(total <= limit, "too many triangles to convert (more than {limit})");
+        ensure!(
+            total <= limit,
+            LimitExceeded,
+            "too many triangles to convert (more than {limit})"
+        );
         mesh.buffers.push(buffer);
     }
     Ok(mesh)

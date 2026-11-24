@@ -182,6 +182,7 @@ fn number(tok: Option<&str>, what: &str, no: usize) -> Result<f64> {
     match tok.and_then(|t| t.parse::<f64>().ok()).filter(|v| v.is_finite()) {
         Some(v) => Ok(v),
         None => bail!(
+            Corrupt,
             "ASF line {no}: {what} needs a number, not `{}`",
             show(tok.unwrap_or("the end of the line"))
         ),
@@ -245,6 +246,7 @@ fn parse_asf(text: &str) -> Result<Skeleton> {
             in_limits = false;
             ensure!(
                 bone.is_none(),
+                Corrupt,
                 "ASF line {no}: `{}` inside a bone's begin … end",
                 show(first)
             );
@@ -269,13 +271,18 @@ fn parse_asf(text: &str) -> Result<Skeleton> {
         }
         let key = first.to_ascii_lowercase();
         match section {
-            Section::None => bail!("not an ASF file: it starts with `{}`, not a `:` section", show(first)),
+            Section::None => bail!(
+                UnknownFormat,
+                "not an ASF file: it starts with `{}`, not a `:` section",
+                show(first)
+            ),
             Section::Other => {}
             Section::Units => match key.as_str() {
                 "length" => {
                     let v = number(tokens.next(), "length", no)?;
                     ensure!(
                         v.is_finite() && v > 0.0,
+                        Corrupt,
                         "ASF line {no}: the length unit must be above 0, not {v}"
                     );
                     sk.length = v;
@@ -287,7 +294,11 @@ fn parse_asf(text: &str) -> Result<Skeleton> {
                     sk.radians = match unit.as_str() {
                         "deg" | "degree" | "degrees" => false,
                         "rad" | "radian" | "radians" => true,
-                        _ => bail!("ASF line {no}: the angle unit `{}` isn't deg or rad", show(&unit)),
+                        _ => bail!(
+                            Corrupt,
+                            "ASF line {no}: the angle unit `{}` isn't deg or rad",
+                            show(&unit)
+                        ),
                     };
                 }
                 _ => {}
@@ -297,6 +308,7 @@ fn parse_asf(text: &str) -> Result<Skeleton> {
                     sk.root.dof_names = tokens.map(str::to_owned).collect();
                     ensure!(
                         sk.root.dof_names.len() <= MAX_DOFS,
+                        LimitExceeded,
                         "ASF line {no}: the root's order lists more than {MAX_DOFS} columns"
                     );
                     sk.root.dofs = sk.root.dof_names.iter().map(|d| Dof::parse(d)).collect();
@@ -305,6 +317,7 @@ fn parse_asf(text: &str) -> Result<Skeleton> {
                     let order = tokens.next().unwrap_or("");
                     let Some(order) = axis_order(order).filter(|o| !o.is_empty()) else {
                         bail!(
+                            Corrupt,
                             "ASF line {no}: the root's axis `{}` isn't an order of X, Y and Z",
                             show(order)
                         );
@@ -317,14 +330,22 @@ fn parse_asf(text: &str) -> Result<Skeleton> {
             },
             Section::Bones => {
                 if key == "begin" {
-                    ensure!(bone.is_none(), "ASF line {no}: `begin` inside a bone's begin … end");
-                    ensure!(sk.bones.len() < MAX_BONES, "ASF has more than {MAX_BONES} bones");
+                    ensure!(
+                        bone.is_none(),
+                        Corrupt,
+                        "ASF line {no}: `begin` inside a bone's begin … end"
+                    );
+                    ensure!(
+                        sk.bones.len() < MAX_BONES,
+                        LimitExceeded,
+                        "ASF has more than {MAX_BONES} bones"
+                    );
                     bone = Some(Bone::new(String::new()));
                     in_limits = false;
                     continue;
                 }
                 let Some(b) = bone.as_mut() else {
-                    bail!("ASF line {no}: `{}` outside a bone's begin … end", show(first));
+                    bail!(Corrupt, "ASF line {no}: `{}` outside a bone's begin … end", show(first));
                 };
                 if key == "end" {
                     let mut b = bone.take().unwrap_or_else(|| Bone::new(String::new()));
@@ -333,6 +354,7 @@ fn parse_asf(text: &str) -> Result<Skeleton> {
                     }
                     ensure!(
                         !b.name.eq_ignore_ascii_case("root") && !names.contains_key(&b.name),
+                        Corrupt,
                         "ASF line {no}: bone `{}` is defined twice",
                         show(&b.name)
                     );
@@ -351,11 +373,16 @@ fn parse_asf(text: &str) -> Result<Skeleton> {
                         let bound = |t: &str| match t.parse::<f64>() {
                             Ok(v) if v.is_finite() => Ok(Some(v)),
                             Ok(v) if v.is_infinite() => Ok(None),
-                            _ => Err(invalid!("ASF line {no}: a limit needs a number, not `{}`", show(t))),
+                            _ => Err(err!(
+                                Corrupt,
+                                "ASF line {no}: a limit needs a number, not `{}`",
+                                show(t)
+                            )),
                         };
                         let [lo, hi] = [pair[0], pair.get(1).copied().unwrap_or("")];
                         ensure!(
                             b.limits.len() < MAX_DOFS,
+                            LimitExceeded,
                             "ASF line {no}: bone `{}` has more than {MAX_DOFS} limits",
                             show(&b.name)
                         );
@@ -368,7 +395,7 @@ fn parse_asf(text: &str) -> Result<Skeleton> {
                     "id" => b.id = tokens.next().map(str::to_owned),
                     "name" => {
                         let name = line[first.len()..].trim();
-                        ensure!(!name.is_empty(), "ASF line {no}: a bone's name is empty");
+                        ensure!(!name.is_empty(), Corrupt, "ASF line {no}: a bone's name is empty");
                         name.clone_into(&mut b.name);
                     }
                     "direction" => {
@@ -381,7 +408,11 @@ fn parse_asf(text: &str) -> Result<Skeleton> {
                         b.axis = three(&mut tokens, "axis", no)?;
                         if let Some(o) = tokens.next() {
                             let Some(order) = axis_order(o).filter(|o| !o.is_empty()) else {
-                                bail!("ASF line {no}: axis order `{}` isn't an order of X, Y and Z", show(o));
+                                bail!(
+                                    Corrupt,
+                                    "ASF line {no}: axis order `{}` isn't an order of X, Y and Z",
+                                    show(o)
+                                );
                             };
                             b.order = order;
                         }
@@ -390,6 +421,7 @@ fn parse_asf(text: &str) -> Result<Skeleton> {
                         b.dof_names = tokens.map(str::to_owned).collect();
                         ensure!(
                             b.dof_names.len() <= MAX_DOFS,
+                            LimitExceeded,
                             "ASF line {no}: bone `{}` lists more than {MAX_DOFS} dofs",
                             show(&b.name)
                         );
@@ -407,9 +439,10 @@ fn parse_asf(text: &str) -> Result<Skeleton> {
             }
         }
     }
-    ensure!(seen, "not an ASF file: it has no `:` sections");
+    ensure!(seen, UnknownFormat, "not an ASF file: it has no `:` sections");
     if let Some(b) = bone {
         bail!(
+            Truncated,
             "ASF ends inside bone `{}`: an `end` is missing, or the file is cut short",
             show(&b.name)
         );
@@ -767,6 +800,7 @@ pub(crate) fn load(input: Input<'_>, ext: &str, assets: &dyn Assets, keep: Keep)
         }
         let Some((asf, path)) = found else {
             bail!(
+                MissingAsset,
                 "AMC motion needs its ASF skeleton beside it, and none was found (looked for {})",
                 names.iter().map(|n| file_name(n)).collect::<Vec<_>>().join(", ")
             );

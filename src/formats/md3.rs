@@ -285,12 +285,16 @@ struct Surface {
 
 /// A header count or offset, which can't be negative.
 fn size(v: i32, what: &str) -> Result<usize> {
-    usize::try_from(v).map_err(|_| invalid!("MD3 {what} is negative ({v})"))
+    usize::try_from(v).map_err(|_| err!(Corrupt, "MD3 {what} is negative ({v})"))
 }
 
 /// Reads the file; `morphs` says whether frames after the first are kept as targets.
 fn parse(data: &[u8], morphs: bool) -> Result<File> {
-    ensure!(data.starts_with(b"IDP3"), "not an MD3 file: no IDP3 signature");
+    ensure!(
+        data.starts_with(b"IDP3"),
+        UnknownFormat,
+        "not an MD3 file: no IDP3 signature"
+    );
     let mut b = Bin::new(data, "MD3");
     b.skip(4)?;
     let version = b.i32()?;
@@ -303,9 +307,10 @@ fn parse(data: &[u8], morphs: bool) -> Result<File> {
     let ofs_frames = size(b.i32()?, "frame offset")?;
     let ofs_tags = size(b.i32()?, "tag offset")?;
     let ofs_surfaces = size(b.i32()?, "surface offset")?;
-    ensure!(n_frames > 0, "MD3 file has no frames");
+    ensure!(n_frames > 0, Empty, "MD3 file has no frames");
     ensure!(
         n_frames <= MAX_FRAMES,
+        LimitExceeded,
         "MD3 file has {n_frames} frames, more than {MAX_FRAMES}"
     );
 
@@ -321,7 +326,7 @@ fn parse(data: &[u8], morphs: bool) -> Result<File> {
         b.seek(ofs_tags)?;
         let total = n_frames
             .checked_mul(n_tags)
-            .ok_or_else(|| invalid!("MD3 file claims too many tags"))?;
+            .ok_or_else(|| err!(LimitExceeded, "MD3 file claims too many tags"))?;
         b.count(total as u64, 112)?;
         for f in 0..n_frames {
             for t in 0..n_tags {
@@ -355,7 +360,7 @@ fn parse(data: &[u8], morphs: bool) -> Result<File> {
         surfaces.extend(surface);
         at = at
             .checked_add(end)
-            .ok_or_else(|| invalid!("MD3 surface {s} points past the file's end"))?;
+            .ok_or_else(|| err!(Truncated, "MD3 surface {s} points past the file's end"))?;
     }
     Ok(File {
         version,
@@ -372,7 +377,11 @@ fn parse(data: &[u8], morphs: bool) -> Result<File> {
 fn surface(data: &[u8], start: usize, s: usize, keep: usize, budget: &mut usize) -> Result<(Option<Surface>, usize)> {
     let mut b = Bin::new(data, "MD3");
     b.seek(start)?;
-    ensure!(b.bytes(4)? == b"IDP3", "MD3 surface {s} doesn't start with IDP3");
+    ensure!(
+        b.bytes(4)? == b"IDP3",
+        Corrupt,
+        "MD3 surface {s} doesn't start with IDP3"
+    );
     let name = scene::text(b.fixed_str(64)?);
     let _flags = b.i32()?;
     let n_frames = size(b.i32()?, "surface frame count")?;
@@ -382,7 +391,7 @@ fn surface(data: &[u8], start: usize, s: usize, keep: usize, budget: &mut usize)
     let ofs = |b: &mut Bin<'_>, what: &str| -> Result<usize> {
         start
             .checked_add(size(b.i32()?, what)?)
-            .ok_or_else(|| invalid!("MD3 surface {s}'s {what} points past the file's end"))
+            .ok_or_else(|| err!(Truncated, "MD3 surface {s}'s {what} points past the file's end"))
     };
     let ofs_tris = ofs(&mut b, "triangle offset")?;
     let ofs_shaders = ofs(&mut b, "shader offset")?;
@@ -392,11 +401,13 @@ fn surface(data: &[u8], start: usize, s: usize, keep: usize, budget: &mut usize)
     // Each surface follows the last, so the next can't start inside this one's header.
     ensure!(
         end >= SURFACE_HEADER,
+        Corrupt,
         "MD3 surface {s} is {end} bytes, less than its header"
     );
-    ensure!(n_frames > 0, "MD3 surface {s} has no frames");
+    ensure!(n_frames > 0, Corrupt, "MD3 surface {s} has no frames");
     ensure!(
         n_frames <= MAX_FRAMES,
+        LimitExceeded,
         "MD3 surface {s} has {n_frames} frames, more than {MAX_FRAMES}"
     );
 
@@ -415,7 +426,10 @@ fn surface(data: &[u8], start: usize, s: usize, keep: usize, budget: &mut usize)
         let v = [b.i32()?, b.i32()?, b.i32()?];
         let v = v.map(|i| usize::try_from(i).ok().filter(|&i| i < n_verts));
         let [Some(a), Some(c1), Some(c2)] = v else {
-            bail!("MD3 surface {s}'s triangle {t} names a vertex past its {n_verts}");
+            bail!(
+                Corrupt,
+                "MD3 surface {s}'s triangle {t} names a vertex past its {n_verts}"
+            );
         };
         // Clockwise front faces in the file; glTF's are counterclockwise.
         indices.extend([a, c2, c1].map(u32_of));
@@ -431,7 +445,7 @@ fn surface(data: &[u8], start: usize, s: usize, keep: usize, budget: &mut usize)
         .checked_mul(n_verts)
         .and_then(|n| n.checked_add(kept * kept))
         .filter(|&n| n <= *budget)
-        .ok_or_else(|| invalid!("MD3 file's frames hold more vertices than a model can"))?;
+        .ok_or_else(|| err!(LimitExceeded, "MD3 file's frames hold more vertices than a model can"))?;
     *budget -= cost;
     b.seek(ofs_xyz)?;
     b.count((n_frames as u64).saturating_mul(n_verts as u64), 8)?;

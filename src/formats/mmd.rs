@@ -238,7 +238,7 @@ pub(crate) fn load(input: Input<'_>, ext: &str, assets: &dyn Assets, keep: Keep)
     } else if bytes.starts_with(b"Pmd") {
         pmd(&bytes)?
     } else {
-        bail!("isn't a {} file", ext.to_ascii_uppercase())
+        bail!(UnknownFormat, "isn't a {} file", ext.to_ascii_uppercase())
     };
     build(model, &input, &stem, assets, keep)
 }
@@ -282,7 +282,7 @@ impl Reader<'_> {
     /// A text field: its length in bytes, then its bytes.
     fn text(&mut self) -> Result<String> {
         let n = self.b.i32()?;
-        ensure!(n >= 0, "PMX text has a negative length");
+        ensure!(n >= 0, Corrupt, "PMX text has a negative length");
         let n = self.b.count(u64::from(n.unsigned_abs()), 1)?;
         let b = self.b.bytes(n)?;
         Ok(if self.utf8 {
@@ -296,7 +296,7 @@ impl Reader<'_> {
     /// A count of items of at least `size` bytes each.
     fn count(&mut self, size: usize) -> Result<usize> {
         let n = self.b.i32()?;
-        ensure!(n >= 0, "PMX file has a negative count");
+        ensure!(n >= 0, Corrupt, "PMX file has a negative count");
         self.b.count(u64::from(n.unsigned_abs()), size)
     }
 
@@ -322,19 +322,20 @@ impl Reader<'_> {
 /// Reads a PMX file.
 fn pmx(data: &[u8]) -> Result<Model> {
     let mut b = Bin::new(data, "PMX");
-    ensure!(b.bytes(4)? == b"PMX ", "isn't a PMX file");
+    ensure!(b.bytes(4)? == b"PMX ", UnknownFormat, "isn't a PMX file");
     let version = b.f32()?;
     ensure!(
         (version - 2.0).abs() < 1e-3 || (version - 2.1).abs() < 1e-3,
+        Unsupported,
         "PMX version {version} isn't 2.0 or 2.1"
     );
     let globals = usize::from(b.u8()?);
-    ensure!(globals >= 8, "PMX header has {globals} settings, fewer than 8");
+    ensure!(globals >= 8, Corrupt, "PMX header has {globals} settings, fewer than 8");
     let g = b.bytes(globals)?;
-    ensure!(g[0] <= 1, "PMX text encoding {} isn't UTF-16 or UTF-8", g[0]);
-    ensure!(g[1] <= 4, "PMX file has {} additional UVs, more than 4", g[1]);
+    ensure!(g[0] <= 1, Corrupt, "PMX text encoding {} isn't UTF-16 or UTF-8", g[0]);
+    ensure!(g[1] <= 4, Corrupt, "PMX file has {} additional UVs, more than 4", g[1]);
     for &s in &g[2..8] {
-        ensure!(matches!(s, 1 | 2 | 4), "PMX index size {s} isn't 1, 2 or 4");
+        ensure!(matches!(s, 1 | 2 | 4), Corrupt, "PMX index size {s} isn't 1, 2 or 4");
     }
     let mut r = Reader {
         b,
@@ -402,7 +403,7 @@ fn pmx(data: &[u8]) -> Result<Model> {
                     m.qdef += 1;
                 }
             }
-            t => bail!("PMX vertex has an unknown deform type {t}"),
+            t => bail!(Corrupt, "PMX vertex has an unknown deform type {t}"),
         }
         r.b.f32()?;
         m.vertices.push(v);
@@ -446,7 +447,7 @@ fn pmx(data: &[u8]) -> Result<Model> {
         };
         let memo = r.text()?;
         let count = r.b.i32()?;
-        ensure!(count >= 0, "PMX material has a negative face count");
+        ensure!(count >= 0, Corrupt, "PMX material has a negative face count");
         m.materials.push(Mat {
             name,
             english,
@@ -547,7 +548,7 @@ fn pmx(data: &[u8]) -> Result<Model> {
             3..=7 => usize::from(r.vertex) + 16,
             8 => usize::from(r.material) + 113,
             10 => usize::from(r.rigid) + 25,
-            k => bail!("PMX morph has an unknown type {k}"),
+            k => bail!(Corrupt, "PMX morph has an unknown type {k}"),
         };
         let count = r.count(size)?;
         let data = match kind {
@@ -665,7 +666,7 @@ fn pmx_tail(r: &mut Reader<'_>, m: &mut Model) -> Result<()> {
 /// Reads a PMD file.
 fn pmd(data: &[u8]) -> Result<Model> {
     let mut b = Bin::new(data, "PMD");
-    ensure!(b.bytes(3)? == b"Pmd", "isn't a PMD file");
+    ensure!(b.bytes(3)? == b"Pmd", UnknownFormat, "isn't a PMD file");
     let version = b.f32()?;
     let mut m = Model::new("PMD", version, "Shift-JIS");
     m.name = sjis(b.fixed_str(20)?);
@@ -1407,7 +1408,12 @@ fn build(m: Model, input: &Input<'_>, stem: &str, assets: &dyn Assets, keep: Kee
         }
         scene.add(node);
     }
-    ensure!(!scene.nodes.is_empty(), "{} file has no faces or bones", m.format);
+    ensure!(
+        !scene.nodes.is_empty(),
+        Empty,
+        "{} file has no faces or bones",
+        m.format
+    );
 
     scene.mirror_z();
     scene.scale(UNIT);
@@ -1578,7 +1584,7 @@ fn motion(data: &[u8], stem: &str, keep: Keep) -> Result<Document<'static>> {
     } else if head.starts_with(b"Vocaloid Motion Data file") {
         10
     } else {
-        bail!("isn't a VMD file")
+        bail!(UnknownFormat, "isn't a VMD file")
     };
     let model = sjis(b.fixed_str(name_len)?);
 

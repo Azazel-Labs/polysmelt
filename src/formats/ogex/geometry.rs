@@ -592,7 +592,12 @@ fn build(c: &mut Ctx<'_>, g: u32, need_uv: usize) -> Result<Option<Geom>> {
     }
     let triangles: usize = draws.iter().map(|(d, _)| d.triangles.len() / 3).sum();
     c.built_triangles += triangles;
-    ensure!(c.built_triangles <= c.limit, "more than {} triangles", c.limit);
+    ensure!(
+        c.built_triangles <= c.limit,
+        LimitExceeded,
+        "more than {} triangles",
+        c.limit
+    );
     if draws.iter().any(|(d, _)| !d.lines.is_empty() || !d.points.is_empty()) {
         c.lines_or_points = true;
     }

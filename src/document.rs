@@ -33,7 +33,7 @@ use crate::material::{Full, Writer};
 use crate::mesh::{Bone, Image, MAX_POINTS, MAX_TRIANGLES, Material, Mesh, Prim, TRIANGLE_CEILING};
 use crate::num::usize_of;
 use crate::source::{Axis, Fact, Handedness, SourceInfo};
-use crate::{Context as _, Result};
+use crate::{Context as _, ErrorKind, Result, Within as _};
 
 pub use crate::keep::Keep;
 
@@ -235,6 +235,7 @@ impl FileSpan {
     fn read_at(&self, off: u64, out: &mut [u8]) -> Result<()> {
         ensure!(
             off.checked_add(out.len() as u64).is_some_and(|end| end <= self.len),
+            Truncated,
             "read past the end of a file's glTF data"
         );
         let mut c = self.file.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -492,7 +493,7 @@ impl Glb {
                     .buffers
                     .get(i)
                     .or(self.extra.as_ref())
-                    .context("glTF buffer is missing")?;
+                    .context(ErrorKind::Corrupt, "glTF buffer is missing")?;
                 let from = self.kept.partition_point(|k| k.0 < i);
                 let to = self.kept.partition_point(|k| k.0 <= i);
                 blob.write_keeping(len, w, &self.kept[from..to])?;
@@ -540,7 +541,7 @@ impl Blob<'_> {
         let end = off
             .checked_add(len)
             .filter(|&e| e <= self.len())
-            .context("glTF data runs past the end of its buffer")?;
+            .context(ErrorKind::Truncated, "glTF data runs past the end of its buffer")?;
         let shared = match self {
             Blob::Bytes(b) => Some(b.slice(usize_of(off)..usize_of(end))),
             Blob::Parts(p) => p.shared(off, len),
@@ -554,7 +555,7 @@ impl Blob<'_> {
         }
         let mut out = Vec::new();
         out.try_reserve_exact(usize_of(len))
-            .map_err(|_| invalid!("glTF data of {len} bytes"))?;
+            .map_err(|_| err!(LimitExceeded, "glTF data of {len} bytes"))?;
         out.resize(usize_of(len), 0);
         self.read_at(off, &mut out)?;
         Ok(out.into())
@@ -565,14 +566,14 @@ impl Blob<'_> {
         let end = off
             .checked_add(out.len() as u64)
             .filter(|&e| e <= self.len())
-            .context("glTF data runs past the end of its buffer")?;
+            .context(ErrorKind::Truncated, "glTF data runs past the end of its buffer")?;
         match self {
             Blob::Borrowed(b) => out.copy_from_slice(&b[usize_of(off)..usize_of(end)]),
             Blob::Bytes(b) => out.copy_from_slice(&b[usize_of(off)..usize_of(end)]),
             #[cfg(feature = "fs")]
             Blob::File(f) => f.read_at(off, out)?,
             Blob::Parts(p) => p.read_at(off, out)?,
-            Blob::Missing(_) => bail!("glTF data is in a meshopt fallback buffer, which holds none"),
+            Blob::Missing(_) => bail!(Corrupt, "glTF data is in a meshopt fallback buffer, which holds none"),
         }
         Ok(())
     }
@@ -583,7 +584,12 @@ impl Blob<'_> {
     fn write_keeping(&self, len: u64, w: &mut dyn Write, kept: &[crate::flatten::Kept]) -> Result<()> {
         #[cfg(feature = "fs")]
         if let (Blob::File(f), false) = (self, kept.is_empty()) {
-            ensure!(len <= f.len, "glTF buffer holds {} bytes but declares {len}", f.len);
+            ensure!(
+                len <= f.len,
+                Truncated,
+                "glTF buffer holds {} bytes but declares {len}",
+                f.len
+            );
             let mut chunk = Vec::new();
             let mut pos = 0;
             for (_, start, bytes) in kept {
@@ -605,6 +611,7 @@ impl Blob<'_> {
     fn write_to(&self, len: u64, w: &mut dyn Write) -> Result<()> {
         ensure!(
             len <= self.len(),
+            Truncated,
             "glTF buffer holds {} bytes but declares {len}",
             self.len()
         );
@@ -614,7 +621,7 @@ impl Blob<'_> {
             #[cfg(feature = "fs")]
             Blob::File(f) => f.write_range(0, len, &mut Vec::new(), w)?,
             Blob::Parts(p) => p.write_to(len, w)?,
-            Blob::Missing(_) => bail!("a meshopt fallback buffer has no bytes to write"),
+            Blob::Missing(_) => bail!(Corrupt, "a meshopt fallback buffer has no bytes to write"),
         }
         Ok(())
     }
@@ -743,7 +750,7 @@ impl<'a> Document<'a> {
         let b = self
             .buffers
             .get(i)
-            .with_context(|| format!("glTF buffers[{i}] doesn't exist"))?;
+            .with_context(ErrorKind::Corrupt, || format!("glTF buffers[{i}] doesn't exist"))?;
         if let Some(s) = b.slice(0, b.len()) {
             return Ok(Cow::Borrowed(s));
         }
@@ -756,15 +763,16 @@ impl<'a> Document<'a> {
     pub(crate) fn view_shared(&self, i: usize) -> Result<Bytes> {
         let v = list(&self.json, "bufferViews")
             .get(i)
-            .with_context(|| format!("glTF bufferViews[{i}] doesn't exist"))?;
+            .with_context(ErrorKind::Corrupt, || format!("glTF bufferViews[{i}] doesn't exist"))?;
         let num = |k: &str| v.get(k).and_then(Value::as_u64).unwrap_or(0);
         let b = self
             .buffers
             .get(usize_of(num("buffer")))
-            .context("glTF buffer view names a missing buffer")?;
+            .context(ErrorKind::Corrupt, "glTF buffer view names a missing buffer")?;
         let (offset, len) = (num("byteOffset"), num("byteLength"));
         ensure!(
             offset.saturating_add(len) <= b.len(),
+            Truncated,
             "glTF buffer view runs past its buffer"
         );
         b.shared(offset, len)
@@ -842,12 +850,12 @@ impl<'a> Document<'a> {
         kept.sort_unstable_by_key(|k| (k.0, k.1));
         let (json, layout, bin_len) = self.glb_json(json, extra.as_ref())?;
         let mut head = vec![0; 20];
-        serde_json::to_writer(&mut head, &Value::Object(json))?;
+        serde_json::to_writer(&mut head, &Value::Object(json)).context(ErrorKind::Invalid, "writing the glTF JSON")?;
         head.resize(head.len().next_multiple_of(4), b' ');
         let text = head.len() - 20;
         let padded = bin_len.map(|n| n.next_multiple_of(4));
         let total = head.len() as u64 + padded.map_or(0, |n| 8 + n);
-        let total = u32::try_from(total).map_err(|_| invalid!("GLB would be over 4 GiB"))?;
+        let total = u32::try_from(total).map_err(|_| err!(LimitExceeded, "GLB would be over 4 GiB"))?;
         head[..4].copy_from_slice(b"glTF");
         head[4..8].copy_from_slice(&2u32.to_le_bytes());
         head[8..12].copy_from_slice(&total.to_le_bytes());
@@ -876,6 +884,7 @@ impl<'a> Document<'a> {
         let held = self.buffers.len() + usize::from(extra.is_some());
         ensure!(
             buffers.len() == held,
+            Corrupt,
             "glTF document lists {} buffers but holds {held}",
             buffers.len(),
         );
@@ -896,6 +905,7 @@ impl<'a> Document<'a> {
             }
             ensure!(
                 blob.len() >= declared,
+                Truncated,
                 "glTF buffer {i} holds {} bytes but declares {declared}",
                 blob.len()
             );
@@ -909,17 +919,20 @@ impl<'a> Document<'a> {
         for (i, v) in views.into_iter().flatten().enumerate() {
             let v = v
                 .as_object_mut()
-                .with_context(|| format!("glTF buffer view {i} is not an object"))?;
-            let (vb, _) = container::rehome(v, &home).with_context(|| format!("glTF buffer view {i}"))?;
+                .with_context(ErrorKind::Corrupt, || format!("glTF buffer view {i} is not an object"))?;
+            let (vb, _) = container::rehome(v, &home).with_within(|| format!("glTF buffer view {i}"))?;
             let exts = v.get_mut("extensions").and_then(Value::as_object_mut);
             for (name, ext) in exts.into_iter().flatten() {
                 if !container::MESHOPT_EXTENSIONS.contains(&name.as_str()) {
                     continue;
                 }
-                let ext = ext.as_object_mut().context("bad meshopt extension")?;
-                let (b, _) = container::rehome(ext, &home).with_context(|| format!("glTF buffer view {i}"))?;
+                let ext = ext
+                    .as_object_mut()
+                    .context(ErrorKind::Corrupt, "bad meshopt extension")?;
+                let (b, _) = container::rehome(ext, &home).with_within(|| format!("glTF buffer view {i}"))?;
                 ensure!(
                     b == 0,
+                    Corrupt,
                     "glTF buffer view {i}: its compressed data is in a missing buffer"
                 );
                 if vb != 0 {

@@ -1,6 +1,6 @@
 //! Bounds-checked little-endian reads, so malformed files fail with an error rather than a panic.
 
-use crate::{Context, Result};
+use crate::{Context, ErrorKind, Result};
 
 /// The three bytes that open every length-prefixed UTF-16 string in a `SketchUp` file.
 pub(crate) const STRING_MARKER: [u8; 3] = [0xff, 0xfe, 0xff];
@@ -19,8 +19,14 @@ impl<'a> Reader<'a> {
 
     /// The next `n` bytes, moving past them.
     pub(crate) fn raw(&mut self, n: usize) -> Result<&'a [u8]> {
-        let end = self.p.checked_add(n).context("archive offset overflows")?;
-        let bytes = self.d.get(self.p..end).context("archive ends early")?;
+        let end = self
+            .p
+            .checked_add(n)
+            .context(ErrorKind::Corrupt, "archive offset overflows")?;
+        let bytes = self
+            .d
+            .get(self.p..end)
+            .context(ErrorKind::Truncated, "archive ends early")?;
         self.p = end;
         Ok(bytes)
     }
@@ -61,7 +67,7 @@ impl<'a> Reader<'a> {
 
     /// The u16 at the cursor without moving it.
     pub(crate) fn peek_u16(&self) -> Result<u16> {
-        u16_at(self.d, self.p).context("archive ends early")
+        u16_at(self.d, self.p).context(ErrorKind::Truncated, "archive ends early")
     }
 
     /// Whether a string record starts at the cursor.
@@ -72,7 +78,7 @@ impl<'a> Reader<'a> {
     /// A `SketchUp` string record: the marker, a length that widens through u8, u16 and u32, then UTF-16LE.
     pub(crate) fn utf16(&mut self) -> Result<String> {
         if !self.marker() {
-            bail!("expected a string record at offset {}", self.p);
+            bail!(Corrupt, "expected a string record at offset {}", self.p);
         }
         self.p += 3;
         let mut len = u32::from(self.u8()?);
@@ -82,7 +88,11 @@ impl<'a> Reader<'a> {
                 len = self.u32()?;
             }
         }
-        let bytes = self.raw((len as usize).checked_mul(2).context("string length overflows")?)?;
+        let bytes = self.raw(
+            (len as usize)
+                .checked_mul(2)
+                .context(ErrorKind::Corrupt, "string length overflows")?,
+        )?;
         Ok(decode_utf16le(bytes))
     }
 }

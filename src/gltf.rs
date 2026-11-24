@@ -20,7 +20,7 @@ use std::path::{Component, Path, PathBuf};
 use serde_json::{Map, Value, json};
 
 use crate::num::usize_of;
-use crate::{Context as _, Result, meshopt};
+use crate::{Context as _, ErrorKind, Result, Within as _, meshopt};
 
 /// The meshopt compression extensions, by name.
 pub const MESHOPT_EXTENSIONS: [&str; 2] = ["EXT_meshopt_compression", "KHR_meshopt_compression"];
@@ -166,6 +166,7 @@ impl Default for CompressOptions {
 pub fn compress_with(input: &[u8], options: CompressOptions) -> Result<Vec<u8>> {
     ensure!(
         !options.color_filter || options.extension == MeshoptExtension::Khr,
+        Invalid,
         "the meshopt COLOR filter needs KHR_meshopt_compression"
     );
     let plain;
@@ -189,14 +190,20 @@ pub fn files_in(dir: impl Into<PathBuf>) -> impl FnMut(&str) -> Result<Vec<u8>> 
             .components()
             .all(|c| matches!(c, Component::Normal(_) | Component::CurDir));
         if !safe || uri.contains(':') {
-            bail!("refusing to read {uri:?}: not a relative path inside the model's folder");
+            bail!(
+                Unsupported,
+                "refusing to read {uri:?}: not a relative path inside the model's folder"
+            );
         }
-        std::fs::read(dir.join(rel)).with_context(|| format!("reading {uri:?}"))
+        std::fs::read(dir.join(rel)).with_context(ErrorKind::Corrupt, || format!("reading {uri:?}"))
     }
 }
 
 fn no_fetch(uri: &str) -> Result<Vec<u8>> {
-    bail!("{uri:?} is an external file; use pack_glb_decompressed to read it")
+    bail!(
+        Unsupported,
+        "{uri:?} is an external file; use pack_glb_decompressed to read it"
+    )
 }
 
 /// A parsed GLB or `.gltf`.
@@ -221,25 +228,26 @@ impl<'a> Doc<'a> {
             return Self::parse_glb(input);
         }
         let text = input.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(input);
-        match crate::json::from_slice(text).context("not a GLB or glTF JSON")? {
+        match crate::json::from_slice(text).context(ErrorKind::UnknownFormat, "not a GLB or glTF JSON")? {
             Value::Object(json) => Ok(Doc {
                 json,
                 bin: None,
                 glb_len: None,
             }),
-            _ => bail!("glTF JSON is not an object"),
+            _ => bail!(Corrupt, "glTF JSON is not an object"),
         }
     }
 
     fn parse_glb(input: &'a [u8]) -> Result<Self> {
         let u32_at = |at: usize| -> Result<usize> {
-            let b = input.get(at..at + 4).context("GLB is truncated")?;
-            Ok(u32::from_le_bytes(b.try_into()?) as usize)
+            let b = input.get(at..at + 4).and_then(|b| b.try_into().ok());
+            Ok(u32::from_le_bytes(b.context(ErrorKind::Truncated, "GLB is truncated")?) as usize)
         };
-        ensure!(u32_at(4)? == 2, "GLB version {} is not 2", u32_at(4)?);
+        ensure!(u32_at(4)? == 2, Unsupported, "GLB version {} is not 2", u32_at(4)?);
         let len = u32_at(8)?;
         ensure!(
             (12..=input.len()).contains(&len),
+            Truncated,
             "GLB length {len} doesn't match the {} bytes given",
             input.len()
         );
@@ -248,27 +256,29 @@ impl<'a> Doc<'a> {
         let mut at = 12;
         while at < len {
             let size = u32_at(at)?;
-            let kind = input.get(at + 4..at + 8).context("GLB is truncated")?;
+            let kind = input
+                .get(at + 4..at + 8)
+                .context(ErrorKind::Truncated, "GLB is truncated")?;
             let body = input
                 .get(at + 8..at + 8 + size)
-                .context("GLB chunk runs past the end")?;
+                .context(ErrorKind::Truncated, "GLB chunk runs past the end")?;
             if json.is_none() {
-                ensure!(kind == CHUNK_JSON, "GLB doesn't start with a JSON chunk");
+                ensure!(kind == CHUNK_JSON, Corrupt, "GLB doesn't start with a JSON chunk");
                 json = Some(body);
             } else if kind == CHUNK_BIN && bin.is_none() {
                 bin = Some(body);
             }
             at += 8 + size.next_multiple_of(4).min(len - at - 8);
         }
-        let json = json.context("GLB has no JSON chunk")?;
+        let json = json.context(ErrorKind::Corrupt, "GLB has no JSON chunk")?;
         let json = json.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(json);
-        match crate::json::from_slice(json).context("bad GLB JSON")? {
+        match crate::json::from_slice(json).context(ErrorKind::Corrupt, "bad GLB JSON")? {
             Value::Object(json) => Ok(Doc {
                 json,
                 bin,
                 glb_len: Some(len),
             }),
-            _ => bail!("glTF JSON is not an object"),
+            _ => bail!(Corrupt, "glTF JSON is not an object"),
         }
     }
 
@@ -288,7 +298,7 @@ impl<'a> Doc<'a> {
         let b = self
             .list("buffers")
             .get(i)
-            .with_context(|| format!("buffer {i} doesn't exist"))?;
+            .with_context(ErrorKind::Corrupt, || format!("buffer {i} doesn't exist"))?;
         let declared = b.get("byteLength").and_then(Value::as_u64).map_or(0, usize_of);
         let fallback = lenient && is_fallback(b);
         let bytes: Cow<'a, [u8]> = match b.get("uri").and_then(Value::as_str) {
@@ -301,10 +311,11 @@ impl<'a> Doc<'a> {
             None if i == 0 && self.bin.is_some() => Cow::Borrowed(self.bin.unwrap_or_default()),
             None if fallback => return Ok(Data::Placeholder),
             None if declared == 0 => Cow::Borrowed(&[]),
-            None => bail!("buffer {i} has no data"),
+            None => bail!(Corrupt, "buffer {i} has no data"),
         };
         ensure!(
             bytes.len() >= declared,
+            Truncated,
             "buffer {i} holds {} bytes but declares {declared}",
             bytes.len()
         );
@@ -324,11 +335,11 @@ impl<'a> Doc<'a> {
             let b = usize_of(
                 buffer
                     .and_then(Value::as_u64)
-                    .with_context(|| format!("buffer view {i} has no buffer"))?,
+                    .with_context(ErrorKind::Corrupt, || format!("buffer view {i} has no buffer"))?,
             );
-            *needed
-                .get_mut(b)
-                .with_context(|| format!("buffer view {i} names missing buffer {b}"))? = true;
+            *needed.get_mut(b).with_context(ErrorKind::Corrupt, || {
+                format!("buffer view {i} names missing buffer {b}")
+            })? = true;
         }
         let mut data = Vec::with_capacity(needed.len());
         for (i, &need) in needed.iter().enumerate() {
@@ -340,7 +351,7 @@ impl<'a> Doc<'a> {
         }
         let bytes = |b: usize| match data.get(b) {
             Some(Some(Data::Bytes(d))) => Ok(&d[..]),
-            _ => bail!("buffer {b} has no data"),
+            _ => bail!(Corrupt, "buffer {b} has no data"),
         };
 
         // Every view's source is checked before anything is reserved, so a hostile length
@@ -355,12 +366,23 @@ impl<'a> Doc<'a> {
                     ext.get("byteOffset").and_then(Value::as_u64).map_or(0, usize_of),
                     get_usize(ext, "byteLength")?,
                 )
-                .with_context(|| format!("buffer view {i}: {name} data out of range"))?;
-                ensure!(len / 1024 <= src.len(), "buffer view {i}: {name} data is truncated");
+                .with_context(ErrorKind::Truncated, || {
+                    format!("buffer view {i}: {name} data out of range")
+                })?;
+                ensure!(
+                    len / 1024 <= src.len(),
+                    Truncated,
+                    "buffer view {i}: {name} data is truncated"
+                );
             } else {
-                let b = get_usize(v.as_object().context("buffer view is not an object")?, "buffer")?;
+                let b = get_usize(
+                    v.as_object()
+                        .context(ErrorKind::Corrupt, "buffer view is not an object")?,
+                    "buffer",
+                )?;
                 let off = v.get("byteOffset").and_then(Value::as_u64).map_or(0, usize_of);
-                slice(bytes(b)?, off, len).with_context(|| format!("buffer view {i} out of range"))?;
+                slice(bytes(b)?, off, len)
+                    .with_context(ErrorKind::Truncated, || format!("buffer view {i} out of range"))?;
             }
             total = total.saturating_add(len.next_multiple_of(4));
         }
@@ -376,18 +398,22 @@ impl<'a> Doc<'a> {
                     ext.get("byteOffset").and_then(Value::as_u64).map_or(0, usize_of),
                     get_usize(ext, "byteLength")?,
                 )
-                .with_context(|| format!("buffer view {i}: {name} data out of range"))?;
+                .with_context(ErrorKind::Truncated, || {
+                    format!("buffer view {i}: {name} data out of range")
+                })?;
                 bin.resize(at + len, 0);
-                decode_view(ext, src, &mut bin[at..]).with_context(|| format!("buffer view {i}"))?;
+                decode_view(ext, src, &mut bin[at..]).with_within(|| format!("buffer view {i}"))?;
             } else {
                 let src = slice(
                     bytes(usize_of(
-                        v.get("buffer").and_then(Value::as_u64).context("missing buffer")?,
+                        v.get("buffer")
+                            .and_then(Value::as_u64)
+                            .context(ErrorKind::Corrupt, "missing buffer")?,
                     ))?,
                     v.get("byteOffset").and_then(Value::as_u64).map_or(0, usize_of),
                     len,
                 )
-                .with_context(|| format!("buffer view {i} out of range"))?;
+                .with_context(ErrorKind::Truncated, || format!("buffer view {i} out of range"))?;
                 bin.extend_from_slice(src);
             }
             placed.push(at);
@@ -396,7 +422,9 @@ impl<'a> Doc<'a> {
 
         let views = self.json.get_mut("bufferViews").and_then(Value::as_array_mut);
         for (v, at) in views.into_iter().flatten().zip(placed) {
-            let v = v.as_object_mut().context("buffer view is not an object")?;
+            let v = v
+                .as_object_mut()
+                .context(ErrorKind::Corrupt, "buffer view is not an object")?;
             v.insert("buffer".into(), json!(0));
             v.insert("byteOffset".into(), json!(at));
             remove_extensions(v, &MESHOPT_EXTENSIONS);
@@ -433,16 +461,24 @@ impl<'a> Doc<'a> {
         let mut required = Vec::new();
         let views = self.json.get_mut("bufferViews").and_then(Value::as_array_mut);
         for (i, v) in views.into_iter().flatten().enumerate() {
-            let v = v.as_object_mut().context("buffer view is not an object")?;
-            let (vb, _) = rehome(v, &home).with_context(|| format!("buffer view {i}"))?;
+            let v = v
+                .as_object_mut()
+                .context(ErrorKind::Corrupt, "buffer view is not an object")?;
+            let (vb, _) = rehome(v, &home).with_within(|| format!("buffer view {i}"))?;
             let exts = v.get_mut("extensions").and_then(Value::as_object_mut);
             for (name, ext) in exts.into_iter().flatten() {
                 if !MESHOPT_EXTENSIONS.contains(&name.as_str()) {
                     continue;
                 }
-                let ext = ext.as_object_mut().context("bad meshopt extension")?;
-                let (b, _) = rehome(ext, &home).with_context(|| format!("buffer view {i}"))?;
-                ensure!(b == 0, "buffer view {i}: compressed data is in a missing buffer");
+                let ext = ext
+                    .as_object_mut()
+                    .context(ErrorKind::Corrupt, "bad meshopt extension")?;
+                let (b, _) = rehome(ext, &home).with_within(|| format!("buffer view {i}"))?;
+                ensure!(
+                    b == 0,
+                    Corrupt,
+                    "buffer view {i}: compressed data is in a missing buffer"
+                );
                 if vb != 0 {
                     required.push(name.clone());
                 }
@@ -470,8 +506,11 @@ impl<'a> Doc<'a> {
         for (i, (v, plan)) in views.iter().zip(&plans).enumerate() {
             let len = view_len(v)?;
             let off = v.get("byteOffset").and_then(Value::as_u64).map_or(0, usize_of);
-            let src = slice(bin, off, len).with_context(|| format!("buffer view {i}"))?;
-            let mut v = v.as_object().cloned().context("buffer view is not an object")?;
+            let src = slice(bin, off, len).with_context(ErrorKind::Corrupt, || format!("buffer view {i}"))?;
+            let mut v = v
+                .as_object()
+                .cloned()
+                .context(ErrorKind::Corrupt, "buffer view is not an object")?;
             pad4(&mut out);
             let at = out.len();
             match plan {
@@ -522,7 +561,7 @@ impl<'a> Doc<'a> {
                     v.entry("extensions")
                         .or_insert_with(|| json!({}))
                         .as_object_mut()
-                        .context("bad buffer view extensions")?
+                        .context(ErrorKind::Corrupt, "bad buffer view extensions")?
                         .insert(name.into(), ext);
                 }
             }
@@ -731,6 +770,7 @@ pub(crate) fn decode_view(ext: &Map<String, Value>, src: &[u8], out: &mut [u8]) 
     let stride = get_usize(ext, "byteStride")?;
     ensure!(
         count.checked_mul(stride) == Some(out.len()),
+        Corrupt,
         "meshopt count {count} x stride {stride} doesn't match the view's {} bytes",
         out.len()
     );
@@ -738,19 +778,19 @@ pub(crate) fn decode_view(ext: &Map<String, Value>, src: &[u8], out: &mut [u8]) 
     let filter = ext.get("filter").and_then(Value::as_str).unwrap_or("NONE");
     let indices = match mode {
         "ATTRIBUTES" => {
-            ensure!(out.len() / 1024 <= src.len(), "meshopt data is truncated");
+            ensure!(out.len() / 1024 <= src.len(), Truncated, "meshopt data is truncated");
             meshopt::decode_vertex_buffer_into(src, out, stride)?;
             return meshopt::apply_filter(filter, out, stride);
         }
         "TRIANGLES" => meshopt::decode_index_buffer(src, count)?,
         "INDICES" => meshopt::decode_index_sequence(src, count)?,
-        m => bail!("unknown meshopt mode {m:?}"),
+        m => bail!(Corrupt, "unknown meshopt mode {m:?}"),
     };
-    ensure!(filter == "NONE", "meshopt filter {filter} on indices");
+    ensure!(filter == "NONE", Corrupt, "meshopt filter {filter} on indices");
     match stride {
         2 => {
             for (o, i) in out.chunks_exact_mut(2).zip(indices) {
-                let i = u16::try_from(i).map_err(|_| invalid!("meshopt index {i} in a 16-bit view"))?;
+                let i = u16::try_from(i).map_err(|_| err!(Corrupt, "meshopt index {i} in a 16-bit view"))?;
                 o.copy_from_slice(&i.to_le_bytes());
             }
         }
@@ -759,7 +799,7 @@ pub(crate) fn decode_view(ext: &Map<String, Value>, src: &[u8], out: &mut [u8]) 
                 o.copy_from_slice(&i.to_le_bytes());
             }
         }
-        s => bail!("meshopt index stride {s}"),
+        s => bail!(Corrupt, "meshopt index stride {s}"),
     }
     Ok(())
 }
@@ -781,17 +821,17 @@ fn embed_images_into(
             continue;
         };
         let (declared, bytes) = if uri.starts_with("data:") {
-            data_uri(uri).with_context(|| format!("image {i}"))?
+            data_uri(uri).with_within(|| format!("image {i}"))?
         } else {
             let path = percent_decode(uri);
-            let bytes = fetch(&path).with_context(|| format!("image {i}"))?;
+            let bytes = fetch(&path).with_within(|| format!("image {i}"))?;
             (mime_from_name(&path).map(str::to_owned), bytes)
         };
         let mime = sniff_mime(&bytes)
             .map(str::to_owned)
             .or_else(|| img.get("mimeType").and_then(Value::as_str).map(str::to_owned))
             .or(declared)
-            .with_context(|| format!("image {i}: unknown image format"))?;
+            .with_context(ErrorKind::Unsupported, || format!("image {i}: unknown image format"))?;
         pad4(bin);
         new_views.push(json!({ "buffer": 0, "byteOffset": bin.len(), "byteLength": bytes.len() }));
         bin.extend_from_slice(&bytes);
@@ -803,7 +843,7 @@ fn embed_images_into(
         json.entry("bufferViews")
             .or_insert_with(|| json!([]))
             .as_array_mut()
-            .context("bufferViews is not a list")?
+            .context(ErrorKind::Corrupt, "bufferViews is not a list")?
             .extend(new_views);
     }
     Ok(())
@@ -812,9 +852,13 @@ fn embed_images_into(
 /// Points an object's `buffer`/`byteOffset` at its buffer's new home; returns the new buffer.
 pub(crate) fn rehome(obj: &mut Map<String, Value>, home: &[(usize, usize)]) -> Result<(usize, usize)> {
     let b = get_usize(obj, "buffer")?;
-    let &(nb, base) = home.get(b).with_context(|| format!("missing buffer {b}"))?;
+    let &(nb, base) = home
+        .get(b)
+        .with_context(ErrorKind::Corrupt, || format!("missing buffer {b}"))?;
     let off = obj.get("byteOffset").and_then(Value::as_u64).map_or(0, usize_of);
-    let at = off.checked_add(base).context("byteOffset out of range")?;
+    let at = off
+        .checked_add(base)
+        .context(ErrorKind::Truncated, "byteOffset out of range")?;
     obj.insert("buffer".into(), json!(nb));
     if nb == 0 || off != 0 {
         obj.insert("byteOffset".into(), json!(at));
@@ -847,14 +891,14 @@ fn view_len(v: &Value) -> Result<usize> {
     v.get("byteLength")
         .and_then(Value::as_u64)
         .map(usize_of)
-        .context("buffer view has no byteLength")
+        .context(ErrorKind::Corrupt, "buffer view has no byteLength")
 }
 
 fn get_usize(obj: &Map<String, Value>, key: &str) -> Result<usize> {
     obj.get(key)
         .and_then(Value::as_u64)
         .map(usize_of)
-        .with_context(|| format!("missing {key}"))
+        .with_context(ErrorKind::Corrupt, || format!("missing {key}"))
 }
 
 fn slice(data: &[u8], off: usize, len: usize) -> Option<&[u8]> {
@@ -904,11 +948,11 @@ pub(crate) fn require_extension(json: &mut Map<String, Value>, name: &str) {
     reason = "each chunk is smaller than `total`, which fits"
 )]
 pub(crate) fn write_glb(json: &Value, bin: Option<&[u8]>) -> Result<Vec<u8>> {
-    let mut text = serde_json::to_vec(json)?;
+    let mut text = serde_json::to_vec(json).context(ErrorKind::Invalid, "writing the glTF JSON")?;
     text.resize(text.len().next_multiple_of(4), b' ');
     let bin_len = bin.map_or(0, |b| 8 + b.len().next_multiple_of(4));
     let total = 12 + 8 + text.len() + bin_len;
-    let total32 = u32::try_from(total).map_err(|_| invalid!("GLB would be over 4 GiB"))?;
+    let total32 = u32::try_from(total).map_err(|_| err!(LimitExceeded, "GLB would be over 4 GiB"))?;
     let mut out = Vec::with_capacity(total);
     out.extend_from_slice(GLB_MAGIC);
     out.extend_from_slice(&2u32.to_le_bytes());
@@ -928,8 +972,12 @@ pub(crate) fn write_glb(json: &Value, bin: Option<&[u8]>) -> Result<Vec<u8>> {
 
 /// A data URI's MIME type and bytes.
 pub(crate) fn data_uri(uri: &str) -> Result<(Option<String>, Vec<u8>)> {
-    let rest = uri.strip_prefix("data:").context("not a data URI")?;
-    let (head, payload) = rest.split_once(',').context("data URI has no ','")?;
+    let rest = uri
+        .strip_prefix("data:")
+        .context(ErrorKind::Corrupt, "not a data URI")?;
+    let (head, payload) = rest
+        .split_once(',')
+        .context(ErrorKind::Corrupt, "data URI has no ','")?;
     let (mime, base64) = match head.strip_suffix(";base64") {
         Some(m) => (m, true),
         None => (head, false),
@@ -956,7 +1004,7 @@ fn decode_base64(s: &str) -> Result<Vec<u8>> {
             b'/' | b'_' => 63,
             b'=' => break,
             b' ' | b'\t' | b'\r' | b'\n' => continue,
-            _ => bail!("bad base64 in data URI"),
+            _ => bail!(Corrupt, "bad base64 in data URI"),
         };
         acc = (acc << 6) | u32::from(v);
         bits += 6;
@@ -1316,7 +1364,7 @@ mod tests {
         let mut asked = Vec::new();
         let fetch = |uri: &str| {
             asked.push(uri.to_owned());
-            files.get(uri).cloned().ok_or_else(|| invalid!("no {uri}"))
+            files.get(uri).cloned().ok_or_else(|| err!(Corrupt, "no {uri}"))
         };
         let glb = pack_glb(&gltf, fetch).unwrap();
         assert_eq!(asked, ["scene data.bin", "fallback.bin", "tex/albedo.png"]);
@@ -1338,7 +1386,7 @@ mod tests {
         let mut asked = Vec::new();
         let fetch = |uri: &str| {
             asked.push(uri.to_owned());
-            files.get(uri).cloned().ok_or_else(|| invalid!("no {uri}"))
+            files.get(uri).cloned().ok_or_else(|| err!(Corrupt, "no {uri}"))
         };
         let glb = pack_glb_decompressed(&gltf, fetch).unwrap();
         assert_eq!(asked, ["scene data.bin", "tex/albedo.png"]);
@@ -1352,7 +1400,7 @@ mod tests {
         let packed = compress(&grid_glb(4)).unwrap();
         let (gltf, mut files) = split(&packed);
         files.remove("tex/albedo.png");
-        let fetch = |uri: &str| files.get(uri).cloned().ok_or_else(|| invalid!("no {uri}"));
+        let fetch = |uri: &str| files.get(uri).cloned().ok_or_else(|| err!(Corrupt, "no {uri}"));
         assert!(pack_glb_decompressed(&gltf, fetch).is_err());
         // decompress reads no files at all.
         assert!(decompress(&gltf).is_err());

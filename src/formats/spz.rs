@@ -29,7 +29,7 @@ use crate::gaussian::{REST, Splats, rotation};
 use crate::keep::spawn;
 use crate::num::usize_of;
 use crate::source::{Axis, Fact, Handedness, SourceInfo};
-use crate::{Context as _, Result};
+use crate::{Context as _, ErrorKind, Result};
 
 /// "NGSP", little-endian, which starts the header.
 const MAGIC: u32 = 0x5053_474e;
@@ -54,28 +54,39 @@ fn decode(bytes: &[u8], max: usize, threads: usize) -> Result<Document<'static>>
         let version = u32::from_le_bytes([v0, v1, v2, v3]);
         ensure!(
             version < 4,
+            Unsupported,
             "SPZ version {version} (zstd streams) isn't supported; versions 1 to 3 (gzip) are"
         );
-        bail!("not an SPZ file: an SPZ header outside a gzip stream");
+        bail!(UnknownFormat, "not an SPZ file: an SPZ header outside a gzip stream");
     }
-    ensure!(bytes.starts_with(&[0x1f, 0x8b]), "not an SPZ file: no gzip stream");
+    ensure!(
+        bytes.starts_with(&[0x1f, 0x8b]),
+        UnknownFormat,
+        "not an SPZ file: no gzip stream"
+    );
     let mut z = flate2::read::MultiGzDecoder::new(bytes);
     let mut head = Vec::with_capacity(HEADER);
     // What a broken stream gives before it breaks is checked for length below.
     let _ = (&mut z).take(HEADER as u64).read_to_end(&mut head);
-    ensure!(head.len() == HEADER, "SPZ data ends early: no header");
+    ensure!(head.len() == HEADER, Truncated, "SPZ data ends early: no header");
     let word = |k: usize| u32::from_le_bytes([head[k], head[k + 1], head[k + 2], head[k + 3]]);
-    ensure!(word(0) == MAGIC, "not an SPZ file: no NGSP header");
+    ensure!(word(0) == MAGIC, UnknownFormat, "not an SPZ file: no NGSP header");
     let version = word(4);
-    ensure!((1..=3).contains(&version), "SPZ version {version} isn't supported");
+    ensure!(
+        (1..=3).contains(&version),
+        Unsupported,
+        "SPZ version {version} isn't supported"
+    );
     let n = usize_of(u64::from(word(8)));
     let (degree, fractional, flags) = (usize::from(head[12]), head[13], head[14]);
     ensure!(
         degree < DIM.len(),
+        Unsupported,
         "SPZ spherical-harmonic degree {degree} isn't supported"
     );
     ensure!(
         n <= max,
+        LimitExceeded,
         "{n} gaussian splats, more than the {max} allowed (Keep::max_points)"
     );
     let mut source = Map::new();
@@ -87,7 +98,9 @@ fn decode(bytes: &[u8], max: usize, threads: usize) -> Result<Document<'static>>
     let rot_size = if version >= 3 { 4 } else { 3 };
     let dim = DIM[degree];
     let per = pos_size + 7 + rot_size + dim * 3;
-    let core = n.checked_mul(per).context("too many SPZ splats")?;
+    let core = n
+        .checked_mul(per)
+        .context(ErrorKind::LimitExceeded, "too many SPZ splats")?;
     let unpack = Unpack {
         version,
         unit: 0.5f32.powi(i32::from(fractional)),
@@ -103,6 +116,7 @@ fn decode(bytes: &[u8], max: usize, threads: usize) -> Result<Document<'static>>
     let (data, unpack) = inflate(z.take(core as u64 + RECORDS), unpack, threads);
     ensure!(
         data.len() >= core,
+        Truncated,
         "SPZ data ends early: {n} splats need {core} bytes, the stream holds {}",
         data.len()
     );

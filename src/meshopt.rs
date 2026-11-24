@@ -28,7 +28,11 @@ const CODEAUX: [u8; 16] = [
 const ORDER: [[usize; 3]; 3] = [[0, 1, 2], [1, 2, 0], [2, 0, 1]];
 
 fn bad(what: &str) -> Error {
-    Error::InvalidInput(format!("EXT_meshopt_compression: {what}"))
+    Error::corrupt(format!("EXT_meshopt_compression: {what}"))
+}
+
+fn cut(what: &str) -> Error {
+    Error::truncated(format!("EXT_meshopt_compression: {what} is cut short"))
 }
 
 fn zigzag8(v: u8) -> u8 {
@@ -367,7 +371,7 @@ pub fn decode_vertex_buffer(src: &[u8], count: usize, stride: usize) -> Result<V
     // A block of at most 256 elements costs at least a quarter byte per element byte, so a
     // stream can't hold more than 1024 times its size: refuse before allocating.
     if size / 1024 > src.len() {
-        return Err(bad("attribute data truncated"));
+        return Err(cut("attribute data"));
     }
     let mut out = vec![0u8; size];
     decode_vertex_buffer_into(src, &mut out, stride)?;
@@ -392,13 +396,17 @@ pub fn decode_vertex_buffer_into(src: &[u8], out: &mut [u8], stride: usize) -> R
     let v1 = match header & 15 {
         0 => false,
         1 => true,
-        v => return Err(bad(&format!("unsupported attribute codec version {v}"))),
+        v => {
+            return Err(Error::unsupported(format!(
+                "EXT_meshopt_compression: attribute codec version {v} is not supported"
+            )));
+        }
     };
     let channels_len = if v1 { stride / 4 } else { 0 };
     let tail = stride + channels_len;
     let tail_pad = tail.max(if v1 { 24 } else { 32 });
     if src.len() < 1 + tail_pad {
-        return Err(bad("attribute data truncated"));
+        return Err(cut("attribute data"));
     }
     // Block data must end exactly where the (padded) tail starts.
     let end = src.len() - tail_pad;
@@ -419,7 +427,7 @@ pub fn decode_vertex_buffer_into(src: &[u8], out: &mut [u8], stride: usize) -> R
         let control = pos;
         pos += channels_len;
         if pos > end {
-            return Err(bad("attribute data truncated"));
+            return Err(cut("attribute data"));
         }
         for k in (0..stride).step_by(4) {
             let ctrl_byte = if v1 { src[control + k / 4] } else { 0 };
@@ -429,7 +437,7 @@ pub fn decode_vertex_buffer_into(src: &[u8], out: &mut [u8], stride: usize) -> R
                     // Literal bytes, unpadded.
                     3 => {
                         if pos + n > end {
-                            return Err(bad("attribute data truncated"));
+                            return Err(cut("attribute data"));
                         }
                         plane[..n].copy_from_slice(&src[pos..pos + n]);
                         pos += n;
@@ -440,7 +448,7 @@ pub fn decode_vertex_buffer_into(src: &[u8], out: &mut [u8], stride: usize) -> R
                         let header = pos;
                         pos += groups.div_ceil(4);
                         if pos > end {
-                            return Err(bad("attribute data truncated"));
+                            return Err(cut("attribute data"));
                         }
                         for g in 0..groups {
                             let h = (src[header + g / 4] >> ((g % 4) * 2)) & 3;
@@ -503,7 +511,7 @@ pub fn decode_vertex_buffer_into(src: &[u8], out: &mut [u8], stride: usize) -> R
 
 /// Decodes one group of 16 deltas packed `bits` wide (0, 1, 2, 4 or 8) into `d`.
 fn decode_group(src: &[u8], mut pos: usize, end: usize, bits: u8, d: &mut [u8]) -> Result<usize> {
-    let truncated = || bad("attribute data truncated");
+    let truncated = || cut("attribute data");
     match bits {
         0 => d.fill(0),
         8 => {
@@ -598,10 +606,7 @@ fn write_varint(out: &mut Vec<u8>, mut v: u32) {
 fn read_varint(src: &[u8], pos: &mut usize, end: usize) -> Result<u32> {
     let mut v = 0u32;
     for shift in (0..35).step_by(7) {
-        let byte = *src
-            .get(*pos)
-            .filter(|_| *pos < end)
-            .ok_or_else(|| bad("index data truncated"))?;
+        let byte = *src.get(*pos).filter(|_| *pos < end).ok_or_else(|| cut("index data"))?;
         *pos += 1;
         v |= u32::from(byte & 0x7f) << shift;
         if byte < 0x80 {
@@ -740,7 +745,9 @@ pub fn decode_index_buffer(src: &[u8], count: usize) -> Result<Vec<u32>> {
         return Err(bad("triangle header"));
     }
     if src[0] & 15 != 1 {
-        return Err(bad("unsupported triangle codec version"));
+        return Err(Error::unsupported(
+            "EXT_meshopt_compression: this triangle codec version is not supported",
+        ));
     }
     let end = src.len() - 16;
     let table = &src[end..];
@@ -778,10 +785,7 @@ pub fn decode_index_buffer(src: &[u8], count: usize) -> Result<Vec<u32>> {
             let aux = if lo < 14 {
                 table[lo]
             } else {
-                let x = *src
-                    .get(pos)
-                    .filter(|_| pos < end)
-                    .ok_or_else(|| bad("index data truncated"))?;
+                let x = *src.get(pos).filter(|_| pos < end).ok_or_else(|| cut("index data"))?;
                 pos += 1;
                 if x == 0 {
                     next = 0;

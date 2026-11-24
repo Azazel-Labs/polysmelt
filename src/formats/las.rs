@@ -29,7 +29,7 @@ use crate::document::{Document, Keep};
 use crate::keep::spawn;
 use crate::num::{f32_of, usize_of};
 use crate::source::{Axis, Fact, Handedness, SourceInfo};
-use crate::{Context as _, Result};
+use crate::{Context as _, ErrorKind, Result};
 
 /// Points decoded per job when the file sets no other size (LAS, or LAZ without chunks).
 const BLOCK: usize = 1 << 16;
@@ -65,7 +65,10 @@ fn compressed(input: Input<'_>, h: &Header, keep: Keep) -> Result<Document<'stat
 
 #[cfg(not(feature = "laz"))]
 fn compressed(_: Input<'_>, _: &Header, _: Keep) -> Result<Document<'static>> {
-    bail!("a LAZ (compressed LAS) file, and this build lacks the `laz` feature")
+    bail!(
+        FeatureDisabled,
+        "a LAZ (compressed LAS) file, and this build lacks the `laz` feature"
+    )
 }
 
 /// Where the file's bytes come from.
@@ -106,10 +109,12 @@ impl Source<'_> {
                 at.checked_add(n)
                     .and_then(|end| b.get(at..end))
                     .map(Cow::Borrowed)
-                    .context("LAS data ends early")
+                    .context(ErrorKind::Truncated, "LAS data ends early")
             }
             #[cfg(feature = "laz")]
-            Source::Laz(b) => slice(b).map(Cow::Owned).context("LAS data ends early"),
+            Source::Laz(b) => slice(b)
+                .map(Cow::Owned)
+                .context(ErrorKind::Truncated, "LAS data ends early"),
             Source::File(f) => {
                 use std::io::{Read as _, Seek as _};
                 let _ = slice;
@@ -118,9 +123,9 @@ impl Source<'_> {
                 let mut out = Vec::new();
                 out.try_reserve_exact(n)
                     .ok()
-                    .context("not enough memory for the LAS data")?;
+                    .context(ErrorKind::LimitExceeded, "not enough memory for the LAS data")?;
                 (&mut *f).take(n as u64).read_to_end(&mut out)?;
-                ensure!(out.len() == n, "LAS data ends early");
+                ensure!(out.len() == n, Truncated, "LAS data ends early");
                 Ok(Cow::Owned(out))
             }
         }
@@ -184,11 +189,13 @@ impl Header {
     fn parse(b: &[u8]) -> Result<Header> {
         ensure!(
             b.len() >= HEADER && b.starts_with(b"LASF"),
+            UnknownFormat,
             "not a LAS file (no LASF header)"
         );
         let version = (b[24], b[25]);
         ensure!(
             version.0 == 1 && version.1 <= 4,
+            Unsupported,
             "LAS version {}.{} isn't one this reads",
             version.0,
             version.1
@@ -196,17 +203,20 @@ impl Header {
         let header_size = u16_at(b, 94);
         ensure!(
             usize::from(header_size) >= HEADER,
+            Corrupt,
             "the LAS header is too short ({header_size} bytes)"
         );
         let raw_format = b[104];
         let format = raw_format & 0x3f;
         ensure!(
             usize::from(format) < SIZES.len(),
+            Unsupported,
             "LAS point format {format} isn't one this reads"
         );
         let record = usize::from(u16_at(b, 105));
         ensure!(
             record >= SIZES[usize::from(format)],
+            Corrupt,
             "LAS point records of {record} bytes are too short for point format {format}"
         );
         let legacy = u64::from(u32_at(b, 107));
@@ -225,10 +235,15 @@ impl Header {
         let scale = three(131);
         ensure!(
             scale.iter().all(|s| s.is_finite() && *s != 0.0),
+            Corrupt,
             "the LAS scale factors aren't usable: {scale:?}"
         );
         let offset = three(155);
-        ensure!(offset.iter().all(|o| o.is_finite()), "the LAS offsets aren't finite");
+        ensure!(
+            offset.iter().all(|o| o.is_finite()),
+            Corrupt,
+            "the LAS offsets aren't finite"
+        );
         let mut guid = [0; 16];
         guid.copy_from_slice(&b[8..24]);
         let has = |end: usize| usize::from(header_size) >= end && b.len() >= end;
@@ -622,6 +637,7 @@ fn read(src: &Source<'_>, h: &Header, keep: Keep) -> Result<Document<'static>> {
         let room = len.saturating_sub(h.data_offset) / h.record as u64;
         ensure!(
             h.count <= room,
+            Truncated,
             "LAS data ends early: {} points declared, room for {room}",
             h.count
         );
@@ -702,7 +718,9 @@ fn read(src: &Source<'_>, h: &Header, keep: Keep) -> Result<Document<'static>> {
                 match mode {
                     Mode::Slice(b) => {
                         let at = usize_of(h.data_offset + job.first * h.record as u64);
-                        let raw = b.get(at..at + job.count * h.record).context("LAS data ends early")?;
+                        let raw = b
+                            .get(at..at + job.count * h.record)
+                            .context(ErrorKind::Truncated, "LAS data ends early")?;
                         plan.decode(raw, s, base);
                     }
                     Mode::Raw => {
@@ -716,7 +734,7 @@ fn read(src: &Source<'_>, h: &Header, keep: Keep) -> Result<Document<'static>> {
                         let read = w
                             .laz
                             .as_mut()
-                            .context("no LAZ decompressor")?
+                            .context(ErrorKind::Corrupt, "no LAZ decompressor")?
                             .read(job, h.record, &mut raw);
                         if read.is_ok() {
                             plan.decode(&raw, s, base);
@@ -725,7 +743,7 @@ fn read(src: &Source<'_>, h: &Header, keep: Keep) -> Result<Document<'static>> {
                         read?;
                     }
                     #[cfg(not(feature = "laz"))]
-                    Mode::Laz => bail!("LAZ needs the `laz` feature"),
+                    Mode::Laz => bail!(FeatureDisabled, "LAZ needs the `laz` feature"),
                 }
                 Ok(())
             })();
@@ -745,7 +763,7 @@ fn read(src: &Source<'_>, h: &Header, keep: Keep) -> Result<Document<'static>> {
         for w in workers.iter().take(these.len()) {
             let mut w = w.lock().unwrap_or_else(PoisonError::into_inner);
             let s = &mut w.scratch;
-            s.result.take().context("a LAS job didn't run")??;
+            s.result.take().context(ErrorKind::Corrupt, "a LAS job didn't run")??;
             if base.is_none() {
                 base = s.base;
             }
@@ -1030,7 +1048,7 @@ mod laz_read {
 
     use super::{Header, Job, Record, u32_at, u64_at};
     use crate::num::usize_of;
-    use crate::{Context as _, Result};
+    use crate::{Context as _, ErrorKind, Result};
 
     /// What every decompressor is made from.
     pub(super) struct Setup<'a> {
@@ -1052,17 +1070,22 @@ mod laz_read {
             let r = records
                 .iter()
                 .find(|r| r.user == "laszip encoded" && r.id == 22204)
-                .context("a LAZ file without its laszip record")?;
-            let vlr = LazVlr::from_buffer(&r.data).context("the LAZ laszip record")?;
+                .context(ErrorKind::Corrupt, "a LAZ file without its laszip record")?;
+            let vlr = LazVlr::from_buffer(&r.data).context(ErrorKind::Corrupt, "the LAZ laszip record")?;
             ensure!(
                 usize::try_from(vlr.items_size()).is_ok_and(|s| s == h.record),
+                Corrupt,
                 "the LAZ items ({} bytes) don't match the point records ({} bytes)",
                 vlr.items_size(),
                 h.record
             );
             let start = h.data_offset;
             let len = bytes.len() as u64;
-            ensure!(start.checked_add(8).is_some_and(|e| e <= len), "LAZ data ends early");
+            ensure!(
+                start.checked_add(8).is_some_and(|e| e <= len),
+                Truncated,
+                "LAZ data ends early"
+            );
             let chunks = if vlr.chunk_size() == 0 && !vlr.uses_variable_size_chunks() {
                 None
             } else {
@@ -1115,7 +1138,7 @@ mod laz_read {
         pub fn open(&self) -> Result<Laz<'a>> {
             let mut c = Cursor::new(self.bytes);
             c.seek(SeekFrom::Start(self.start))?;
-            let d = LasZipDecompressor::new(c, self.vlr.clone()).context("the LAZ data")?;
+            let d = LasZipDecompressor::new(c, self.vlr.clone()).context(ErrorKind::Corrupt, "the LAZ data")?;
             Ok(Laz { d, next: 0 })
         }
     }
@@ -1124,16 +1147,23 @@ mod laz_read {
         /// Decompresses the job's points into `raw`.
         pub fn read(&mut self, job: Job, record: usize, raw: &mut Vec<u8>) -> Result<()> {
             if job.first != self.next {
-                self.d.seek(job.first).context("seeking in the LAZ data")?;
+                self.d
+                    .seek(job.first)
+                    .context(ErrorKind::Corrupt, "seeking in the LAZ data")?;
             }
-            let size = job.count.checked_mul(record).context("too many LAZ points")?;
+            let size = job
+                .count
+                .checked_mul(record)
+                .context(ErrorKind::LimitExceeded, "too many LAZ points")?;
             raw.clear();
             raw.try_reserve_exact(size)
                 .ok()
-                .context("not enough memory for the LAZ points")?;
+                .context(ErrorKind::LimitExceeded, "not enough memory for the LAZ points")?;
             raw.resize(size, 0);
             self.next = u64::MAX;
-            self.d.decompress_many(raw).context("the LAZ data")?;
+            self.d
+                .decompress_many(raw)
+                .context(ErrorKind::Corrupt, "the LAZ data")?;
             self.next = job.first + job.count as u64;
             Ok(())
         }
@@ -1151,6 +1181,7 @@ mod laz_read {
             if table <= start.cast_signed() {
                 ensure!(
                     !vlr.uses_variable_size_chunks(),
+                    Corrupt,
                     "a LAZ file of variable-size chunks without its chunk table"
                 );
                 return Ok(None);
@@ -1159,17 +1190,19 @@ mod laz_read {
         let table = table.cast_unsigned();
         ensure!(
             table.checked_add(8).is_some_and(|e| e <= len),
+            Truncated,
             "the LAZ chunk table is past the end"
         );
         let chunks = u64::from(u32_at(bytes, usize_of(table) + 4));
         // Each chunk takes some bytes of point data, and no chunk is empty.
         ensure!(
             chunks <= (table - start) && chunks <= n as u64 + 1,
+            Corrupt,
             "the LAZ chunk table counts {chunks} chunks, more than the data holds"
         );
         let mut c = Cursor::new(bytes);
         c.seek(SeekFrom::Start(start))?;
-        let t = laz::laszip::ChunkTable::read_from(&mut c, vlr).context("the LAZ chunk table")?;
+        let t = laz::laszip::ChunkTable::read_from(&mut c, vlr).context(ErrorKind::Corrupt, "the LAZ chunk table")?;
         let counts = t.as_ref().iter().map(|e| e.point_count).collect();
         Ok(Some(counts))
     }

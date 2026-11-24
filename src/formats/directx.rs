@@ -58,7 +58,7 @@ use crate::images::Images;
 use crate::mesh::{Material, srgb_to_linear};
 use crate::num::{f32_of, u32_of};
 use crate::source::{Axis, Fact, Handedness};
-use crate::{Context, Result};
+use crate::{Context, ErrorKind, Result};
 
 /// How deep data objects may nest.
 const MAX_DEPTH: usize = 256;
@@ -85,6 +85,7 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
     } = b;
     ensure!(
         !scene.nodes.is_empty(),
+        Empty,
         "the .x file is empty: it has no frames or meshes"
     );
     scene.images = images.list;
@@ -140,6 +141,7 @@ struct File {
 fn parse_file(data: &[u8]) -> Result<File> {
     ensure!(
         data.len() >= 16 && data[..4] == *b"xof ",
+        UnknownFormat,
         "not a DirectX .x file (no xof header)"
     );
     let major = std::str::from_utf8(&data[4..6])
@@ -159,7 +161,7 @@ fn parse_file(data: &[u8]) -> Result<File> {
         b"bin " => ("binary", true, false),
         b"tzip" => ("compressed text", false, true),
         b"bzip" => ("compressed binary", true, true),
-        _ => bail!("unknown .x encoding {:?}", scene::text(&data[8..12])),
+        _ => bail!(Unsupported, "unknown .x encoding {:?}", scene::text(&data[8..12])),
     };
     let inflated;
     let body = if compressed {
@@ -193,14 +195,22 @@ fn mszip(data: &[u8]) -> Result<Vec<u8>> {
     let mut b = Bin::new(data, "compressed .x");
     let total = crate::num::usize_of(u64::from(b.u32()?));
     let want = total.saturating_sub(16);
-    ensure!(want <= MAX_INFLATED, "compressed .x file too big ({total} bytes)");
+    ensure!(
+        want <= MAX_INFLATED,
+        LimitExceeded,
+        "compressed .x file too big ({total} bytes)"
+    );
     let mut out = Vec::with_capacity(want.min(1 << 20));
     while out.len() < want && b.left() >= 4 {
         let size = usize::from(b.u16()?);
         let packed = usize::from(b.u16()?);
-        ensure!(packed >= 2, "bad block in a compressed .x file");
+        ensure!(packed >= 2, Corrupt, "bad block in a compressed .x file");
         let block = b.bytes(packed)?;
-        ensure!(block[..2] == *b"CK", "bad block in a compressed .x file (no CK)");
+        ensure!(
+            block[..2] == *b"CK",
+            Corrupt,
+            "bad block in a compressed .x file (no CK)"
+        );
         let limit = size.min(want - out.len());
         inflate(&block[2..], &mut out, limit)?;
     }
@@ -356,7 +366,7 @@ impl<'a> Lexer<'a> {
                 // Punctuation, and the type keywords of template declarations.
                 12..=20 | 40..=53 => {}
                 31 => return Ok(Tok::Word(b"template")),
-                _ => bail!("unknown token {id} in a binary .x file"),
+                _ => bail!(Corrupt, "unknown token {id} in a binary .x file"),
             }
         }
     }
@@ -406,7 +416,7 @@ fn parse(lex: &mut Lexer<'_>) -> Result<Vec<Obj>> {
                     match lex.next()? {
                         Tok::Close | Tok::End => break,
                         Tok::Word(w) | Tok::Str(w) => name = scene::text(w),
-                        Tok::Open => bail!("an object inside a reference in a .x file"),
+                        Tok::Open => bail!(Corrupt, "an object inside a reference in a .x file"),
                         Tok::Num(_) | Tok::Guid => {}
                     }
                 }
@@ -443,7 +453,11 @@ fn parse(lex: &mut Lexer<'_>) -> Result<Vec<Obj>> {
                     skip_object(lex)?;
                     continue;
                 }
-                ensure!(stack.len() <= MAX_DEPTH, "objects nest too deeply in a .x file");
+                ensure!(
+                    stack.len() <= MAX_DEPTH,
+                    LimitExceeded,
+                    "objects nest too deeply in a .x file"
+                );
                 stack.push(Obj {
                     kind: scene::text(w),
                     name: name.map(scene::text).unwrap_or_default(),
@@ -548,10 +562,9 @@ impl<'a> Nums<'a> {
     }
 
     fn f64(&mut self) -> Result<f64> {
-        let x = *self
-            .v
-            .get(self.at)
-            .with_context(|| format!("{} in a .x file is cut short", self.what))?;
+        let x = *self.v.get(self.at).with_context(ErrorKind::Truncated, || {
+            format!("{} in a .x file is cut short", self.what)
+        })?;
         self.at += 1;
         Ok(x)
     }
@@ -571,10 +584,13 @@ impl<'a> Nums<'a> {
 
     /// A count of items `width` numbers each, refused when there aren't the numbers to hold them.
     fn count(&mut self, width: usize) -> Result<usize> {
-        let n = whole(self.f64()?).with_context(|| format!("{} in a .x file has a bad count", self.what))?;
+        let n = whole(self.f64()?).with_context(ErrorKind::Corrupt, || {
+            format!("{} in a .x file has a bad count", self.what)
+        })?;
         let n = crate::num::usize_of(u64::from(n));
         ensure!(
             n.saturating_mul(width) <= self.left(),
+            Truncated,
             "{} in a .x file counts {n} items, more than it holds",
             self.what
         );
@@ -910,6 +926,7 @@ impl<'a> Build<'a> {
         let limit = self.keep.triangles();
         ensure!(
             self.triangles <= limit,
+            LimitExceeded,
             "too many triangles to convert (more than {limit})"
         );
 

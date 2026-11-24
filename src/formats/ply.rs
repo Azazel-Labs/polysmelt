@@ -40,7 +40,7 @@ use crate::images::Images;
 use crate::mesh::{FastMap, Material, Mesh, Prim, quad, smooth_normals, srgb_to_linear, triangulate};
 use crate::num::{f32_of, u32_of};
 use crate::source::SourceInfo;
-use crate::{Context as _, Result};
+use crate::{Context as _, ErrorKind, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Format {
@@ -72,7 +72,7 @@ impl Ty {
             b"uint" | b"uint32" => Ty::U32,
             b"float" | b"float32" => Ty::F32,
             b"double" | b"float64" => Ty::F64,
-            t => bail!("unknown PLY type {}", crate::shown(t)),
+            t => bail!(Corrupt, "unknown PLY type {}", crate::shown(t)),
         })
     }
 
@@ -343,7 +343,7 @@ fn header(data: &[u8]) -> Result<(Header, Vec<Element>, usize)> {
         let rest = data
             .get(at..)
             .filter(|r| !r.is_empty())
-            .context("PLY header has no end_header")?;
+            .context(ErrorKind::Corrupt, "PLY header has no end_header")?;
         let len = rest
             .iter()
             .position(|&c| c == b'\n' || c == b'\r')
@@ -358,7 +358,7 @@ fn header(data: &[u8]) -> Result<(Header, Vec<Element>, usize)> {
             };
         if first {
             let line = line.strip_prefix(BOM).unwrap_or(line);
-            ensure!(line == b"ply", "not a PLY file");
+            ensure!(line == b"ply", UnknownFormat, "not a PLY file");
             first = false;
             continue;
         }
@@ -371,7 +371,7 @@ fn header(data: &[u8]) -> Result<(Header, Vec<Element>, usize)> {
                     b"ascii" => Format::Ascii,
                     b"binary_little_endian" => Format::Le,
                     b"binary_big_endian" => Format::Be,
-                    f => bail!("unknown PLY format {}", crate::shown(f)),
+                    f => bail!(Corrupt, "unknown PLY format {}", crate::shown(f)),
                 });
             }
             [b"comment", kind, ..] if kind.eq_ignore_ascii_case(b"texturefile") => {
@@ -386,12 +386,12 @@ fn header(data: &[u8]) -> Result<(Header, Vec<Element>, usize)> {
                 count: std::str::from_utf8(count)
                     .ok()
                     .and_then(|c| c.parse().ok())
-                    .context("bad PLY element count")?,
+                    .context(ErrorKind::Corrupt, "bad PLY element count")?,
                 props: Vec::new(),
             }),
             [b"property", b"list", c, i, name] => elements
                 .last_mut()
-                .context("PLY property before element")?
+                .context(ErrorKind::Corrupt, "PLY property before element")?
                 .props
                 .push(Prop {
                     name: String::from_utf8_lossy(name).into_owned(),
@@ -400,7 +400,7 @@ fn header(data: &[u8]) -> Result<(Header, Vec<Element>, usize)> {
                 }),
             [b"property", ty, name] => elements
                 .last_mut()
-                .context("PLY property before element")?
+                .context(ErrorKind::Corrupt, "PLY property before element")?
                 .props
                 .push(Prop {
                     name: String::from_utf8_lossy(name).into_owned(),
@@ -411,7 +411,7 @@ fn header(data: &[u8]) -> Result<(Header, Vec<Element>, usize)> {
         }
     }
     let header = Header {
-        format: format.context("PLY header names no format")?,
+        format: format.context(ErrorKind::Corrupt, "PLY header names no format")?,
         version,
         textures,
         comments,
@@ -720,6 +720,7 @@ pub(crate) fn ply(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<D
     // A file cut short keeps the items it holds whole, if it holds any vertices.
     ensure!(
         !body.cut || !body.verts.pos.is_empty(),
+        Truncated,
         "PLY data ends early: the file holds fewer items than its header counts"
     );
     let mut source = json!({
@@ -1012,7 +1013,7 @@ enum Kind {
 fn reserve<T>(v: &mut Vec<T>, n: usize) -> Result<()> {
     v.try_reserve_exact(n)
         .ok()
-        .context("not enough memory for the PLY data")
+        .context(ErrorKind::LimitExceeded, "not enough memory for the PLY data")
 }
 
 /// Reads one element's items, a block of the file at a time.
@@ -1038,6 +1039,7 @@ fn read_element(blocks: &mut Blocks<'_>, format: Format, el: &Element, body: &mu
     if kind == Kind::Vertex {
         ensure!(
             plan.xyz.iter().all(|&s| s != usize::MAX),
+            Corrupt,
             "PLY vertices have no x, y and z"
         );
         let n = el.count;
@@ -1047,6 +1049,7 @@ fn read_element(blocks: &mut Blocks<'_>, format: Format, el: &Element, body: &mu
             plan.splat = None;
             ensure!(
                 n <= body.max_splats,
+                LimitExceeded,
                 "{n} gaussian splats, more than the {} allowed (Keep::max_points)",
                 body.max_splats
             );
@@ -1122,7 +1125,7 @@ fn read_element(blocks: &mut Blocks<'_>, format: Format, el: &Element, body: &mu
                     kept = cur.pos;
                 }
                 Err(Stop::Short) => break,
-                Err(Stop::Bad(m)) => bail!("{m}"),
+                Err(Stop::Bad(m)) => bail!(Corrupt, "{m}"),
             }
         }
         let buffered = all.len();
@@ -1137,6 +1140,7 @@ fn read_element(blocks: &mut Blocks<'_>, format: Format, el: &Element, body: &mu
         }
         ensure!(
             body.tris.len() / 3 <= body.limit,
+            LimitExceeded,
             "too many triangles to convert (more than {})",
             body.limit
         );
@@ -1474,6 +1478,7 @@ fn build(
         }
         ensure!(
             corner_tris.len() <= limit,
+            LimitExceeded,
             "too many triangles to convert (more than {limit})"
         );
     }
@@ -1482,8 +1487,12 @@ fn build(
         .filter(|t| t.iter().all(|&i| (i as usize) < nv))
         .collect();
     let total = tris.len() / 3 + corner_tris.len() + strips.len();
-    ensure!(total <= limit, "too many triangles to convert (more than {limit})");
-    ensure!(total > 0, "PLY has no faces");
+    ensure!(
+        total <= limit,
+        LimitExceeded,
+        "too many triangles to convert (more than {limit})"
+    );
+    ensure!(total > 0, Empty, "PLY has no faces");
 
     let per_corner = !faces.corner_uv.is_empty() || !faces.corner_col.is_empty() || slots > 1;
     let has_uv = !faces.corner_uv.is_empty() || verts.uv.len() == nv && nv > 0;

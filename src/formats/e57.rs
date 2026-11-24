@@ -30,7 +30,7 @@ use super::{Input, ReadSeek};
 use crate::document::{Document, Keep};
 use crate::num::f32_of;
 use crate::source::{Axis, Fact, Handedness, SourceInfo};
-use crate::{Context as _, Result};
+use crate::{Context as _, ErrorKind, Result};
 
 /// The most custom attributes made from fields that aren't position, normal or color.
 const COLUMNS: usize = 64;
@@ -80,13 +80,13 @@ fn open<'a>(input: &Input<'a>) -> Result<(Reader<'a>, Rc<Meter>)> {
         since: Cell::new(0),
         limit: Cell::new(u64::MAX),
     });
-    let stream = input.seekable().context("reading the E57 file")?;
+    let stream = input.seekable().context(ErrorKind::Corrupt, "reading the E57 file")?;
     let inner = BufReader::with_capacity(1 << 16, stream);
     let reader = E57Reader::new(Watched {
         inner,
         meter: Rc::clone(&meter),
     })
-    .context("not a readable E57 file")?;
+    .context(ErrorKind::Corrupt, "not a readable E57 file")?;
     Ok((reader, meter))
 }
 
@@ -342,6 +342,7 @@ fn scan(reader: &mut Reader<'_>, meter: &Meter, pc: &PointCloud) -> Result<Part>
     let f = Fields::new(pc);
     ensure!(
         f.cartesian.is_some() || f.spherical.is_some(),
+        Corrupt,
         "an E57 scan has neither Cartesian nor spherical positions"
     );
     // When every field is constant, the `e57` crate can't tell how many values a packet holds.
@@ -402,10 +403,12 @@ fn scan(reader: &mut Reader<'_>, meter: &Meter, pc: &PointCloud) -> Result<Part>
     let mut origin = None;
     meter.since.set(0);
     meter.limit.set(STALL);
-    let points = reader.pointcloud_raw(pc).context("reading an E57 scan")?;
+    let points = reader
+        .pointcloud_raw(pc)
+        .context(ErrorKind::Corrupt, "reading an E57 scan")?;
     for p in points {
         meter.since.set(0);
-        let p = p.context("reading an E57 scan")?;
+        let p = p.context(ErrorKind::Corrupt, "reading an E57 scan")?;
         let local = match (f.cartesian, f.spherical) {
             (Some(c), _) if !flag(&p, f.cartesian_state) => Some(c.map(|k| value(&p, k))),
             (_, Some([r, a, e])) if !flag(&p, f.spherical_state) => {

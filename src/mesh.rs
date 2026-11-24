@@ -585,7 +585,7 @@ impl Welder {
 ///
 /// When the mesh has nothing to draw.
 pub fn to_glb(mesh: &Mesh) -> Result<Vec<u8>> {
-    ensure!(mesh.prims.iter().any(|p| !p.is_empty()), "nothing to draw");
+    ensure!(mesh.prims.iter().any(|p| !p.is_empty()), Empty, "nothing to draw");
     Document::from_mesh(mesh.clone(), serde_json::Map::new()).to_glb()
 }
 

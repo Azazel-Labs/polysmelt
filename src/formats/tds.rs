@@ -1172,7 +1172,9 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         .next()
         .filter(|&(id, _)| id == MAIN || id == PROJECT)
         .map(|(_, b)| b);
-    let Some(main) = main else { bail!("not a 3DS file") };
+    let Some(main) = main else {
+        bail!(UnknownFormat, "not a 3DS file")
+    };
     let mut source = Map::new();
     let (mut editor, mut kf) = (&[][..], Keyframer::default());
     for (id, b) in chunks(main) {
@@ -1306,7 +1308,12 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         let mut prims: HashMap<usize, Prim> = HashMap::new();
         for t in ts {
             triangles += t.faces.len();
-            ensure!(triangles <= input.limit, "more than {} triangles", input.limit);
+            ensure!(
+                triangles <= input.limit,
+                LimitExceeded,
+                "more than {} triangles",
+                input.limit
+            );
             let mut face_mat = vec![None; t.faces.len()];
             for (name, faces) in &t.materials {
                 let m = by_name.get(name).copied();
@@ -1328,6 +1335,7 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
             || objects
                 .iter()
                 .any(|o| matches!(o.body, Body::Camera(_) | Body::Light(_))),
+        Empty,
         "this 3DS file has no meshes, cameras or lights"
     );
     let mut textured = vec![false; materials.len()];

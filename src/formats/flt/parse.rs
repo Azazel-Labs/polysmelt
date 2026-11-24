@@ -591,6 +591,7 @@ impl<'a> Records<'a> {
 pub(super) fn parse(data: &[u8]) -> Result<Db> {
     ensure!(
         data.len() >= 4 && u16::from_be_bytes([data[0], data[1]]) == op::HEADER,
+        UnknownFormat,
         "not an OpenFlight file"
     );
     let mut db = Db {

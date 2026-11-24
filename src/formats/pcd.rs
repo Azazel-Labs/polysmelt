@@ -20,7 +20,7 @@ use super::stream::{f32_from, f64_from, space};
 use crate::document::{Document, Keep};
 use crate::num::f32_of;
 use crate::source::SourceInfo;
-use crate::{Context as _, Result};
+use crate::{Context as _, ErrorKind, Result};
 
 /// The most custom attributes made from the fields that aren't position, normal or color.
 const COLUMNS: usize = 64;
@@ -32,7 +32,7 @@ const FIELDS: usize = 4096;
 const PIECE: usize = if cfg!(test) { 64 << 10 } else { 4 << 20 };
 
 pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document<'static>> {
-    let bytes = input.read().context("reading the PCD file")?;
+    let bytes = input.read().context(ErrorKind::Corrupt, "reading the PCD file")?;
     read(&bytes, keep)
 }
 
@@ -80,7 +80,7 @@ impl Header {
         let (mut width, mut height, mut points) = (None, None, None);
         let mut viewpoint = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0];
         loop {
-            ensure!(at < b.len().min(HEADER), "not a PCD file: no DATA line");
+            ensure!(at < b.len().min(HEADER), UnknownFormat, "not a PCD file: no DATA line");
             let end = b[at..].iter().position(|&c| c == b'\n').map_or(b.len(), |n| at + n);
             let line = String::from_utf8_lossy(&b[at..end]);
             at = (end + 1).min(b.len());
@@ -91,7 +91,7 @@ impl Header {
             let mut words = line.split_ascii_whitespace();
             let key = words.next().unwrap_or_default().to_ascii_uppercase();
             let rest: Vec<&str> = words.take(FIELDS + 1).collect();
-            ensure!(rest.len() <= FIELDS, "PCD header line {key} is too long");
+            ensure!(rest.len() <= FIELDS, LimitExceeded, "PCD header line {key} is too long");
             let num = |s: &&str| s.parse::<u64>().ok();
             match key.as_str() {
                 "VERSION" => version = rest.first().map(|s| (*s).to_string()).unwrap_or_default(),
@@ -104,7 +104,7 @@ impl Header {
                             "I" => Ok(Kind::I),
                             "U" => Ok(Kind::U),
                             "F" => Ok(Kind::F),
-                            t => Err(crate::Error::InvalidInput(format!("PCD field type {t} is unknown"))),
+                            t => Err(err!(Corrupt, "PCD field type {t} is unknown")),
                         })
                         .collect::<Result<_>>()?;
                 }
@@ -122,9 +122,9 @@ impl Header {
                         Some("ascii") => Data::Ascii,
                         Some("binary") => Data::Binary,
                         Some("binary_compressed") => Data::Compressed,
-                        d => bail!("PCD data kind {} is unknown", d.unwrap_or("(none)")),
+                        d => bail!(Corrupt, "PCD data kind {} is unknown", d.unwrap_or("(none)")),
                     };
-                    ensure!(!names.is_empty(), "the PCD file names no fields");
+                    ensure!(!names.is_empty(), Corrupt, "the PCD file names no fields");
                     let n = names.len();
                     // Old files leave out what defaults: four-byte floats, one value each.
                     let sizes = if sizes.is_empty() { vec![4; n] } else { sizes };
@@ -132,6 +132,7 @@ impl Header {
                     let counts = if counts.is_empty() { vec![1; n] } else { counts };
                     ensure!(
                         sizes.len() == n && types.len() == n && counts.len() == n,
+                        Corrupt,
                         "the PCD header's FIELDS, SIZE, TYPE and COUNT lines differ in length"
                     );
                     let mut fields = Vec::with_capacity(n);
@@ -140,9 +141,10 @@ impl Header {
                             Kind::F => matches!(size, 4 | 8),
                             Kind::I | Kind::U => matches!(size, 1 | 2 | 4 | 8),
                         };
-                        ensure!(fits, "PCD field {name} has type {kind:?} of size {size}");
+                        ensure!(fits, Corrupt, "PCD field {name} has type {kind:?} of size {size}");
                         ensure!(
                             (1..=1 << 20).contains(&count),
+                            LimitExceeded,
                             "PCD field {name} has {count} values per point"
                         );
                         fields.push(Field {
@@ -417,34 +419,43 @@ fn read(bytes: &[u8], keep: Keep) -> Result<Document<'static>> {
     points::check_count(h.points, keep.points(), "PCD")?;
     let n = usize::try_from(h.points).unwrap_or(usize::MAX);
     let lay = Layout::new(&h, n);
-    ensure!(lay.pos, "the PCD file has no x, y and z fields");
+    ensure!(lay.pos, Corrupt, "the PCD file has no x, y and z fields");
     let body = &bytes[h.start.min(bytes.len())..];
-    let record = h.record().filter(|&r| r > 0).context("PCD records are too big")?;
+    let record = h
+        .record()
+        .filter(|&r| r > 0)
+        .context(ErrorKind::LimitExceeded, "PCD records are too big")?;
     let (mut d, origin) = match h.data {
         Data::Ascii => ascii(body, &h, &lay, n, keep.threads())?,
         Data::Binary => {
             let need = n
                 .checked_mul(record)
                 .filter(|&b| b <= body.len())
-                .context("PCD data ends early")?;
+                .context(ErrorKind::Truncated, "PCD data ends early")?;
             binary(&body[..need], &lay, n)?
         }
         Data::Compressed => {
-            ensure!(body.len() >= 8, "PCD data ends early");
+            ensure!(body.len() >= 8, Truncated, "PCD data ends early");
             let packed = usize_of(u32::from_le_bytes([body[0], body[1], body[2], body[3]]));
             let size = usize_of(u32::from_le_bytes([body[4], body[5], body[6], body[7]]));
-            let need = n.checked_mul(record).context("PCD records are too big")?;
+            let need = n
+                .checked_mul(record)
+                .context(ErrorKind::LimitExceeded, "PCD records are too big")?;
             ensure!(
                 size == need,
+                Corrupt,
                 "PCD compressed data holds {size} bytes, not the {need} its points need"
             );
-            let data = body.get(8..8 + packed).context("PCD data ends early")?;
+            let data = body
+                .get(8..8 + packed)
+                .context(ErrorKind::Truncated, "PCD data ends early")?;
             // LZF expands a byte to at most about 130 of them; anything more is a broken file.
             ensure!(
                 size <= packed.saturating_mul(140).saturating_add(64),
+                Corrupt,
                 "PCD compressed data is broken"
             );
-            let raw = lzf(data, size).context("PCD compressed data is broken")?;
+            let raw = lzf(data, size).context(ErrorKind::Corrupt, "PCD compressed data is broken")?;
             binary(&raw, &lay, n)?
         }
     };
@@ -480,6 +491,7 @@ fn binary(data: &[u8], lay: &Layout, n: usize) -> Result<(Decoded, [f64; 3])> {
         if e.role != Role::Skip && n > 0 {
             ensure!(
                 e.start + (n - 1) * e.stride + e.size <= data.len(),
+                Truncated,
                 "PCD data ends early"
             );
         }

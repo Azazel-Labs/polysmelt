@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::{Context, Result};
+use crate::{Context, ErrorKind, Result};
 
 use super::model::{self, Model};
 use super::reader::{Reader, byte_at, bytes_at, f64_at, marker_at, u16_at, u32_at};
@@ -249,7 +249,7 @@ impl<'a> Archive<'a> {
             0xffff => {
                 let _schema = self.r.u16()?;
                 let n = self.r.u16()?;
-                ensure!(n <= 40, "implausible legacy class name");
+                ensure!(n <= 40, Corrupt, "implausible legacy class name");
                 let name: Rc<str> = Rc::from(String::from_utf8_lossy(self.r.raw(usize::from(n))?).as_ref());
                 let cs = self.alloc(Entry {
                     cls: true,
@@ -267,7 +267,7 @@ impl<'a> Archive<'a> {
 
     fn new_class_ref(&mut self, s: u64, expect: Option<&str>) -> Result<Obj> {
         if let std::collections::hash_map::Entry::Vacant(slot) = self.slots.entry(s) {
-            let name = expect.context("unknown legacy class slot")?;
+            let name = expect.context(ErrorKind::Corrupt, "unknown legacy class slot")?;
             slot.insert(Entry {
                 cls: true,
                 name: Rc::from(name),
@@ -275,8 +275,11 @@ impl<'a> Archive<'a> {
             });
             self.class_slot.insert(name.to_owned(), s);
         }
-        let entry = self.slots.get(&s).context("unknown legacy class slot")?;
-        ensure!(entry.cls, "class ref points to an object");
+        let entry = self
+            .slots
+            .get(&s)
+            .context(ErrorKind::Corrupt, "unknown legacy class slot")?;
+        ensure!(entry.cls, Corrupt, "class ref points to an object");
         let name = Rc::clone(&entry.name);
         self.new_obj(name)
     }
@@ -315,8 +318,8 @@ impl<'a> Archive<'a> {
                 name: Rc::from("premodel"),
                 v: None,
             }),
-            None => bail!("legacy backref to unknown slot"),
-            Some(e) if e.cls => bail!("legacy backref to class"),
+            None => bail!(Corrupt, "legacy backref to unknown slot"),
+            Some(e) if e.cls => bail!(Corrupt, "legacy backref to class"),
             Some(e) => Ok(Obj {
                 slot: s,
                 name: Rc::clone(&e.name),
@@ -326,7 +329,10 @@ impl<'a> Archive<'a> {
     }
 
     fn register_burn(&mut self, delta: u64) -> Result<()> {
-        let watermark = self.annot_watermark.take().context("burn without an annotation")?;
+        let watermark = self
+            .annot_watermark
+            .take()
+            .context(ErrorKind::Corrupt, "burn without an annotation")?;
         self.burns.push((watermark + self.cum_delta, delta));
         self.cum_delta += delta;
         if let Some(credit) = self.burn_stack.last_mut() {
@@ -351,7 +357,7 @@ impl<'a> Archive<'a> {
         } else if tag != 0xffff && tag & 0x8000 == 0 {
             return Ok(Some(u64::from(tag)));
         }
-        ensure!(allow_inline, "entity ref is a new object");
+        ensure!(allow_inline, Corrupt, "entity ref is a new object");
         self.r.p = start;
         Ok(Some(self.object(None)?.slot))
     }
@@ -364,10 +370,14 @@ impl<'a> Archive<'a> {
         }
         if tag == 0x7fff {
             let big = self.r.u32()?;
-            ensure!(big & 0x8000_0000 == 0, "entity ref is a new object");
+            ensure!(big & 0x8000_0000 == 0, Corrupt, "entity ref is a new object");
             return Ok(Some(u64::from(big)));
         }
-        ensure!(tag != 0xffff && tag & 0x8000 == 0, "entity ref is a new object");
+        ensure!(
+            tag != 0xffff && tag & 0x8000 == 0,
+            Corrupt,
+            "entity ref is a new object"
+        );
         Ok(Some(u64::from(tag)))
     }
 
@@ -378,11 +388,12 @@ impl<'a> Archive<'a> {
         let mut firsts = Vec::new();
         for _ in 0..2 {
             let count = self.r.u32()?;
-            ensure!(count <= 1000, "implausible dimension path length");
+            ensure!(count <= 1000, Corrupt, "implausible dimension path length");
             for i in 0..count {
                 let tag = self.r.peek_u16()?;
                 let is_new = if tag == 0x7fff {
-                    u32_at(self.d(), self.r.p + 2).context("archive ends early")? & 0x8000_0000 != 0
+                    u32_at(self.d(), self.r.p + 2).context(ErrorKind::Truncated, "archive ends early")? & 0x8000_0000
+                        != 0
                 } else {
                     tag == 0xffff || tag & 0x8000 != 0
                 };
@@ -501,7 +512,11 @@ impl<'a> Archive<'a> {
             self.object(Some("CLayer"))?;
         } else if tag == 0x7fff {
             self.r.u16()?;
-            ensure!(self.r.u32()? & 0x8000_0000 == 0, "drawbase layer: unexpected class");
+            ensure!(
+                self.r.u32()? & 0x8000_0000 == 0,
+                Corrupt,
+                "drawbase layer: unexpected class"
+            );
         } else {
             out.layer = u64::from(self.r.u16()?);
         }
@@ -514,12 +529,16 @@ impl<'a> Archive<'a> {
         if self.ver < FIRST_DIB_OBJECT {
             self.r.u32()?;
             let z = self.r.u32()? as usize;
-            ensure!(z <= self.d().len(), "implausible dib length");
+            ensure!(z <= self.d().len(), Corrupt, "implausible dib length");
             t.inline = Some((self.r.p, z));
             self.r.skip(z)?;
         } else {
             // The caller read the flag as a u16; its high byte opens the texture's own preamble.
-            self.r.p = self.r.p.checked_sub(1).context("archive offset underflows")?;
+            self.r.p = self
+                .r
+                .p
+                .checked_sub(1)
+                .context(ErrorKind::Corrupt, "archive offset underflows")?;
             self.preamble()?;
             let dib = self.object(Some("CDib"))?;
             t.dib = (!dib.name.is_empty()).then_some(dib.slot);
@@ -534,7 +553,7 @@ impl<'a> Archive<'a> {
                 self.r.u32()?;
             }
             16 => {}
-            _ => bail!("texture size block misaligned"),
+            _ => bail!(Corrupt, "texture size block misaligned"),
         }
         t.tile = self.r.f64s::<2>()?;
         self.r.utf16()?;
@@ -665,7 +684,7 @@ impl<'a> Archive<'a> {
             name: Rc::clone(&name),
             v: None,
         });
-        ensure!(self.depth < MAX_DEPTH, "objects nest too deeply");
+        ensure!(self.depth < MAX_DEPTH, LimitExceeded, "objects nest too deeply");
         self.depth += 1;
         let read = self.read(&name, slot);
         self.depth -= 1;
@@ -790,7 +809,7 @@ impl<'a> Archive<'a> {
                 self.seen_line_style = true;
                 Ok(Value::Other)
             }
-            other => bail!("no legacy reader for {other}"),
+            other => bail!(Unsupported, "no legacy reader for {other}"),
         }
     }
 
@@ -804,10 +823,14 @@ impl<'a> Archive<'a> {
         let tag = self.r.u16()?;
         let parent = if tag == 0x7fff {
             let big = self.r.u32()?;
-            ensure!(big & 0x8000_0000 == 0, "edge-use parent is a new object");
+            ensure!(big & 0x8000_0000 == 0, Corrupt, "edge-use parent is a new object");
             Some(u64::from(big))
         } else {
-            ensure!(tag != 0xffff && tag & 0x8000 == 0, "edge-use parent is a new object");
+            ensure!(
+                tag != 0xffff && tag & 0x8000 == 0,
+                Corrupt,
+                "edge-use parent is a new object"
+            );
             (tag != 0).then_some(u64::from(tag))
         };
         let expected = self.current_loop + self.cum_delta;
@@ -817,7 +840,7 @@ impl<'a> Archive<'a> {
                 self.register_burn(delta)?;
             } else {
                 self.r.p = p0;
-                bail!("edge-use parent mismatch");
+                bail!(Corrupt, "edge-use parent mismatch");
             }
         }
         Ok(Value::EdgeUse { edge, sense })
@@ -855,7 +878,7 @@ impl<'a> Archive<'a> {
         }
         let plane = self.r.f64s::<4>()?;
         let count = self.r.u32()?;
-        ensure!(count <= 10_000, "implausible loop count");
+        ensure!(count <= 10_000, Corrupt, "implausible loop count");
         let mut loops = Vec::new();
         for _ in 0..count {
             if let Some(v) = self.object(Some("CLoop"))?.v {
@@ -901,15 +924,19 @@ impl<'a> Archive<'a> {
             }
             17 | 18 => self.r.skip(24)?,
             11 => {
-                ensure!(depth < MAX_ATTR_DEPTH, "attribute arrays nest too deeply");
+                ensure!(
+                    depth < MAX_ATTR_DEPTH,
+                    LimitExceeded,
+                    "attribute arrays nest too deeply"
+                );
                 let n = self.r.u32()?;
-                ensure!(n <= 100_000, "attr array too large");
+                ensure!(n <= 100_000, Corrupt, "attr array too large");
                 for _ in 0..n {
                     let t = self.r.u8()?;
                     self.skip_typed(t, depth + 1)?;
                 }
             }
-            _ => bail!("unknown legacy attribute type {t}"),
+            _ => bail!(Corrupt, "unknown legacy attribute type {t}"),
         }
         Ok(())
     }
@@ -984,8 +1011,10 @@ impl<'a> Archive<'a> {
         sides[1].copy_from_slice(&a[12..21]);
         for _ in 0..2 {
             let z = self.r.u32()? as usize;
-            self.r
-                .skip(z.checked_mul(32).context("texture point count overflows")?)?;
+            self.r.skip(
+                z.checked_mul(32)
+                    .context(ErrorKind::Corrupt, "texture point count overflows")?,
+            )?;
         }
         self.r.skip(8)?; // front and back flags
         Ok(Value::Ftc(Box::new(sides)))
@@ -1036,7 +1065,7 @@ impl<'a> Archive<'a> {
     fn read_section_plane(&mut self) -> Result<Value> {
         self.preamble()?;
         self.draw()?;
-        let first = f64_at(self.d(), self.r.p).context("archive ends early")?;
+        let first = f64_at(self.d(), self.r.p).context(ErrorKind::Truncated, "archive ends early")?;
         if first.abs() > 1.0001 {
             self.object(None)?;
         }
@@ -1087,7 +1116,7 @@ impl<'a> Archive<'a> {
                         && w[11..14] == [0xff, 0xfe, 0xff]
                 })
             })
-            .context("text delimiter not found")?;
+            .context(ErrorKind::Corrupt, "text delimiter not found")?;
         self.r.p = found + 11;
         self.r.utf16()?;
         self.r.skip(5)?;
@@ -1111,7 +1140,7 @@ impl<'a> Archive<'a> {
         };
         self.r.skip(base_len)?;
         let nl = self.r.u32()?;
-        ensure!(nl <= 10_000, "implausible definition layer count");
+        ensure!(nl <= 10_000, Corrupt, "implausible definition layer count");
         // The count is real layers; SketchUp 2020 puts null separators between them.
         let mut got = 0;
         while got < nl {
@@ -1136,7 +1165,7 @@ impl<'a> Archive<'a> {
         {
             nr = c;
         }
-        ensure!(nr <= 100_000, "definition list misaligned");
+        ensure!(nr <= 100_000, Corrupt, "definition list misaligned");
         for _ in 0..nr {
             self.object(Some("CRelationship"))?;
         }
@@ -1162,7 +1191,7 @@ impl<'a> Archive<'a> {
         {
             count = c;
         }
-        ensure!(count <= 5_000_000, "implausible definition entity count");
+        ensure!(count <= 5_000_000, Corrupt, "implausible definition entity count");
         Ok(count)
     }
 
@@ -1188,7 +1217,7 @@ impl<'a> Archive<'a> {
                 (bytes_at(d, p, &[0xff, 0xff]) && bytes_at(d, p + 4, &[10, 0]) && bytes_at(d, p + 6, b"CThumbnail"))
                     || thumb_cs.is_some_and(|cs| is_class_ref(d, p, cs))
             })
-            .context("definition thumbnail not found")?;
+            .context(ErrorKind::Corrupt, "definition thumbnail not found")?;
         self.r.p = tpos;
         self.object(Some("CThumbnail"))?;
         Ok(name)
@@ -1224,7 +1253,10 @@ impl<'a> Archive<'a> {
         let mut v: Vec<Obj> = Vec::new();
         while v.len() < n {
             let save = self.r.p;
-            let pending = self.inline_stack.get(depth).context("entity list stack")?;
+            let pending = self
+                .inline_stack
+                .get(depth)
+                .context(ErrorKind::Corrupt, "entity list stack")?;
             if !pending.is_empty() && v.len() + pending.len() >= n {
                 // everything left is an instance an annotation already wrote in full
                 if !self.peek_backref().is_some_and(|s| pending.contains(&s)) {
@@ -1257,7 +1289,10 @@ impl<'a> Archive<'a> {
             if v.len() >= n {
                 break;
             }
-            let e = self.slots.get(&slot).context("inline instance slot")?;
+            let e = self
+                .slots
+                .get(&slot)
+                .context(ErrorKind::Corrupt, "inline instance slot")?;
             v.push(Obj {
                 slot,
                 name: Rc::clone(&e.name),
@@ -1283,7 +1318,11 @@ fn bootstrap_two_materials(data: &[u8], ver: u32, start: usize) -> Result<u64> {
     boot.r.p = start;
     boot.object(Some("CMaterial"))?;
     let tag = boot.r.peek_u16()?;
-    ensure!(tag != 0xffff && tag & 0x8000 != 0, "cannot bootstrap the slot base");
+    ensure!(
+        tag != 0xffff && tag & 0x8000 != 0,
+        Corrupt,
+        "cannot bootstrap the slot base"
+    );
     Ok(u64::from(tag & 0x7fff))
 }
 
@@ -1304,7 +1343,11 @@ fn probe_layer_anchor_bases(data: &[u8], ver: u32, start: usize, mat_count: u32)
     let mut layers = Vec::new();
     if ver >= FIRST_V4 {
         let count = boot.r.u32()?;
-        ensure!((1..=100_000).contains(&count), "implausible layer count in base probe");
+        ensure!(
+            (1..=100_000).contains(&count),
+            Corrupt,
+            "implausible layer count in base probe"
+        );
         for _ in 0..count {
             layers.push(boot.object(Some("CLayer"))?);
         }
@@ -1313,6 +1356,7 @@ fn probe_layer_anchor_bases(data: &[u8], ver: u32, start: usize, mat_count: u32)
     let anchor = boot.object(None)?;
     ensure!(
         &*anchor.name == "premodel",
+        Corrupt,
         "base probe: anchor resolved to {}",
         anchor.name
     );
@@ -1367,7 +1411,7 @@ fn walk_model_on(ar: &mut Archive<'_>, mat_count: u32) -> Result<(Vec<Obj>, Vec<
     } else {
         ar.r.u32()? as usize
     };
-    ensure!(lc <= 100_000 || ver < FIRST_V4, "invalid layer count");
+    ensure!(lc <= 100_000 || ver < FIRST_V4, Corrupt, "invalid layer count");
     let mut layers = Vec::new();
     while layers.len() < lc {
         let Some(tag) = u16_at(ar.d(), ar.r.p) else { break };
@@ -1385,7 +1429,7 @@ fn walk_model_on(ar: &mut Archive<'_>, mat_count: u32) -> Result<(Vec<Obj>, Vec<
     }
     ar.collect_trailing_layers(&mut layers, false)?;
     let anchor = ar.object(None)?;
-    ensure!(&*anchor.name == "CLayer", "definition anchor is not a layer");
+    ensure!(&*anchor.name == "CLayer", Corrupt, "definition anchor is not a layer");
     read_definitions(ar)?;
     let mut root_count = ar.r.u32()?;
     if root_count > 5_000_000
@@ -1393,7 +1437,7 @@ fn walk_model_on(ar: &mut Archive<'_>, mat_count: u32) -> Result<(Vec<Obj>, Vec<
     {
         root_count = c;
     }
-    ensure!(root_count <= 5_000_000, "implausible root entity count");
+    ensure!(root_count <= 5_000_000, Corrupt, "implausible root entity count");
     let root = ar.entity_list(root_count, true)?;
     Ok((root, materials))
 }
@@ -1413,7 +1457,7 @@ fn read_definitions(ar: &mut Archive<'_>) -> Result<()> {
             ar.r.p = at;
         }
     }
-    ensure!(dc <= 1_000_000, "invalid definition count");
+    ensure!(dc <= 1_000_000, Corrupt, "invalid definition count");
     for _ in 0..dc {
         ar.object(Some("CComponentDefinition"))?;
     }
@@ -1438,8 +1482,8 @@ fn walk_with_bases<'a>(data: &'a [u8], ver: u32, start: usize, mat_count: u32, b
         }
     }
     Err(best.map_or_else(
-        || invalid!("no viable slot base"),
-        |(e, at)| invalid!("stopped at offset {at}: {e}"),
+        || err!(Corrupt, "no viable slot base"),
+        |(e, at)| e.within(format_args!("stopped at offset {at}")),
     ))
 }
 
@@ -1454,14 +1498,14 @@ fn find_start(data: &[u8], ver: u32) -> Result<(usize, u32)> {
         })
     };
     if let Some(mh) = class_record(b"CMaterial").filter(|&mh| mh >= 4) {
-        let mc = u32_at(data, mh - 4).context("archive ends early")?;
-        ensure!(mc <= 100_000, "implausible material count");
+        let mc = u32_at(data, mh - 4).context(ErrorKind::Truncated, "archive ends early")?;
+        ensure!(mc <= 100_000, Corrupt, "implausible material count");
         return Ok((mh, mc));
     }
-    let lh = class_record(b"CLayer").context("no CMaterial or CLayer class record found")?;
+    let lh = class_record(b"CLayer").context(ErrorKind::Corrupt, "no CMaterial or CLayer class record found")?;
     let start = lh
         .checked_sub(if ver >= 17 { 9 } else { 8 })
-        .context("layer record too early")?;
+        .context(ErrorKind::Corrupt, "layer record too early")?;
     Ok((start, 0))
 }
 

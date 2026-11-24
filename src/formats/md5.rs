@@ -77,7 +77,7 @@ pub(crate) fn load(input: Input<'_>, ext: &str, assets: &dyn Assets, keep: Keep)
         (false, true) => true,
         // Both kinds of section, or neither: the extension decides.
         (true, true) => ext.eq_ignore_ascii_case("md5anim"),
-        (false, false) => bail!("MD5 file has no joints, meshes or hierarchy"),
+        (false, false) => bail!(Empty, "MD5 file has no joints, meshes or hierarchy"),
     };
     let mut scene = if anim {
         build_anim(&file.anim.unwrap_or_default(), &stem)?
@@ -116,7 +116,7 @@ impl<'a> Lex<'a> {
     }
 
     fn err(&self, what: &str) -> crate::Error {
-        invalid!("MD5 file, line {}: {what}", self.line)
+        err!(Corrupt, "MD5 file, line {}: {what}", self.line)
     }
 
     /// Moves past `n` bytes, counting the line breaks among them.
@@ -163,7 +163,11 @@ impl<'a> Lex<'a> {
             }
             b'"' => {
                 let Some(end) = rest[1..].iter().position(|&c| c == b'"' || c == b'\n') else {
-                    return Err(self.err("a string runs to the end of the file"));
+                    bail!(
+                        Truncated,
+                        "MD5 file, line {}: a string runs to the end of the file",
+                        self.line
+                    );
                 };
                 if rest[1 + end] != b'"' {
                     return Err(self.err("a string runs past the end of its line"));
@@ -194,7 +198,7 @@ impl<'a> Lex<'a> {
     }
 
     fn need(&mut self) -> Result<Tok<'a>> {
-        self.next()?.ok_or_else(|| invalid!("MD5 file is cut short"))
+        self.next()?.ok_or_else(|| err!(Truncated, "MD5 file is cut short"))
     }
 
     fn sym(&mut self, s: u8) -> Result<()> {
@@ -253,7 +257,11 @@ impl<'a> Lex<'a> {
     /// least `size` bytes each.
     fn room(&self, n: usize, size: usize) -> Result<usize> {
         if n.saturating_mul(size) > self.b.len() - self.at {
-            return Err(self.err(&format!("a count of {n} is more than the file holds")));
+            bail!(
+                Truncated,
+                "MD5 file, line {}: a count of {n} is more than the file holds",
+                self.line
+            );
         }
         Ok(n)
     }
@@ -343,7 +351,7 @@ fn parse(data: &[u8]) -> Result<File> {
     let mut lex = Lex::new(data);
     match lex.next()? {
         Some(Tok::Word(b"MD5Version")) => {}
-        _ => bail!("not an MD5 file: it doesn't start with MD5Version"),
+        _ => bail!(UnknownFormat, "not an MD5 file: it doesn't start with MD5Version"),
     }
     let mut file = File {
         version: lex.int()?,
@@ -433,7 +441,7 @@ fn parse(data: &[u8]) -> Result<File> {
                         }
                         Some(Tok::Word(_)) => values.push(f32_of(lex.num()?)),
                         Some(_) => return Err(lex.err("expected a number or '}'")),
-                        None => bail!("MD5 file is cut short"),
+                        None => bail!(Truncated, "MD5 file is cut short"),
                     }
                 }
                 file.anim.get_or_insert_default().frames.push(values);
@@ -553,6 +561,7 @@ fn build_mesh(m: &MeshFile, stem: &str, input: &Input<'_>, assets: &dyn Assets, 
     for j in &m.joints {
         ensure!(
             j.parent >= -1 && j.parent < i64::try_from(n).unwrap_or(i64::MAX),
+            Corrupt,
             "MD5 joint {:?} has parent {}, but there are {n} joints",
             j.name,
             j.parent
@@ -586,6 +595,7 @@ fn build_mesh(m: &MeshFile, stem: &str, input: &Input<'_>, assets: &dyn Assets, 
         for (vi, v) in block.verts.iter().enumerate() {
             ensure!(
                 v.start.checked_add(v.count).is_some_and(|e| e <= block.weights.len()),
+                Corrupt,
                 "MD5 mesh {mi}: vertex {vi}'s weights run past numweights {}",
                 block.weights.len()
             );
@@ -593,6 +603,7 @@ fn build_mesh(m: &MeshFile, stem: &str, input: &Input<'_>, assets: &dyn Assets, 
         for (wi, w) in block.weights.iter().enumerate() {
             ensure!(
                 w.joint < n,
+                Corrupt,
                 "MD5 mesh {mi}: weight {wi} names joint {}, but there are {n}",
                 w.joint
             );
@@ -600,6 +611,7 @@ fn build_mesh(m: &MeshFile, stem: &str, input: &Input<'_>, assets: &dyn Assets, 
         for (ti, t) in block.tris.iter().enumerate() {
             ensure!(
                 t.iter().all(|&i| i < block.verts.len()),
+                Corrupt,
                 "MD5 mesh {mi}: triangle {ti} names a vertex past numverts {}",
                 block.verts.len()
             );
@@ -738,9 +750,10 @@ fn smooth_normals(positions: &[[f32; 3]], indices: &[u32]) -> Vec<[f32; 3]> {
 fn build_anim(a: &AnimFile, stem: &str) -> Result<Scene> {
     let mut scene = Scene::default();
     let n = a.hierarchy.len();
-    ensure!(n > 0, "MD5 animation has no joints");
+    ensure!(n > 0, Empty, "MD5 animation has no joints");
     ensure!(
         a.base.len() == n,
+        Corrupt,
         "MD5 animation's baseframe has {} joints, its hierarchy {n}",
         a.base.len()
     );
@@ -748,18 +761,21 @@ fn build_anim(a: &AnimFile, stem: &str) -> Result<Scene> {
     for (name, parent, flags, start) in &a.hierarchy {
         ensure!(
             *parent >= -1 && *parent < i64::try_from(n).unwrap_or(i64::MAX),
+            Corrupt,
             "MD5 joint {name:?} has parent {parent}, but there are {n} joints"
         );
         ensure!(
             start
                 .checked_add(flags.count_ones() as usize)
                 .is_some_and(|e| e <= components),
+            Corrupt,
             "MD5 joint {name:?}'s components run past numAnimatedComponents {components}"
         );
     }
     for (k, f) in a.frames.iter().enumerate() {
         ensure!(
             f.len() >= components,
+            Corrupt,
             "MD5 frame {k} has {} values, expected numAnimatedComponents {components}",
             f.len()
         );

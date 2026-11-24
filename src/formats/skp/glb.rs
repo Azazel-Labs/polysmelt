@@ -6,7 +6,7 @@
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 
-use crate::Result;
+use crate::{Context as _, ErrorKind, Result};
 use serde_json::{Value, json};
 
 use super::model::{Definition, Face, Id, Instance, Model};
@@ -336,7 +336,11 @@ impl<'m> Writer<'m> {
             return Ok(None);
         }
         if self.nodes.len() >= MAX_NODES {
-            ensure!(self.lenient, "the SketchUp model has too many component instances");
+            ensure!(
+                self.lenient,
+                LimitExceeded,
+                "the SketchUp model has too many component instances"
+            );
             return Ok(None);
         }
         self.active.push(inst.definition);
@@ -435,6 +439,7 @@ impl<'m> Writer<'m> {
             }
             ensure!(
                 self.vertices <= self.max_vertices,
+                LimitExceeded,
                 "the SketchUp model is too large to convert"
             );
         }
@@ -584,7 +589,7 @@ impl<'m> Writer<'m> {
         if self.hidden_nodes {
             doc["extensionsUsed"] = json!(["KHR_node_visibility"]);
         }
-        let mut text = serde_json::to_vec(&doc)?;
+        let mut text = serde_json::to_vec(&doc).context(ErrorKind::Invalid, "writing the glTF JSON")?;
         while !text.len().is_multiple_of(4) {
             text.push(b' ');
         }
@@ -598,7 +603,7 @@ impl<'m> Writer<'m> {
             u32::try_from(text.len()),
             u32::try_from(bin.len()),
         ) else {
-            bail!("the converted model is larger than a GLB file can hold");
+            bail!(LimitExceeded, "the converted model is larger than a GLB file can hold");
         };
         let mut out = Vec::with_capacity(total);
         out.extend_from_slice(b"glTF");

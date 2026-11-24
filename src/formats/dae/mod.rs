@@ -56,7 +56,7 @@ use crate::images::Images;
 use crate::material::Full;
 use crate::num::{f32_of, u32_of};
 use crate::source::{Axis, Fact, Handedness, SourceInfo};
-use crate::{Context as _, Result};
+use crate::{Context as _, ErrorKind, Result};
 use xml::Dom;
 
 /// How deeply nodes nest, `instance_node` included.
@@ -87,11 +87,11 @@ pub(super) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
         .file_name()
         .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
     let text: &[u8] = if raw.starts_with(b"PK\x03\x04") {
-        let mut zip = ZipArchive::new(Cursor::new(&raw[..])).map_err(|e| invalid!("{e}"))?;
-        let entry = root_entry(&mut zip).context("the archive holds no COLLADA document")?;
+        let mut zip = ZipArchive::new(Cursor::new(&raw[..])).context(ErrorKind::Corrupt, "bad ZIP archive")?;
+        let entry = root_entry(&mut zip).context(ErrorKind::UnknownFormat, "the archive holds no COLLADA document")?;
         let mut bytes = Vec::new();
         zip.by_name(&entry)
-            .map_err(|e| invalid!("{e}"))?
+            .with_context(ErrorKind::Corrupt, || format!("reading {entry}"))?
             .take(MAX_ENTRY)
             .read_to_end(&mut bytes)?;
         let (dir, name) = entry.rsplit_once('/').map_or_else(
@@ -110,7 +110,7 @@ pub(super) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
     let root = dom
         .root()
         .filter(|&r| dom.is(r, "COLLADA"))
-        .context("not a COLLADA document")?;
+        .context(ErrorKind::UnknownFormat, "not a COLLADA document")?;
     let home = archive
         .as_ref()
         .map_or_else(|| input.dir().to_string_lossy().replace('\\', "/"), |a| a.dir.clone());
@@ -840,7 +840,12 @@ impl Reader<'_> {
             return Ok(());
         };
         self.drawn += self.mesh_triangles[mesh];
-        ensure!(self.drawn <= self.limit, "too many triangles (over {})", self.limit);
+        ensure!(
+            self.drawn <= self.limit,
+            LimitExceeded,
+            "too many triangles (over {})",
+            self.limit
+        );
         if self.keep.skins
             && let Some(skin) = skin
         {
@@ -892,7 +897,7 @@ impl Reader<'_> {
         };
         let budget = self.limit.saturating_sub(self.drawn);
         let Ok(pieces) = geometry::mesh(dom, &mut self.sources, mesh_el, budget) else {
-            bail!("too many triangles (over {})", self.limit);
+            bail!(LimitExceeded, "too many triangles (over {})", self.limit);
         };
         let mut prims = Vec::new();
         let mut points = Vec::new();

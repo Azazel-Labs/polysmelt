@@ -113,7 +113,12 @@ struct Reader {
 fn read(text: &str, limit: usize, keep: Keep) -> Result<Document<'static>> {
     let xml = Xml::parse(text)?;
     let root = xml.root();
-    ensure!(root.is("world"), "not XGL: the root is <{}>", root.name());
+    ensure!(
+        root.is("world"),
+        UnknownFormat,
+        "not XGL: the root is <{}>",
+        root.name()
+    );
     let mut r = Reader {
         scene: Scene::default(),
         keep,
@@ -150,6 +155,7 @@ fn read(text: &str, limit: usize, keep: Keep) -> Result<Document<'static>> {
     }
     ensure!(
         r.scene.meshes.iter().any(|m| !m.prims.is_empty()),
+        Empty,
         "no geometry in the XGL file"
     );
     let Reader {
@@ -494,6 +500,7 @@ impl Reader {
                 let limit = self.limit;
                 ensure!(
                     self.triangles <= limit,
+                    LimitExceeded,
                     "too many triangles to convert (more than {limit})"
                 );
             }

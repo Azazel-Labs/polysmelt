@@ -246,14 +246,14 @@ fn parse(data: &[u8]) -> Result<Parsed> {
         if line.starts_with("[Serializer") {
             return binary::skeleton(data).map(Parsed::Skeleton);
         }
-        bail!("unknown OGRE file version {line}");
+        bail!(Unsupported, "unknown OGRE file version {line}");
     }
     let text = xml_text(data);
     let doc = xml::Xml::parse(&text)?;
     match doc.root().name() {
         "mesh" => xml::mesh(&doc).map(|m| Parsed::Mesh(Box::new(m))),
         "skeleton" => xml::skeleton(&doc).map(Parsed::Skeleton),
-        other => bail!("not an OGRE mesh or skeleton: its XML is a <{other}>"),
+        other => bail!(UnknownFormat, "not an OGRE mesh or skeleton: its XML is a <{other}>"),
     }
 }
 

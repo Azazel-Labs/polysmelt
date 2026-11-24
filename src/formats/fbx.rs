@@ -23,7 +23,7 @@ use std::path::Path;
 
 use super::fbx_tree::{Attr as A, NodeHandle};
 use super::nurbs;
-use crate::{Context as _, Result};
+use crate::{Context as _, ErrorKind, Result};
 use serde_json::{Map, Value, json};
 
 use crate::assets::Assets;
@@ -467,7 +467,9 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
     .into_iter()
     .find(|c| !c.is_empty())
     .unwrap_or_default();
-    let objects_node = rootnode.first_child_by_name("Objects").context("FBX has no Objects")?;
+    let objects_node = rootnode
+        .first_child_by_name("Objects")
+        .context(ErrorKind::Empty, "FBX has no Objects")?;
     let mut objs = Objects {
         file: file.clone(),
         nodes: HashMap::new(),
@@ -713,7 +715,7 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         scene_nodes = vec![r.nodes.len() - 1];
     }
     scene_nodes.append(&mut r.skinned_roots);
-    ensure!(!r.nodes.is_empty(), "FBX has no mesh geometry");
+    ensure!(!r.nodes.is_empty(), Empty, "FBX has no mesh geometry");
 
     if r.keep.materials
         && r.keep.textures
@@ -1966,7 +1968,7 @@ impl Reader<'_, '_, '_> {
         if let Some(&i) = self.mesh_of.get(&(g, mats.clone())) {
             return Ok(i);
         }
-        let geom = self.objs.node(g).context("missing geometry")?;
+        let geom = self.objs.node(g).context(ErrorKind::Corrupt, "missing geometry")?;
         // The UV set each material slot's color texture reads, by name.
         let color_uv: HashMap<usize, &str> = mats
             .iter()
@@ -3367,9 +3369,10 @@ fn geometry(
     color_uv: &HashMap<usize, &str>,
     named: bool,
 ) -> Result<(Prims, Vec<String>)> {
-    let verts = floats(child_attr(geom, "Vertices").context("mesh has no vertices")?).context("bad vertices")?;
-    let poly_index =
-        ints(child_attr(geom, "PolygonVertexIndex").context("mesh has no polygons")?).context("bad polygons")?;
+    let verts = floats(child_attr(geom, "Vertices").context(ErrorKind::Corrupt, "mesh has no vertices")?)
+        .context(ErrorKind::Corrupt, "bad vertices")?;
+    let poly_index = ints(child_attr(geom, "PolygonVertexIndex").context(ErrorKind::Corrupt, "mesh has no polygons")?)
+        .context(ErrorKind::Corrupt, "bad polygons")?;
     let normals = Layer::read(geom, "LayerElementNormal", "Normals", "NormalsIndex", 3);
     // Tangents need the normals they're perpendicular to; the binormals only give their handedness.
     let tangents = normals
@@ -3694,7 +3697,11 @@ fn geometry(
         .collect();
     out.sort_unstable_by_key(|x| x.0);
     let triangles: usize = out.iter().map(|x| x.1.indices.len() / 3).sum();
-    ensure!(triangles <= limit, "too many triangles to convert (more than {limit})");
+    ensure!(
+        triangles <= limit,
+        LimitExceeded,
+        "too many triangles to convert (more than {limit})"
+    );
     Ok((out, uv_names))
 }
 
