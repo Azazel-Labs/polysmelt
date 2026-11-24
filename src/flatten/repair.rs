@@ -1135,14 +1135,22 @@ impl Fix<'_, '_> {
                 else {
                     continue;
                 };
-                let a = *zeros.entry(count).or_insert_with(|| {
-                    // No buffer view: zeros, by the specification.
-                    push(
-                        self.json,
-                        "accessors",
-                        json!({ "componentType": 5126, "count": count, "type": "VEC2" }),
-                    )
-                });
+                let a = if let Some(&a) = zeros.get(&count) {
+                    a
+                } else {
+                    // An accessor without a view is zeros by the specification, but some readers (the `gltf` crate
+                    // among them) refuse one that isn't sparse: the zeros are written out, unless there are more
+                    // than the file's own data could hold positions for (a count that's only claimed).
+                    let mut a = json!({ "componentType": 5126, "count": count, "type": "VEC2" });
+                    let data: u64 = doc.buffers.iter().map(crate::document::Blob::len).sum();
+                    let fits = |n: &u64| *n <= 1 << 26 && n * 8 <= data.max(1 << 20);
+                    if let Some(len) = Some(count).filter(fits).and_then(|n| usize::try_from(n * 8).ok()) {
+                        a["bufferView"] = json!(self.place(&vec![0; len], Some(34962)));
+                    }
+                    let a = push(self.json, "accessors", a);
+                    zeros.insert(count, a);
+                    a
+                };
                 json!(a)
             };
             if let Some(attrs) = primitive_mut(self.json, m, p)
@@ -1698,6 +1706,36 @@ mod tests {
             d.json["meshes"][0]["primitives"][0]["attributes"]["TEXCOORD_1"],
             json!(uv)
         );
+    }
+
+    #[test]
+    fn a_missing_texture_coordinate_set_is_written_out_as_zeros() {
+        let mut b = Build::default();
+        let p = triangle(&mut b);
+        let d = repaired_doc(b.doc(json!({
+            "meshes": [{ "primitives": [{ "attributes": { "POSITION": p }, "material": 0 }] }],
+            "materials": [{ "pbrMetallicRoughness": { "baseColorTexture": { "index": 0 } } }],
+            "textures": [{}],
+        })));
+        let uv = index(&d.json["meshes"][0]["primitives"][0]["attributes"], "TEXCOORD_0").unwrap();
+        let acc = &d.json["accessors"][uv];
+        assert_eq!(acc["count"], 3);
+        // Backed by a view, which readers that refuse a view-less accessor need.
+        let view = index(acc, "bufferView").expect("a view");
+        assert_eq!(d.json["bufferViews"][view]["byteLength"], 24);
+    }
+
+    #[test]
+    fn a_claimed_vertex_count_writes_no_zeros_for_it() {
+        let mut d = Build::default().doc(json!({
+            "accessors": [{ "componentType": 5126, "count": 1_000_000_000_u64, "type": "VEC3" }],
+            "meshes": [{ "primitives": [{ "attributes": { "POSITION": 0 }, "material": 0 }] }],
+            "materials": [{ "pbrMetallicRoughness": { "baseColorTexture": { "index": 0 } } }],
+            "textures": [{}],
+        }));
+        d.repair();
+        let uv = index(&d.json["meshes"][0]["primitives"][0]["attributes"], "TEXCOORD_0").unwrap();
+        assert!(d.json["accessors"][uv].get("bufferView").is_none());
     }
 
     #[cfg(all(feature = "fs", feature = "gltf"))]

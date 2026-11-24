@@ -1,0 +1,11 @@
+material Old
+{
+    technique
+    {
+        pass
+        {
+            diffuse 0 0.5 1
+        }
+    }
+}
+

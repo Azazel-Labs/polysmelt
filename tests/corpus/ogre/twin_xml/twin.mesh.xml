@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mesh>
+<sharedgeometry vertexcount="6">
+<vertexbuffer positions="true" normals="true">
+<vertex><position x="0" y="0" z="0"/><normal x="0" y="0" z="1"/></vertex>
+<vertex><position x="1" y="0" z="0"/><normal x="0" y="0" z="1"/></vertex>
+<vertex><position x="0" y="1" z="0"/><normal x="0" y="0" z="1"/></vertex>
+<vertex><position x="1" y="1" z="0"/><normal x="0" y="0" z="1"/></vertex>
+<vertex><position x="0" y="2" z="0"/><normal x="0" y="0" z="1"/></vertex>
+<vertex><position x="1" y="2" z="0"/><normal x="0" y="0" z="1"/></vertex>
+</vertexbuffer>
+<vertexbuffer tangents="true" binormals="true" colours_diffuse="true" texture_coords="2" texture_coord_dimensions_0="float2" texture_coord_dimensions_1="float1">
+<vertex><tangent x="1" y="0" z="0"/><binormal x="0" y="1" z="0"/><colour_diffuse value="1 1 1 1"/><texcoord u="0" v="1"/><texcoord u="0"/></vertex>
+<vertex><tangent x="1" y="0" z="0"/><binormal x="0" y="1" z="0"/><colour_diffuse value="1 0 0 1"/><texcoord u="1" v="1"/><texcoord u="0.125"/></vertex>
+<vertex><tangent x="1" y="0" z="0"/><binormal x="0" y="-1" z="0"/><colour_diffuse value="0 1 0 1"/><texcoord u="0" v="0.5"/><texcoord u="0.25"/></vertex>
+<vertex><tangent x="1" y="0" z="0"/><binormal x="0" y="-1" z="0"/><colour_diffuse value="0 0 1 1"/><texcoord u="1" v="0.5"/><texcoord u="0.375"/></vertex>
+<vertex><tangent x="1" y="0" z="0"/><binormal x="0" y="1" z="0"/><colour_diffuse value="0.2 0.4 0.6 1"/><texcoord u="0" v="0"/><texcoord u="0.5"/></vertex>
+<vertex><tangent x="1" y="0" z="0"/><binormal x="0" y="1" z="0"/><colour_diffuse value="0 0 0 1"/><texcoord u="1" v="0"/><texcoord u="0.625"/></vertex>
+</vertexbuffer>
+</sharedgeometry>
+<submeshes>
+<submesh material="Twin/Body" usesharedvertices="true" use32bitindexes="false" operationtype="triangle_strip">
+<faces count="4"><face v1="0" v2="1" v3="2"/><face v1="3"/><face v1="4"/><face v1="5"/></faces>
+</submesh>
+<submesh material="Twin/Lid" usesharedvertices="false" use32bitindexes="false" operationtype="triangle_list">
+<faces count="1"><face v1="0" v2="1" v3="2"/></faces>
+<geometry vertexcount="3">
+<vertexbuffer positions="true">
+<vertex><position x="0" y="0" z="1"/></vertex>
+<vertex><position x="1" y="0" z="1"/></vertex>
+<vertex><position x="0" y="1" z="1"/></vertex>
+</vertexbuffer>
+<vertexbuffer texture_coords="1" texture_coord_dimensions_0="float2">
+<vertex><texcoord u="0" v="0"/></vertex>
+<vertex><texcoord u="1" v="0"/></vertex>
+<vertex><texcoord u="0" v="1"/></vertex>
+</vertexbuffer>
+</geometry>
+<textures><texture alias="Decal" name="lid.png"/></textures>
+</submesh>
+</submeshes>
+<levelofdetail strategy="distance_box" numlevels="2" manual="false">
+<lodgenerated value="50"><lodfacelist submeshindex="1" numfaces="1"><face v1="0" v2="1" v3="2"/></lodfacelist></lodgenerated>
+</levelofdetail>
+<submeshnames><submeshname name="body" index="0"/><submeshname name="lid" index="1"/></submeshnames>
+<poses>
+<pose target="submesh" index="1" name="open"><poseoffset index="2" x="0" y="0" z="1"/></pose>
+</poses>
+<animations>
+<animation name="flap" length="1">
+<tracks>
+<track target="submesh" index="1" type="pose"><keyframes>
+<keyframe time="0"></keyframe>
+<keyframe time="1"><poseref poseindex="0" influence="1"/></keyframe>
+</keyframes></track>
+</tracks></animation>
+</animations>
+</mesh>

@@ -70,6 +70,7 @@ fn enabled(ext: &str) -> bool {
         "amf" => cfg!(feature = "amf"),
         "lwo" => cfg!(feature = "lwo"),
         "ac" => cfg!(feature = "ac3d"),
+        "mesh" | "skeleton" | "xml" => cfg!(feature = "ogre"),
         _ => false,
     }
 }
@@ -106,7 +107,7 @@ const ALL_EXTENSIONS: &[&str] = &[
     "stl", "ply", "vox", "obj", "3ds", "fbx", "3mf", "usd", "usda", "usdc", "usdz", "gltf", "glb", "skp", "bvh", "dae",
     "zae", "kmz", "off", "vrm", "vrma", "x3d", "x3dv", "x3dz", "wrl", "wrz", "dxf", "splat", "spz", "las", "laz",
     "pcd", "xyz", "pts", "ptx", "asc", "e57", "amf", "lwo", "ac", "pmx", "pmd", "vmd", "x", "md2", "md3", "md5mesh",
-    "md5anim", "iqm", "smd", "vta", "ms3d", "b3d", "asf", "amc", "c3d", "trc", "htr",
+    "md5anim", "iqm", "smd", "vta", "ms3d", "b3d", "asf", "amc", "c3d", "trc", "htr", "mesh", "skeleton", "xml",
 ];
 
 fn ext_of(p: &Path) -> String {
@@ -1226,6 +1227,10 @@ fn lwo() {
 #[test]
 fn ac3d() {
     check("ac");
+}
+#[test]
+fn ogre() {
+    check("ogre");
 }
 
 /// Every extension `formats::load` takes has cases, and every format a corpus folder.

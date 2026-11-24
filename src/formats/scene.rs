@@ -84,6 +84,8 @@ pub(crate) struct Primitive {
     pub positions: Vec<[f32; 3]>,
     /// Empty, or one per vertex; zero or broken normals are replaced by their faces' normal.
     pub normals: Vec<[f32; 3]>,
+    /// Empty, or one per vertex: `[x, y, z, w]` with `w` the bitangent's sign. Written only beside normals.
+    pub tangents: Vec<[f32; 4]>,
     /// Texture coordinate sets, glTF convention (origin top-left), each empty or one per vertex.
     pub uvs: Vec<Vec<[f32; 2]>>,
     /// Vertex color sets, linear RGBA, each empty or one per vertex.
@@ -95,9 +97,11 @@ pub(crate) struct Primitive {
     pub influences: usize,
     /// The joint a vertex no joint moves is bound to.
     pub rest_joint: u32,
-    /// Triangles, three indices each (or points, one each, when `points` is set).
+    /// Triangles, three indices each (or points, one each, when `points` is set, or line segments, two each,
+    /// when `lines` is set).
     pub indices: Vec<u32>,
     pub points: bool,
+    pub lines: bool,
     pub material: Option<usize>,
     pub targets: Vec<Target>,
 }
@@ -253,11 +257,15 @@ impl Scene {
             for p in &mut m.prims {
                 p.positions.iter_mut().for_each(v);
                 p.normals.iter_mut().for_each(v);
+                for t in &mut p.tangents {
+                    t[2] = -t[2];
+                    t[3] = -t[3];
+                }
                 for t in &mut p.targets {
                     t.positions.iter_mut().for_each(v);
                     t.normals.iter_mut().for_each(v);
                 }
-                if !p.points {
+                if !p.points && !p.lines {
                     for t in p.indices.chunks_exact_mut(3) {
                         t.swap(1, 2);
                     }
@@ -357,7 +365,7 @@ impl Scene {
         self.meshes
             .iter()
             .flat_map(|m| &m.prims)
-            .filter(|p| !p.points)
+            .filter(|p| !p.points && !p.lines)
             .map(|p| p.indices.len() / 3)
             .sum()
     }
@@ -494,9 +502,9 @@ impl Scene {
             let targets: Vec<Value> = targets
                 .into_iter()
                 .map(|t| {
-                    let mut tj = json!({ "POSITION": sparse_vec3(&mut b, &t.positions, n, true) });
+                    let mut tj = json!({ "POSITION": sparse_vec3(&mut b, t.positions, n, true) });
                     if t.normals.len() == n {
-                        tj["NORMAL"] = json!(sparse_vec3(&mut b, &t.normals, n, false));
+                        tj["NORMAL"] = json!(sparse_vec3(&mut b, t.normals, n, false));
                     }
                     tj
                 })
@@ -613,7 +621,8 @@ impl Scene {
         // Animations.
         let mut animations_json = Vec::new();
         if keep.animations {
-            let mut inputs: HashMap<Vec<u32>, usize> = HashMap::new();
+            // Each distinct set of times is written once, by a hash of their bits: channels usually share theirs.
+            let mut inputs: HashMap<u64, Vec<(Vec<f32>, usize)>> = HashMap::new();
             for a in std::mem::take(&mut self.animations) {
                 let mut channels = Vec::new();
                 let mut samplers = Vec::new();
@@ -634,33 +643,41 @@ impl Scene {
                     if c.node >= n {
                         continue;
                     }
-                    let Some((times, values)) = clean_keys(&c, width) else {
+                    let (node, cpath, cinterp) = (c.node, c.path, c.interp);
+                    let Some((times, values)) = clean_keys(c, width) else {
                         continue;
                     };
                     let count = times.len();
-                    let key: Vec<u32> = times.iter().map(|t| t.to_bits()).collect();
-                    let input = if let Some(&i) = inputs.get(&key) {
+                    let hash = times.iter().fold(times.len() as u64, |h, t| {
+                        (h.rotate_left(5) ^ u64::from(t.to_bits())).wrapping_mul(0x9e37_79b9_7f4a_7c15)
+                    });
+                    let list = inputs.entry(hash).or_default();
+                    let found = list
+                        .iter()
+                        .find(|(t, _)| t.iter().map(|x| x.to_bits()).eq(times.iter().map(|x| x.to_bits())));
+                    let input = if let Some(&(_, i)) = found {
                         i
                     } else {
+                        let kept = times.clone();
                         let i = floats(&mut b, times, "SCALAR", true);
-                        inputs.insert(key, i);
+                        list.push((kept, i));
                         i
                     };
-                    let (path, kind) = match c.path {
+                    let (path, kind) = match cpath {
                         Path::Translation => ("translation", "VEC3"),
                         Path::Rotation => ("rotation", "VEC4"),
                         Path::Scale => ("scale", "VEC3"),
                         Path::Weights => ("weights", "SCALAR"),
                     };
-                    let output = if c.path == Path::Weights {
+                    let output = if cpath == Path::Weights {
                         b.accessor(Part::f32(values), 5126, count * width, "SCALAR", None)
                     } else {
                         floats(&mut b, values, kind, false)
                     };
-                    let interp = match c.interp {
+                    let interp = match cinterp {
                         Interp::Linear => "LINEAR",
                     };
-                    channels.push(json!({ "sampler": samplers.len(), "target": { "node": c.node, "path": path } }));
+                    channels.push(json!({ "sampler": samplers.len(), "target": { "node": node, "path": path } }));
                     samplers.push(json!({ "input": input, "output": output, "interpolation": interp }));
                 }
                 if channels.is_empty() {
@@ -733,34 +750,57 @@ pub(crate) fn floats(b: &mut Builder, v: Vec<f32>, kind: &str, bounds: bool) -> 
 }
 
 /// A channel's keys as glTF wants them: finite, times strictly increasing (a key at or before the last moves just
-/// after it), rotations unit length and each on the same side as the last. `None` when no key is left.
-fn clean_keys(c: &Channel, width: usize) -> Option<(Vec<f32>, Vec<f32>)> {
-    let keys = c.times.len().min(c.values.len() / width.max(1));
-    let mut times: Vec<f32> = Vec::with_capacity(keys);
-    let mut values = Vec::with_capacity(keys * width);
-    let mut last = [0.0f64, 0.0, 0.0, 1.0];
-    for k in 0..keys {
-        let mut t = c.times[k];
-        let v = &c.values[k * width..(k + 1) * width];
-        if !t.is_finite() || v.iter().any(|x| !x.is_finite()) {
-            continue;
+/// after it), rotations unit length and each on the same side as the last. `None` when no key is left. Keys that
+/// are already in order are cleaned where they are.
+fn clean_keys(c: Channel, width: usize) -> Option<(Vec<f32>, Vec<f32>)> {
+    let Channel {
+        mut times,
+        mut values,
+        path,
+        ..
+    } = c;
+    let width = width.max(1);
+    let keys = times.len().min(values.len() / width);
+    times.truncate(keys);
+    values.truncate(keys * width);
+    let tidy = times.iter().all(|t| t.is_finite())
+        && times.windows(2).all(|w| w[0] < w[1])
+        && values.iter().all(|x| x.is_finite());
+    if !tidy {
+        let mut kept: Vec<f32> = Vec::with_capacity(keys);
+        let mut out = Vec::with_capacity(keys * width);
+        for (&t, v) in times.iter().zip(values.chunks_exact(width)) {
+            if !t.is_finite() || v.iter().any(|x| !x.is_finite()) {
+                continue;
+            }
+            kept.push(match kept.last() {
+                Some(&p) if t <= p => p.next_up(),
+                _ => t,
+            });
+            out.extend_from_slice(v);
         }
-        if let Some(&p) = times.last()
-            && t <= p
-        {
-            t = p.next_up();
-        }
-        times.push(t);
-        if c.path == Path::Rotation {
-            let mut q = normalize(std::array::from_fn(|i| f64::from(v[i]))).map(f64::from);
+        times = kept;
+        values = out;
+    }
+    if path == Path::Rotation {
+        let mut last = [0.0f64, 0.0, 0.0, 1.0];
+        for v in values.chunks_exact_mut(4) {
+            let mut q: [f64; 4] = std::array::from_fn(|i| f64::from(v[i]));
+            // Already unit length to within half a float's step: normalizing wouldn't change it.
+            let unit = (q.iter().map(|c| c * c).sum::<f64>() - 1.0).abs() <= 1e-7;
+            if !unit {
+                q = normalize(q).map(f64::from);
+            }
             let dot: f64 = (0..4).map(|i| q[i] * last[i]).sum();
             if dot < 0.0 {
                 q = q.map(|x| -x);
             }
             last = q;
-            values.extend(q.map(f32_of));
-        } else {
-            values.extend_from_slice(v);
+            if !unit || dot < 0.0 {
+                for (o, x) in v.iter_mut().zip(q) {
+                    *o = f32_of(x);
+                }
+            }
         }
     }
     (!times.is_empty()).then_some((times, values))
@@ -817,7 +857,13 @@ fn write_prim(
         return None;
     }
     if p.indices.iter().any(|&i| i as usize >= n) {
-        let width = if p.points { 1 } else { 3 };
+        let width = if p.points {
+            1
+        } else if p.lines {
+            2
+        } else {
+            3
+        };
         let idx: Vec<u32> = p
             .indices
             .chunks_exact(width)
@@ -836,7 +882,7 @@ fn write_prim(
         }
     }
     let mut attributes = Map::new();
-    if p.normals.len() == n && !p.points {
+    if p.normals.len() == n && !p.points && !p.lines {
         fix_normals(&mut p.normals, &p.positions, &p.indices);
         let a = b.accessor(
             Part::f32(std::mem::take(&mut p.normals).into_flattened()),
@@ -866,6 +912,24 @@ fn write_prim(
             );
             attributes.insert("NORMAL".into(), json!(a));
         }
+    }
+    // glTF wants tangents only beside normals, unit length with a w of ±1.
+    if attributes.contains_key("NORMAL") && p.tangents.len() == n {
+        let t: Vec<f32> = p
+            .tangents
+            .iter()
+            .flat_map(|t| {
+                let len = (t[0] * t[0] + t[1] * t[1] + t[2] * t[2]).sqrt();
+                let w = if t[3] < 0.0 { -1.0 } else { 1.0 };
+                if len > 0.0 && len.is_finite() {
+                    [t[0] / len, t[1] / len, t[2] / len, w]
+                } else {
+                    [1.0, 0.0, 0.0, w]
+                }
+            })
+            .collect();
+        let a = b.accessor(Part::f32(t), 5126, n, "VEC4", Some(34962));
+        attributes.insert("TANGENT".into(), json!(a));
     }
     let pos = b.positions(std::mem::take(&mut p.positions));
     attributes.insert("POSITION".into(), json!(pos));
@@ -934,6 +998,8 @@ fn write_prim(
     let mut prim = json!({ "attributes": attributes, "indices": indices });
     if p.points {
         prim["mode"] = json!(0);
+    } else if p.lines {
+        prim["mode"] = json!(1);
     }
     if let Some(m) = p.material
         && materials > 0
@@ -945,38 +1011,46 @@ fn write_prim(
 
 /// A `VEC3` float accessor of `n` offsets from `v` (missing ones zero): sparse over zeros when few are nonzero.
 /// `bounds` adds `min` and `max`, which glTF requires of position offsets.
-fn sparse_vec3(b: &mut Builder, v: &[[f32; 3]], n: usize, bounds: bool) -> usize {
-    let get = |i: usize| {
-        v.get(i)
-            .copied()
-            .filter(|x| x.iter().all(|c| c.is_finite()))
-            .unwrap_or([0.0; 3])
-    };
-    let nonzero: Vec<u32> = (0..n)
-        .filter(|&i| get(i).iter().any(|&c| c != 0.0))
-        .map(u32_of)
-        .collect();
+#[allow(
+    clippy::needless_bitwise_bool,
+    reason = "branchless, so the loop over every vertex vectorizes"
+)]
+fn sparse_vec3(b: &mut Builder, mut v: Vec<[f32; 3]>, n: usize, bounds: bool) -> usize {
+    // Every value as it's written, in one pass: one past the list, or not finite, is zero.
+    v.resize(n, [0.0; 3]);
     let (mut min, mut max) = ([f32::MAX; 3], [f32::MIN; 3]);
-    let mut see = |x: [f32; 3]| {
-        for k in 0..3 {
-            min[k] = min[k].min(x[k]);
-            max[k] = max[k].max(x[k]);
+    let mut moved = 0;
+    // Without branching per component (`&` and `|`, not `&&` and `||`), so the loop vectorizes.
+    for x in &mut v {
+        if !(x[0].is_finite() & x[1].is_finite() & x[2].is_finite()) {
+            *x = [0.0; 3];
         }
-    };
-    for &i in &nonzero {
-        see(get(i as usize));
+        moved += usize::from((x[0] != 0.0) | (x[1] != 0.0) | (x[2] != 0.0));
+        // Finite by now, so a plain comparison does; zero vectors count, as the bounds take in zero
+        // whenever there's one.
+        for k in 0..3 {
+            min[k] = if x[k] < min[k] { x[k] } else { min[k] };
+            max[k] = if x[k] > max[k] { x[k] } else { max[k] };
+        }
     }
-    if nonzero.len() < n {
-        see([0.0; 3]);
-    }
-    let a = if nonzero.len() * 4 < n {
+    let a = if moved * 4 < n {
+        let mut nonzero: Vec<u32> = Vec::with_capacity(moved.max(1));
+        let mut values: Vec<[f32; 3]> = Vec::with_capacity(moved.max(1));
+        for (i, x) in v.iter().enumerate() {
+            if x.iter().any(|&c| c != 0.0) {
+                nonzero.push(u32_of(i));
+                values.push(*x);
+            }
+        }
         // An accessor with neither a view nor sparse values is all zeros to glTF, but not every reader takes it:
         // a target that moves nothing stores one zero offset.
-        let nonzero = if nonzero.is_empty() { vec![0] } else { nonzero };
-        let values: Vec<f32> = nonzero.iter().flat_map(|&i| get(i as usize)).collect();
+        if nonzero.is_empty() {
+            nonzero.push(0);
+            values.push([0.0; 3]);
+        }
         let count = nonzero.len();
         let iv = b.view(Part::u32(nonzero), None);
-        let vv = b.view(Part::f32(values), None);
+        let vv = b.view(Part::vec3(values), None);
         let a = json!({
             "componentType": 5126,
             "count": n,
@@ -990,8 +1064,7 @@ fn sparse_vec3(b: &mut Builder, v: &[[f32; 3]], n: usize, bounds: bool) -> usize
         b.accessors.push(a);
         b.accessors.len() - 1
     } else {
-        let all: Vec<f32> = (0..n).flat_map(get).collect();
-        b.accessor(Part::f32(all), 5126, n, "VEC3", Some(34962))
+        b.accessor(Part::vec3(v), 5126, n, "VEC3", Some(34962))
     };
     if bounds {
         b.accessors[a]["min"] = json!(min);
@@ -1006,7 +1079,10 @@ fn sparse_vec3(b: &mut Builder, v: &[[f32; 3]], n: usize, bounds: bool) -> usize
 fn skin_sets(p: &Primitive, count: usize) -> (Vec<u32>, Vec<f32>, usize) {
     let n = p.positions.len().max(p.joints.len() / p.influences.max(1));
     let w = p.influences;
-    let mut lists: Vec<Vec<(u32, f32)>> = Vec::with_capacity(n);
+    // Every vertex's list, end to end, and where each ends: no list of its own for each vertex.
+    let mut flat: Vec<(u32, f32)> = Vec::with_capacity(n * w.clamp(1, 4));
+    let mut ends: Vec<usize> = Vec::with_capacity(n);
+    let mut list: Vec<(u32, f32)> = Vec::with_capacity(w);
     let mut most = 1;
     let rest = if (p.rest_joint as usize) < count {
         p.rest_joint
@@ -1014,7 +1090,7 @@ fn skin_sets(p: &Primitive, count: usize) -> (Vec<u32>, Vec<f32>, usize) {
         0
     };
     for v in 0..n {
-        let mut list: Vec<(u32, f32)> = Vec::new();
+        list.clear();
         for k in 0..w {
             let (j, wt) = (p.joints[v * w + k], p.weights[v * w + k]);
             if !(wt > 0.0 && wt.is_finite()) || j as usize >= count {
@@ -1029,20 +1105,19 @@ fn skin_sets(p: &Primitive, count: usize) -> (Vec<u32>, Vec<f32>, usize) {
         list.truncate(MAX_INFLUENCES);
         let sum: f32 = list.iter().map(|e| e.1).sum();
         if list.is_empty() || sum <= 0.0 || !sum.is_finite() {
-            list = vec![(rest, 1.0)];
+            flat.push((rest, 1.0));
         } else {
-            for e in &mut list {
-                e.1 /= sum;
-            }
+            flat.extend(list.iter().map(|&(j, wt)| (j, wt / sum)));
         }
-        most = most.max(list.len());
-        lists.push(list);
+        most = most.max(flat.len() - ends.last().copied().unwrap_or(0));
+        ends.push(flat.len());
     }
     let sets = most.div_ceil(4);
     let mut js = vec![0u32; sets * n * 4];
     let mut ws = vec![0f32; sets * n * 4];
-    for (v, list) in lists.iter().enumerate() {
-        for (k, &(j, wt)) in list.iter().enumerate() {
+    let starts = std::iter::once(0).chain(ends.iter().copied());
+    for (v, (start, end)) in starts.zip(ends.iter().copied()).enumerate() {
+        for (k, &(j, wt)) in flat[start..end].iter().enumerate() {
             let at = (k / 4) * n * 4 + v * 4 + k % 4;
             js[at] = j;
             ws[at] = wt;

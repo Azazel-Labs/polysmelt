@@ -7,7 +7,9 @@
 //!   path); for a model in memory they come from [`Assets::read`]. A meshopt fallback buffer that isn't there holds nothing: views on it
 //!   decode from their compressed data.
 //! - Images named by URI (a data URI, or a file found as buffers are) move into a buffer, so the
-//!   document stands on its own. One that isn't found keeps its URI.
+//!   document stands on its own. One that isn't found keeps its URI. An image file stays in the
+//!   file until its bytes are wanted (writing the GLB, most often): only its first bytes are read,
+//!   to know its type.
 //! - glTF 1.0 (and its binary GLB, `KHR_binary_glTF`) is upgraded to 2.0 first; see
 //!   [`super::gltf1`].
 
@@ -147,32 +149,49 @@ pub(crate) fn load<'a>(input: Input<'a>, assets: &'a dyn Assets, keep: Keep) -> 
     Ok(doc)
 }
 
+/// The most image files a document keeps open to read later; images past them are read now.
+#[cfg(feature = "fs")]
+const OPEN_IMAGES: usize = 256;
+
 /// Moves each image named by URI into a buffer of its own, when it's found and its type known.
 fn embed_images(doc: &mut Document<'_>, input: Input<'_>, assets: &dyn Assets) {
     let n = doc.json.get("images").and_then(Value::as_array).map_or(0, Vec::len);
+    #[cfg(feature = "fs")]
+    let mut open = 0;
     for i in 0..n {
         let img = &doc.json["images"][i];
         let Some(uri) = img.get("uri").and_then(Value::as_str) else {
             continue;
         };
+        let declared = img.get("mimeType").and_then(Value::as_str);
+        let typed =
+            |bytes: &[u8], named: Option<&str>| container::sniff_mime(bytes).or(declared).or(named).map(str::to_owned);
         let found = if uri.starts_with("data:") {
-            container::data_uri(uri).ok()
+            container::data_uri(uri)
+                .ok()
+                .and_then(|(named, bytes)| Some((typed(&bytes, named.as_deref())?, Blob::Bytes(bytes.into()))))
         } else {
             let name = container::percent_decode(uri);
-            read_external(input, assets, uri)
-                .ok()
-                .map(|b| (container::mime_from_name(&name).map(str::to_owned), b.into_owned()))
+            let named = container::mime_from_name(&name);
+            #[cfg(feature = "fs")]
+            let later = (input.bytes().is_none() && open < OPEN_IMAGES)
+                .then(|| image_file(input, &name))
+                .flatten()
+                .and_then(|(head, span)| Some((typed(&head, named)?, Blob::File(span))));
+            #[cfg(not(feature = "fs"))]
+            let later = None;
+            #[cfg(feature = "fs")]
+            if later.is_some() {
+                open += 1;
+            }
+            later.or_else(|| {
+                let bytes = read_external(input, assets, uri).ok()?.into_owned();
+                Some((typed(&bytes, named)?, Blob::Bytes(bytes.into())))
+            })
         };
-        let Some((named, bytes)) = found else { continue };
-        let Some(mime) = container::sniff_mime(&bytes)
-            .map(str::to_owned)
-            .or_else(|| img.get("mimeType").and_then(Value::as_str).map(str::to_owned))
-            .or(named)
-        else {
-            continue;
-        };
-        let len = bytes.len();
-        let buffer = doc.push_buffer(bytes);
+        let Some((mime, blob)) = found else { continue };
+        let len = blob.len();
+        let buffer = doc.push_blob(blob);
         let view = doc.push_view(json!({ "buffer": buffer, "byteLength": len }));
         let img = doc.json["images"][i]
             .as_object_mut()
@@ -181,6 +200,13 @@ fn embed_images(doc: &mut Document<'_>, input: Input<'_>, assets: &dyn Assets) {
         img.insert("bufferView".into(), json!(view));
         img.insert("mimeType".into(), json!(mime));
     }
+}
+
+/// The image file `name` (relative to the model) left in the file, with its first bytes, enough to
+/// tell its type.
+#[cfg(feature = "fs")]
+fn image_file(input: Input<'_>, name: &str) -> Option<(Vec<u8>, FileSpan)> {
+    FileSpan::open(&input.dir().join(checked(name).ok()?), 16)
 }
 
 /// Notes where each image named by URI (other than a `data:` one) is, without reading it. A file
@@ -483,6 +509,57 @@ mod tests {
             .err()
             .unwrap();
         assert!(err.to_string().contains("refusing"), "{err}");
+    }
+
+    #[cfg(feature = "fs")]
+    #[test]
+    fn image_files_left_in_place_are_written_as_they_are() {
+        // More images than are kept open, each its own bytes; some named wrongly, so only their
+        // first bytes tell their type.
+        let n = super::OPEN_IMAGES + 4;
+        let dir = tempfile::tempdir().unwrap();
+        let png = |i: usize| {
+            let mut b = b"\x89PNG\r\n\x1a\n".to_vec();
+            b.extend((0..i % 300).map(|k| u8::try_from((k * 7 + i) % 251).unwrap()));
+            b
+        };
+        let jpeg = b"\xff\xd8\xff\xe0 not really a jpeg".to_vec();
+        let mut images = Vec::new();
+        for i in 0..n {
+            let name = if i % 5 == 0 {
+                format!("t{i}.jpg")
+            } else {
+                format!("t{i}.png")
+            };
+            std::fs::write(dir.path().join(&name), png(i)).unwrap();
+            images.push(serde_json::json!({ "uri": name }));
+        }
+        std::fs::write(dir.path().join("j.png"), &jpeg).unwrap();
+        images.push(serde_json::json!({ "uri": "j.png", "mimeType": "image/png" }));
+        images.push(serde_json::json!({ "uri": "missing.png" }));
+        let gltf = serde_json::json!({ "asset": { "version": "2.0" }, "images": images });
+        let path = dir.path().join("m.gltf");
+        std::fs::write(&path, gltf.to_string()).unwrap();
+        let doc = crate::formats::load(&path, "gltf", &Folder::new(dir.path()), Keep::ALL).unwrap();
+        let glb = doc.to_glb().unwrap();
+        let (json, bin) = split(&glb);
+        let views = views(&json, bin);
+        let images = json["images"].as_array().unwrap();
+        assert_eq!(images.len(), n + 2);
+        for (i, img) in images.iter().enumerate() {
+            if i == n + 1 {
+                assert_eq!(img["uri"], "missing.png", "what isn't found keeps its URI");
+                continue;
+            }
+            let view = usize::try_from(img["bufferView"].as_u64().unwrap()).unwrap();
+            let (bytes, mime) = if i == n {
+                (jpeg.clone(), "image/jpeg")
+            } else {
+                (png(i), "image/png")
+            };
+            assert_eq!(views[view], bytes, "image {i}");
+            assert_eq!(img["mimeType"], mime, "image {i}");
+        }
     }
 
     #[test]

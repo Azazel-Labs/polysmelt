@@ -1,5 +1,7 @@
 //! Windows and OS/2 bitmaps: 1 to 32 bits a pixel, palette or bit-field masks, raw or RLE.
 
+use std::borrow::Cow;
+
 use super::{FREE, Raster, fill, flip, get, le16, le32, masked, may_grow, opaque_if_clear, pixels};
 use crate::num::usize_of;
 
@@ -104,20 +106,62 @@ pub(super) fn decode(b: &[u8]) -> Option<Raster> {
             _ => return None,
         };
         let stride = (wu * usize::from(bpp)).div_ceil(32) * 4;
-        let mut raw = data[..data.len().min(stride * hu)].to_vec();
-        fill(&mut raw, stride * hu)?;
-        px.reserve(n * 4);
-        for row in raw.chunks_exact(stride) {
-            for p in row.chunks_exact(bytes).take(wu) {
-                let mut v = [0u8; 4];
-                v[..bytes].copy_from_slice(p);
-                let v = u32::from_le_bytes(v);
-                let a = if alpha == 0 { 255 } else { masked(v, alpha) };
-                px.extend_from_slice(&[masked(v, masks[0]), masked(v, masks[1]), masked(v, masks[2]), a]);
+        // The rows in place when they're all there; a copy padded out when they fall short.
+        let raw: Cow<'_, [u8]> = if let Some(all) = data.get(..stride * hu) {
+            Cow::Borrowed(all)
+        } else {
+            let mut raw = data.to_vec();
+            fill(&mut raw, stride * hu)?;
+            Cow::Owned(raw)
+        };
+        let channels = if alpha == 0 { 3 } else { 4 };
+        px.reserve(n * channels);
+        // Rows top to bottom as they're read, so nothing is flipped after.
+        let rows = raw.chunks_exact(stride);
+        let rows: Box<dyn Iterator<Item = &[u8]>> = if top_down { Box::new(rows) } else { Box::new(rows.rev()) };
+        let plain = masks == [0xFF_0000, 0xFF00, 0xFF] && matches!(alpha, 0 | 0xFF00_0000);
+        for row in rows {
+            let row = &row[..wu * bytes];
+            match (plain, bytes) {
+                // Blue, green, red (and alpha) bytes, as most bitmaps are.
+                (true, 3) => {
+                    for p in row.chunks_exact(3) {
+                        px.extend_from_slice(&[p[2], p[1], p[0]]);
+                    }
+                }
+                (true, 4) if alpha == 0 => {
+                    for p in row.chunks_exact(4) {
+                        px.extend_from_slice(&[p[2], p[1], p[0]]);
+                    }
+                }
+                (true, 4) => {
+                    for p in row.chunks_exact(4) {
+                        px.extend_from_slice(&[p[2], p[1], p[0], p[3]]);
+                    }
+                }
+                _ => {
+                    for p in row.chunks_exact(bytes) {
+                        let mut v = [0u8; 4];
+                        v[..bytes].copy_from_slice(p);
+                        let v = u32::from_le_bytes(v);
+                        px.extend_from_slice(&[masked(v, masks[0]), masked(v, masks[1]), masked(v, masks[2])]);
+                        if alpha != 0 {
+                            px.push(masked(v, alpha));
+                        }
+                    }
+                }
             }
         }
-        // 32-bit pixels' fourth byte is alpha unless it's zero throughout (it's padding then).
-        opaque_if_clear(&mut px, 4);
+        if channels == 4 {
+            // 32-bit pixels' fourth byte is alpha unless it's zero throughout (it's padding then).
+            opaque_if_clear(&mut px, 4);
+        }
+        return Some(Raster {
+            w,
+            h,
+            channels,
+            data: px,
+        });
     }
     if !top_down {
         flip(&mut px, wu * 4);
@@ -259,6 +303,14 @@ mod tests {
         // 16 bits: 5-5-5 by default.
         let b = bmp(40, 2, 1, 16, 0, &[], &[0x00, 0x7C, 0x1F, 0x00]);
         assert_eq!(decoded(&b, "a.bmp").unwrap().2, [255, 0, 0, 255, 0, 0, 255, 255]);
+        // 32 bits: the fourth byte is alpha, unless it's zero throughout.
+        let b = bmp(40, 2, 1, 32, 0, &[], &[1, 2, 3, 0, 4, 5, 6, 0]);
+        assert_eq!(decoded(&b, "a.bmp").unwrap().2, [3, 2, 1, 255, 6, 5, 4, 255]);
+        let b = bmp(40, 2, 1, 32, 0, &[], &[1, 2, 3, 10, 4, 5, 6, 255]);
+        assert_eq!(decoded(&b, "a.bmp").unwrap().2, [3, 2, 1, 10, 6, 5, 4, 255]);
+        // Rows the file cuts short are padded with black.
+        let b = bmp(40, 1, -2, 24, 0, &[], &[255, 0, 0, 0, 0]);
+        assert_eq!(decoded(&b, "a.bmp").unwrap().2, [0, 0, 255, 255, 0, 0, 0, 255]);
     }
 
     #[test]

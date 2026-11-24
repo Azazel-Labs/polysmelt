@@ -375,7 +375,7 @@ impl Image {
         None
     }
 
-    fn mime_of(bytes: &[u8]) -> Option<&'static str> {
+    pub(crate) fn mime_of(bytes: &[u8]) -> Option<&'static str> {
         if bytes.starts_with(b"\x89PNG") {
             Some("image/png")
         } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
@@ -875,7 +875,8 @@ mod triangulate_tests {
     feature = "3mf",
     feature = "off",
     feature = "x3d",
-    feature = "dxf"
+    feature = "dxf",
+    feature = "md2"
 ))]
 #[derive(Default, Clone, Copy)]
 pub(crate) struct FxHasher(u64);
@@ -890,7 +891,8 @@ pub(crate) struct FxHasher(u64);
     feature = "3mf",
     feature = "off",
     feature = "x3d",
-    feature = "dxf"
+    feature = "dxf",
+    feature = "md2"
 ))]
 impl std::hash::Hasher for FxHasher {
     #[inline]
@@ -928,7 +930,8 @@ impl std::hash::Hasher for FxHasher {
     feature = "fbx",
     feature = "off",
     feature = "x3d",
-    feature = "dxf"
+    feature = "dxf",
+    feature = "md2"
 ))]
 pub(crate) type FastMap<K, V> = std::collections::HashMap<K, V, std::hash::BuildHasherDefault<FxHasher>>;
 
