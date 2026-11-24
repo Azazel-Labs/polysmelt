@@ -267,6 +267,7 @@ pub(crate) struct Parts {
 /// One typed array of a [`Parts`].
 pub(crate) enum Part {
     F32(Vec<f32>),
+    Vec3(Vec<[f32; 3]>),
     U32(Vec<u32>),
     U16(Vec<u16>),
     Bytes(Bytes),
@@ -283,6 +284,21 @@ impl Part {
             Part::F32(v)
         } else {
             Part::Bytes(v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>().into())
+        }
+    }
+
+    /// Vectors of three floats, stored as [`f32`](Self::f32) would store them flattened.
+    pub(crate) fn vec3(v: Vec<[f32; 3]>) -> Self {
+        if cfg!(target_endian = "little") {
+            Part::Vec3(v)
+        } else {
+            Part::Bytes(
+                v.iter()
+                    .flatten()
+                    .flat_map(|x| x.to_le_bytes())
+                    .collect::<Vec<u8>>()
+                    .into(),
+            )
         }
     }
 
@@ -311,6 +327,7 @@ impl Part {
     fn as_bytes(&self) -> Option<&[u8]> {
         Some(match self {
             Part::F32(v) => bytemuck::cast_slice(v),
+            Part::Vec3(v) => bytemuck::cast_slice(v),
             Part::U32(v) => bytemuck::cast_slice(v),
             Part::U16(v) => bytemuck::cast_slice(v),
             Part::Bytes(v) => v,
@@ -405,6 +422,52 @@ impl Parts {
             pos = at + take;
         }
         write_zeros(w, len.saturating_sub(pos))
+    }
+}
+
+/// A GLB ready to write (see [`Document::write_glb`]): its header and JSON chunk, and where each
+/// of the document's buffers goes in its binary chunk.
+struct Glb {
+    /// The 12-byte header, the JSON chunk's header and the JSON, padded.
+    head: Vec<u8>,
+    /// The whole GLB's length.
+    total: u32,
+    /// The binary chunk's length, padded; `None` for none.
+    padded: Option<u64>,
+    /// Each buffer in the binary chunk: (buffer, offset, length).
+    layout: Vec<(usize, u64, u64)>,
+    /// Bytes repair made, the last buffer.
+    extra: Option<Blob<'static>>,
+    /// What repair rewrote in buffers, sorted by buffer and offset.
+    kept: Vec<crate::flatten::Kept>,
+}
+
+impl Glb {
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "the binary chunk is smaller than `total`, which is checked to fit"
+    )]
+    fn write(&self, doc: &Document<'_>, w: &mut dyn Write) -> Result<()> {
+        w.write_all(&self.head)?;
+        if let Some(padded) = self.padded {
+            w.write_all(&(padded as u32).to_le_bytes())?;
+            w.write_all(b"BIN\0")?;
+            let mut pos = 0;
+            for &(i, at, len) in &self.layout {
+                write_zeros(w, at - pos)?;
+                let blob = doc
+                    .buffers
+                    .get(i)
+                    .or(self.extra.as_ref())
+                    .context("glTF buffer is missing")?;
+                let from = self.kept.partition_point(|k| k.0 < i);
+                let to = self.kept.partition_point(|k| k.0 <= i);
+                blob.write_keeping(len, w, &self.kept[from..to])?;
+                pos = at + len;
+            }
+            write_zeros(w, padded - pos)?;
+        }
+        Ok(())
     }
 }
 
@@ -684,8 +747,10 @@ impl<'a> Document<'a> {
     /// When a buffer holds fewer bytes than it declares, a buffer's file can't be read, or the
     /// GLB would be over 4 GiB.
     pub fn to_glb(&self) -> Result<Vec<u8>> {
-        let mut out = Vec::new();
-        self.write_glb(&mut out)?;
+        let glb = self.glb()?;
+        // Sized up front: a GLB with animation or many textures runs to megabytes.
+        let mut out = Vec::with_capacity(glb.total as usize);
+        glb.write(self, &mut out)?;
         Ok(out)
     }
 
@@ -700,44 +765,42 @@ impl<'a> Document<'a> {
         reason = "each chunk is smaller than `total`, which is checked to fit"
     )]
     pub fn write_glb(&self, w: &mut dyn Write) -> Result<()> {
+        self.glb()?.write(self, w)
+    }
+
+    /// The GLB as it will be written: its JSON chunk, and where each buffer goes in its binary
+    /// chunk.
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "the JSON chunk is smaller than `total`, which is checked to fit"
+    )]
+    fn glb(&self) -> Result<Glb> {
         let mut json = self.json.clone();
         // What repair read from files is written from memory rather than read again.
         let (extra, mut kept) = crate::flatten::repaired_keeping(self, &mut json);
         let extra = extra.map(|b| Blob::Bytes(b.into()));
         kept.sort_unstable_by_key(|k| (k.0, k.1));
         let (json, layout, bin_len) = self.glb_json(json, extra.as_ref())?;
-        let mut text = serde_json::to_vec(&Value::Object(json))?;
-        text.resize(text.len().next_multiple_of(4), b' ');
+        let mut head = vec![0; 20];
+        serde_json::to_writer(&mut head, &Value::Object(json))?;
+        head.resize(head.len().next_multiple_of(4), b' ');
+        let text = head.len() - 20;
         let padded = bin_len.map(|n| n.next_multiple_of(4));
-        let total = 12 + 8 + text.len() as u64 + padded.map_or(0, |n| 8 + n);
+        let total = head.len() as u64 + padded.map_or(0, |n| 8 + n);
         let total = u32::try_from(total).map_err(|_| invalid!("GLB would be over 4 GiB"))?;
-        let mut head = Vec::with_capacity(28);
-        head.extend_from_slice(b"glTF");
-        head.extend_from_slice(&2u32.to_le_bytes());
-        head.extend_from_slice(&total.to_le_bytes());
-        head.extend_from_slice(&(text.len() as u32).to_le_bytes());
-        head.extend_from_slice(b"JSON");
-        w.write_all(&head)?;
-        w.write_all(&text)?;
-        if let Some(padded) = padded {
-            w.write_all(&(padded as u32).to_le_bytes())?;
-            w.write_all(b"BIN\0")?;
-            let mut pos = 0;
-            for (i, at, len) in layout {
-                write_zeros(w, at - pos)?;
-                let blob = self
-                    .buffers
-                    .get(i)
-                    .or(extra.as_ref())
-                    .context("glTF buffer is missing")?;
-                let from = kept.partition_point(|k| k.0 < i);
-                let to = kept.partition_point(|k| k.0 <= i);
-                blob.write_keeping(len, w, &kept[from..to])?;
-                pos = at + len;
-            }
-            write_zeros(w, padded - pos)?;
-        }
-        Ok(())
+        head[..4].copy_from_slice(b"glTF");
+        head[4..8].copy_from_slice(&2u32.to_le_bytes());
+        head[8..12].copy_from_slice(&total.to_le_bytes());
+        head[12..16].copy_from_slice(&(text as u32).to_le_bytes());
+        head[16..20].copy_from_slice(b"JSON");
+        Ok(Glb {
+            head,
+            total,
+            padded,
+            layout,
+            extra,
+            kept,
+        })
     }
 
     /// The GLB's JSON (from `json`, the document's, with `extra` its last buffer if given),

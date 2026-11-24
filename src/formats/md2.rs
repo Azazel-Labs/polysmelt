@@ -41,7 +41,7 @@ use crate::Result;
 use crate::assets::Assets;
 use crate::document::{Document, Keep};
 use crate::images::Images;
-use crate::mesh::Material;
+use crate::mesh::{FastMap, Material};
 use crate::num::{f32_of, u32_of};
 
 /// Frames a second: the rate the engine's game logic runs at, as the format stores none.
@@ -280,7 +280,7 @@ fn parse(data: &[u8], morphs: bool) -> Result<Model> {
     }
 
     // A vertex per distinct position and texture coordinate pair, in the order the triangles name them.
-    let mut slot: HashMap<(u16, u16), u32> = HashMap::new();
+    let mut slot: FastMap<(u16, u16), u32> = FastMap::default();
     let mut verts: Vec<(u16, u16)> = Vec::new();
     let mut indices = Vec::with_capacity(tris.len() * 3);
     for (v, s) in &tris {
@@ -329,21 +329,18 @@ fn parse(data: &[u8], morphs: bool) -> Result<Model> {
         if f >= kept {
             continue;
         }
-        for (p, n) in frame_pos.iter_mut().zip(&mut frame_nrm) {
-            let [x, y, z, ni] = b.array::<4>()?;
-            let c = [x, y, z];
+        let packed = b.bytes(n_xyz * 4)?.chunks_exact(4);
+        for ((p, n), c) in frame_pos.iter_mut().zip(&mut frame_nrm).zip(packed) {
             *p = [0, 1, 2].map(|k| f32::from(c[k]) * scale[k] + translate[k]);
             // An index past the table has no normal; the writer gives the vertex its faces'.
-            *n = NORMALS.get(usize::from(ni)).copied().unwrap_or([0.0; 3]);
+            *n = NORMALS.get(usize::from(c[3])).copied().unwrap_or([0.0; 3]);
         }
-        let positions: Vec<[f32; 3]> = verts.iter().map(|&(v, _)| frame_pos[usize::from(v)]).collect();
-        let normals: Vec<[f32; 3]> = verts.iter().map(|&(v, _)| frame_nrm[usize::from(v)]).collect();
         if f == 0 {
-            prim.positions = positions;
-            prim.normals = normals;
+            prim.positions = verts.iter().map(|&(v, _)| frame_pos[usize::from(v)]).collect();
+            prim.normals = verts.iter().map(|&(v, _)| frame_nrm[usize::from(v)]).collect();
             frames.push(None);
         } else {
-            frames.push(target(&mut prim, &positions, &normals));
+            frames.push(target(&mut prim, &verts, &frame_pos, &frame_nrm));
         }
     }
     if n_st > 0 && skin_w > 0 && skin_h > 0 {
@@ -368,29 +365,34 @@ fn parse(data: &[u8], morphs: bool) -> Result<Model> {
     })
 }
 
-/// Adds a frame as a target of `prim` (holding the first frame) and gives its index, or `None` when the frame
-/// doesn't move a vertex: then it's the first frame again, with no target of its own.
-fn target(prim: &mut Primitive, positions: &[[f32; 3]], normals: &[[f32; 3]]) -> Option<usize> {
-    let zero = |d: &[[f32; 3]]| d.iter().flatten().all(|&c| c == 0.0);
-    let positions = minus(positions, &prim.positions);
-    if zero(&positions) {
-        return None;
-    }
-    let normals = minus(normals, &prim.normals);
-    prim.targets.push(Target {
-        positions,
-        // A target needn't carry what it leaves alone.
-        normals: if zero(&normals) { Vec::new() } else { normals },
-    });
+/// Adds a frame (its positions and normals per file vertex, which `verts` name) as a target of `prim` (holding
+/// the first frame) and gives its index, or `None` when the frame doesn't move a vertex: then it's the first frame
+/// again, with no target of its own.
+#[allow(
+    clippy::needless_bitwise_bool,
+    reason = "branchless, so the loop over every vertex vectorizes"
+)]
+fn target(prim: &mut Primitive, verts: &[(u16, u16)], pos: &[[f32; 3]], nrm: &[[f32; 3]]) -> Option<usize> {
+    // Each vertex's offset from the first frame, or `None` when none moves.
+    let offsets = |frame: &[[f32; 3]], first: &[[f32; 3]]| {
+        let mut moved = false;
+        let d: Vec<[f32; 3]> = verts
+            .iter()
+            .zip(first)
+            .map(|(&(v, _), b)| {
+                let a = frame[usize::from(v)];
+                let d = [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+                moved |= (d[0] != 0.0) | (d[1] != 0.0) | (d[2] != 0.0);
+                d
+            })
+            .collect();
+        moved.then_some(d)
+    };
+    let positions = offsets(pos, &prim.positions)?;
+    // A target needn't carry what it leaves alone.
+    let normals = offsets(nrm, &prim.normals).unwrap_or_default();
+    prim.targets.push(Target { positions, normals });
     Some(prim.targets.len() - 1)
-}
-
-/// `a - b`, vector by vector.
-fn minus(a: &[[f32; 3]], b: &[[f32; 3]]) -> Vec<[f32; 3]> {
-    a.iter()
-        .zip(b)
-        .map(|(a, b)| [a[0] - b[0], a[1] - b[1], a[2] - b[2]])
-        .collect()
 }
 
 /// The runs of frames that make each animation: consecutive frames whose names match once trailing digits are

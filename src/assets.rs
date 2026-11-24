@@ -420,15 +420,26 @@ fn walk_files(root: &Path, visit: &mut dyn FnMut(&Path)) {
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
         };
-        let mut entries: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
-        entries.sort();
+        // The listing says what each entry is; only a link needs looking up.
+        let mut entries: Vec<(PathBuf, bool)> = entries
+            .flatten()
+            .map(|e| {
+                let p = e.path();
+                let dir = match e.file_type() {
+                    Ok(t) if !t.is_symlink() => t.is_dir(),
+                    _ => p.is_dir(),
+                };
+                (p, dir)
+            })
+            .collect();
+        entries.sort_unstable();
         let mut dirs = Vec::new();
-        for p in entries {
+        for (p, dir) in entries {
             seen += 1;
             if seen > 20_000 {
                 return;
             }
-            if p.is_dir() {
+            if dir {
                 dirs.push(p);
             } else {
                 visit(&p);

@@ -494,9 +494,9 @@ impl Scene {
             let targets: Vec<Value> = targets
                 .into_iter()
                 .map(|t| {
-                    let mut tj = json!({ "POSITION": sparse_vec3(&mut b, &t.positions, n, true) });
+                    let mut tj = json!({ "POSITION": sparse_vec3(&mut b, t.positions, n, true) });
                     if t.normals.len() == n {
-                        tj["NORMAL"] = json!(sparse_vec3(&mut b, &t.normals, n, false));
+                        tj["NORMAL"] = json!(sparse_vec3(&mut b, t.normals, n, false));
                     }
                     tj
                 })
@@ -945,38 +945,46 @@ fn write_prim(
 
 /// A `VEC3` float accessor of `n` offsets from `v` (missing ones zero): sparse over zeros when few are nonzero.
 /// `bounds` adds `min` and `max`, which glTF requires of position offsets.
-fn sparse_vec3(b: &mut Builder, v: &[[f32; 3]], n: usize, bounds: bool) -> usize {
-    let get = |i: usize| {
-        v.get(i)
-            .copied()
-            .filter(|x| x.iter().all(|c| c.is_finite()))
-            .unwrap_or([0.0; 3])
-    };
-    let nonzero: Vec<u32> = (0..n)
-        .filter(|&i| get(i).iter().any(|&c| c != 0.0))
-        .map(u32_of)
-        .collect();
+#[allow(
+    clippy::needless_bitwise_bool,
+    reason = "branchless, so the loop over every vertex vectorizes"
+)]
+fn sparse_vec3(b: &mut Builder, mut v: Vec<[f32; 3]>, n: usize, bounds: bool) -> usize {
+    // Every value as it's written, in one pass: one past the list, or not finite, is zero.
+    v.resize(n, [0.0; 3]);
     let (mut min, mut max) = ([f32::MAX; 3], [f32::MIN; 3]);
-    let mut see = |x: [f32; 3]| {
-        for k in 0..3 {
-            min[k] = min[k].min(x[k]);
-            max[k] = max[k].max(x[k]);
+    let mut moved = 0;
+    // Without branching per component (`&` and `|`, not `&&` and `||`), so the loop vectorizes.
+    for x in &mut v {
+        if !(x[0].is_finite() & x[1].is_finite() & x[2].is_finite()) {
+            *x = [0.0; 3];
         }
-    };
-    for &i in &nonzero {
-        see(get(i as usize));
+        moved += usize::from((x[0] != 0.0) | (x[1] != 0.0) | (x[2] != 0.0));
+        // Finite by now, so a plain comparison does; zero vectors count, as the bounds take in zero
+        // whenever there's one.
+        for k in 0..3 {
+            min[k] = if x[k] < min[k] { x[k] } else { min[k] };
+            max[k] = if x[k] > max[k] { x[k] } else { max[k] };
+        }
     }
-    if nonzero.len() < n {
-        see([0.0; 3]);
-    }
-    let a = if nonzero.len() * 4 < n {
+    let a = if moved * 4 < n {
+        let mut nonzero: Vec<u32> = Vec::with_capacity(moved.max(1));
+        let mut values: Vec<[f32; 3]> = Vec::with_capacity(moved.max(1));
+        for (i, x) in v.iter().enumerate() {
+            if x.iter().any(|&c| c != 0.0) {
+                nonzero.push(u32_of(i));
+                values.push(*x);
+            }
+        }
         // An accessor with neither a view nor sparse values is all zeros to glTF, but not every reader takes it:
         // a target that moves nothing stores one zero offset.
-        let nonzero = if nonzero.is_empty() { vec![0] } else { nonzero };
-        let values: Vec<f32> = nonzero.iter().flat_map(|&i| get(i as usize)).collect();
+        if nonzero.is_empty() {
+            nonzero.push(0);
+            values.push([0.0; 3]);
+        }
         let count = nonzero.len();
         let iv = b.view(Part::u32(nonzero), None);
-        let vv = b.view(Part::f32(values), None);
+        let vv = b.view(Part::vec3(values), None);
         let a = json!({
             "componentType": 5126,
             "count": n,
@@ -990,8 +998,7 @@ fn sparse_vec3(b: &mut Builder, v: &[[f32; 3]], n: usize, bounds: bool) -> usize
         b.accessors.push(a);
         b.accessors.len() - 1
     } else {
-        let all: Vec<f32> = (0..n).flat_map(get).collect();
-        b.accessor(Part::f32(all), 5126, n, "VEC3", Some(34962))
+        b.accessor(Part::vec3(v), 5126, n, "VEC3", Some(34962))
     };
     if bounds {
         b.accessors[a]["min"] = json!(min);
