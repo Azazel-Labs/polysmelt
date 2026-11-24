@@ -151,6 +151,14 @@ gltf = { version = "1.4", default-features = false, features = ["allow_empty_tex
 name = "meshopt"
 required-features = ["fs"]
 
+[[example]]
+name = "convert"
+required-features = ["fs"]
+
+[[example]]
+name = "inspect"
+required-features = ["fs"]
+
 [lints.rust]
 unsafe_code = "forbid"
 

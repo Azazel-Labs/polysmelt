@@ -49,6 +49,9 @@ fn main() -> polysmelt::Result<()> {
 }
 ```
 
+`cargo run --example convert -- in.fbx out.glb` converts a model, and
+`cargo run --example inspect -- in.fbx` prints what it holds.
+
 ## Status
 
 Early. What exists today:
