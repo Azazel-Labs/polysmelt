@@ -100,10 +100,19 @@ impl Error {
         self.0.format
     }
 
-    /// An error of `kind` that says `message`.
+    /// An error of `kind` that says `message`, for an [`Assets`](crate::assets::Assets)
+    /// source or a [`pack_glb`](crate::gltf::pack_glb) fetch of your own to return.
+    ///
+    /// ```
+    /// use polysmelt::{Error, ErrorKind};
+    ///
+    /// let err = Error::new(ErrorKind::MissingAsset, "tex/wood.png isn't in the pack");
+    /// assert_eq!(err.kind(), ErrorKind::MissingAsset);
+    /// assert_eq!(err.to_string(), "tex/wood.png isn't in the pack");
+    /// ```
     #[cold]
     #[inline(never)]
-    pub(crate) fn new(kind: ErrorKind, message: impl Into<Cow<'static, str>>) -> Self {
+    pub fn new(kind: ErrorKind, message: impl Into<Cow<'static, str>>) -> Self {
         let message = match message.into() {
             Cow::Owned(s) => Cow::Owned(printable(s)),
             m @ Cow::Borrowed(_) => m,
@@ -152,10 +161,11 @@ impl Error {
         Self::new(ErrorKind::MissingAsset, message)
     }
 
-    /// An error of `kind` that says `message`, caused by `source`.
+    /// An error of `kind` that says `message`, caused by `source`, which
+    /// [`source`](std::error::Error::source) returns.
     #[cold]
     #[inline(never)]
-    pub(crate) fn caused(
+    pub fn caused(
         kind: ErrorKind,
         message: impl Into<Cow<'static, str>>,
         source: impl StdError + Send + Sync + 'static,

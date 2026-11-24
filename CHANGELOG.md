@@ -2,6 +2,11 @@
 
 Breaking changes are allowed in minor releases until 1.0.
 
+## 0.17.1
+
+- `Error::new(kind, message)` and `Error::caused(kind, message, source)` are public, so an
+  `Assets` source or a `pack_glb` fetch of your own can return any `ErrorKind`.
+
 ## 0.17.0
 
 This release reshapes the public API ahead of 1.0. Most code needs only the small changes
