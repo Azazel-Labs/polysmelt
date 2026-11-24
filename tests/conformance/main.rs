@@ -759,7 +759,12 @@ fn run(case: &Case) -> Result<(), String> {
             Err(err) if !message(&err).to_lowercase().contains(&want.to_lowercase()) => {
                 Err(format!("failed with {err:?}, expected an error containing {want:?}"))
             }
-            Err(err) if format!("{:?}", err.kind()) != kind => {
+            // Without every default feature, a case can stop at the feature it needs before
+            // it reaches the data the case is about.
+            Err(err)
+                if format!("{:?}", err.kind()) != kind
+                    && (cfg!(feature = "default") || err.kind() != polysmelt::ErrorKind::FeatureDisabled) =>
+            {
                 Err(format!("failed with {err:?}, expected an error of kind {kind}"))
             }
             Err(err) if named == Some(false) => Err(format!(
