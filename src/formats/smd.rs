@@ -20,7 +20,7 @@ use crate::Result;
 use crate::assets::Assets;
 use crate::document::{Document, Keep};
 use crate::images::Images;
-use crate::mesh::Material;
+use crate::mesh::{FastMap, Material};
 use crate::num::{f32_of, u32_of};
 use crate::source::{Axis, Fact, Handedness};
 
@@ -199,12 +199,19 @@ fn settle_frames(mut frames: Vec<Frame>) -> Vec<Frame> {
 fn reference(scene: &mut Scene, ids: &HashMap<i64, usize>, bones: usize, triangles: &[Triangle], name: &str) {
     struct Build {
         prim: Primitive,
-        seen: HashMap<Vec<u32>, u32>,
-        links: Vec<Vec<(u32, f32)>>,
+        /// The first vertex with each position, normal and texture coordinate, by their bits.
+        seen: FastMap<[u32; 8], u32>,
+        /// The next vertex with the same position, normal and texture coordinate as each, differing in its links;
+        /// `u32::MAX` after the last.
+        next: Vec<u32>,
+        /// Each vertex's run of `flat`, its joints and weights.
+        links: Vec<(u32, u32)>,
+        flat: Vec<(u32, f32)>,
     }
     let skinned = bones > 0;
     let mut builds: Vec<Build> = Vec::new();
     let mut prim_of: HashMap<usize, usize> = HashMap::new();
+    let mut links: Vec<(u32, f32)> = Vec::new();
     for t in triangles {
         let b = *prim_of.entry(t.material).or_insert_with(|| {
             builds.push(Build {
@@ -213,32 +220,59 @@ fn reference(scene: &mut Scene, ids: &HashMap<i64, usize>, bones: usize, triangl
                     uvs: vec![Vec::new()],
                     ..Primitive::default()
                 },
-                seen: HashMap::new(),
+                seen: FastMap::default(),
+                next: Vec::new(),
                 links: Vec::new(),
+                flat: Vec::new(),
             });
             builds.len() - 1
         });
         let build = &mut builds[b];
         for v in &t.corners {
-            let links = if skinned { influence(v, ids) } else { Vec::new() };
-            let mut key: Vec<u32> = v
-                .position
-                .iter()
-                .chain(&v.normal)
-                .chain(&v.uv)
-                .map(|c| c.to_bits())
-                .collect();
-            for &(j, w) in &links {
-                key.push(j);
-                key.push(w.to_bits());
+            links.clear();
+            if skinned {
+                influence(v, ids, &mut links);
             }
+            let [x, y, z] = v.position.map(f32::to_bits);
+            let [nx, ny, nz] = v.normal.map(f32::to_bits);
+            let [s, t] = v.uv.map(f32::to_bits);
+            let key = [x, y, z, nx, ny, nz, s, t];
             let next = u32_of(build.prim.positions.len());
-            let index = *build.seen.entry(key).or_insert(next);
+            // A vertex is used again only when its links match bit for bit too.
+            let same = |l: &[(u32, f32)]| {
+                l.len() == links.len()
+                    && l.iter()
+                        .zip(&links)
+                        .all(|(a, b)| a.0 == b.0 && a.1.to_bits() == b.1.to_bits())
+            };
+            let index = match build.seen.get(&key) {
+                None => {
+                    build.seen.insert(key, next);
+                    next
+                }
+                Some(&first) => {
+                    let mut at = first;
+                    loop {
+                        let (start, len) = build.links[at as usize];
+                        if same(&build.flat[start as usize..][..len as usize]) {
+                            break at;
+                        }
+                        let after = build.next[at as usize];
+                        if after == u32::MAX {
+                            build.next[at as usize] = next;
+                            break next;
+                        }
+                        at = after;
+                    }
+                }
+            };
             if index == next {
+                build.next.push(u32::MAX);
                 build.prim.positions.push(v.position);
                 build.prim.normals.push(v.normal);
                 build.prim.uvs[0].push([v.uv[0], 1.0 - v.uv[1]]);
-                build.links.push(links);
+                build.links.push((u32_of(build.flat.len()), u32_of(links.len())));
+                build.flat.extend_from_slice(&links);
             }
             build.prim.indices.push(index);
         }
@@ -246,11 +280,12 @@ fn reference(scene: &mut Scene, ids: &HashMap<i64, usize>, bones: usize, triangl
     let mut prims = Vec::with_capacity(builds.len());
     for mut b in builds {
         if skinned {
-            let width = b.links.iter().map(Vec::len).max().unwrap_or(0).max(1);
+            let width = b.links.iter().map(|l| l.1 as usize).max().unwrap_or(0).max(1);
             b.prim.influences = width;
             b.prim.joints = Vec::with_capacity(width * b.links.len());
             b.prim.weights = Vec::with_capacity(width * b.links.len());
-            for l in &b.links {
+            for &(start, len) in &b.links {
+                let l = &b.flat[start as usize..][..len as usize];
                 for k in 0..width {
                     let (j, w) = l.get(k).copied().unwrap_or((0, 0.0));
                     b.prim.joints.push(j);
@@ -282,8 +317,7 @@ fn reference(scene: &mut Scene, ids: &HashMap<i64, usize>, bones: usize, triangl
 
 /// A vertex's joints and weights: its links to known bones with weight, and its parent bone with whatever weight
 /// they leave; a bone linked twice is one, and at most [`scene::MAX_INFLUENCES`] are kept, the heaviest.
-fn influence(v: &Vertex, ids: &HashMap<i64, usize>) -> Vec<(u32, f32)> {
-    let mut out: Vec<(u32, f32)> = Vec::new();
+fn influence(v: &Vertex, ids: &HashMap<i64, usize>, out: &mut Vec<(u32, f32)>) {
     let mut sum = 0.0f32;
     for &(bone, w) in &v.links {
         if let Some(&j) = ids.get(&bone)
@@ -300,16 +334,15 @@ fn influence(v: &Vertex, ids: &HashMap<i64, usize>) -> Vec<(u32, f32)> {
         out.push((u32_of(p), 1.0 - sum));
     }
     out.sort_by_key(|l| l.0);
-    let mut merged: Vec<(u32, f32)> = Vec::with_capacity(out.len());
-    for (j, w) in out {
-        match merged.last_mut() {
-            Some(last) if last.0 == j => last.1 += w,
-            _ => merged.push((j, w)),
+    out.dedup_by(|later, kept| {
+        let same = later.0 == kept.0;
+        if same {
+            kept.1 += later.1;
         }
-    }
-    merged.sort_by(|a, b| b.1.total_cmp(&a.1));
-    merged.truncate(scene::MAX_INFLUENCES);
-    merged
+        same
+    });
+    out.sort_by(|a, b| b.1.total_cmp(&a.1));
+    out.truncate(scene::MAX_INFLUENCES);
 }
 
 /// The bones' keys, frame by frame from the first frame's time: a bone a frame leaves out holds its last pose.
@@ -466,27 +499,83 @@ fn lines(text: &str) -> Vec<(usize, &str)> {
     out
 }
 
+/// A number as `str::parse` reads it, but faster for the plain decimals files hold.
+fn float(w: &str) -> Option<f32> {
+    super::stream::f32_from(w.as_bytes())
+}
+
+/// A number as `str::parse` reads it, like [`float`].
+fn double(w: &str) -> Option<f64> {
+    super::stream::f64_from(w.as_bytes())
+}
+
+/// A line's words, split where `str::split_whitespace` splits them: an ASCII line (nearly every one) by its bytes.
+enum Words<'a> {
+    Ascii(&'a str),
+    Other(std::str::SplitWhitespace<'a>),
+}
+
+fn words_of(line: &str) -> Words<'_> {
+    if line.is_ascii() {
+        Words::Ascii(line)
+    } else {
+        Words::Other(line.split_whitespace())
+    }
+}
+
+impl<'a> Iterator for Words<'a> {
+    type Item = &'a str;
+
+    #[inline]
+    fn next(&mut self) -> Option<&'a str> {
+        match self {
+            Words::Ascii(rest) => {
+                // The ASCII characters `char::is_whitespace` takes.
+                let space = |c: &u8| matches!(c, b'\t'..=b'\r' | b' ');
+                let b = rest.as_bytes();
+                let Some(start) = b.iter().position(|c| !space(c)) else {
+                    *rest = "";
+                    return None;
+                };
+                let end = b[start..].iter().position(space).map_or(b.len(), |k| start + k);
+                let word = &rest[start..end];
+                *rest = &rest[end..];
+                Some(word)
+            }
+            Words::Other(w) => w.next(),
+        }
+    }
+}
+
 /// A line without the comment that ends it.
 fn code(line: &str) -> &str {
-    line.find("//").map_or(line, |i| line[..i].trim_end())
+    let b = line.as_bytes();
+    let mut from = 0;
+    while let Some(k) = b[from..].iter().position(|&c| c == b'/') {
+        let i = from + k;
+        if b.get(i + 1) == Some(&b'/') {
+            return line[..i].trim_end();
+        }
+        from = i + 1;
+    }
+    line
 }
 
 /// Whether the line ends a section.
 fn is_end(line: &str) -> bool {
-    code(line).eq_ignore_ascii_case("end")
+    // Lines come trimmed: most start with something other than an `e`, which settles it.
+    line.as_bytes().first().is_some_and(|c| c.eq_ignore_ascii_case(&b'e')) && code(line).eq_ignore_ascii_case("end")
 }
 
 /// The finite numbers of `words`, as many as parse in a row.
 fn numbers<'a>(words: impl Iterator<Item = &'a str>) -> Vec<f32> {
-    words
-        .map_while(|w| w.parse::<f32>().ok().filter(|x| x.is_finite()))
-        .collect()
+    words.map_while(|w| float(w).filter(|x| x.is_finite())).collect()
 }
 
 /// An integer, written plainly or as a whole float (`3.000000`).
 fn integer(w: &str) -> Option<i64> {
     w.parse::<i64>().ok().or_else(|| {
-        let f = w.parse::<f64>().ok()?;
+        let f = double(w)?;
         #[allow(clippy::cast_possible_truncation, reason = "checked to be a whole number in range")]
         (f.fract() == 0.0 && f.abs() < 9.0e15).then_some(f as i64)
     })
@@ -499,7 +588,7 @@ fn parse(text: &str, limit: usize) -> Result<Smd> {
     let Some(&(n, first)) = lines.first() else {
         bail!("SMD file is empty");
     };
-    let mut words = code(first).split_whitespace();
+    let mut words = words_of(code(first));
     ensure!(
         words.next().is_some_and(|w| w.eq_ignore_ascii_case("version")),
         "isn't an SMD file: it doesn't start with a version line"
@@ -512,7 +601,7 @@ fn parse(text: &str, limit: usize) -> Result<Smd> {
     while i < lines.len() {
         let (n, line) = lines[i];
         i += 1;
-        let head = code(line).split_whitespace().next().unwrap_or("").to_ascii_lowercase();
+        let head = words_of(code(line)).next().unwrap_or("").to_ascii_lowercase();
         i = match head.as_str() {
             "nodes" => nodes(&lines, i, &mut s)?,
             "skeleton" => skeleton(&lines, i, &mut s)?,
@@ -560,7 +649,7 @@ fn node_line(t: &str) -> Option<(i64, String, i64)> {
         }
         None => rest.split_once(char::is_whitespace)?,
     };
-    let parent = integer(rest.split_whitespace().next()?)?;
+    let parent = integer(words_of(rest).next()?)?;
     Some((id, name.to_owned(), parent))
 }
 
@@ -572,14 +661,10 @@ fn skeleton(lines: &[(usize, &str)], mut i: usize, s: &mut Smd) -> Result<usize>
         if is_end(line) {
             break;
         }
-        let mut words = code(line).split_whitespace();
+        let mut words = words_of(code(line));
         let first = words.next().unwrap_or("");
         if first.eq_ignore_ascii_case("time") {
-            let Some(time) = words
-                .next()
-                .and_then(|w| w.parse::<f64>().ok())
-                .filter(|t| t.is_finite())
-            else {
+            let Some(time) = words.next().and_then(double).filter(|t| t.is_finite()) else {
                 bail!("SMD line {n}: the time isn't a number");
             };
             s.frames.push(Frame {
@@ -612,39 +697,47 @@ fn skeleton(lines: &[(usize, &str)], mut i: usize, s: &mut Smd) -> Result<usize>
 /// The `triangles` section from line `i`: a material line and three vertex lines each. Returns the line after its
 /// end.
 fn triangles(lines: &[(usize, &str)], mut i: usize, s: &mut Smd, limit: usize) -> Result<usize> {
-    let mut by_name: HashMap<String, usize> = s.materials.iter().enumerate().map(|(k, m)| (m.clone(), k)).collect();
+    let mut by_name: FastMap<String, usize> = s.materials.iter().enumerate().map(|(k, m)| (m.clone(), k)).collect();
+    // Triangles run in long stretches of one material.
+    let mut last: Option<(&str, usize)> = None;
     while let Some(&(_, line)) = lines.get(i) {
         i += 1;
         if is_end(line) {
             return Ok(i);
         }
-        let mut corners = Vec::with_capacity(3);
-        while corners.len() < 3 {
+        let mut corners: [Option<Vertex>; 3] = [None, None, None];
+        for c in &mut corners {
             let Some(&(n, v)) = lines.get(i) else { break };
             if is_end(v) {
                 break;
             }
             i += 1;
             match vertex(code(v)) {
-                Some(v) => corners.push(v),
+                Some(v) => *c = Some(v),
                 None => bail!("SMD line {n}: a vertex needs its parent bone, position and normal"),
             }
         }
-        let Ok(corners) = <[Vertex; 3]>::try_from(corners) else {
+        let [Some(a), Some(b), Some(c)] = corners else {
             s.dropped += 1;
             continue;
         };
+        let corners = [a, b, c];
         ensure!(
             s.triangles.len() < limit,
             "too many triangles to convert (more than {limit})"
         );
-        let material = if let Some(&m) = by_name.get(line) {
+        let material = if let Some((name, m)) = last
+            && name == line
+        {
+            m
+        } else if let Some(&m) = by_name.get(line) {
             m
         } else {
             s.materials.push(line.to_owned());
             by_name.insert(line.to_owned(), s.materials.len() - 1);
             s.materials.len() - 1
         };
+        last = Some((line, material));
         s.triangles.push(Triangle { material, corners });
     }
     Ok(i)
@@ -652,16 +745,12 @@ fn triangles(lines: &[(usize, &str)], mut i: usize, s: &mut Smd, limit: usize) -
 
 /// `parent x y z nx ny nz u v [links (bone weight)...]`; the texture coordinates and links are optional.
 fn vertex(t: &str) -> Option<Vertex> {
-    let mut words = t.split_whitespace();
+    let mut words = words_of(t);
     let parent = integer(words.next()?)?;
     let mut f = [0.0f32; 8];
     let mut got = 0;
     for slot in &mut f {
-        match words
-            .next()
-            .and_then(|w| w.parse::<f32>().ok())
-            .filter(|x| x.is_finite())
-        {
+        match words.next().and_then(float).filter(|x| x.is_finite()) {
             Some(x) => {
                 *slot = x;
                 got += 1;
@@ -677,10 +766,7 @@ fn vertex(t: &str) -> Option<Vertex> {
         && let Some(count) = words.next().and_then(integer)
     {
         for _ in 0..count.max(0) {
-            let (Some(b), Some(w)) = (
-                words.next().and_then(integer),
-                words.next().and_then(|w| w.parse::<f32>().ok()),
-            ) else {
+            let (Some(b), Some(w)) = (words.next().and_then(integer), words.next().and_then(float)) else {
                 break;
             };
             links.push((b, w));
@@ -703,14 +789,10 @@ fn vertex_frames(lines: &[(usize, &str)], mut i: usize, s: &mut Smd) -> Result<u
         if is_end(line) {
             break;
         }
-        let mut words = code(line).split_whitespace();
+        let mut words = words_of(code(line));
         let first = words.next().unwrap_or("");
         if first.eq_ignore_ascii_case("time") {
-            let Some(time) = words
-                .next()
-                .and_then(|w| w.parse::<f64>().ok())
-                .filter(|t| t.is_finite())
-            else {
+            let Some(time) = words.next().and_then(double).filter(|t| t.is_finite()) else {
                 bail!("SMD line {n}: the time isn't a number");
             };
             let name = line
@@ -819,14 +901,17 @@ end
     fn links_take_their_weight_and_the_parent_the_rest() {
         let v = vertex("1 0 0 0 0 0 1 0 0 2 0 0.25 1 0.5").unwrap();
         let ids: HashMap<i64, usize> = [(0, 0), (1, 1)].into_iter().collect();
-        let mut l = influence(&v, &ids);
+        let mut l = Vec::new();
+        influence(&v, &ids, &mut l);
         l.sort_by_key(|x| x.0);
         assert_eq!(l.len(), 2);
         assert!((l[0].1 - 0.25).abs() < 1e-6);
         assert!((l[1].1 - 0.75).abs() < 1e-6);
         // A link to a missing bone is dropped; its weight goes to the parent.
         let v = vertex("0 0 0 0 0 0 1 0 0 1 7 0.5").unwrap();
-        assert_eq!(influence(&v, &ids), vec![(0, 1.0)]);
+        l.clear();
+        influence(&v, &ids, &mut l);
+        assert_eq!(l, vec![(0, 1.0)]);
         // A huge count with nothing after it ends with the line.
         let v = vertex("0 0 0 0 0 0 1 0 0 999999999999 1 0.5").unwrap();
         assert_eq!(v.links.len(), 1);

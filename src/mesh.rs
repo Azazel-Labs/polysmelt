@@ -877,6 +877,7 @@ mod triangulate_tests {
     feature = "x3d",
     feature = "dxf",
     feature = "md2",
+    feature = "smd",
     feature = "flt",
     feature = "ogex"
 ))]
@@ -895,6 +896,7 @@ pub(crate) struct FxHasher(u64);
     feature = "x3d",
     feature = "dxf",
     feature = "md2",
+    feature = "smd",
     feature = "flt",
     feature = "ogex"
 ))]
@@ -936,6 +938,7 @@ impl std::hash::Hasher for FxHasher {
     feature = "x3d",
     feature = "dxf",
     feature = "md2",
+    feature = "smd",
     feature = "flt",
     feature = "ogex"
 ))]
