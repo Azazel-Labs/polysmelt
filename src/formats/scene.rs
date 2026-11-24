@@ -21,6 +21,7 @@ use crate::document::{Builder, Document, Keep, Part};
 use crate::images::Source;
 use crate::mesh::Material;
 use crate::num::{f32_of, u32_of};
+use crate::source::SourceInfo;
 
 /// The most influences a vertex keeps: four sets of joints and weights.
 pub(crate) const MAX_INFLUENCES: usize = 16;
@@ -171,8 +172,11 @@ pub(crate) struct Scene {
     pub images: Vec<Source>,
     pub skins: Vec<Skin>,
     pub animations: Vec<Animation>,
-    /// Written as `asset.extras.source`.
+    /// The format's own details, written as `asset.extras.source` with [`Scene::info`].
     pub source: Map<String, Value>,
+    /// What the file says about itself (its units, up axis, author...), written into `asset.extras.source`. What
+    /// [`Scene::scale`], [`Scene::rotate_roots`] and [`Scene::mirror_z`] convert is marked converted.
+    pub info: SourceInfo,
     pub facts: Map<String, Value>,
 }
 
@@ -252,6 +256,7 @@ impl Scene {
     /// Mirrors the scene through the XY plane (Z negated), as a left-handed source needs: vertex data, node
     /// transforms, inverse bind matrices and keys, with every triangle wound the other way so faces keep facing out.
     pub fn mirror_z(&mut self) {
+        self.info.converted.handedness = true;
         let v = |p: &mut [f32; 3]| p[2] = -p[2];
         for m in &mut self.meshes {
             for p in &mut m.prims {
@@ -297,6 +302,9 @@ impl Scene {
 
     /// Scales lengths by `s`: positions, morph offsets, translations, keys and inverse bind matrices.
     pub fn scale(&mut self, s: f32) {
+        if (s - 1.0).abs() > f32::EPSILON {
+            self.info.converted.units = true;
+        }
         let v = |p: &mut [f32; 3]| *p = p.map(|c| c * s);
         for m in &mut self.meshes {
             for p in &mut m.prims {
@@ -329,6 +337,7 @@ impl Scene {
     /// Turns the whole scene by unit quaternion `q`: each root node's transform and keys are turned, and what hangs
     /// from them follows. Skinned vertices follow their joints, so nothing else changes.
     pub fn rotate_roots(&mut self, q: [f32; 4]) {
+        self.info.converted.up_axis = true;
         let parents = self.parents();
         let qd = q.map(f64::from);
         let roots: Vec<bool> = parents.iter().map(Option::is_none).collect();
@@ -716,10 +725,12 @@ impl Scene {
             }
         }
 
-        json.insert(
-            "asset".into(),
-            json!({ "extras": { "source": Value::Object(self.source) } }),
-        );
+        self.info.write(&mut self.source);
+        let mut asset = json!({ "extras": { "source": Value::Object(self.source) } });
+        if let Some(c) = self.info.copyright {
+            asset["copyright"] = json!(c);
+        }
+        json.insert("asset".into(), asset);
         json.insert("scene".into(), json!(0));
         json.insert("scenes".into(), json!([{ "nodes": roots }]));
         if !nodes_json.is_empty() {

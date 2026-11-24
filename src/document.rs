@@ -32,6 +32,7 @@ use crate::images::{Refs, Source};
 use crate::material::{Full, Writer};
 use crate::mesh::{Bone, Image, MAX_POINTS, MAX_TRIANGLES, Material, Mesh, Prim, TRIANGLE_CEILING};
 use crate::num::usize_of;
+use crate::source::{Axis, Fact, Handedness, SourceInfo};
 use crate::{Context as _, Result};
 
 pub use crate::keep::Keep;
@@ -611,6 +612,33 @@ fn list<'v>(obj: &'v Map<String, Value>, key: &str) -> &'v [Value] {
 }
 
 impl<'a> Document<'a> {
+    /// What the file this was read from says about itself: its units, up axis, frame rate, author, tool and
+    /// dates, each declared, assumed or unknown, and what the reader converted (see [`crate::source`]). A glTF
+    /// file read as it is reports glTF's own: meters, +Y up, right-handed, its `generator` and `copyright`.
+    pub fn source_info(&self) -> SourceInfo {
+        let asset = self.json.get("asset");
+        let source = asset
+            .and_then(|a| a.pointer("/extras/source"))
+            .and_then(Value::as_object);
+        let mut info = source.map(SourceInfo::from_json).unwrap_or_default();
+        let field = |k: &str| asset.and_then(|a| a.get(k)).and_then(Value::as_str).map(str::to_owned);
+        if info.copyright.is_none() {
+            info.copyright = field("copyright");
+        }
+        if info.format.is_none() && field("version").is_some_and(|v| v.starts_with('2')) {
+            info.format = Some("glTF".into());
+            info.version = field("version");
+            info.meters_per_unit = Fact::Declared(1.0);
+            info.up_axis = Fact::Declared(Axis::PosY);
+            info.forward_axis = Fact::Declared(Axis::PosZ);
+            info.handedness = Fact::Declared(Handedness::Right);
+            if info.tool.is_none() {
+                info.tool = field("generator");
+            }
+        }
+        info
+    }
+
     /// A document that draws nothing: only the `asset` glTF requires.
     #[must_use]
     pub fn empty(facts: Map<String, Value>) -> Document<'static> {

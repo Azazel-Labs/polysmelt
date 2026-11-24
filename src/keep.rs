@@ -59,8 +59,9 @@ pub struct Keep {
     pub cameras: bool,
     /// Lights (`KHR_lights_punctual`).
     pub lights: bool,
-    /// `extras` everywhere: custom properties and source metadata. The document's facts
-    /// stay either way.
+    /// `extras` everywhere: custom properties and each format's own details. What the file says
+    /// about itself in the keys [`SourceInfo`](crate::source::SourceInfo) reads (units, up axis,
+    /// author...) stays in `asset.extras.source`, and the document's facts stay, either way.
     pub extras: bool,
     /// The most triangles a load accepts, against hostile or runaway files: a model that draws
     /// more is refused (and [`Document::flatten`] refuses to draw more). Defaults to
@@ -362,7 +363,21 @@ impl Document<'_> {
             self.refs.clear();
         }
         if !keep.extras {
+            // What the file says about itself isn't a custom property: its normalized keys stay.
+            let info: Option<Map<String, Value>> = root
+                .pointer("/asset/extras/source")
+                .and_then(Value::as_object)
+                .map(|s| {
+                    s.iter()
+                        .filter(|(k, _)| crate::source::KEYS.contains(&k.as_str()))
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect()
+                })
+                .filter(|m: &Map<String, Value>| !m.is_empty());
             remove_key_everywhere(&mut root, "extras");
+            if let (Some(info), Some(asset)) = (info, root.get_mut("asset").and_then(Value::as_object_mut)) {
+                asset.insert("extras".into(), serde_json::json!({ "source": info }));
+            }
         }
         let Value::Object(json) = &mut root else { unreachable!() };
         if !dead.is_empty() {

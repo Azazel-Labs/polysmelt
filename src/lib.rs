@@ -92,6 +92,7 @@ pub mod mesh;
 pub mod meshopt;
 mod num;
 pub mod rig;
+pub mod source;
 
 #[cfg(any(
     feature = "webp",
