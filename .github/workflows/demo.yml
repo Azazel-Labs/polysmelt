@@ -1,0 +1,69 @@
+name: Demo
+
+# Builds the web demo in demo/ (polysmelt in WebAssembly, drawn with wgpu) and deploys it to GitHub Pages.
+# One-time repository setting: Settings -> Pages -> Build and deployment -> Source: GitHub Actions.
+
+on:
+  push:
+    branches: [main]
+    # Only when something that goes into the page changes.
+    paths: [demo/**, src/**, Cargo.toml, media/social.png, .github/workflows/demo.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # The binaryen release whose wasm-opt shrinks the module.
+  BINARYEN_VERSION: "123"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: demo
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install && rustup target add wasm32-unknown-unknown && rustup component add clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: demo
+      - run: cargo fmt --check
+      - run: cargo clippy --target wasm32-unknown-unknown -- -D warnings
+      - run: cargo test
+      - name: Install wasm-bindgen (the version in Cargo.lock)
+        run: |
+          v=$(cargo pkgid wasm-bindgen | sed 's/.*@//')
+          if [ "$(wasm-bindgen --version 2>/dev/null)" != "wasm-bindgen $v" ]; then
+            cargo install wasm-bindgen-cli --version "$v" --locked
+          fi
+      - name: Install wasm-opt (binaryen)
+        run: |
+          curl -sSfL "https://github.com/WebAssembly/binaryen/releases/download/version_${BINARYEN_VERSION}/binaryen-version_${BINARYEN_VERSION}-x86_64-linux.tar.gz" \
+            | tar -xz -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/binaryen-version_${BINARYEN_VERSION}/bin" >> "$GITHUB_PATH"
+      - run: scripts/build.sh
+      - run: ls -lR dist | head -50
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: demo/dist
+
+  deploy:
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    # One deployment at a time, and a running one is never cancelled halfway.
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

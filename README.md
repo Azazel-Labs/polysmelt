@@ -1,5 +1,9 @@
 # polysmelt
 
+<p align="center"><a href="https://azazel-labs.github.io/polysmelt/"><img src="https://raw.githubusercontent.com/Azazel-Labs/polysmelt/main/media/hero.png" alt="polysmelt: 60+ 3D formats in, clean glTF out" width="100%"></a></p>
+
+<p align="center"><b><a href="https://azazel-labs.github.io/polysmelt/">Live demo</a></b>: drop a model or a folder in your browser to see polysmelt read it, light it, play its animations and hand it back as GLB.</p>
+
 [![crates.io](https://img.shields.io/crates/v/polysmelt.svg)](https://crates.io/crates/polysmelt)
 [![docs.rs](https://img.shields.io/docsrs/polysmelt)](https://docs.rs/polysmelt)
 [![CI](https://github.com/Azazel-Labs/polysmelt/actions/workflows/ci.yml/badge.svg)](https://github.com/Azazel-Labs/polysmelt/actions/workflows/ci.yml)
