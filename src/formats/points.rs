@@ -13,9 +13,9 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 
 use serde_json::{Map, Value, json};
 
-use crate::Result;
 use crate::document::{Builder, Document, Part};
 use crate::source::SourceInfo;
+use crate::{Context as _, ErrorKind, Result};
 
 /// A point cloud on its way to a document. Every array that isn't empty has one entry per
 /// point.
@@ -271,15 +271,16 @@ impl Cloud {
 
 /// Room for `n` more items, or an error where there isn't memory for them.
 pub(crate) fn reserve<T>(v: &mut Vec<T>, n: usize, what: &str) -> Result<()> {
-    v.try_reserve(n)
-        .ok()
-        .ok_or_else(|| crate::Error::InvalidInput(format!("not enough memory for the {what} points")))
+    v.try_reserve(n).with_context(ErrorKind::LimitExceeded, || {
+        format!("not enough memory for the {what} points")
+    })
 }
 
 /// Refuses `n` points when it's more than `max` ([`Keep::max_points`](crate::document::Keep)).
 pub(crate) fn check_count(n: u64, max: usize, what: &str) -> Result<()> {
     ensure!(
         usize::try_from(n).is_ok_and(|n| n <= max),
+        LimitExceeded,
         "{n} points in the {what} file, more than the {max} allowed (Keep::max_points)"
     );
     Ok(())

@@ -121,7 +121,12 @@ impl<'a> Reader<'a> {
     }
 
     fn bytes(&mut self, n: usize) -> Result<&'a [u8]> {
-        ensure!(n <= self.left(), "OGRE file cut short at byte {}", self.at);
+        ensure!(
+            n <= self.left(),
+            Truncated,
+            "OGRE file is cut short at byte {}",
+            self.at
+        );
         let b = &self.data[self.at..self.at + n];
         self.at += n;
         Ok(b)
@@ -202,7 +207,7 @@ impl<'a> Reader<'a> {
     fn expect(&mut self, id: u16, what: &str) -> Result<(usize, usize)> {
         match self.chunk(&[id]) {
             Some((_, start, len)) => Ok((start, len)),
-            None => bail!("OGRE {what} chunk missing at byte {}", self.at),
+            None => bail!(Corrupt, "OGRE {what} chunk missing at byte {}", self.at),
         }
     }
 
@@ -211,6 +216,7 @@ impl<'a> Reader<'a> {
         let end = start.saturating_add(len);
         ensure!(
             len >= HEADER && end <= self.data.len() && end >= self.at,
+            Corrupt,
             "OGRE chunk at byte {start} has a bad length"
         );
         self.at = end;
@@ -222,6 +228,7 @@ impl<'a> Reader<'a> {
         let n = usize_of(u64::from(n));
         ensure!(
             n.checked_mul(size).is_some_and(|b| b <= self.left()),
+            Truncated,
             "OGRE count {n} at byte {} runs past the end of the file",
             self.at
         );
@@ -282,15 +289,18 @@ fn mesh_version(line: &str) -> Result<Version> {
         "[MeshSerializer_v1.8]" => Version::V18,
         "[MeshSerializer_v1.100]" | "[MeshSerializer_v2.1 R0 LEGACYV1]" => Version::V100,
         l if l.starts_with("[MeshSerializer_v2") => {
-            bail!("OGRE mesh {l} is the Ogre-Next v2 layout, which isn't read")
+            bail!(
+                Unsupported,
+                "OGRE mesh {l} is the Ogre-Next v2 layout, which isn't read"
+            )
         }
-        l => bail!("unknown OGRE mesh version {l}"),
+        l => bail!(Unsupported, "unknown OGRE mesh version {l}"),
     })
 }
 
 /// Reads a binary `.mesh`.
 pub(super) fn mesh(data: &[u8]) -> Result<MeshFile> {
-    let (be, line) = header(data).ok_or_else(|| invalid!("not an OGRE mesh"))?;
+    let (be, line) = header(data).ok_or_else(|| err!(UnknownFormat, "not an OGRE mesh"))?;
     let version = mesh_version(&line)?;
     let mut r = Reader { data, at: 2, be };
     r.string();
@@ -554,15 +564,20 @@ fn decode(
     let mut seen: Vec<(u16, u16)> = Vec::new();
     for e in elements {
         let Some((size, comps)) = element_size(e.ty) else {
-            bail!("OGRE vertex element type {} is unknown", e.ty);
+            bail!(Corrupt, "OGRE vertex element type {} is unknown", e.ty);
         };
         let Some(&(_, stride, data)) = buffers.iter().find(|b| b.0 == e.source) else {
-            bail!("OGRE vertex element reads buffer {}, which isn't there", e.source);
+            bail!(
+                Corrupt,
+                "OGRE vertex element reads buffer {}, which isn't there",
+                e.source
+            );
         };
         let offset = usize::from(e.offset);
         ensure!(
             offset + size <= stride,
-            "OGRE vertex element at offset {offset} runs past its {stride}-byte vertex"
+            Corrupt,
+            "OGRE vertex element at offset {offset} runs past the end of its {stride}-byte vertex"
         );
         let wanted = match e.semantic {
             VES_POSITION | VES_NORMAL | VES_TANGENT | VES_BINORMAL | VES_DIFFUSE | VES_SPECULAR => e.index == 0,
@@ -647,7 +662,11 @@ fn old_geometry(r: &mut Reader<'_>, version: Version) -> Result<Geometry> {
             }
             _ => {
                 let dim = usize::from(r.u16()?);
-                ensure!((1..=4).contains(&dim), "OGRE texture coordinates have {dim} dimensions");
+                ensure!(
+                    (1..=4).contains(&dim),
+                    Corrupt,
+                    "OGRE texture coordinates have {dim} dimensions"
+                );
                 r.count(count, 4 * dim)?;
                 let b = r.bytes(n * 4 * dim)?;
                 let be = r.be;
@@ -684,7 +703,7 @@ fn lod(r: &mut Reader<'_>, version: Version, file: &mut MeshFile) -> Result<()> 
     if version == Version::V100 {
         for _ in 1..levels {
             let Some((id, _, _)) = r.chunk(&[M_MESH_LOD_MANUAL, M_MESH_LOD_GENERATED]) else {
-                bail!("OGRE level of detail chunk missing at byte {}", r.at);
+                bail!(Corrupt, "OGRE level of detail chunk missing at byte {}", r.at);
             };
             let usage = r.f32()?;
             let mut manual = None;
@@ -809,7 +828,7 @@ fn animations(r: &mut Reader<'_>, version: Version, file: &mut MeshFile) -> Resu
                         let time = r.f32()?;
                         let normals = version >= Version::V18 && r.bool()?;
                         let Some(n) = vertices else {
-                            bail!("OGRE morph track targets geometry {target}, which isn't there");
+                            bail!(Corrupt, "OGRE morph track targets geometry {target}, which isn't there");
                         };
                         let width = if normals { 24 } else { 12 };
                         let n = r.count(u32::try_from(n).unwrap_or(u32::MAX), width)?;
@@ -839,7 +858,7 @@ fn animations(r: &mut Reader<'_>, version: Version, file: &mut MeshFile) -> Resu
                     }
                     Keys::Pose(keys)
                 }
-                k => bail!("OGRE animation track type {k} is unknown"),
+                k => bail!(Corrupt, "OGRE animation track type {k} is unknown"),
             };
             a.tracks.push(Track { target, keys });
         }
@@ -850,9 +869,10 @@ fn animations(r: &mut Reader<'_>, version: Version, file: &mut MeshFile) -> Resu
 
 /// Reads a binary `.skeleton`.
 pub(super) fn skeleton(data: &[u8]) -> Result<SkeletonFile> {
-    let (be, line) = header(data).ok_or_else(|| invalid!("not an OGRE skeleton"))?;
+    let (be, line) = header(data).ok_or_else(|| err!(UnknownFormat, "not an OGRE skeleton"))?;
     ensure!(
         line.starts_with("[Serializer_v1."),
+        Unsupported,
         "unknown OGRE skeleton version {line}"
     );
     let mut r = Reader { data, at: 2, be };

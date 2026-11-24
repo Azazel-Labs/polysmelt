@@ -29,6 +29,7 @@ fn decode(bytes: &[u8], max: usize) -> Result<Document> {
     let n = splats.len();
     ensure!(
         n <= max,
+        LimitExceeded,
         "{n} gaussian splats, more than the {max} allowed (Keep::max_points)"
     );
     let mut s = Splats::with_capacity(n, 0)?;

@@ -29,6 +29,37 @@
 //! | `georeference` | where a scan or survey sits on Earth: `wkt`, `epsg`, `verticalEpsg`, `origin` and the like |
 //!
 //! Every other key is the format's own detail, kept as the reader found it.
+//!
+//! Reading it, and telling a declared value from an assumed one:
+//!
+//! ```
+//! use polysmelt::source::{Axis, Fact, SourceInfo};
+//!
+//! // What a COLLADA file in centimeters, Z up, leaves in `asset.extras.source`.
+//! let source = serde_json::json!({
+//!     "format": "COLLADA",
+//!     "metersPerUnit": 0.01,
+//!     "unit": "centimeter",
+//!     "upAxis": "+Z",
+//!     "frameRate": 30.0,
+//!     "assumed": ["frameRate"],
+//!     "converted": ["units", "upAxis"],
+//! });
+//! let info = SourceInfo::from_json(source.as_object().unwrap());
+//! assert_eq!(info.format.as_deref(), Some("COLLADA"));
+//! assert_eq!(info.up_axis, Fact::Declared(Axis::PosZ));
+//! match info.frame_rate {
+//!     Fact::Declared(fps) => println!("{fps} frames per second"),
+//!     Fact::Assumed(fps) => println!("probably {fps} frames per second"),
+//!     Fact::Unknown => println!("frame rate unknown"),
+//! }
+//! // Converted to meters on reading: a unit of the geometry is a meter now.
+//! assert!(info.converted.units);
+//! assert_eq!(info.output_meters_per_unit(), Fact::Declared(1.0));
+//! ```
+
+use std::fmt;
+use std::str::FromStr;
 
 use serde_json::{Map, Value, json};
 
@@ -59,7 +90,23 @@ pub const KEYS: [&str; 21] = [
 ];
 
 /// A value as the file gave it: declared, assumed (the format's convention, or a guess), or unknown.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+///
+/// Exhaustive: these three are every case there is, so a `match` on one needs no wildcard arm.
+///
+/// ```
+/// use polysmelt::source::Fact;
+///
+/// let units: Fact<f64> = Fact::Assumed(0.001);
+/// let note = match units {
+///     Fact::Declared(m) => format!("{m} m, as the file says"),
+///     Fact::Assumed(m) => format!("{m} m, by the format's convention"),
+///     Fact::Unknown => "unknown".to_owned(),
+/// };
+/// assert_eq!(note, "0.001 m, by the format's convention");
+/// assert_eq!(units.value(), Some(&0.001));
+/// assert_eq!(units.declared(), None);
+/// ```
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Fact<T> {
     /// The file says so.
     Declared(T),
@@ -106,7 +153,18 @@ impl<T> Fact<T> {
     }
 }
 
-/// A signed axis.
+/// A signed axis. It parses from and displays as `asset.extras.source` writes it:
+///
+/// ```
+/// use polysmelt::source::Axis;
+///
+/// let up: Axis = "+Z".parse().unwrap();
+/// assert_eq!(up, Axis::PosZ);
+/// assert_eq!("-y".parse::<Axis>(), Ok(Axis::NegY));
+/// assert_eq!("Y".parse::<Axis>(), Ok(Axis::PosY));
+/// assert!("Z_UP".parse::<Axis>().is_err());
+/// assert_eq!(up.to_string(), "+Z");
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Axis {
     /// `+X`
@@ -137,26 +195,6 @@ impl Axis {
         }
     }
 
-    /// `"+Y"`, `"-z"` or a bare `"Y"` (positive).
-    #[must_use]
-    pub fn parse(s: &str) -> Option<Axis> {
-        let s = s.trim();
-        let (neg, letter) = match s.as_bytes() {
-            [b'+', c] | [c] => (false, *c),
-            [b'-', c] => (true, *c),
-            _ => return None,
-        };
-        Some(match (letter.to_ascii_uppercase(), neg) {
-            (b'X', false) => Axis::PosX,
-            (b'X', true) => Axis::NegX,
-            (b'Y', false) => Axis::PosY,
-            (b'Y', true) => Axis::NegY,
-            (b'Z', false) => Axis::PosZ,
-            (b'Z', true) => Axis::NegZ,
-            _ => return None,
-        })
-    }
-
     /// The unit vector along it.
     #[must_use]
     pub fn vector(self) -> [f32; 3] {
@@ -171,7 +209,48 @@ impl Axis {
     }
 }
 
-/// Which way a coordinate system turns.
+impl FromStr for Axis {
+    type Err = ParseAxisError;
+
+    /// `"+Y"`, `"-z"` or a bare `"Y"` (positive), around any whitespace.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let (neg, letter) = match s.trim().as_bytes() {
+            [b'+', c] | [c] => (false, *c),
+            [b'-', c] => (true, *c),
+            _ => return Err(ParseAxisError(())),
+        };
+        Ok(match (letter.to_ascii_uppercase(), neg) {
+            (b'X', false) => Axis::PosX,
+            (b'X', true) => Axis::NegX,
+            (b'Y', false) => Axis::PosY,
+            (b'Y', true) => Axis::NegY,
+            (b'Z', false) => Axis::PosZ,
+            (b'Z', true) => Axis::NegZ,
+            _ => return Err(ParseAxisError(())),
+        })
+    }
+}
+
+impl fmt::Display for Axis {
+    /// [`Axis::as_str`]: `+Y`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Text that isn't an [`Axis`]: what parsing one fails with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ParseAxisError(());
+
+impl fmt::Display for ParseAxisError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("not an axis: expected +X, -X, +Y, -Y, +Z or -Z")
+    }
+}
+
+impl std::error::Error for ParseAxisError {}
+
+/// Which way a coordinate system turns. Exhaustive: there are only the two.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Handedness {
     /// glTF's.
@@ -181,7 +260,11 @@ pub enum Handedness {
 }
 
 /// What a reader converted to glTF's conventions (meters, +Y up, right-handed).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+///
+/// Non-exhaustive, so that more conversions can be reported: read its fields, or start from
+/// [`Converted::default`] (nothing converted) and set them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct Converted {
     /// Lengths were scaled from the file's unit to meters.
     pub units: bool,
@@ -191,8 +274,25 @@ pub struct Converted {
     pub handedness: bool,
 }
 
-/// What a model's file says about itself (see the [module](self) docs).
+/// What a model's file says about itself (see the [module](self) docs, which read one).
+///
+/// Non-exhaustive, so that more of what files say can be added: read its fields, or, to write
+/// one with [`SourceInfo::write`], start from [`SourceInfo::default`] (nothing known) and set
+/// them.
+///
+/// ```
+/// use polysmelt::source::{Fact, SourceInfo};
+///
+/// let mut info = SourceInfo::default();
+/// info.tool = Some("my exporter".into());
+/// info.meters_per_unit = Fact::Declared(0.001);
+/// let mut source = serde_json::Map::new();
+/// info.write(&mut source);
+/// assert_eq!(source["metersPerUnit"], 0.001);
+/// assert_eq!(SourceInfo::from_json(&source), info);
+/// ```
 #[derive(Clone, Debug, Default, PartialEq)]
+#[non_exhaustive]
 pub struct SourceInfo {
     /// The format's name: `"FBX"`, `"COLLADA"`, `"Wavefront OBJ"`.
     pub format: Option<String>,
@@ -259,7 +359,7 @@ impl SourceInfo {
             Some(v) => Fact::Declared(v),
             None => Fact::Unknown,
         };
-        let axis = |k: &str| match source.get(k).and_then(Value::as_str).and_then(Axis::parse) {
+        let axis = |k: &str| match source.get(k).and_then(Value::as_str).and_then(|s| s.parse().ok()) {
             Some(a) if assumed.iter().any(|x| x == k) => Fact::Assumed(a),
             Some(a) => Fact::Declared(a),
             None => Fact::Unknown,
@@ -479,10 +579,14 @@ mod tests {
 
     #[test]
     fn axes_read_signed_or_bare() {
-        assert_eq!(Axis::parse("+Y"), Some(Axis::PosY));
-        assert_eq!(Axis::parse("-z"), Some(Axis::NegZ));
-        assert_eq!(Axis::parse("X"), Some(Axis::PosX));
-        assert_eq!(Axis::parse("Z_UP"), None);
+        assert_eq!("+Y".parse(), Ok(Axis::PosY));
+        assert_eq!(" -z ".parse(), Ok(Axis::NegZ));
+        assert_eq!("X".parse(), Ok(Axis::PosX));
+        assert_eq!("Z_UP".parse::<Axis>(), Err(ParseAxisError(())));
+        assert_eq!("".parse::<Axis>(), Err(ParseAxisError(())));
+        for a in [Axis::PosX, Axis::NegX, Axis::PosY, Axis::NegY, Axis::PosZ, Axis::NegZ] {
+            assert_eq!(a.to_string().parse(), Ok(a));
+        }
     }
 
     #[test]

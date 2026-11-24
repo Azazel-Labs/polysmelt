@@ -30,7 +30,7 @@ use crate::material::{Full, Writer};
 use crate::mesh::{Bone, Image, MAX_POINTS, MAX_TRIANGLES, Material, Mesh, Prim, TRIANGLE_CEILING};
 use crate::num::usize_of;
 use crate::source::{Axis, Fact, Handedness, SourceInfo};
-use crate::{Context as _, Result};
+use crate::{Context as _, ErrorKind, Result, Within as _};
 
 pub use crate::keep::Keep;
 
@@ -342,7 +342,7 @@ impl Bin {
                 .buffers
                 .get(i)
                 .or(self.extra.as_ref())
-                .context("glTF buffer is missing")?;
+                .context(ErrorKind::Corrupt, "glTF buffer is missing")?;
             blob.write_to(len, w)?;
             pos = at + len;
         }
@@ -380,7 +380,7 @@ impl Blob {
         let end = off
             .checked_add(len)
             .filter(|&e| e <= self.len())
-            .context("glTF data runs past the end of its buffer")?;
+            .context(ErrorKind::Truncated, "glTF data runs past the end of its buffer")?;
         let shared = match self {
             Blob::Bytes(b) => Some(b.slice(usize_of(off)..usize_of(end))),
             Blob::Parts(p) => p.shared(off, len),
@@ -394,7 +394,7 @@ impl Blob {
         }
         let mut out = Vec::new();
         out.try_reserve_exact(usize_of(len))
-            .map_err(|_| invalid!("glTF data of {len} bytes"))?;
+            .map_err(|_| err!(LimitExceeded, "glTF data of {len} bytes"))?;
         out.resize(usize_of(len), 0);
         self.read_at(off, &mut out)?;
         Ok(out.into())
@@ -405,11 +405,11 @@ impl Blob {
         let end = off
             .checked_add(out.len() as u64)
             .filter(|&e| e <= self.len())
-            .context("glTF data runs past the end of its buffer")?;
+            .context(ErrorKind::Truncated, "glTF data runs past the end of its buffer")?;
         match self {
             Blob::Bytes(b) => out.copy_from_slice(&b[usize_of(off)..usize_of(end)]),
             Blob::Parts(p) => p.read_at(off, out),
-            Blob::Missing(_) => bail!("glTF data is in a meshopt fallback buffer, which holds none"),
+            Blob::Missing(_) => bail!(Corrupt, "glTF data is in a meshopt fallback buffer, which holds none"),
         }
         Ok(())
     }
@@ -418,13 +418,14 @@ impl Blob {
     fn write_to(&self, len: u64, w: &mut dyn Write) -> Result<()> {
         ensure!(
             len <= self.len(),
-            "glTF buffer holds {} bytes but declares {len}",
+            Truncated,
+            "glTF buffer is cut short: it holds {} bytes but declares {len}",
             self.len()
         );
         match self {
             Blob::Bytes(b) => w.write_all(&b[..usize_of(len)])?,
             Blob::Parts(p) => p.write_to(len, w)?,
-            Blob::Missing(_) => bail!("a meshopt fallback buffer has no bytes to write"),
+            Blob::Missing(_) => bail!(Corrupt, "a meshopt fallback buffer has no bytes to write"),
         }
         Ok(())
     }
@@ -559,7 +560,7 @@ impl Document {
         let b = self
             .buffers
             .get(i)
-            .with_context(|| format!("glTF buffers[{i}] doesn't exist"))?;
+            .with_context(ErrorKind::Corrupt, || format!("glTF buffers[{i}] doesn't exist"))?;
         if let Some(s) = b.slice(0, b.len()) {
             return Ok(Cow::Borrowed(s));
         }
@@ -572,16 +573,17 @@ impl Document {
     pub(crate) fn view_shared(&self, i: usize) -> Result<Bytes> {
         let v = list(&self.json, "bufferViews")
             .get(i)
-            .with_context(|| format!("glTF bufferViews[{i}] doesn't exist"))?;
+            .with_context(ErrorKind::Corrupt, || format!("glTF bufferViews[{i}] doesn't exist"))?;
         let num = |k: &str| v.get(k).and_then(Value::as_u64).unwrap_or(0);
         let b = self
             .buffers
             .get(usize_of(num("buffer")))
-            .context("glTF buffer view names a missing buffer")?;
+            .context(ErrorKind::Corrupt, "glTF buffer view names a missing buffer")?;
         let (offset, len) = (num("byteOffset"), num("byteLength"));
         ensure!(
             offset.saturating_add(len) <= b.len(),
-            "glTF buffer view runs past its buffer"
+            Truncated,
+            "glTF buffer view runs past the end of its buffer"
         );
         b.shared(offset, len)
     }
@@ -683,11 +685,11 @@ impl Document {
     fn glb(&self) -> Result<Glb> {
         let (json, bin) = self.packed()?;
         let mut head = vec![0; 20];
-        serde_json::to_writer(&mut head, &Value::Object(json))?;
+        serde_json::to_writer(&mut head, &Value::Object(json)).context(ErrorKind::Invalid, "writing the glTF JSON")?;
         head.resize(head.len().next_multiple_of(4), b' ');
         let text = head.len() - 20;
         let total = head.len() as u64 + bin.padded.map_or(0, |n| 8 + n);
-        let total = u32::try_from(total).map_err(|_| invalid!("GLB would be over 4 GiB"))?;
+        let total = u32::try_from(total).map_err(|_| err!(LimitExceeded, "GLB would be over 4 GiB"))?;
         head[..4].copy_from_slice(b"glTF");
         head[4..8].copy_from_slice(&2u32.to_le_bytes());
         head[8..12].copy_from_slice(&total.to_le_bytes());
@@ -719,6 +721,7 @@ impl Document {
         let held = self.buffers.len() + usize::from(extra.is_some());
         ensure!(
             buffers.len() == held,
+            Corrupt,
             "glTF document lists {} buffers but holds {held}",
             buffers.len(),
         );
@@ -739,7 +742,8 @@ impl Document {
             }
             ensure!(
                 blob.len() >= declared,
-                "glTF buffer {i} holds {} bytes but declares {declared}",
+                Truncated,
+                "glTF buffer {i} is cut short: it holds {} bytes but declares {declared}",
                 blob.len()
             );
             bin_len = bin_len.next_multiple_of(4);
@@ -752,17 +756,20 @@ impl Document {
         for (i, v) in views.into_iter().flatten().enumerate() {
             let v = v
                 .as_object_mut()
-                .with_context(|| format!("glTF buffer view {i} is not an object"))?;
-            let (vb, _) = container::rehome(v, &home).with_context(|| format!("glTF buffer view {i}"))?;
+                .with_context(ErrorKind::Corrupt, || format!("glTF buffer view {i} is not an object"))?;
+            let (vb, _) = container::rehome(v, &home).with_within(|| format!("glTF buffer view {i}"))?;
             let exts = v.get_mut("extensions").and_then(Value::as_object_mut);
             for (name, ext) in exts.into_iter().flatten() {
                 if !container::MESHOPT_EXTENSIONS.contains(&name.as_str()) {
                     continue;
                 }
-                let ext = ext.as_object_mut().context("bad meshopt extension")?;
-                let (b, _) = container::rehome(ext, &home).with_context(|| format!("glTF buffer view {i}"))?;
+                let ext = ext
+                    .as_object_mut()
+                    .context(ErrorKind::Corrupt, "bad meshopt extension")?;
+                let (b, _) = container::rehome(ext, &home).with_within(|| format!("glTF buffer view {i}"))?;
                 ensure!(
                     b == 0,
+                    Corrupt,
                     "glTF buffer view {i}: its compressed data is in a missing buffer"
                 );
                 if vb != 0 {
@@ -798,7 +805,7 @@ impl Document {
         let (skinned, rigid): (Vec<Prim>, Vec<Prim>) = if skeleton.is_empty() {
             (Vec::new(), prims)
         } else {
-            prims.into_iter().partition(Prim::skinned)
+            prims.into_iter().partition(Prim::is_skinned)
         };
         let mut meshes = vec![(None, rigid)];
         if !skinned.is_empty() {
@@ -821,12 +828,15 @@ impl Document {
     ) -> Document {
         let materials = texcoords(&mut meshes, materials);
         let mut b = Builder::default();
-        let rig = (!skeleton.is_empty() && meshes.iter().any(|(_, p)| !p.is_empty() && p.iter().all(Prim::skinned)))
-            .then(|| Rigging::new(skeleton, meshes.iter().flat_map(|(_, p)| p)));
+        let rig = (!skeleton.is_empty()
+            && meshes
+                .iter()
+                .any(|(_, p)| !p.is_empty() && p.iter().all(Prim::is_skinned)))
+        .then(|| Rigging::new(skeleton, meshes.iter().flat_map(|(_, p)| p)));
         let (mut nodes, mut out) = (Vec::new(), Vec::new());
         let mut skinned_node = None;
         for (name, prims) in meshes {
-            let skinned = !prims.is_empty() && prims.iter().all(Prim::skinned);
+            let skinned = !prims.is_empty() && prims.iter().all(Prim::is_skinned);
             b.joints = rig.as_ref().filter(|_| skinned).map(|r| (r.offset, r.joints.len()));
             let Some(mut mesh) = b.mesh(prims, materials.len()) else {
                 continue;
@@ -943,7 +953,7 @@ impl<'s> Rigging<'s> {
         use crate::flatten::{IDENTITY, affine_inverse, decompose, mul, trs};
         let roots = skeleton.iter().filter(|b| b.parent.is_none()).count();
         let unbound = || {
-            prims.filter(|p| p.skinned()).any(|p| {
+            prims.filter(|p| p.is_skinned()).any(|p| {
                 p.skin_weights
                     .iter()
                     .any(|w| w.iter().sum::<f32>().partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater))

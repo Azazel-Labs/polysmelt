@@ -7,7 +7,7 @@ use serde_json::{Map, Value, json};
 use super::{Reader, index, items, list};
 use crate::document::Document;
 use crate::gltf::MESHOPT_EXTENSIONS;
-use crate::{Context as _, Result};
+use crate::{Context as _, ErrorKind, Result};
 
 const DRACO: &str = "KHR_draco_mesh_compression";
 const QUANTIZATION: &str = "KHR_mesh_quantization";
@@ -109,7 +109,7 @@ fn read(doc: &Document) -> Result<Plan> {
             continue;
         };
         let attrs = p.get("attributes").cloned().unwrap_or(Value::Null);
-        let view = index(ext, "bufferView").context("glTF Draco primitive has no bufferView")?;
+        let view = index(ext, "bufferView").context(ErrorKind::Corrupt, "glTF Draco primitive has no bufferView")?;
         #[cfg(feature = "draco")]
         {
             r.draco.clear();
@@ -117,7 +117,7 @@ fn read(doc: &Document) -> Result<Plan> {
             for (acc, bytes, _, n) in std::mem::take(&mut r.draco) {
                 match source.insert(acc, view) {
                     Some(v) if v != view => {
-                        bail!("glTF accessor {acc} is decoded from two Draco streams")
+                        bail!(Corrupt, "glTF accessor {acc} is decoded from two Draco streams")
                     }
                     Some(_) => continue,
                     None => {}
@@ -141,6 +141,7 @@ fn read(doc: &Document) -> Result<Plan> {
             for a in accs {
                 ensure!(
                     r.acc(a)?.view.is_some(),
+                    FeatureDisabled,
                     "glTF uses Draco compression, which needs Polysmelt's `draco` feature"
                 );
             }

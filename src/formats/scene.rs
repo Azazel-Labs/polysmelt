@@ -383,7 +383,11 @@ impl Scene {
     pub fn finish(mut self, keep: Keep) -> Result<Document> {
         let limit = keep.triangles();
         let tris = self.triangles();
-        ensure!(tris <= limit, "too many triangles to convert (more than {limit})");
+        ensure!(
+            tris <= limit,
+            LimitExceeded,
+            "too many triangles to convert (more than {limit})"
+        );
         let parents = self.parents();
         let mut b = Builder::default();
         let mut json = Map::new();
@@ -1480,7 +1484,7 @@ impl<'a> Bin<'a> {
                 self.at = end;
                 Ok(s)
             }
-            None => bail!("{} file is cut short", self.what),
+            None => bail!(Truncated, "{} file is cut short", self.what),
         }
     }
 
@@ -1490,7 +1494,12 @@ impl<'a> Bin<'a> {
 
     /// Moves to `off` from the start.
     pub fn seek(&mut self, off: usize) -> Result<()> {
-        ensure!(off <= self.data.len(), "{} file points past its end", self.what);
+        ensure!(
+            off <= self.data.len(),
+            Truncated,
+            "{} file has an offset that runs past the end of the file",
+            self.what
+        );
         self.at = off;
         Ok(())
     }
@@ -1551,7 +1560,11 @@ impl<'a> Bin<'a> {
         let n = usize::try_from(n).unwrap_or(usize::MAX);
         match n.checked_mul(size.max(1)) {
             Some(b) if b <= self.left() => Ok(n),
-            _ => bail!("{} file claims {n} items, more than it holds", self.what),
+            _ => bail!(
+                Truncated,
+                "{} file is cut short: it claims {n} items, more than it holds",
+                self.what
+            ),
         }
     }
 

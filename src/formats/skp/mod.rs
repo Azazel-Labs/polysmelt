@@ -33,7 +33,7 @@ use super::Input;
 use crate::assets::Memory;
 use crate::document::{Document, Keep};
 use crate::source::{Axis, Converted, Fact, Handedness, SourceInfo};
-use crate::{Context, Result};
+use crate::{Result, Within as _};
 
 /// Reads the `SketchUp` model `input`, with what it holds in a glTF document.
 pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document> {
@@ -91,19 +91,22 @@ fn is_skp(bytes: &[u8]) -> bool {
 /// are damaged.
 fn convert(bytes: &[u8], limit: usize) -> Result<(Option<Vec<u8>>, u32)> {
     if !is_skp(bytes) {
-        bail!("not a SketchUp file");
+        bail!(UnknownFormat, "not a SketchUp file");
     }
     let Some(major) = major_version(bytes) else {
-        bail!("SketchUp file has no version in its header")
+        bail!(Corrupt, "SketchUp file has no version in its header")
     };
     let reading = || format!("reading a SketchUp {} file", version_name(major));
     let model = if major <= LAST_LEGACY {
         if major < 3 {
-            bail!("SketchUp {major} files are not supported (SketchUp 3 is the oldest this reader knows)");
+            bail!(
+                Unsupported,
+                "SketchUp {major} files are not supported (SketchUp 3 is the oldest this reader knows)"
+            );
         }
-        legacy::parse(bytes, major).with_context(reading)?
+        legacy::parse(bytes, major).with_within(reading)?
     } else {
-        vff::parse(bytes).with_context(reading)?
+        vff::parse(bytes).with_within(reading)?
     };
     Ok((glb::write(&model, limit)?, major))
 }

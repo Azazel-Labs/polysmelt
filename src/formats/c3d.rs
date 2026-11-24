@@ -319,16 +319,18 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document> {
     let b: &[u8] = &bytes;
     ensure!(
         b.len() >= 2 && b[1] == 0x50,
+        UnknownFormat,
         "not a C3D file: its second byte isn't 0x50"
     );
     ensure!(
         b[0] >= 2,
+        Corrupt,
         "C3D header points at parameter block {}, not one past the header",
         b[0]
     );
     let param_start = (usize::from(b[0]) - 1) * BLOCK;
     let Some(&proc_byte) = b.get(param_start + 3) else {
-        bail!("C3D file is cut short: its parameters are missing");
+        bail!(Truncated, "C3D file is cut short: its parameters are missing");
     };
     let p = match proc_byte {
         84 => Some(Processor::Intel),
@@ -364,7 +366,7 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document> {
         0 => params.count("POINT:DATA_START").unwrap_or(0),
         n => usize::from(n),
     };
-    ensure!(start_block > 0, "C3D file doesn't say where its data starts");
+    ensure!(start_block > 0, Corrupt, "C3D file doesn't say where its data starts");
     let data_start = (start_block - 1).saturating_mul(BLOCK);
     let rate_given = float(11)
         .filter(|r| *r > 0.0)
@@ -488,7 +490,7 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document> {
         (_, None) => Fact::Unknown,
     };
     info.unit = Some(units.clone().unwrap_or_else(|| "mm".into()));
-    info.up_axis = match y_screen.as_deref().and_then(Axis::parse) {
+    info.up_axis = match y_screen.as_deref().and_then(|s| s.parse().ok()) {
         Some(up) if screen.is_some() => Fact::Declared(up),
         _ => Fact::Assumed(Axis::PosZ),
     };

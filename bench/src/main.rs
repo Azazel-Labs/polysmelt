@@ -242,7 +242,7 @@ fn write_glb(t: &Torus, path: &Path) -> std::io::Result<()> {
         images: Vec::new(),
         skeleton: Vec::new(),
     };
-    std::fs::write(path, polysmelt::mesh::to_glb(&mesh).map_err(std::io::Error::other)?)
+    std::fs::write(path, mesh.to_glb().map_err(std::io::Error::other)?)
 }
 
 /// The torus skinned to a ring of 32 bones, each vertex weighted between the two nearest: what
@@ -284,7 +284,7 @@ fn write_glb_skinned(t: &Torus, path: &Path) -> std::io::Result<()> {
         images: Vec::new(),
         skeleton,
     };
-    std::fs::write(path, polysmelt::mesh::to_glb(&mesh).map_err(std::io::Error::other)?)
+    std::fs::write(path, mesh.to_glb().map_err(std::io::Error::other)?)
 }
 
 struct Input {

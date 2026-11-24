@@ -866,7 +866,7 @@ impl Renderer {
                 buffer("colors", bytemuck::cast_slice(&colors), vertex),
             ];
             if self.scene.skinned {
-                let (joints, weights) = if p.skinned() {
+                let (joints, weights) = if p.is_skinned() {
                     (p.skin_joints.clone(), p.skin_weights.clone())
                 } else {
                     (vec![[0; 4]; n], vec![[0.0; 4]; n])

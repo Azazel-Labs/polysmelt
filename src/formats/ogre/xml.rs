@@ -51,6 +51,7 @@ pub(super) fn mesh(doc: &Xml<'_>) -> Result<MeshFile> {
     let root = doc.root();
     ensure!(
         root.name() == "mesh",
+        UnknownFormat,
         "not an OGRE mesh: its XML is a <{}>",
         root.name()
     );
@@ -210,7 +211,11 @@ fn mesh_animation(a: El<'_, '_>, file: &MeshFile) -> Result<MeshAnimation> {
                     })
                     .collect(),
             ),
-            other => bail!("OGRE animation track type {:?} is unknown", other.unwrap_or("")),
+            other => bail!(
+                Corrupt,
+                "OGRE animation track type {:?} is unknown",
+                other.unwrap_or("")
+            ),
         };
         out.tracks.push(Track { target, keys });
     }
@@ -406,6 +411,7 @@ pub(super) fn skeleton(doc: &Xml<'_>) -> Result<SkeletonFile> {
     let root = doc.root();
     ensure!(
         root.name() == "skeleton",
+        UnknownFormat,
         "not an OGRE skeleton: its XML is a <{}>",
         root.name()
     );

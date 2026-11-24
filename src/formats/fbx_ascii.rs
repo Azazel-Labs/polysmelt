@@ -6,7 +6,7 @@
 
 use std::borrow::Cow;
 
-use crate::{Context as _, Result};
+use crate::{Context as _, ErrorKind, Result};
 use base64::Engine as _;
 
 #[cfg(test)]
@@ -47,6 +47,7 @@ pub(super) fn parse(data: &[u8]) -> Result<Tree<'_>> {
     if let Some((Some(major), _)) = stated {
         ensure!(
             major >= 7,
+            Unsupported,
             "this is FBX {major}, older than FBX 7, which this reader and Blender cannot read"
         );
     }
@@ -64,7 +65,7 @@ pub(super) fn parse(data: &[u8]) -> Result<Tree<'_>> {
         match lex.next()? {
             None => {
                 if let Some(name) = names.last() {
-                    bail!("the file ends inside {name}");
+                    bail!(Truncated, "the file is cut short inside {name}");
                 }
                 break;
             }
@@ -82,8 +83,8 @@ pub(super) fn parse(data: &[u8]) -> Result<Tree<'_>> {
                     names.push(name);
                 }
             }
-            Some(t) if !names.is_empty() => bail!("line {}: expected a node, found {}", lex.line, t.what()),
-            Some(_) => bail!("line {}: expected a node name", lex.line),
+            Some(t) if !names.is_empty() => bail!(Corrupt, "line {}: expected a node, found {}", lex.line, t.what()),
+            Some(_) => bail!(Corrupt, "line {}: expected a node name", lex.line),
         }
     }
     debug_assert_eq!(b.depth(), 0);
@@ -219,7 +220,8 @@ impl<'a> Lexer<'a> {
             }
             b'"' => {
                 let body = start + 1;
-                let end = memchr(b'"', &b[body..]).with_context(|| format!("line {}: unclosed string", self.line))?;
+                let end = memchr(b'"', &b[body..])
+                    .with_context(ErrorKind::Corrupt, || format!("line {}: unclosed string", self.line))?;
                 let s = &b[body..body + end];
                 self.line += s.split(|&c| c == b'\n').count() - 1;
                 self.i = body + end + 1;
@@ -249,7 +251,7 @@ impl<'a> Lexer<'a> {
                     .chars()
                     .next()
                     .unwrap_or('?');
-                bail!("line {}: unexpected {c:?}", self.line)
+                bail!(Corrupt, "line {}: unexpected {c:?}", self.line)
             }
         }))
     }
@@ -266,7 +268,7 @@ impl<'a> Lexer<'a> {
         };
         loop {
             if !self.skip_space() {
-                bail!("line {}: unexpected value in an array", self.line);
+                bail!(Corrupt, "line {}: unexpected value in an array", self.line);
             }
             match self.src[self.i] {
                 b',' => self.i += 1,
@@ -278,7 +280,7 @@ impl<'a> Lexer<'a> {
                     let n = number(self.number());
                     out.push(n);
                 }
-                _ => bail!("line {}: unexpected value in an array", self.line),
+                _ => bail!(Corrupt, "line {}: unexpected value in an array", self.line),
             }
         }
     }
@@ -387,7 +389,7 @@ fn values<'a>(lex: &mut Lexer<'a>, name: &str, vals: &mut Vec<Val<'a>>) -> Resul
             }
             Some(_) => {}
         }
-        match lex.next()?.context("unreachable")? {
+        match lex.next()?.context(ErrorKind::Corrupt, "unreachable")? {
             Tok::Comma => {}
             Tok::Num(s) => vals.push(Val::Num(number(s))),
             Tok::Str(s) if name == "Content" => vals.push(Val::Raw(s)),
@@ -401,15 +403,17 @@ fn values<'a>(lex: &mut Lexer<'a>, name: &str, vals: &mut Vec<Val<'a>>) -> Resul
                 // `*N { a: v,v,… }`
                 let n = match lex.next()? {
                     Some(Tok::Num(n)) => n.parse::<usize>().unwrap_or(0),
-                    _ => bail!("line {}: expected an array length", lex.line),
+                    _ => bail!(Corrupt, "line {}: expected an array length", lex.line),
                 };
                 ensure!(
                     matches!(lex.next()?, Some(Tok::Open)),
+                    Corrupt,
                     "line {}: expected an array",
                     lex.line
                 );
                 ensure!(
                     matches!(lex.next()?, Some(Tok::Name("a"))),
+                    Corrupt,
                     "line {}: expected an array's values",
                     lex.line
                 );
@@ -417,13 +421,14 @@ fn values<'a>(lex: &mut Lexer<'a>, name: &str, vals: &mut Vec<Val<'a>>) -> Resul
                 // Some exporters write `2,5` for 2.5, which can't be told from two numbers.
                 ensure!(
                     arr.len() == n,
+                    Corrupt,
                     "line {}: an array of {n} values holds {} (numbers written with decimal commas?)",
                     lex.line,
                     arr.len()
                 );
                 vals.push(Val::Arr(arr));
             }
-            Tok::Name(_) | Tok::Open | Tok::Close => bail!("line {}: unexpected token", lex.line),
+            Tok::Name(_) | Tok::Open | Tok::Close => bail!(Corrupt, "line {}: unexpected token", lex.line),
         }
     }
 }
@@ -553,7 +558,7 @@ fn write(tree: &Tree<'_>) -> Result<Vec<u8>> {
     out.extend_from_slice(BINARY_MAGIC);
     out.extend_from_slice(&[0x1a, 0]);
     out.extend_from_slice(&7400u32.to_le_bytes());
-    let offset = |n: usize| u32::try_from(n).map_err(|_| invalid!("too big for binary FBX 7.4"));
+    let offset = |n: usize| u32::try_from(n).map_err(|_| err!(LimitExceeded, "too big for binary FBX 7.4"));
     let mut open = vec![Open {
         header: 0,
         next: tree.root().first_child(),
@@ -582,7 +587,8 @@ fn write(tree: &Tree<'_>) -> Result<Vec<u8>> {
         top.next = node.next_sibling();
         let header = out.len();
         let name = node.name().as_bytes();
-        let name_len = u8::try_from(name.len()).map_err(|_| invalid!("a node name is too long for binary FBX"))?;
+        let name_len =
+            u8::try_from(name.len()).map_err(|_| err!(LimitExceeded, "a node name is too long for binary FBX"))?;
         out.extend_from_slice(&[0; 12]);
         out.push(name_len);
         out.extend_from_slice(name);
@@ -621,9 +627,9 @@ fn write(tree: &Tree<'_>) -> Result<Vec<u8>> {
 #[cfg(test)]
 fn attribute(out: &mut Vec<u8>, a: &Attr<'_>) -> Result<()> {
     fn array<T: Elem>(out: &mut Vec<u8>, kind: u8, a: &Array<'_, T>) -> Result<()> {
-        let v = a.to_vec().context("an array that can't be read")?;
+        let v = a.to_vec().context(ErrorKind::Corrupt, "an array that can't be read")?;
         let bytes: &[u8] = bytemuck::cast_slice(&v);
-        let len = |n: usize| u32::try_from(n).map_err(|_| invalid!("an array too big for binary FBX"));
+        let len = |n: usize| u32::try_from(n).map_err(|_| err!(LimitExceeded, "an array too big for binary FBX"));
         out.push(kind);
         out.extend_from_slice(&len(v.len())?.to_le_bytes());
         out.extend_from_slice(&0u32.to_le_bytes());
@@ -641,7 +647,7 @@ fn attribute(out: &mut Vec<u8>, a: &Attr<'_>) -> Result<()> {
         out.push(kind);
         out.extend_from_slice(
             &u32::try_from(b.len())
-                .map_err(|_| invalid!("too big for binary FBX"))?
+                .map_err(|_| err!(LimitExceeded, "too big for binary FBX"))?
                 .to_le_bytes(),
         );
         out.extend_from_slice(b);

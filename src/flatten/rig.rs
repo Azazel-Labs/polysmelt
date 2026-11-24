@@ -8,8 +8,8 @@ use serde_json::Value;
 use super::{Reader, floats, index, items, list, list_of};
 use crate::document::Document;
 use crate::num::f32_of;
-use crate::rig::{Animation, Channel, Interpolation, Node, Path, Rig, Skin, Trs};
-use crate::{Context as _, Result};
+use crate::rig::{Animation, Channel, Interpolation, Node, Property, Rig, Skin, Trs};
+use crate::{Context as _, ErrorKind, Result};
 
 impl Document {
     /// The document's nodes, skins and animations, accessors read. A document loaded with a
@@ -48,13 +48,14 @@ impl Document {
         for (k, s) in list(json, "skins").iter().enumerate() {
             let joints = list_of(s, "joints");
             if let Some(&j) = joints.iter().find(|&&j| j >= nodes.len()) {
-                bail!("glTF skin {k} names node {j}, which doesn't exist");
+                bail!(Corrupt, "glTF skin {k} names node {j}, which doesn't exist");
             }
             let inverse_bind = match index(s, "inverseBindMatrices") {
                 Some(a) => {
                     let m = r.read::<16>(a, IDENTITY)?;
                     ensure!(
                         m.len() >= joints.len(),
+                        Corrupt,
                         "glTF skin {k} has {} inverse bind matrices for {} joints",
                         m.len(),
                         joints.len()
@@ -83,22 +84,25 @@ impl Document {
                     // A channel for another extension's target, or none.
                     continue;
                 };
-                let path = match path {
-                    "translation" => Path::Translation,
-                    "rotation" => Path::Rotation,
-                    "scale" => Path::Scale,
-                    "weights" => Path::Weights,
+                let property = match path {
+                    "translation" => Property::Translation,
+                    "rotation" => Property::Rotation,
+                    "scale" => Property::Scale,
+                    "weights" => Property::Weights,
                     _ => continue,
                 };
                 ensure!(
                     node < nodes.len(),
+                    Corrupt,
                     "glTF animation {k} animates node {node}, which doesn't exist"
                 );
                 let s = index(ch, "sampler")
                     .and_then(|s| samplers.get(s))
-                    .with_context(|| format!("glTF animation {k}: a channel names a missing sampler"))?;
+                    .with_context(ErrorKind::Corrupt, || {
+                        format!("glTF animation {k}: a channel names a missing sampler")
+                    })?;
                 let (Some(input), Some(output)) = (index(s, "input"), index(s, "output")) else {
-                    bail!("glTF animation {k}: a sampler has no input or output");
+                    bail!(Corrupt, "glTF animation {k}: a sampler has no input or output");
                 };
                 let interpolation = match s.get("interpolation").and_then(Value::as_str).unwrap_or("LINEAR") {
                     "STEP" => Interpolation::Step,
@@ -109,14 +113,14 @@ impl Document {
                     Entry::Occupied(t) => t.get().clone(),
                     Entry::Vacant(v) => v.insert(r.read::<1>(input, [0.0])?.into_flattened()).clone(),
                 };
-                let values = match path {
-                    Path::Translation | Path::Scale => r.read::<3>(output, [0.0; 3])?.into_flattened(),
-                    Path::Rotation => r.read::<4>(output, [0.0, 0.0, 0.0, 1.0])?.into_flattened(),
-                    Path::Weights => r.read::<1>(output, [0.0])?.into_flattened(),
+                let values = match property {
+                    Property::Translation | Property::Scale => r.read::<3>(output, [0.0; 3])?.into_flattened(),
+                    Property::Rotation => r.read::<4>(output, [0.0, 0.0, 0.0, 1.0])?.into_flattened(),
+                    Property::Weights => r.read::<1>(output, [0.0])?.into_flattened(),
                 };
                 channels.push(Channel {
                     node,
-                    path,
+                    property,
                     interpolation,
                     times,
                     values,

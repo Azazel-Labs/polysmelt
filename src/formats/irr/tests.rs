@@ -190,7 +190,7 @@ fn reads_a_scene() {
     // The box: at the root's (0,0,10) turned 90° about Y, so its (5,0,0) is at (0,0,5) in Irrlicht's left-handed
     // space; mirrored, (0,0,-5).
     let world = doc.flatten(Pose::Rest).unwrap().unwrap();
-    assert!(!world.prims.is_empty());
+    assert_ne!(world.prims.len(), 0);
     let b = names("box");
     let r = names("root");
     assert_eq!(j["nodes"][r]["children"][0], b);

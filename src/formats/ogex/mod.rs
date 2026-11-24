@@ -509,6 +509,7 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
     // A file of nodes alone (a skeleton, or empty groups) is a scene still; one with nothing is not.
     ensure!(
         !c.meshes.is_empty() || !c.lights.is_empty() || !c.cameras.is_empty() || scene,
+        Empty,
         "this OpenGEX file has no geometry"
     );
     Ok(finish(c))

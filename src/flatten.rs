@@ -51,7 +51,7 @@ use crate::mesh::{
     Texture, UvTransform, Volume,
 };
 use crate::num::{f32_of, u32_of, usize_of};
-use crate::{Context as _, Result};
+use crate::{Context as _, ErrorKind, Result, Within as _};
 
 /// How much of a buffer is read at once.
 const BLOCK: usize = 256 * 1024;
@@ -356,7 +356,12 @@ fn scene_order(json: &Map<String, Value>) -> Result<Option<Vec<usize>>> {
         (0..nodes.len()).filter(|&i| !child[i]).collect()
     } else {
         let s = json.get("scene").and_then(Value::as_u64).map_or(0, usize_of);
-        list_of(scenes.get(s).context("glTF default scene doesn't exist")?, "nodes")
+        list_of(
+            scenes
+                .get(s)
+                .context(ErrorKind::Corrupt, "glTF default scene doesn't exist")?,
+            "nodes",
+        )
     };
     let mut seen = vec![false; nodes.len()];
     let mut order = Vec::new();
@@ -595,6 +600,7 @@ impl<'d> Reader<'d> {
             !list(json, "extensionsRequired")
                 .iter()
                 .any(|e| e.as_str() == Some("KHR_draco_mesh_compression")),
+            FeatureDisabled,
             "glTF uses Draco compression, which needs Polysmelt's `draco` feature"
         );
         if let Some(e) = list(json, "extensionsRequired")
@@ -602,7 +608,10 @@ impl<'d> Reader<'d> {
             .filter_map(Value::as_str)
             .find(|e| !drawable(e))
         {
-            bail!("glTF requires the `{e}` extension, which polysmelt can't draw");
+            bail!(
+                Unsupported,
+                "glTF requires the `{e}` extension, which polysmelt can't draw"
+            );
         }
         Ok(Self::bare(doc))
     }
@@ -649,7 +658,8 @@ impl<'d> Reader<'d> {
             "meshes" => self.meshes,
             _ => list(self.json, key),
         };
-        all.get(i).with_context(|| format!("glTF {key}[{i}] doesn't exist"))
+        all.get(i)
+            .with_context(ErrorKind::Corrupt, || format!("glTF {key}[{i}] doesn't exist"))
     }
 
     /// A buffer view as (buffer, offset, length, stride), and whether it has extensions (as a
@@ -672,11 +682,11 @@ impl<'d> Reader<'d> {
         let buffer = buffer
             .and_then(Value::as_u64)
             .map(usize_of)
-            .context("glTF buffer view has no buffer")?;
+            .context(ErrorKind::Corrupt, "glTF buffer view has no buffer")?;
         let offset = offset.and_then(Value::as_u64).unwrap_or(0);
         let len = len
             .and_then(Value::as_u64)
-            .context("glTF buffer view has no byteLength")?;
+            .context(ErrorKind::Corrupt, "glTF buffer view has no byteLength")?;
         Ok((buffer, offset, len, stride.and_then(Value::as_u64).map(usize_of), ext))
     }
 
@@ -694,24 +704,27 @@ impl<'d> Reader<'d> {
             .get("buffer")
             .and_then(Value::as_u64)
             .map(usize_of)
-            .with_context(|| format!("glTF buffer view {i}: {name} names no buffer"))?;
+            .with_context(ErrorKind::Corrupt, || {
+                format!("glTF buffer view {i}: {name} names no buffer")
+            })?;
         let off = ext.get("byteOffset").and_then(Value::as_u64).unwrap_or(0);
         let src_len = ext
             .get("byteLength")
             .and_then(Value::as_u64)
-            .with_context(|| format!("glTF buffer view {i}: {name} has no byteLength"))?;
-        let blob = self
-            .doc
-            .buffers
-            .get(b)
-            .with_context(|| format!("glTF buffer view {i}: {name} names missing buffer {b}"))?;
+            .with_context(ErrorKind::Corrupt, || {
+                format!("glTF buffer view {i}: {name} has no byteLength")
+            })?;
+        let blob = self.doc.buffers.get(b).with_context(ErrorKind::Corrupt, || {
+            format!("glTF buffer view {i}: {name} names missing buffer {b}")
+        })?;
         let held;
         let src = if let Some(s) = blob.slice(off, src_len) {
             s
         } else {
             ensure!(
                 off.saturating_add(src_len) <= blob.len(),
-                "glTF buffer view {i}: {name} data out of range"
+                Truncated,
+                "glTF buffer view {i}: {name} data runs past the end of its buffer"
             );
             let mut v = vec![0; usize_of(src_len)];
             blob.read_at(off, &mut v)?;
@@ -722,10 +735,11 @@ impl<'d> Reader<'d> {
         // us allocate.
         ensure!(
             len / 1024 <= src.len(),
-            "glTF buffer view {i}: {name} data is truncated"
+            Truncated,
+            "glTF buffer view {i}: {name} data is cut short"
         );
         let mut out = vec![0; len];
-        container::decode_view(ext, src, &mut out).with_context(|| format!("glTF buffer view {i}"))?;
+        container::decode_view(ext, src, &mut out).with_within(|| format!("glTF buffer view {i}"))?;
         self.meshopt.insert(i, out);
         Ok(true)
     }
@@ -740,12 +754,13 @@ impl<'d> Reader<'d> {
             .doc
             .buffers
             .get(buffer)
-            .context("glTF buffer view names a missing buffer")?;
+            .context(ErrorKind::Corrupt, "glTF buffer view names a missing buffer")?;
         ensure!(
             offset.saturating_add(len) <= b.len(),
-            "glTF buffer view runs past its buffer"
+            Truncated,
+            "glTF buffer view runs past the end of its buffer"
         );
-        usize::try_from(len).map_err(|_| invalid!("glTF buffer view is too big to hold"))?;
+        usize::try_from(len).map_err(|_| err!(LimitExceeded, "glTF buffer view is too big to hold"))?;
         b.shared(offset, len)
     }
 
@@ -783,6 +798,7 @@ impl<'d> Reader<'d> {
         let ctype = ctype.and_then(Value::as_u64).unwrap_or(0);
         ensure!(
             matches!(ctype, 5120..=5123 | 5125 | 5126),
+            Corrupt,
             "glTF accessor {i} has component type {ctype}"
         );
         let (n, rows) = match kind.and_then(Value::as_str) {
@@ -793,13 +809,13 @@ impl<'d> Reader<'d> {
             Some("MAT2") => (4, 2),
             Some("MAT3") => (9, 3),
             Some("MAT4") => (16, 4),
-            t => bail!("glTF accessor {i} has type {t:?}, not one read here"),
+            t => bail!(Corrupt, "glTF accessor {i} has type {t:?}, not one read here"),
         };
         let u = |x: Option<&Value>| x.and_then(Value::as_u64).map(usize_of);
         Ok(Acc {
             view: u(view),
             offset: offset.and_then(Value::as_u64).unwrap_or(0),
-            count: u(count).context("glTF accessor has no count")?,
+            count: u(count).context(ErrorKind::Corrupt, "glTF accessor has no count")?,
             ctype,
             n,
             rows,
@@ -819,6 +835,7 @@ impl<'d> Reader<'d> {
         let Some(view) = a.view else {
             ensure!(
                 a.count <= self.max_vertices,
+                LimitExceeded,
                 "glTF accessor counts {} elements",
                 a.count
             );
@@ -832,6 +849,7 @@ impl<'d> Reader<'d> {
         let stride = stride.filter(|&s| s > 0).unwrap_or(esize);
         ensure!(
             stride >= esize,
+            Corrupt,
             "glTF buffer view stride {stride} is under an element's {esize} bytes"
         );
         // The elements' bytes, from the first: the accessor's offset into its view is checked here, not counted twice.
@@ -839,13 +857,19 @@ impl<'d> Reader<'d> {
             .checked_mul(stride as u64)
             .and_then(|s| s.checked_add(esize as u64))
             .filter(|&s| a.offset.checked_add(s).is_some_and(|end| end <= vlen))
-            .with_context(|| format!("glTF accessor's {} elements run past their buffer view", a.count))?;
+            .with_context(ErrorKind::Corrupt, || {
+                format!(
+                    "glTF accessor's {} elements run past the end of their buffer view",
+                    a.count
+                )
+            })?;
         // Only a view with extensions can be meshopt-compressed.
         if ext && self.meshopt(view)? {
             let bytes = &self.meshopt[&view];
-            let s = bytes
-                .get(usize_of(a.offset)..usize_of(a.offset + span))
-                .context("glTF accessor runs past its decoded buffer view")?;
+            let s = bytes.get(usize_of(a.offset)..usize_of(a.offset + span)).context(
+                ErrorKind::Corrupt,
+                "glTF accessor runs past the end of its decoded buffer view",
+            )?;
             f(0, s, stride);
             return Ok(());
         }
@@ -854,10 +878,11 @@ impl<'d> Reader<'d> {
             .doc
             .buffers
             .get(buffer)
-            .context("glTF buffer view names a missing buffer")?;
+            .context(ErrorKind::Corrupt, "glTF buffer view names a missing buffer")?;
         ensure!(
             start + span <= b.len(),
-            "glTF accessor runs past its buffer: bytes {start}..{} of buffer {buffer}, which holds {}",
+            Truncated,
+            "glTF accessor runs past the end of its buffer: bytes {start}..{} of buffer {buffer}, which holds {}",
             start + span,
             b.len()
         );
@@ -897,6 +922,7 @@ impl<'d> Reader<'d> {
         if a.view.is_none() {
             ensure!(
                 a.count <= self.max_vertices,
+                LimitExceeded,
                 "glTF accessor counts {} elements",
                 a.count
             );
@@ -904,7 +930,7 @@ impl<'d> Reader<'d> {
         let count = a.count;
         let mut out = Vec::new();
         out.try_reserve_exact(count)
-            .map_err(|_| invalid!("glTF accessor counts {count} elements"))?;
+            .map_err(|_| err!(LimitExceeded, "glTF accessor counts {count} elements"))?;
         let m = a.n.min(N);
         let cs = a.csize();
         let (ctype, normalized) = (a.ctype, a.normalized);
@@ -1011,7 +1037,10 @@ impl<'d> Reader<'d> {
         #[cfg(not(feature = "draco"))]
         {
             let _ = (ext, attrs, indices);
-            bail!("glTF accessor {i} is Draco-compressed, which needs Polysmelt's `draco` feature")
+            bail!(
+                FeatureDisabled,
+                "glTF accessor {i} is Draco-compressed, which needs Polysmelt's `draco` feature"
+            )
         }
     }
 
@@ -1024,6 +1053,7 @@ impl<'d> Reader<'d> {
     fn read_index_acc(&mut self, i: usize, a: &Acc) -> Result<Vec<u32>> {
         ensure!(
             a.n == 1 && matches!(a.ctype, 5121 | 5123 | 5125),
+            Corrupt,
             "glTF index accessor {i} isn't unsigned integer scalars"
         );
         self.read_u32s(a)
@@ -1033,7 +1063,7 @@ impl<'d> Reader<'d> {
         let count = a.count;
         let mut out = Vec::new();
         out.try_reserve_exact(count)
-            .map_err(|_| invalid!("glTF accessor counts {count} elements"))?;
+            .map_err(|_| err!(LimitExceeded, "glTF accessor counts {count} elements"))?;
         let ctype = a.ctype;
         // Appended in order, as `read_acc` does; what the data doesn't reach is 0.
         self.blocks(a, |first, bytes, stride| {
@@ -1089,17 +1119,19 @@ impl<'d> Reader<'d> {
 
     /// A sparse accessor's indices, and an accessor for its values.
     fn sparse(&mut self, a: &Acc, s: &Value) -> Result<(Vec<u32>, Acc)> {
-        let count = index(s, "count").context("glTF sparse accessor has no count")?;
+        let count = index(s, "count").context(ErrorKind::Corrupt, "glTF sparse accessor has no count")?;
         ensure!(
             count <= a.count,
+            Corrupt,
             "glTF sparse accessor replaces more elements than it has"
         );
         let part = |key: &str| -> Result<(usize, u64)> {
             let p = s
                 .get(key)
-                .with_context(|| format!("glTF sparse accessor has no {key}"))?;
+                .with_context(ErrorKind::Corrupt, || format!("glTF sparse accessor has no {key}"))?;
             Ok((
-                index(p, "bufferView").with_context(|| format!("glTF sparse {key} has no bufferView"))?,
+                index(p, "bufferView")
+                    .with_context(ErrorKind::Corrupt, || format!("glTF sparse {key} has no bufferView"))?,
                 p.get("byteOffset").and_then(Value::as_u64).unwrap_or(0),
             ))
         };
@@ -1107,6 +1139,7 @@ impl<'d> Reader<'d> {
         let ictype = s["indices"].get("componentType").and_then(Value::as_u64).unwrap_or(0);
         ensure!(
             matches!(ictype, 5121 | 5123 | 5125),
+            Corrupt,
             "glTF sparse indices' component type {ictype}"
         );
         let idx = Acc {
@@ -1239,7 +1272,11 @@ impl<'d> Reader<'d> {
         .flatten()
         .min()
         .unwrap_or(0);
-        ensure!(count <= self.doc.max_triangles, "glTF node has {count} instances");
+        ensure!(
+            count <= self.doc.max_triangles,
+            LimitExceeded,
+            "glTF node has {count} instances"
+        );
         Ok((0..count)
             .map(|k| {
                 let t = t.as_ref().map_or([0.0; 3], |v| v[k].map(f64::from));
@@ -1777,6 +1814,7 @@ impl Reader<'_> {
                         let _ = ext;
                         ensure!(
                             self.acc(pos)?.view.is_some(),
+                            FeatureDisabled,
                             "glTF uses Draco compression, which needs Polysmelt's `draco` feature"
                         );
                     }
@@ -1840,12 +1878,14 @@ impl Reader<'_> {
         if mode < 4 {
             ensure!(
                 total <= self.point_budget,
+                LimitExceeded,
                 "too many points and lines to convert (more than {})",
                 self.doc.max_points
             );
         } else {
             ensure!(
                 total <= self.budget,
+                LimitExceeded,
                 "too many triangles to convert (more than {})",
                 self.doc.max_triangles
             );
@@ -1914,7 +1954,7 @@ impl Reader<'_> {
     fn skeleton(&self, mesh: &mut Mesh) {
         let nodes = self.nodes;
         let mut used = vec![false; nodes.len()];
-        for p in mesh.prims.iter().filter(|p| p.skinned()) {
+        for p in mesh.prims.iter().filter(|p| p.is_skinned()) {
             for &j in p.skin_joints.as_flattened() {
                 if let Some(u) = used.get_mut(j as usize) {
                     *u = true;
@@ -1994,7 +2034,7 @@ impl Reader<'_> {
         // Each node's bone, as a flat table: one load per joint, no branches.
         let bone: Vec<u32> = bone_of.iter().map(|b| b.map_or(0, u32_of)).collect();
         for p in &mut mesh.prims {
-            if mesh.skeleton.is_empty() || !p.skinned() {
+            if mesh.skeleton.is_empty() || !p.is_skinned() {
                 p.skin_joints = Vec::new();
                 p.skin_weights = Vec::new();
                 continue;
@@ -2056,6 +2096,7 @@ impl Reader<'_> {
                 let _ = ext;
                 ensure!(
                     self.acc(pos)?.view.is_some(),
+                    FeatureDisabled,
                     "glTF uses Draco compression, which needs Polysmelt's `draco` feature"
                 );
             }
@@ -2195,7 +2236,7 @@ impl Reader<'_> {
         use draco_core::draco_types::DataType;
         use draco_core::mesh_decoder::MeshDecoder;
 
-        let view = index(ext, "bufferView").context("glTF Draco primitive has no bufferView")?;
+        let view = index(ext, "bufferView").context(ErrorKind::Corrupt, "glTF Draco primitive has no bufferView")?;
         let bytes = self.view_shared(view)?;
         let limits = DecodeLimits::default()
             .with_max_faces(self.budget as u64)
@@ -2204,7 +2245,7 @@ impl Reader<'_> {
         let mut dm = draco_core::mesh::Mesh::new();
         MeshDecoder::new()
             .decode(&mut buffer, &mut dm)
-            .map_err(|e| invalid!("glTF Draco data doesn't decode: {e}"))?;
+            .context(ErrorKind::Corrupt, "glTF Draco data doesn't decode")?;
         drop(bytes);
 
         if let Some(i) = indices {
@@ -2222,9 +2263,9 @@ impl Reader<'_> {
             let (Some(acc), Some(id)) = (index(attrs, name), id.as_u64().and_then(|v| u32::try_from(v).ok())) else {
                 continue;
             };
-            let attribute = dm
-                .attribute_by_unique_id(id)
-                .with_context(|| format!("glTF Draco stream has no attribute {id} for {name}"))?;
+            let attribute = dm.attribute_by_unique_id(id).with_context(ErrorKind::Corrupt, || {
+                format!("glTF Draco stream has no attribute {id} for {name}")
+            })?;
             let a = self.acc(acc)?;
             let mut values = attribute.read_f32s(points, a.n);
             if a.normalized || attribute.normalized() {
@@ -3052,9 +3093,9 @@ impl Reader<'_> {
             }
             let s = index(ch, "sampler")
                 .and_then(|s| samplers.get(s))
-                .context("glTF animation channel names a missing sampler")?;
+                .context(ErrorKind::Corrupt, "glTF animation channel names a missing sampler")?;
             let (Some(input), Some(output)) = (index(s, "input"), index(s, "output")) else {
-                bail!("glTF animation sampler has no input or output");
+                bail!(Corrupt, "glTF animation sampler has no input or output");
             };
             let interpolation = s.get("interpolation").and_then(Value::as_str).unwrap_or("LINEAR");
             let times: Vec<f32> = self.read::<1>(input, [0.0])?.into_flattened();
@@ -3238,7 +3279,7 @@ fn slerp(a: &[f32], b: &[f32], s: f64, out: &mut [f64]) {
 mod tests {
     use crate::assets::Folder;
     use crate::document::{Keep, Pose};
-    use crate::mesh::{Material, Mesh, Prim, to_glb};
+    use crate::mesh::{Material, Mesh, Prim};
 
     /// A bumpy grid with normals, UVs and colors, in two materials.
     fn grid(n: u32) -> Mesh {
@@ -3321,7 +3362,7 @@ mod tests {
         );
         let mesh = doc.flatten(Pose::Rest).unwrap().unwrap();
         assert!(
-            to_glb(&mesh).unwrap() == to_glb(&in_memory.flatten(Pose::Rest).unwrap().unwrap()).unwrap(),
+            mesh.to_glb().unwrap() == in_memory.flatten(Pose::Rest).unwrap().unwrap().to_glb().unwrap(),
             "{name} flattens differently from memory"
         );
         mesh
@@ -3439,7 +3480,7 @@ mod tests {
         assert_eq!(p.normals, [[0., 0., 1.]; 3]);
 
         // Written out, the sets are renumbered from 0 with no gaps, the color texture's first.
-        let glb = to_glb(&mesh).unwrap();
+        let glb = mesh.to_glb().unwrap();
         let back = load(dir.path(), "back.glb", &glb);
         let q = &back.prims[0];
         assert_eq!(q.uvs, p.uvs);
@@ -3517,7 +3558,7 @@ mod tests {
             assert_eq!(mesh.prims[0].uv_sets[set], [[0., 0.], [1., 0.], [0., 1.]]);
         };
         check(&mesh);
-        let back = load(dir.path(), "back.glb", &to_glb(&mesh).unwrap());
+        let back = load(dir.path(), "back.glb", &mesh.to_glb().unwrap());
         check(&back);
     }
 
@@ -3571,21 +3612,21 @@ mod tests {
         let rig = doc.rig().unwrap();
         let ch = &rig.animations[0].channels;
         assert_eq!(ch.len(), 1);
-        assert_eq!((ch[0].node, ch[0].path), (0, crate::rig::Path::Translation));
+        assert_eq!((ch[0].node, ch[0].property), (0, crate::rig::Property::Translation));
     }
 
     #[test]
     fn reads_back_what_to_glb_writes() {
         let dir = tempfile::tempdir().unwrap();
         let mesh = grid(30);
-        let glb = to_glb(&mesh).unwrap();
+        let glb = mesh.to_glb().unwrap();
         same(&mesh, &load(dir.path(), "plain.glb", &glb));
     }
 
     #[test]
     fn streamed_glb_cut_short_is_an_error() {
         let dir = tempfile::tempdir().unwrap();
-        let glb = to_glb(&grid(60)).unwrap();
+        let glb = grid(60).to_glb().unwrap();
         assert!(glb.len() > 2 * 64 * 1024);
         let path = dir.path().join("cut.glb");
         std::fs::write(&path, &glb[..glb.len() - 1000]).unwrap();
@@ -3597,7 +3638,7 @@ mod tests {
     fn reads_meshopt_compressed_glb() {
         let dir = tempfile::tempdir().unwrap();
         let mesh = grid(30);
-        let packed = crate::gltf::compress(&to_glb(&mesh).unwrap()).unwrap();
+        let packed = crate::gltf::compress(&mesh.to_glb().unwrap()).unwrap();
         same(&mesh, &load(dir.path(), "packed.glb", &packed));
     }
 
@@ -3605,7 +3646,7 @@ mod tests {
     fn decode_leaves_plain_gltf() {
         let dir = tempfile::tempdir().unwrap();
         let mesh = grid(30);
-        let packed = crate::gltf::compress(&to_glb(&mesh).unwrap()).unwrap();
+        let packed = crate::gltf::compress(&mesh.to_glb().unwrap()).unwrap();
         let path = dir.path().join("packed.glb");
         std::fs::write(&path, &packed).unwrap();
         let mut doc = crate::formats::load(&path, "glb", &Folder::new(dir.path()), Keep::ALL).unwrap();
@@ -3617,7 +3658,7 @@ mod tests {
         // The compressed data and the fallback are gone: only the decoded buffer is left.
         assert_eq!(doc.json["buffers"].as_array().unwrap().len(), 1);
         let after = doc.flatten(Pose::Rest).unwrap().unwrap();
-        assert_eq!(to_glb(&before).unwrap(), to_glb(&after).unwrap());
+        assert_eq!(before.to_glb().unwrap(), after.to_glb().unwrap());
         same(&mesh, &load(dir.path(), "decoded.glb", &doc.to_glb().unwrap()));
         // Decoding plain glTF changes nothing.
         let glb = doc.to_glb().unwrap();
@@ -3677,7 +3718,7 @@ mod tests {
     #[test]
     fn decode_keeps_required_extensions_it_cant_draw() {
         let dir = tempfile::tempdir().unwrap();
-        let packed = crate::gltf::compress(&to_glb(&grid(10)).unwrap()).unwrap();
+        let packed = crate::gltf::compress(&grid(10).to_glb().unwrap()).unwrap();
         let path = dir.path().join("packed.glb");
         std::fs::write(&path, &packed).unwrap();
         let mut doc = crate::formats::load(&path, "glb", &Folder::new(dir.path()), Keep::ALL).unwrap();
@@ -3730,7 +3771,7 @@ mod tests {
         doc.decode().unwrap();
         assert_eq!(doc.json["accessors"][1]["componentType"], 5123);
         let after = doc.flatten(Pose::Rest).unwrap().unwrap();
-        assert_eq!(to_glb(&before).unwrap(), to_glb(&after).unwrap());
+        assert_eq!(before.to_glb().unwrap(), after.to_glb().unwrap());
     }
 
     #[test]
@@ -3738,7 +3779,7 @@ mod tests {
         // A compressed GLB split into a .gltf and its buffer files.
         let dir = tempfile::tempdir().unwrap();
         let mesh = grid(10);
-        let packed = crate::gltf::compress(&to_glb(&mesh).unwrap()).unwrap();
+        let packed = crate::gltf::compress(&mesh.to_glb().unwrap()).unwrap();
         let json_len = u32::from_le_bytes(packed[12..16].try_into().unwrap()) as usize;
         let mut json: serde_json::Value = serde_json::from_slice(&packed[20..20 + json_len]).unwrap();
         let bin = &packed[20 + json_len + 8..];
@@ -3953,7 +3994,7 @@ mod tests {
         mesh.prims[1].indices.clear();
         mesh.prims[1].normals.clear();
         mesh.prims[1].points = (0..9).collect();
-        let glb = to_glb(&mesh).unwrap();
+        let glb = mesh.to_glb().unwrap();
         let len = u32::from_le_bytes(glb[12..16].try_into().unwrap()) as usize;
         let json: serde_json::Value = serde_json::from_slice(&glb[20..20 + len]).unwrap();
         let prims = json["meshes"]
@@ -3991,7 +4032,7 @@ mod tests {
         assert_eq!(back.prims[0].positions, mesh.prims[0].positions);
         assert_eq!(back.prims[1].points, mesh.prims[1].points);
         assert!(back.prims[1].normals.is_empty(), "no normals are made up for points");
-        assert!(to_glb(&back).unwrap() == glb, "written again, the same bytes");
+        assert!(back.to_glb().unwrap() == glb, "written again, the same bytes");
     }
 
     /// The box around a flattened mesh's positions.

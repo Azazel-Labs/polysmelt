@@ -30,7 +30,7 @@ use std::io::{BufReader, Read};
 use crate::document::{Builder, Document, Keep};
 use crate::images::{Images, Location};
 use crate::source::{Axis, Fact, Handedness, SourceInfo};
-use crate::{Context as _, Result};
+use crate::{Context as _, ErrorKind, Result, Within as _};
 use quick_xml::events::{BytesStart, Event};
 use serde_json::{Map, Value, json};
 use zip::ZipArchive;
@@ -334,7 +334,8 @@ type Fast = std::hash::BuildHasherDefault<crate::mesh::FxHasher>;
 // Load a 3MF: the build as nodes, an object's triangles as a mesh with a primitive per look, and
 /// the facts worth keeping.
 pub(crate) fn load(input: super::Input<'_>, keep: Keep) -> Result<Document> {
-    let mut zip: Zip<'_> = ZipArchive::new(input.seekable()?).context("not a 3MF file (it isn't a zip)")?;
+    let mut zip: Zip<'_> =
+        ZipArchive::new(input.seekable()?).context(ErrorKind::UnknownFormat, "not a 3MF file (it isn't a zip)")?;
     let names: HashMap<String, String> = zip
         .file_names()
         .filter_map(Result::ok)
@@ -352,13 +353,16 @@ pub(crate) fn load(input: super::Input<'_>, keep: Keep) -> Result<Document> {
         if parts.contains_key(&key) {
             continue;
         }
-        ensure!(parts.len() < 1024, "too many model files in this 3MF");
+        ensure!(parts.len() < 1024, LimitExceeded, "too many model files in this 3MF");
         let Some(real) = names.get(&key) else {
-            ensure!(key != root, "no 3D model in this 3MF");
+            ensure!(key != root, Corrupt, "no 3D model in this 3MF");
             continue;
         };
-        let reader = zip.by_name(real)?.take(MAX_PART);
-        let part = parse_part(reader, &mut triangles, input.limit).with_context(|| format!("reading {real}"))?;
+        let reader = zip
+            .by_name(real)
+            .with_context(ErrorKind::Corrupt, || format!("reading {real}"))?
+            .take(MAX_PART);
+        let part = parse_part(reader, &mut triangles, input.limit).with_within(|| format!("reading {real}"))?;
         for o in part.objects.values() {
             todo.extend(o.components.iter().filter_map(|c| c.path.as_deref()).map(norm));
         }
@@ -367,10 +371,10 @@ pub(crate) fn load(input: super::Input<'_>, keep: Keep) -> Result<Document> {
     }
     let slicer = read_slicer(&mut zip, &names);
     let main = &parts[&root];
-    ensure!(!main.build.is_empty(), "this 3MF builds nothing");
+    ensure!(!main.build.is_empty(), Empty, "this 3MF builds nothing");
     let unit = main.unit.clone().unwrap_or_else(|| "millimeter".to_owned());
     let Some(scale) = meters(Some(&unit)) else {
-        bail!("unknown 3MF unit {unit:?}")
+        bail!(Corrupt, "unknown 3MF unit {unit:?}")
     };
 
     let mut out = Emit {
@@ -417,10 +421,11 @@ pub(crate) fn load(input: super::Input<'_>, keep: Keep) -> Result<Document> {
     if out.triangles == 0 {
         ensure!(
             out.levelsets == 0,
+            Unsupported,
             "this 3MF builds only volumetric level sets (shapes given by implicit functions), which have no \
              triangles to read"
         );
-        bail!("this 3MF has no triangles");
+        bail!(Empty, "this 3MF has no triangles");
     }
 
     let mut facts = Map::new();
@@ -782,7 +787,7 @@ impl Emit<'_> {
         if let Some(&mesh) = self.mesh_of.get(&at) {
             return Ok(mesh);
         }
-        let part = self.parts.get(key).context("model file")?;
+        let part = self.parts.get(key).context(ErrorKind::Corrupt, "model file")?;
         let mesh = self.mesh(part, key, o, id, filament, top, range)?;
         self.mesh_of.insert(at, mesh);
         Ok(mesh)
@@ -826,6 +831,7 @@ impl Emit<'_> {
         for (i, t) in o.tris.iter().enumerate().take(last).skip(first) {
             ensure!(
                 self.built < self.limit,
+                LimitExceeded,
                 "too many triangles to convert (more than {})",
                 self.limit
             );
@@ -854,7 +860,8 @@ impl Emit<'_> {
                 prim_of.resize(material + 1, u32::MAX);
             }
             if prim_of[material] == u32::MAX {
-                prim_of[material] = u32::try_from(prims.len())?;
+                prim_of[material] =
+                    u32::try_from(prims.len()).context(ErrorKind::LimitExceeded, "too many primitives")?;
                 prims.push(Prim {
                     material,
                     ..Prim::default()
@@ -881,7 +888,8 @@ impl Emit<'_> {
                 let index = if let Some(index) = found {
                     index
                 } else {
-                    let index = u32::try_from(p.positions.len())?;
+                    let index = u32::try_from(p.positions.len())
+                        .context(ErrorKind::LimitExceeded, "too many vertices for 32-bit indices")?;
                     p.positions.push(pos[k]);
                     if let Some(uv) = &uvs {
                         p.uvs.push([uv[k][0], 1.0 - uv[k][1]]);
@@ -910,6 +918,7 @@ impl Emit<'_> {
             self.built += made;
             ensure!(
                 self.built <= self.limit,
+                LimitExceeded,
                 "too many triangles to convert (more than {})",
                 self.limit
             );
@@ -1245,7 +1254,10 @@ fn parse_part(r: impl Read, triangles: &mut usize, limit: usize) -> Result<Part>
     // Inside an object's `<beamlattice>`, and inside one of its `<beamset>`s.
     let (mut in_lattice, mut in_set) = (false, false);
     loop {
-        let (e, empty) = match reader.read_event_into(&mut buf)? {
+        let (e, empty) = match reader
+            .read_event_into(&mut buf)
+            .context(ErrorKind::Corrupt, "bad 3MF XML")?
+        {
             Event::Start(e) => (e, false),
             Event::Empty(e) => (e, true),
             Event::Text(t) => {
@@ -1343,7 +1355,11 @@ fn parse_part(r: impl Read, triangles: &mut usize, limit: usize) -> Result<Part>
                         _ => {}
                     });
                     *triangles += 1;
-                    ensure!(*triangles <= limit, "too many triangles to preview (more than {limit})");
+                    ensure!(
+                        *triangles <= limit,
+                        LimitExceeded,
+                        "too many triangles to preview (more than {limit})"
+                    );
                     o.tris.push(t);
                 }
             }
@@ -1397,7 +1413,11 @@ fn parse_part(r: impl Read, triangles: &mut usize, limit: usize) -> Result<Part>
                     });
                     let r1 = r[0].unwrap_or(l.radius);
                     *triangles += 1;
-                    ensure!(*triangles <= limit, "too many beams to preview (more than {limit})");
+                    ensure!(
+                        *triangles <= limit,
+                        LimitExceeded,
+                        "too many beams to preview (more than {limit})"
+                    );
                     l.beams.push(lattice::Beam {
                         v,
                         r: [r1, r[1].unwrap_or(r1)],
@@ -1418,7 +1438,11 @@ fn parse_part(r: impl Read, triangles: &mut usize, limit: usize) -> Result<Part>
                         _ => {}
                     });
                     *triangles += 1;
-                    ensure!(*triangles <= limit, "too many balls to preview (more than {limit})");
+                    ensure!(
+                        *triangles <= limit,
+                        LimitExceeded,
+                        "too many balls to preview (more than {limit})"
+                    );
                     l.balls.push(lattice::Ball {
                         v,
                         r: r.unwrap_or(l.ball_radius),

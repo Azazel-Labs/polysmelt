@@ -4,7 +4,7 @@
 //! Codes are decoded a bit at a time, canonically, which keeps the reader small; it checks every length,
 //! distance and code, so damaged data is an error rather than a panic.
 
-use crate::{Context, Result};
+use crate::{Context, ErrorKind, Result};
 
 /// Reads a deflate stream's bits, least significant first.
 struct Bits<'a> {
@@ -18,7 +18,10 @@ impl Bits<'_> {
     /// The next `n` bits (at most 16).
     fn get(&mut self, n: u32) -> Result<usize> {
         while self.count < n {
-            let byte = *self.data.get(self.at).context("compressed data cut short")?;
+            let byte = *self
+                .data
+                .get(self.at)
+                .context(ErrorKind::Truncated, "compressed data is cut short")?;
             self.at += 1;
             self.buf |= usize::from(byte) << self.count;
             self.count += 8;
@@ -51,7 +54,7 @@ impl Huff {
         let mut left = 1i32;
         for &c in &count[1..] {
             left = (left << 1) - i32::from(c);
-            ensure!(left >= 0, "bad Huffman code in compressed data");
+            ensure!(left >= 0, Corrupt, "bad Huffman code in compressed data");
         }
         let mut offsets = [0u16; 16];
         for len in 1..15 {
@@ -79,13 +82,13 @@ impl Huff {
                 return i
                     .and_then(|i| self.symbols.get(i))
                     .copied()
-                    .context("bad Huffman code in compressed data");
+                    .context(ErrorKind::Corrupt, "bad Huffman code in compressed data");
             }
             index += count;
             first = (first + count) << 1;
             code <<= 1;
         }
-        bail!("bad Huffman code in compressed data")
+        bail!(Corrupt, "bad Huffman code in compressed data")
     }
 }
 
@@ -123,13 +126,22 @@ pub(crate) fn inflate(data: &[u8], out: &mut Vec<u8>, limit: usize) -> Result<()
                 bits.buf = 0;
                 bits.count = 0;
                 let at = bits.at;
-                let head = data.get(at..at + 4).context("compressed data cut short")?;
+                let head = data
+                    .get(at..at + 4)
+                    .context(ErrorKind::Truncated, "compressed data is cut short")?;
                 let len = u16::from_le_bytes([head[0], head[1]]);
                 let not = u16::from_le_bytes([head[2], head[3]]);
-                ensure!(len == !not, "bad stored block in compressed data");
+                ensure!(len == !not, Corrupt, "bad stored block in compressed data");
                 let len = usize::from(len);
-                ensure!(len <= end - out.len(), "compressed data inflates past its size");
-                out.extend_from_slice(data.get(at + 4..at + 4 + len).context("compressed data cut short")?);
+                ensure!(
+                    len <= end - out.len(),
+                    Corrupt,
+                    "compressed data inflates past its size"
+                );
+                out.extend_from_slice(
+                    data.get(at + 4..at + 4 + len)
+                        .context(ErrorKind::Truncated, "compressed data is cut short")?,
+                );
                 bits.at = at + 4 + len;
             }
             1 => {
@@ -146,7 +158,7 @@ pub(crate) fn inflate(data: &[u8], out: &mut Vec<u8>, limit: usize) -> Result<()
                 let (lit, dist) = dynamic(&mut bits)?;
                 codes(&mut bits, out, end, &lit, &dist)?;
             }
-            _ => bail!("bad block type in compressed data"),
+            _ => bail!(Corrupt, "bad block type in compressed data"),
         }
         if last || (out.len() >= end && bits.at >= data.len()) {
             return Ok(());
@@ -159,7 +171,11 @@ fn dynamic(bits: &mut Bits<'_>) -> Result<(Huff, Huff)> {
     let nlen = bits.get(5)? + 257;
     let ndist = bits.get(5)? + 1;
     let ncode = bits.get(4)? + 4;
-    ensure!(nlen <= 286 && ndist <= 30, "bad dynamic block in compressed data");
+    ensure!(
+        nlen <= 286 && ndist <= 30,
+        Corrupt,
+        "bad dynamic block in compressed data"
+    );
     let mut lengths = [0u8; 320];
     for &k in &CODE_ORDER[..ncode] {
         lengths[k] = u8::try_from(bits.get(3)?).unwrap_or(0);
@@ -176,17 +192,25 @@ fn dynamic(bits: &mut Bits<'_>) -> Result<(Huff, Huff)> {
         }
         let (value, repeat) = match sym {
             16 => {
-                ensure!(at > 0, "bad dynamic block in compressed data");
+                ensure!(at > 0, Corrupt, "bad dynamic block in compressed data");
                 (lengths[at - 1], 3 + bits.get(2)?)
             }
             17 => (0, 3 + bits.get(3)?),
             _ => (0, 11 + bits.get(7)?),
         };
-        ensure!(at + repeat <= nlen + ndist, "bad dynamic block in compressed data");
+        ensure!(
+            at + repeat <= nlen + ndist,
+            Corrupt,
+            "bad dynamic block in compressed data"
+        );
         lengths[at..at + repeat].fill(value);
         at += repeat;
     }
-    ensure!(lengths[256] != 0, "bad dynamic block in compressed data (no end code)");
+    ensure!(
+        lengths[256] != 0,
+        Corrupt,
+        "bad dynamic block in compressed data (no end code)"
+    );
     Ok((Huff::new(&lengths[..nlen])?, Huff::new(&lengths[nlen..nlen + ndist])?))
 }
 
@@ -195,7 +219,7 @@ fn codes(bits: &mut Bits<'_>, out: &mut Vec<u8>, end: usize, lit: &Huff, dist: &
     loop {
         let sym = lit.decode(bits)?;
         if let Ok(byte) = u8::try_from(sym) {
-            ensure!(out.len() < end, "compressed data inflates past its size");
+            ensure!(out.len() < end, Corrupt, "compressed data inflates past its size");
             out.push(byte);
             continue;
         }
@@ -203,13 +227,17 @@ fn codes(bits: &mut Bits<'_>, out: &mut Vec<u8>, end: usize, lit: &Huff, dist: &
             return Ok(());
         }
         let i = usize::from(sym - 257);
-        ensure!(i < 29, "bad length code in compressed data");
+        ensure!(i < 29, Corrupt, "bad length code in compressed data");
         let len = usize::from(LENGTH_BASE[i]) + bits.get(u32::from(LENGTH_EXTRA[i]))?;
         let d = usize::from(dist.decode(bits)?);
-        ensure!(d < 30, "bad distance code in compressed data");
+        ensure!(d < 30, Corrupt, "bad distance code in compressed data");
         let back = usize::from(DIST_BASE[d]) + bits.get(u32::from(DIST_EXTRA[d]))?;
-        ensure!(back <= out.len(), "compressed data reaches back too far");
-        ensure!(len <= end - out.len(), "compressed data inflates past its size");
+        ensure!(back <= out.len(), Corrupt, "compressed data reaches back too far");
+        ensure!(
+            len <= end - out.len(),
+            Corrupt,
+            "compressed data inflates past its size"
+        );
         let from = out.len() - back;
         for k in 0..len {
             let byte = out[from + k];

@@ -1,5 +1,26 @@
 //! A model as plain triangle lists (and line and point lists): what the format readers
 //! produce, written out as a GLB.
+//!
+//! Building one by hand and writing it:
+//!
+//! ```
+//! use polysmelt::mesh::{Material, Mesh, Prim};
+//!
+//! let mesh = Mesh {
+//!     prims: vec![Prim {
+//!         positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+//!         indices: vec![0, 1, 2],
+//!         material: 0,
+//!         ..Prim::default()
+//!     }],
+//!     materials: vec![Material::plain("red", [1.0, 0.0, 0.0, 1.0])],
+//!     ..Mesh::default()
+//! };
+//! assert_eq!(mesh.triangles(), 1);
+//! let glb = mesh.to_glb()?;
+//! assert_eq!(&glb[..4], b"glTF");
+//! # Ok::<(), polysmelt::Error>(())
+//! ```
 
 use crate::Result;
 use crate::document::Document;
@@ -19,8 +40,12 @@ pub const TRIANGLE_CEILING: usize = 1 << 30;
 pub const MAX_POINTS: usize = 16_000_000;
 
 /// One material's worth of triangles, and of the lines and points drawn on the same vertices.
-#[derive(Debug, Default, Clone)]
+///
+/// Every per-vertex list is either empty or as long as `positions`. Build one with a struct
+/// literal ending in `..Prim::default()`.
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct Prim {
+    /// Vertex positions.
     pub positions: Vec<[f32; 3]>,
     /// Unit vertex normals; empty for a faceted model (STL), which glTF clients shade flat.
     pub normals: Vec<[f32; 3]>,
@@ -49,6 +74,7 @@ pub struct Prim {
     /// Points, a vertex index each (glTF's `POINTS`): a point cloud is a primitive of these
     /// alone.
     pub points: Vec<u32>,
+    /// Its material, an index into [`Mesh::materials`].
     pub material: usize,
     /// Each vertex's most-weighted joint, as a node index (the order of `Rig::nodes`), when the primitive is skinned;
     /// empty otherwise. Tells which bone each part of the surface moves with, for fitting a body to its skeleton.
@@ -71,7 +97,7 @@ impl Prim {
 
     /// Whether every vertex has joints and weights, so the primitive can be bound to [`Mesh::skeleton`].
     #[must_use]
-    pub fn skinned(&self) -> bool {
+    pub fn is_skinned(&self) -> bool {
         !self.positions.is_empty()
             && self.skin_joints.len() == self.positions.len()
             && self.skin_weights.len() == self.positions.len()
@@ -81,6 +107,7 @@ impl Prim {
 /// A joint skinned primitives are bound to.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Bone {
+    /// Its name, if it has one.
     pub name: Option<String>,
     /// The bone it hangs from, an index into [`Mesh::skeleton`], always before this one.
     pub parent: Option<usize>,
@@ -125,34 +152,51 @@ impl Default for Sampling {
 /// How each of a material's core textures is sampled.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Samplings {
+    /// [`Material::color_image`]'s.
     pub color: Sampling,
+    /// [`Material::normal_image`]'s.
     pub normal: Sampling,
+    /// [`Material::metallic_roughness_image`]'s.
     pub metallic_roughness: Sampling,
+    /// [`Material::occlusion_image`]'s.
     pub occlusion: Sampling,
+    /// [`Material::emissive_image`]'s.
     pub emissive: Sampling,
 }
 
 /// A texture an extension uses: an image in [`Mesh::images`], and how it's sampled.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Texture {
+    /// The image, an index into [`Mesh::images`].
     pub image: usize,
+    /// How it's sampled.
     pub sampling: Sampling,
 }
 
 /// The `KHR_materials_*` extensions to glTF's metallic-roughness model: index of refraction,
 /// specular, transmission, clearcoat, sheen, volume, anisotropy, iridescence and dispersion.
 /// A `None` is the extension left out.
+///
+/// Non-exhaustive, so that more extensions can be added: start from [`Extensions::default`]
+/// (none) and set the ones you need.
 #[derive(Debug, Clone, PartialEq, Default)]
+#[non_exhaustive]
 pub struct Extensions {
     /// `KHR_materials_ior`.
     pub ior: Option<f32>,
+    /// `KHR_materials_specular`.
     pub specular: Option<Specular<Texture>>,
     /// `KHR_materials_transmission`: how much light passes through, its texture's red scaling it.
     pub transmission: Option<Factor<Texture>>,
+    /// `KHR_materials_clearcoat`.
     pub clearcoat: Option<Clearcoat<Texture>>,
+    /// `KHR_materials_sheen`.
     pub sheen: Option<Sheen<Texture>>,
+    /// `KHR_materials_volume`.
     pub volume: Option<Volume<Texture>>,
+    /// `KHR_materials_anisotropy`.
     pub anisotropy: Option<Anisotropy<Texture>>,
+    /// `KHR_materials_iridescence`.
     pub iridescence: Option<Iridescence<Texture>>,
     /// `KHR_materials_dispersion`: how much the index of refraction varies with wavelength.
     pub dispersion: Option<f32>,
@@ -161,12 +205,27 @@ pub struct Extensions {
 /// A material, glTF's metallic-roughness model: a base color, the metallic and roughness
 /// scalars, and the textures that vary them. The textures read [`Prim::uvs`] unless their
 /// [`Sampling`] says otherwise; the images are indices into [`Mesh::images`].
-#[derive(Debug, Clone)]
+///
+/// Non-exhaustive, so that more of glTF's material can be carried: start from
+/// [`Material::plain`] (or [`Material::default`]) and set what you need.
+///
+/// ```
+/// use polysmelt::mesh::Material;
+///
+/// let mut glass = Material::plain("glass", [0.9, 0.95, 1.0, 0.25]);
+/// glass.roughness = 0.05;
+/// glass.double_sided = true;
+/// assert_eq!(glass.metallic, 0.0);
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct Material {
+    /// Its name; may be empty.
     pub name: String,
     /// Linear RGBA. Its alpha is opacity: below 1 the material is blended, unless
     /// `alpha_cutoff` makes it cut out instead.
     pub color: [f32; 4],
+    /// Linear RGBA (the image itself sRGB-encoded), scaling `color`.
     pub color_image: Option<usize>,
     /// A tangent-space normal map.
     pub normal_image: Option<usize>,
@@ -179,7 +238,9 @@ pub struct Material {
     pub emissive: [f32; 3],
     /// Light given off, scaling `emissive`.
     pub emissive_image: Option<usize>,
+    /// How metallic, 0 (a dielectric) to 1 (a metal).
     pub metallic: f32,
+    /// How rough, 0 (a mirror) to 1 (fully diffuse).
     pub roughness: f32,
     /// Seen from both sides rather than culled from behind.
     pub double_sided: bool,
@@ -239,18 +300,22 @@ pub struct Image {
     /// clones point at the same bytes.
     pub bytes: crate::Bytes,
     /// `image/png` or `image/jpeg`; or `image/webp` for a WebP image [`Document::flatten`]
-    /// took from a glTF document as it is, which [`to_glb`] writes as PNG and
+    /// took from a glTF document as it is, which [`Mesh::to_glb`] writes as PNG and
     /// [`Image::into_png_or_jpeg`] turns into PNG.
     ///
     /// [`Document::flatten`]: crate::document::Document::flatten
     pub mime: &'static str,
 }
 
-/// A model as triangles (and lines and points) grouped by material, ready to write as glTF.
-#[derive(Debug, Default, Clone)]
+/// A model as triangles (and lines and points) grouped by material, ready to write as glTF
+/// with [`Mesh::to_glb`] (see the [module](self) docs, which build one).
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct Mesh {
+    /// Its primitives, one a material.
     pub prims: Vec<Prim>,
+    /// Its materials, which [`Prim::material`] indexes.
     pub materials: Vec<Material>,
+    /// Its images, which the materials index.
     pub images: Vec<Image>,
     /// The joints skinned primitives are bound to, parents first; empty when nothing is skinned. Written out, a
     /// skin binds the vertices where they are, so the GLB loads in the pose the mesh was drawn in, ready to move.
@@ -274,6 +339,17 @@ impl Mesh {
     #[must_use]
     pub fn points(&self) -> usize {
         self.prims.iter().map(|p| p.points.len()).sum()
+    }
+
+    /// A GLB with one mesh: a primitive per `Prim` (and one more for its lines, and one for its
+    /// points, on the same vertices), its materials, and the images embedded.
+    ///
+    /// # Errors
+    ///
+    /// When the mesh has nothing to draw.
+    pub fn to_glb(&self) -> Result<Vec<u8>> {
+        ensure!(self.prims.iter().any(|p| !p.is_empty()), Empty, "nothing to draw");
+        Document::from_mesh(self.clone(), serde_json::Map::new()).to_glb()
     }
 }
 
@@ -576,17 +652,6 @@ impl Welder {
             ..Prim::default()
         }
     }
-}
-
-/// A GLB with one mesh: a primitive per `Prim` (and one more for its lines, and one for its
-/// points, on the same vertices), its materials, and the images embedded.
-///
-/// # Errors
-///
-/// When the mesh has nothing to draw.
-pub fn to_glb(mesh: &Mesh) -> Result<Vec<u8>> {
-    ensure!(mesh.prims.iter().any(|p| !p.is_empty()), "nothing to draw");
-    Document::from_mesh(mesh.clone(), serde_json::Map::new()).to_glb()
 }
 
 /// Triangulates one polygon face, its corners in order, appending triangles as indices into

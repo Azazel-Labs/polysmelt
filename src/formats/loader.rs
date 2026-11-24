@@ -23,8 +23,11 @@ use crate::{Bytes, Result};
 ///
 /// # Errors
 ///
-/// When the file can't be read, its format is none Polysmelt reads (or one whose feature is
-/// off), or the model doesn't parse.
+/// [`ErrorKind::Io`](crate::ErrorKind::Io) when the file can't be read, and
+/// [`MissingAsset`](crate::ErrorKind::MissingAsset) when a file it refers to isn't there;
+/// [`UnknownFormat`](crate::ErrorKind::UnknownFormat) when its format is none Polysmelt reads,
+/// and [`FeatureDisabled`](crate::ErrorKind::FeatureDisabled) when it's one whose feature is
+/// off; otherwise what's wrong with the model. The error names the file it was reading.
 #[cfg(feature = "fs")]
 pub fn open(path: impl AsRef<Path>) -> Result<Document> {
     Loader::new().open(path)
@@ -47,7 +50,9 @@ pub fn open(path: impl AsRef<Path>) -> Result<Document> {
 ///
 /// # Errors
 ///
-/// When the format can't be told or is one whose feature is off, or the model doesn't parse.
+/// [`ErrorKind::UnknownFormat`](crate::ErrorKind::UnknownFormat) when the format can't be told,
+/// [`FeatureDisabled`](crate::ErrorKind::FeatureDisabled) when it's one whose feature is off,
+/// and otherwise what's wrong with the model.
 pub fn read(bytes: impl Into<Bytes>, name: &str) -> Result<Document> {
     Loader::new().read(bytes, name)
 }
@@ -127,12 +132,11 @@ impl Loader {
     ///
     /// # Errors
     ///
-    /// When the file can't be read, its format is none Polysmelt reads (or one whose feature
-    /// is off), or the model doesn't parse.
+    /// As [`open`]'s.
     #[cfg(feature = "fs")]
     pub fn open(&self, path: impl AsRef<Path>) -> Result<Document> {
         // A bare file name's folder is the current one, which its references are found from.
-        let path = std::path::absolute(path.as_ref())?;
+        let path = std::path::absolute(path.as_ref()).map_err(|e| crate::Error::from(e).at(path.as_ref()))?;
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
         let folder;
         let assets: &dyn Assets = if let Some(a) = &self.assets {
@@ -150,8 +154,8 @@ impl Loader {
     ///
     /// # Errors
     ///
-    /// When the format can't be told or is one whose feature is off, or the model doesn't
-    /// parse.
+    /// As [`read`]'s, and [`ErrorKind::MissingAsset`](crate::ErrorKind::MissingAsset) when a
+    /// file the model refers to isn't among the assets.
     pub fn read(&self, bytes: impl Into<Bytes>, name: &str) -> Result<Document> {
         let bytes = bytes.into();
         let path = Path::new(name);

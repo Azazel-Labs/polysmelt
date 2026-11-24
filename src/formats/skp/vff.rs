@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use crate::{Context, Result};
+use crate::{Context, ErrorKind, Result};
 
 use super::model::{self, Id, Model};
 use super::reader::{f64_at, u32_at};
@@ -51,7 +51,11 @@ fn tree(d: &[u8], depth: usize) -> Result<Vec<Node<'_>>> {
     let mut out = Vec::new();
     for (tag, payload) in flat(d) {
         let children = if !payload.is_empty() && CONTAINERS.contains(&tag) {
-            ensure!(depth < MAX_DEPTH, "records nest deeper than {MAX_DEPTH} levels");
+            ensure!(
+                depth < MAX_DEPTH,
+                LimitExceeded,
+                "records nest deeper than {MAX_DEPTH} levels"
+            );
             tree(payload, depth + 1)?
         } else {
             Vec::new()
@@ -407,7 +411,7 @@ fn collect(nodes: &[Node<'_>], out: &mut Collected) {
 fn top_level(d: &[u8]) -> Result<Vec<&[u8]>> {
     let mut p = 0;
     while let Some(size) = u32_at(d, p + 2) {
-        ensure!(size as usize <= d.len() - p - 6, "model.dat is truncated");
+        ensure!(size as usize <= d.len() - p - 6, Truncated, "model.dat is cut short");
         p += 6 + size as usize;
     }
     let mut records: Vec<(u16, &[u8], &[u8])> = Vec::new();
@@ -455,12 +459,12 @@ fn top_level(d: &[u8]) -> Result<Vec<&[u8]>> {
 pub(crate) fn parse(data: &[u8]) -> Result<Model> {
     let off = (0..data.len().min(4096))
         .find(|&i| data.get(i..i + 4) == Some(b"PK\x03\x04"))
-        .context("no ZIP container found")?;
+        .context(ErrorKind::Corrupt, "no ZIP container found")?;
     let zip = Zip::open(&data[off..])?;
     let by_name = materials(&zip);
     let dat = zip
         .get("model.dat")
-        .context("model.dat not found in the ZIP container")??;
+        .context(ErrorKind::Corrupt, "model.dat not found in the ZIP container")??;
     let mut c = Collected::default();
     for record in top_level(&dat)? {
         collect(&tree(record, 0)?, &mut c);
@@ -470,7 +474,7 @@ pub(crate) fn parse(data: &[u8]) -> Result<Model> {
         definitions: c.definitions,
         ..Model::default()
     };
-    model.root = c.root.context("model.dat has no model record")?;
+    model.root = c.root.context(ErrorKind::Corrupt, "model.dat has no model record")?;
     for (id, name) in c.material_names {
         if let Some(m) = by_name.get(&name) {
             model.materials.insert(id, m.clone());

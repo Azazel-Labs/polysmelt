@@ -158,6 +158,7 @@ pub(crate) fn load(input: super::Input<'_>, ext: &str, assets: &dyn Assets, keep
     }
     ensure!(
         !scene.nodes.is_empty(),
+        Empty,
         "SMD file has no skeleton, triangles or vertex animation"
     );
     scene.rotate_roots(scene::Z_UP_TO_Y_UP);
@@ -415,7 +416,7 @@ fn vertex_animation(scene: &mut Scene, shapes: Vec<Shape>, name: &str) -> Result
     }
     let base_at = settled.iter().position(|s| s.time == 0.0).unwrap_or(0);
     let Some(base) = settled.get(base_at) else {
-        bail!("VTA file has no vertex animation");
+        bail!(Empty, "VTA file has no vertex animation");
     };
     let mut index: HashMap<i64, usize> = HashMap::new();
     let mut positions = Vec::new();
@@ -432,10 +433,15 @@ fn vertex_animation(scene: &mut Scene, shapes: Vec<Shape>, name: &str) -> Result
             normals[i] = n;
         }
     }
-    ensure!(!positions.is_empty(), "VTA file has no vertices in its first frame");
+    ensure!(
+        !positions.is_empty(),
+        Empty,
+        "VTA file has no vertices in its first frame"
+    );
     let count = settled.len() - 1;
     ensure!(
         count.saturating_mul(positions.len()) <= MAX_TARGET_VALUES,
+        LimitExceeded,
         "VTA file has too many frames of too many vertices to convert ({count} of {})",
         positions.len()
     );
@@ -586,16 +592,17 @@ fn parse(text: &str, limit: usize) -> Result<Smd> {
     let lines = lines(text);
     let mut s = Smd::default();
     let Some(&(n, first)) = lines.first() else {
-        bail!("SMD file is empty");
+        bail!(Empty, "SMD file is empty");
     };
     let mut words = words_of(code(first));
     ensure!(
         words.next().is_some_and(|w| w.eq_ignore_ascii_case("version")),
+        UnknownFormat,
         "isn't an SMD file: it doesn't start with a version line"
     );
     s.version = match words.next().and_then(integer) {
         Some(v) => v,
-        None => bail!("SMD line {n}: the version isn't a number"),
+        None => bail!(Corrupt, "SMD line {n}: the version isn't a number"),
     };
     let mut i = 1;
     while i < lines.len() {
@@ -607,7 +614,7 @@ fn parse(text: &str, limit: usize) -> Result<Smd> {
             "skeleton" => skeleton(&lines, i, &mut s)?,
             "triangles" => triangles(&lines, i, &mut s, limit)?,
             "vertexanimation" => vertex_frames(&lines, i, &mut s)?,
-            "version" => bail!("SMD line {n}: a second version line"),
+            "version" => bail!(Corrupt, "SMD line {n}: a second version line"),
             // A section this reader doesn't know: passed over to its end.
             _ => lines[i..]
                 .iter()
@@ -626,7 +633,7 @@ fn nodes(lines: &[(usize, &str)], mut i: usize, s: &mut Smd) -> Result<usize> {
             break;
         }
         let Some((id, name, parent)) = node_line(code(line)) else {
-            bail!("SMD line {n}: a node needs an id, a name and a parent");
+            bail!(Corrupt, "SMD line {n}: a node needs an id, a name and a parent");
         };
         if s.ids.contains_key(&id) {
             continue;
@@ -665,7 +672,7 @@ fn skeleton(lines: &[(usize, &str)], mut i: usize, s: &mut Smd) -> Result<usize>
         let first = words.next().unwrap_or("");
         if first.eq_ignore_ascii_case("time") {
             let Some(time) = words.next().and_then(double).filter(|t| t.is_finite()) else {
-                bail!("SMD line {n}: the time isn't a number");
+                bail!(Corrupt, "SMD line {n}: the time isn't a number");
             };
             s.frames.push(Frame {
                 time,
@@ -675,7 +682,10 @@ fn skeleton(lines: &[(usize, &str)], mut i: usize, s: &mut Smd) -> Result<usize>
         }
         let v = numbers(words);
         let (Some(bone), true) = (integer(first), v.len() >= 6) else {
-            bail!("SMD line {n}: a bone's pose needs its id, a position and a rotation");
+            bail!(
+                Corrupt,
+                "SMD line {n}: a bone's pose needs its id, a position and a rotation"
+            );
         };
         let Some(&b) = s.ids.get(&bone) else {
             continue;
@@ -714,7 +724,10 @@ fn triangles(lines: &[(usize, &str)], mut i: usize, s: &mut Smd, limit: usize) -
             i += 1;
             match vertex(code(v)) {
                 Some(v) => *c = Some(v),
-                None => bail!("SMD line {n}: a vertex needs its parent bone, position and normal"),
+                None => bail!(
+                    Corrupt,
+                    "SMD line {n}: a vertex needs its parent bone, position and normal"
+                ),
             }
         }
         let [Some(a), Some(b), Some(c)] = corners else {
@@ -724,6 +737,7 @@ fn triangles(lines: &[(usize, &str)], mut i: usize, s: &mut Smd, limit: usize) -
         let corners = [a, b, c];
         ensure!(
             s.triangles.len() < limit,
+            LimitExceeded,
             "too many triangles to convert (more than {limit})"
         );
         let material = if let Some((name, m)) = last
@@ -793,7 +807,7 @@ fn vertex_frames(lines: &[(usize, &str)], mut i: usize, s: &mut Smd) -> Result<u
         let first = words.next().unwrap_or("");
         if first.eq_ignore_ascii_case("time") {
             let Some(time) = words.next().and_then(double).filter(|t| t.is_finite()) else {
-                bail!("SMD line {n}: the time isn't a number");
+                bail!(Corrupt, "SMD line {n}: the time isn't a number");
             };
             let name = line
                 .find('#')
@@ -809,7 +823,7 @@ fn vertex_frames(lines: &[(usize, &str)], mut i: usize, s: &mut Smd) -> Result<u
         }
         let v = numbers(words);
         let (Some(id), true) = (integer(first), v.len() >= 3) else {
-            bail!("SMD line {n}: a vertex needs its id and position");
+            bail!(Corrupt, "SMD line {n}: a vertex needs its id and position");
         };
         let normal = if v.len() >= 6 { [v[3], v[4], v[5]] } else { [0.0; 3] };
         if s.shapes.is_empty() {
@@ -944,7 +958,7 @@ end
         let c = a
             .channels
             .iter()
-            .find(|c| c.node == arm && c.path == crate::rig::Path::Rotation)
+            .find(|c| c.node == arm && c.property == crate::rig::Property::Rotation)
             .unwrap();
         // Held at frame 1, where the file leaves it out.
         assert_eq!(c.times.len(), 3);

@@ -160,6 +160,7 @@ fn name(text: &[u8], ofs: u32) -> Result<String> {
     let ofs = usize_of(ofs);
     ensure!(
         ofs < text.len() || (ofs == 0 && text.is_empty()),
+        Corrupt,
         "IQM name at {ofs} is outside the {}-byte text block",
         text.len()
     );
@@ -227,6 +228,7 @@ fn numbers(raw: &[u8], format: u32, normalized: bool) -> Vec<f32> {
 fn parse(data: &[u8], frames: bool) -> Result<File> {
     ensure!(
         data.starts_with(b"INTERQUAKEMODEL\0"),
+        UnknownFormat,
         "not an IQM file: no INTERQUAKEMODEL signature"
     );
     let mut b = Bin::new(data, "IQM");
@@ -263,9 +265,14 @@ fn parse(data: &[u8], frames: bool) -> Result<File> {
         ofs_comment,
         ..,
     ] = h;
-    ensure!(version == 2, "IQM version {version} isn't supported, only 2");
+    ensure!(
+        version == 2,
+        Unsupported,
+        "IQM version {version} isn't supported, only 2"
+    );
     ensure!(
         usize_of(filesize) <= data.len(),
+        Truncated,
         "IQM file is cut short: {} bytes of {filesize}",
         data.len()
     );
@@ -291,19 +298,19 @@ fn parse(data: &[u8], frames: bool) -> Result<File> {
         }
         for (i, [kind, _flags, format, size, offset]) in heads.into_iter().enumerate() {
             let Some(bytes) = format_size(format) else {
-                bail!("IQM vertex array {i} has unknown number format {format}");
+                bail!(Corrupt, "IQM vertex array {i} has unknown number format {format}");
             };
             // Tangents and custom arrays aren't kept.
             if !matches!(kind, POSITION | TEXCOORD | NORMAL | BLENDINDEXES | BLENDWEIGHTS | COLOR) {
                 continue;
             }
             let size = usize_of(size);
-            ensure!(size > 0, "IQM vertex array {i} has no components");
+            ensure!(size > 0, Corrupt, "IQM vertex array {i} has no components");
             let mut a = Bin::new(data, "IQM");
             a.seek(usize_of(offset))?;
             let total = vertices
                 .checked_mul(size)
-                .ok_or_else(|| invalid!("IQM vertex array {i} is too large"))?;
+                .ok_or_else(|| err!(LimitExceeded, "IQM vertex array {i} is too large"))?;
             a.count(total as u64, bytes)?;
             let normalized = matches!(kind, TEXCOORD | BLENDWEIGHTS | COLOR);
             let mut values = numbers(a.bytes(total * bytes)?, format, normalized);
@@ -406,12 +413,14 @@ fn parse(data: &[u8], frames: bool) -> Result<File> {
         let channels: u32 = poses.iter().map(|p| (p.mask & 0x3ff).count_ones()).sum();
         ensure!(
             channels == num_framechannels,
+            Corrupt,
             "IQM poses animate {channels} channels, but frames hold {num_framechannels}"
         );
         ensure!(
             num_frames
                 .checked_mul(poses.len())
                 .is_some_and(|n| n <= MAX_POSE_FRAMES),
+            LimitExceeded,
             "IQM file has {num_frames} frames of {} joints, more than can be read",
             poses.len()
         );
@@ -486,6 +495,7 @@ fn build(f: &File, stem: &str, input: &Input<'_>, assets: &dyn Assets, keep: Kee
         let parent = usize::try_from(j.parent).ok();
         ensure!(
             j.parent >= -1 && parent.is_none_or(|p| p < i),
+            Corrupt,
             "IQM joint {i} has parent {}, which isn't an earlier joint",
             j.parent
         );
@@ -511,6 +521,7 @@ fn build(f: &File, stem: &str, input: &Input<'_>, assets: &dyn Assets, keep: Kee
     let Some(positions) = first(POSITION).filter(|a| a.size >= 3) else {
         ensure!(
             f.meshes.iter().all(|m| m.num_triangles == 0),
+            Corrupt,
             "IQM file has meshes but no positions"
         );
         return finish_anims(scene, f, keep.animations);
@@ -520,12 +531,14 @@ fn build(f: &File, stem: &str, input: &Input<'_>, assets: &dyn Assets, keep: Kee
         let verts = m.first_vertex..m.first_vertex.saturating_add(m.num_vertexes);
         ensure!(
             verts.end <= f.vertices,
+            Corrupt,
             "IQM mesh {mi}'s vertices run past the {} there are",
             f.vertices
         );
         let tris = m.first_triangle..m.first_triangle.saturating_add(m.num_triangles);
         ensure!(
             tris.end <= f.triangles.len(),
+            Corrupt,
             "IQM mesh {mi}'s triangles run past the {} there are",
             f.triangles.len()
         );
@@ -536,7 +549,7 @@ fn build(f: &File, stem: &str, input: &Input<'_>, assets: &dyn Assets, keep: Kee
         for (ti, t) in f.triangles[tris].iter().enumerate() {
             let local = t.map(|v| usize_of(v).checked_sub(verts.start).filter(|&v| v < verts.len()));
             let [Some(a), Some(b), Some(c)] = local else {
-                bail!("IQM mesh {mi}'s triangle {ti} names a vertex outside the mesh");
+                bail!(Corrupt, "IQM mesh {mi}'s triangle {ti} names a vertex outside the mesh");
             };
             // Clockwise front faces in the file; glTF's are counterclockwise.
             indices.extend([a, c, b].map(u32_of));
@@ -591,6 +604,7 @@ fn build(f: &File, stem: &str, input: &Input<'_>, assets: &dyn Assets, keep: Kee
                         let weighted = w > 0.0 && w.is_finite();
                         ensure!(
                             !weighted || (j >= 0.0 && f64::from(j) < f64::from(u32::try_from(n).unwrap_or(u32::MAX))),
+                            Corrupt,
                             "IQM vertex {v} is weighted to joint {j}, but there are {n}"
                         );
                         prim.joints.push(if weighted { joint_of(j) } else { 0 });
@@ -679,6 +693,7 @@ fn finish_anims(mut scene: Scene, f: &File, keep: bool) -> Result<Scene> {
     }
     ensure!(
         f.poses.len() == n,
+        Corrupt,
         "IQM file has {} poses for {n} joints",
         f.poses.len()
     );
@@ -698,6 +713,7 @@ fn finish_anims(mut scene: Scene, f: &File, keep: bool) -> Result<Scene> {
         let frames = a.first..a.first.saturating_add(a.count);
         ensure!(
             frames.end <= f.num_frames,
+            Corrupt,
             "IQM animation {ai} runs past the {} frames there are",
             f.num_frames
         );

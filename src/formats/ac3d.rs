@@ -299,7 +299,7 @@ fn mat_values(m: &mut Mat, w: &[&[u8]]) {
 
 fn parse(data: &[u8]) -> Result<Model> {
     let data = data.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(data);
-    ensure!(data.starts_with(b"AC3D"), "not an AC3D file");
+    ensure!(data.starts_with(b"AC3D"), UnknownFormat, "not an AC3D file");
     let mut lines = Lines { d: data, at: 0 };
     let head = lines.next_line().unwrap_or_default();
     let mut m = Model {
@@ -802,7 +802,12 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
             triangles += s.len as usize - 2;
             need = need.saturating_add(clip_cost(s.len));
         }
-        ensure!(triangles <= input.limit, "more than {} triangles", input.limit);
+        ensure!(
+            triangles <= input.limit,
+            LimitExceeded,
+            "more than {} triangles",
+            input.limit
+        );
         let take = need.min(clip);
         clip -= take;
         corners += o.refs.len() + o.verts.len();
@@ -838,7 +843,7 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         meshes.push(mesh);
         mesh_of[*oi] = Some(meshes.len() - 1);
     }
-    ensure!(!meshes.is_empty(), "this AC3D file has no geometry");
+    ensure!(!meshes.is_empty(), Empty, "this AC3D file has no geometry");
 
     // A plain world (no placement or surfaces of its own) gives way to its children.
     let plain = |i: usize| {

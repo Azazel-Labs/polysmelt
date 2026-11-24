@@ -10,7 +10,7 @@ mod armature {
     use std::path::PathBuf;
 
     use polysmelt::assets::Folder;
-    use polysmelt::rig::{Path, Rig, Trs};
+    use polysmelt::rig::{Property, Rig, Trs};
 
     use super::Loader;
 
@@ -102,7 +102,9 @@ mod armature {
         let (first, last) = a.span();
         assert!(last > first, "{first}..{last}");
         assert!(
-            a.channels.iter().any(|c| c.node == upper && c.path == Path::Rotation),
+            a.channels
+                .iter()
+                .any(|c| c.node == upper && c.property == Property::Rotation),
             "Upper turns"
         );
         let posed = rig.pose(Some(0), last);
@@ -231,7 +233,7 @@ fn accessor_offset_to_the_buffer_end() {
 #[cfg(feature = "gltf")]
 fn bind_pose_keeps_stored_vertices() {
     use polysmelt::document::Pose;
-    use polysmelt::mesh::{Bone, Material, Mesh, Prim, to_glb};
+    use polysmelt::mesh::{Bone, Material, Mesh, Prim};
     let mut p = Prim::default();
     for i in 0..6u8 {
         let x = f32::from(i) * 0.5;
@@ -271,7 +273,7 @@ fn bind_pose_keeps_stored_vertices() {
         let doc = polysmelt::read(glb.to_vec(), "s.glb").unwrap();
         doc.flatten(pose).unwrap().unwrap()
     };
-    let glb = to_glb(&mesh).unwrap();
+    let glb = mesh.to_glb().unwrap();
     let bind = flat(&glb, Pose::Bind);
     assert_eq!(bind.prims[0].positions, p.positions, "bind moves no vertex");
     assert_eq!(bind.prims[0].normals, p.normals);
@@ -296,7 +298,7 @@ fn bind_pose_keeps_stored_vertices() {
     }
     assert_eq!(rest.prims[0].skin_joints, bind.prims[0].skin_joints);
     assert_eq!(rest.prims[0].skin_weights, bind.prims[0].skin_weights);
-    let again = flat(&to_glb(&bind).unwrap(), Pose::Bind);
+    let again = flat(&bind.to_glb().unwrap(), Pose::Bind);
     assert_eq!(again.prims[0].positions, p.positions);
     for (got, want) in again.skeleton.iter().zip(&skeleton) {
         for (g, w) in got.matrix.iter().zip(&want.matrix) {

@@ -757,6 +757,7 @@ impl Model {
             }
             ensure!(
                 self.triangles <= self.limit,
+                LimitExceeded,
                 "too many triangles to convert (more than {})",
                 self.limit
             );
@@ -1213,7 +1214,7 @@ fn unit(units: i64) -> Option<(f64, &'static str)> {
 pub(crate) fn load(input: Input<'_>) -> Result<Document> {
     let data = input.read()?;
     let d = data.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&data);
-    ensure!(!d.iter().all(u8::is_ascii_whitespace), "DXF file is empty");
+    ensure!(!d.iter().all(u8::is_ascii_whitespace), Empty, "DXF file is empty");
     let binary = d.starts_with(SENTINEL);
     let mut p = Pairs {
         d,
@@ -1257,7 +1258,7 @@ pub(crate) fn load(input: Input<'_>) -> Result<Document> {
             _ => {}
         }
     }
-    ensure!(sections > 0, "not a DXF file: it has no sections");
+    ensure!(sections > 0, UnknownFormat, "not a DXF file: it has no sections");
     Build::new(m, binary).finish()
 }
 
@@ -1453,6 +1454,7 @@ impl Build {
             self.triangles += self.mesh_tris[m];
             ensure!(
                 self.triangles <= self.m.limit,
+                LimitExceeded,
                 "too many triangles to convert (more than {})",
                 self.m.limit
             );

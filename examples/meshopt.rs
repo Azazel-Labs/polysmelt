@@ -16,7 +16,7 @@
 use std::path::Path;
 
 use polysmelt::gltf;
-use polysmelt::mesh::{Material, Mesh, Prim, to_glb};
+use polysmelt::mesh::{Material, Mesh, Prim};
 
 #[allow(clippy::cast_precision_loss, reason = "a 25 by 25 grid")]
 fn sample() -> polysmelt::Result<Vec<u8>> {
@@ -43,7 +43,7 @@ fn sample() -> polysmelt::Result<Vec<u8>> {
         images: Vec::new(),
         skeleton: Vec::new(),
     };
-    gltf::compress(&to_glb(&mesh)?)
+    gltf::compress(&mesh.to_glb()?)
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -54,11 +54,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let glb = match cmd.as_str() {
                 "compress" => gltf::compress(&data)?,
                 "compress-khr" => {
-                    let options = gltf::CompressOptions {
-                        level: 3,
-                        color_filter: true,
-                        ..gltf::CompressOptions::KHR
-                    };
+                    let options = gltf::CompressOptions::KHR.level(3).color_filter(true);
                     gltf::compress_with(&data, options)?
                 }
                 "decompress" => gltf::decompress(&data)?,

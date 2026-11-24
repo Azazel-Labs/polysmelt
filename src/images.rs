@@ -17,10 +17,14 @@ use crate::assets::Assets;
 use crate::document::Document;
 use crate::gltf::{data_uri, mime_from_name, sniff_mime};
 use crate::mesh::Image;
-use crate::{Context as _, Result};
+use crate::{Context as _, ErrorKind, Result};
 
 /// Where an image is.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Non-exhaustive: other places an image can be may be added, so a `match` on one needs a
+/// wildcard arm.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Location {
     /// A file, found through the [`Assets`].
     File(PathBuf),
@@ -419,18 +423,19 @@ impl<'d> ImageHandle<'d> {
                 self.doc.view_shared(crate::num::usize_of(v))?
             } else {
                 let uri = self.json.get("uri").and_then(Value::as_str);
-                data_uri(uri.with_context(|| format!("image {i} has no bytes"))?)?
+                data_uri(uri.with_context(ErrorKind::Corrupt, || format!("image {i} has no bytes"))?)?
                     .1
                     .into()
             };
-            return image_of(bytes, self.mime()).with_context(|| format!("image {i}: unknown image format"));
+            return image_of(bytes, self.mime())
+                .with_context(ErrorKind::Unsupported, || format!("image {i}: unknown image format"));
         };
         let bytes: Cow<'_, [u8]> = match (r.location(), &r.bytes) {
             (_, Some(b)) => Cow::Borrowed(b),
             (Location::File(p), None) => assets
                 .read(p)
-                .with_context(|| format!("image {i}: can't read {}", p.display()))?,
-            _ => bail!("image {i} ({:?}) wasn't found", r.name),
+                .ok_or_else(|| crate::Error::missing(format!("image {i} can't be read")).at(p))?,
+            _ => bail!(MissingAsset, "image {i} ({:?}) wasn't found", r.name),
         };
         let img = if r.raw {
             image_of(crate::Bytes::from(bytes.into_owned()), self.mime())
@@ -438,7 +443,9 @@ impl<'d> ImageHandle<'d> {
             let name = self.path().map_or_else(|| PathBuf::from(&r.name), Path::to_path_buf);
             assets.image(&bytes, &name)
         };
-        img.with_context(|| format!("image {i} ({:?}) isn't an image that can be embedded", r.name))
+        img.with_context(ErrorKind::Unsupported, || {
+            format!("image {i} ({:?}) isn't an image that can be embedded", r.name)
+        })
     }
 }
 

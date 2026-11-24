@@ -13,7 +13,7 @@ use serde_json::{Map, Value, json};
 use crate::document::{Builder, Document, Part};
 use crate::mesh::srgb_to_linear;
 use crate::source::SourceInfo;
-use crate::{Context as _, Result};
+use crate::{Context as _, ErrorKind, Result};
 
 /// The extension's name, which also prefixes its attributes.
 pub(crate) const EXTENSION: &str = "KHR_gaussian_splatting";
@@ -83,7 +83,7 @@ impl Splats {
             let mut v = Vec::new();
             v.try_reserve_exact(n)
                 .ok()
-                .context("not enough memory for the splats")?;
+                .context(ErrorKind::LimitExceeded, "not enough memory for the splats")?;
             Ok(v)
         }
         let mut sh = Vec::with_capacity(rest);

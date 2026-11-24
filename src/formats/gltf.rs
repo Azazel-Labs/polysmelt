@@ -21,7 +21,7 @@ use crate::document::{Blob, Document, Keep};
 use crate::gltf as container;
 use crate::images::{Location, Reference};
 use crate::num::usize_of;
-use crate::{Bytes, Context as _, Result};
+use crate::{Bytes, Context as _, ErrorKind, Result};
 
 /// Reads the glTF or GLB `input`.
 pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document> {
@@ -59,7 +59,11 @@ pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
         }
         source["version"] = version.into();
     } else {
-        ensure!(version.starts_with("2."), "glTF version {version:?} isn't 1.x or 2.x");
+        ensure!(
+            version.starts_with("2."),
+            Unsupported,
+            "glTF version {version:?} isn't 1.x or 2.x"
+        );
     }
     let mut doc = Document {
         json,
@@ -86,11 +90,12 @@ pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
             None if fallback => Blob::Missing(declared),
             // An empty buffer needs no data (a placeholder some writers leave).
             None if declared == 0 => Blob::Bytes(Bytes::new()),
-            None => bail!("glTF buffer {i} has no data"),
+            None => bail!(Corrupt, "glTF buffer {i} has no data"),
         };
         ensure!(
             blob.len() >= declared,
-            "glTF buffer {i} holds {} bytes but declares {declared}",
+            Truncated,
+            "glTF buffer {i} is cut short: it holds {} bytes but declares {declared}",
             blob.len()
         );
         if let Some(b) = b.as_object_mut() {
@@ -192,7 +197,7 @@ fn checked(rel: &str) -> Result<&str> {
         && Path::new(rel)
             .components()
             .all(|c| matches!(c, Component::Normal(_) | Component::CurDir | Component::ParentDir));
-    ensure!(safe, "refusing to read {rel:?}: not a relative path");
+    ensure!(safe, Unsupported, "refusing to read {rel:?}: not a relative path");
     Ok(rel)
 }
 
@@ -208,24 +213,29 @@ fn read_external(input: Input<'_>, assets: &dyn Assets, uri: &str) -> Result<Byt
     let p = input.dir().join(checked(&rel)?);
     #[cfg(feature = "fs")]
     if input.bytes().is_none() {
-        return read_file(&p).map_err(|e| invalid!("glTF file {rel:?}: {e}"));
+        return read_file(&p, Some(&rel));
     }
     assets
         .read_shared(&p)
-        .with_context(|| format!("glTF file {rel:?} isn't among the assets"))
+        .ok_or_else(|| crate::Error::missing(format!("glTF file {rel:?} isn't among the assets")).at(&p))
 }
 
 /// The file at `path`, whole, in one read into memory reserved for it (failing, rather than
-/// aborting, when there isn't that much).
+/// aborting, when there isn't that much). `asset` names a file the model refers to, as its
+/// reference has it.
 #[cfg(feature = "fs")]
-fn read_file(path: &Path) -> std::io::Result<Bytes> {
+fn read_file(path: &Path, asset: Option<&str>) -> Result<Bytes> {
     use std::io::Read as _;
-    let mut file = std::fs::File::open(path)?;
-    let len = file.metadata()?.len();
+    let io = |e: std::io::Error| match asset {
+        Some(rel) => crate::Error::asset(e, path, format!("glTF file {rel:?}")),
+        None => crate::Error::from(e),
+    };
+    let mut file = std::fs::File::open(path).map_err(io)?;
+    let len = file.metadata().map_err(io)?.len();
     let mut all = Vec::new();
     all.try_reserve_exact(usize::try_from(len).unwrap_or(usize::MAX))
-        .map_err(|_| std::io::Error::other(format!("{len} bytes won't fit in memory")))?;
-    file.read_to_end(&mut all)?;
+        .map_err(|_| err!(LimitExceeded, "glTF file of {len} bytes"))?;
+    file.read_to_end(&mut all).map_err(io)?;
     Ok(all.into())
 }
 
@@ -237,23 +247,28 @@ fn glb_layout<'b>(
     total: u64,
     read: impl Fn(u64, usize) -> Result<&'b [u8]>,
 ) -> Result<(Map<String, Value>, Option<Span>)> {
-    let head = read(0, 20).context("GLB is truncated")?;
+    let head = read(0, 20)?;
     let u32_at = |b: &[u8], at: usize| u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]]);
     if u32_at(head, 4) == 1 {
         // glTF 1.0's binary glTF: the JSON's length and format (0, JSON) in the header, then
         // the body, unpadded, to the end.
-        ensure!(u32_at(head, 16) == 0, "binary glTF 1.0 content isn't JSON");
+        ensure!(u32_at(head, 16) == 0, Corrupt, "binary glTF 1.0 content isn't JSON");
         let json_len = u64::from(u32_at(head, 12));
         let end = u64::from(u32_at(head, 8)).min(total);
-        ensure!(20 + json_len <= end, "GLB is truncated");
+        ensure!(20 + json_len <= end, Truncated, "GLB is cut short");
         let text = read(20, usize_of(json_len))?;
         let json = glb_json(text)?;
         return Ok((json, Some((20 + json_len, end - 20 - json_len))));
     }
-    ensure!(u32_at(head, 4) == 2, "GLB version {} is not 1 or 2", u32_at(head, 4));
-    ensure!(&head[16..20] == b"JSON", "GLB doesn't start with a JSON chunk");
+    ensure!(
+        u32_at(head, 4) == 2,
+        Unsupported,
+        "GLB version {} is not 1 or 2",
+        u32_at(head, 4)
+    );
+    ensure!(&head[16..20] == b"JSON", Corrupt, "GLB doesn't start with a JSON chunk");
     let json_len = u64::from(u32_at(head, 12));
-    ensure!(20 + json_len <= total, "GLB is truncated");
+    ensure!(20 + json_len <= total, Truncated, "GLB is cut short");
     let text = read(20, usize_of(json_len))?;
     let json = glb_json(text)?;
     let at = (20 + json_len).next_multiple_of(4);
@@ -275,7 +290,7 @@ fn glb_in_memory(bytes: &[u8], share: impl FnOnce(&[u8]) -> Bytes) -> Result<(Ma
     let (json, bin) = glb_layout(total, |off, len| {
         bytes
             .get(usize_of(off)..usize_of(off).saturating_add(len))
-            .context("GLB is truncated")
+            .context(ErrorKind::Truncated, "GLB is cut short")
     })?;
     let bin = bin.map(|(base, len)| Blob::Bytes(share(&bytes[usize_of(base)..usize_of(base + len)])));
     Ok((json, bin))
@@ -286,8 +301,10 @@ fn glb_json(text: &[u8]) -> Result<Map<String, Value>> {
     let text = text.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(text);
     // The chunk is padded with spaces, or by some writers with zeros.
     let end = text.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
-    let Value::Object(json) = crate::json::from_slice(&text[..end]).context("GLB JSON doesn't parse")? else {
-        bail!("glTF JSON is not an object")
+    let Value::Object(json) =
+        crate::json::from_slice(&text[..end]).context(ErrorKind::Corrupt, "GLB JSON doesn't parse")?
+    else {
+        bail!(Corrupt, "glTF JSON is not an object")
     };
     Ok(json)
 }
@@ -297,7 +314,7 @@ fn gltf_json(bytes: &[u8]) -> Result<Map<String, Value>> {
     let text = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
     match crate::json::from_slice(text) {
         Ok(Value::Object(m)) => Ok(m),
-        _ => bail!("not a glTF file: neither GLB nor glTF JSON"),
+        _ => bail!(UnknownFormat, "not a glTF file: neither GLB nor glTF JSON"),
     }
 }
 
@@ -305,7 +322,7 @@ fn gltf_json(bytes: &[u8]) -> Result<Map<String, Value>> {
 /// the bytes read, not copied out of them.
 #[cfg(feature = "fs")]
 fn open_file(path: &Path) -> Result<(Map<String, Value>, Option<Blob>)> {
-    let all = read_file(path).map_err(|e| invalid!("glTF file: {e}"))?;
+    let all = read_file(path, None)?;
     if all.starts_with(b"glTF") {
         return glb_in_memory(&all, |part| all.slice_ref(part));
     }

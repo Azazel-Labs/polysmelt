@@ -150,6 +150,7 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document> {
         }
         ensure!(
             segments.len() < MAX_SEGMENTS,
+            LimitExceeded,
             "HTR has more than {MAX_SEGMENTS} segments"
         );
         index.insert(name.to_owned(), segments.len());
@@ -183,6 +184,7 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document> {
                 _ => {
                     ensure!(
                         section.is_some(),
+                        UnknownFormat,
                         "not an HTR file: it starts with `[{}]`, not [Header]",
                         show(name)
                     );
@@ -199,7 +201,11 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document> {
             continue;
         }
         let Some(at) = section else {
-            bail!("not an HTR file: it starts with `{}`, not [Header]", show(line));
+            bail!(
+                UnknownFormat,
+                "not an HTR file: it starts with `{}`, not [Header]",
+                show(line)
+            );
         };
         let mut tokens = line.split_whitespace();
         let first = tokens.next().unwrap_or("");
@@ -218,6 +224,7 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document> {
                 let v = numbers(tokens, 7);
                 ensure!(
                     v.len() == 7,
+                    Corrupt,
                     "HTR line {no}: segment `{}`'s base position needs seven numbers",
                     show(first)
                 );
@@ -243,9 +250,9 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document> {
         }
     }
     let Some(_) = section else {
-        bail!("not an HTR file: it's empty");
+        bail!(Empty, "not an HTR file: it's empty");
     };
-    ensure!(!segments.is_empty(), "HTR has no segments");
+    ensure!(!segments.is_empty(), Empty, "HTR has no segments");
 
     let get = |k: &str| header.get(&k.to_ascii_lowercase()).map(String::as_str);
     let order_text = get("EulerRotationOrder").unwrap_or("ZYX");
@@ -260,12 +267,14 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document> {
         .collect();
     let Ok(order) = <[usize; 3]>::try_from(order) else {
         bail!(
+            Corrupt,
             "HTR EulerRotationOrder `{}` isn't three of X, Y and Z",
             show(order_text)
         );
     };
     ensure!(
         order_text.trim().len() == 3,
+        Corrupt,
         "HTR EulerRotationOrder `{}` isn't three of X, Y and Z",
         show(order_text)
     );
@@ -273,7 +282,7 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document> {
         None => false,
         Some(u) if u.starts_with("deg") => false,
         Some(u) if u.starts_with("rad") => true,
-        Some(u) => bail!("HTR RotationUnits `{}` isn't Degrees or Radians", show(u)),
+        Some(u) => bail!(Corrupt, "HTR RotationUnits `{}` isn't Degrees or Radians", show(u)),
     };
     let angle = if radians { 1.0 } else { std::f64::consts::PI / 180.0 };
     let rate = get("DataFrameRate")
@@ -374,7 +383,7 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document> {
     info.version = get("FileVersion").map(str::to_owned);
     info.unit = units.map(str::to_owned);
     info.meters_per_unit = meters.map_or(Fact::Unknown, Fact::Declared);
-    info.up_axis = match (get("GlobalAxisofGravity"), Axis::parse(gravity)) {
+    info.up_axis = match (get("GlobalAxisofGravity"), gravity.parse().ok()) {
         (Some(_), Some(a)) if up.is_some() => Fact::Declared(a),
         (None, _) => Fact::Assumed(Axis::PosY),
         _ => Fact::Unknown,

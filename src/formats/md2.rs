@@ -215,12 +215,16 @@ struct Model {
 
 /// A header count or offset, which can't be negative.
 fn size(v: i32, what: &str) -> Result<usize> {
-    usize::try_from(v).map_err(|_| invalid!("MD2 header's {what} is negative ({v})"))
+    usize::try_from(v).map_err(|_| err!(Corrupt, "MD2 header's {what} is negative ({v})"))
 }
 
 /// Reads the file; `morphs` says whether frames after the first are kept as targets.
 fn parse(data: &[u8], morphs: bool) -> Result<Model> {
-    ensure!(data.starts_with(b"IDP2"), "not an MD2 file: no IDP2 signature");
+    ensure!(
+        data.starts_with(b"IDP2"),
+        UnknownFormat,
+        "not an MD2 file: no IDP2 signature"
+    );
     let mut b = Bin::new(data, "MD2");
     b.skip(4)?;
     let mut h = [0i32; 16];
@@ -266,7 +270,7 @@ fn parse(data: &[u8], morphs: bool) -> Result<Model> {
             st.push([b.i16()?, b.i16()?]);
         }
     }
-    ensure!(n_tris > 0, "MD2 file has no triangles");
+    ensure!(n_tris > 0, Empty, "MD2 file has no triangles");
     b.seek(size(ofs_tris, "triangle offset")?)?;
     let mut tris = Vec::with_capacity(b.count(n_tris as u64, 12)?);
     for t in 0..n_tris {
@@ -274,11 +278,13 @@ fn parse(data: &[u8], morphs: bool) -> Result<Model> {
         let s = [b.u16()?, b.u16()?, b.u16()?];
         ensure!(
             v.iter().all(|&i| usize::from(i) < n_xyz),
+            Corrupt,
             "MD2 triangle {t} names a vertex past the {n_xyz} each frame holds"
         );
         // With no texture coordinates at all, their indices mean nothing.
         ensure!(
             n_st == 0 || s.iter().all(|&i| usize::from(i) < n_st),
+            Corrupt,
             "MD2 triangle {t} names a texture coordinate past the {n_st} there are"
         );
         tris.push((v, if n_st == 0 { [0; 3] } else { s }));
@@ -300,19 +306,22 @@ fn parse(data: &[u8], morphs: bool) -> Result<Model> {
         }
     }
 
-    ensure!(n_frames > 0, "MD2 file has no frames");
+    ensure!(n_frames > 0, Empty, "MD2 file has no frames");
     ensure!(
         n_frames <= MAX_FRAMES,
+        LimitExceeded,
         "MD2 file has {n_frames} frames, more than {MAX_FRAMES}"
     );
     let need = n_xyz.checked_mul(4).and_then(|n| n.checked_add(40));
     ensure!(
         need.is_some_and(|n| frame_size >= n),
+        Corrupt,
         "MD2 frames are {frame_size} bytes, too few for {n_xyz} vertices"
     );
     let kept = if morphs { n_frames } else { 1 };
     ensure!(
         kept.checked_mul(verts.len()).is_some_and(|n| n <= MAX_FRAME_VERTICES),
+        LimitExceeded,
         "MD2 file's {n_frames} frames of {} vertices are more than a model can hold",
         verts.len()
     );

@@ -268,13 +268,14 @@ fn load_as(path: &Path, ext: &str, format: Option<Format>, assets: &dyn Assets, 
         && len <= SMALL_FILE
     {
         let mut bytes = Vec::with_capacity(usize::try_from(len).unwrap_or(0));
-        file.read_to_end(&mut bytes)?;
+        file.read_to_end(&mut bytes)
+            .map_err(|e| crate::Error::from(e).at(path))?;
         let bytes = Bytes::from(bytes);
         let input = Input::shared(&bytes, path);
-        return read_input(input, extension_as(input, ext, format), assets, keep);
+        return read_input(input, extension_as(input, ext, format), assets, keep).map_err(|e| e.at(path));
     }
     let input = Input::file(path);
-    read_input(input, extension_as(input, ext, format), assets, keep)
+    read_input(input, extension_as(input, ext, format), assets, keep).map_err(|e| e.at(path))
 }
 
 /// The largest model [`load_as`] reads whole before parsing, rather than streaming it from the file.
@@ -494,12 +495,17 @@ pub(crate) fn read_input(input: Input<'_>, ext: &str, assets: &dyn Assets, keep:
         };
         match found {
             Some(e) => ext = e,
-            None if ext.is_empty() => bail!("can't tell this model's format from its first bytes"),
+            None if ext.is_empty() => bail!(UnknownFormat, "can't tell this model's format from its first bytes"),
             None => {}
         }
     }
     let limit = keep.triangles();
-    let mut doc = convert(Input { limit, ..input }, ext, assets, keep)?;
+    let mut doc = convert(Input { limit, ..input }, ext, assets, keep).map_err(|e| {
+        match EXTENSIONS.iter().find(|&&e| e == ext) {
+            Some(known) => e.in_format(feature_for(known)),
+            None => e,
+        }
+    })?;
     doc.max_triangles = limit;
     doc.prune(keep);
     if matches!(
@@ -618,8 +624,8 @@ fn convert(input: Input<'_>, ext: &str, assets: &dyn Assets, keep: Keep) -> Resu
         "irrmesh" | "irr" => irr::load(input, ext, assets, keep),
         #[cfg(feature = "xgl")]
         "xgl" | "zgl" => xgl::load(input, ext, assets, keep),
-        e if EXTENSIONS.contains(&e) => bail!("built without the `{}` feature", feature_for(e)),
-        _ => bail!("not a model format handled here: .{ext}"),
+        e if EXTENSIONS.contains(&e) => bail!(FeatureDisabled, "built without the `{}` feature", feature_for(e)),
+        _ => bail!(UnknownFormat, "not a model format handled here: .{ext}"),
     }
 }
 
@@ -729,9 +735,9 @@ fn guess_texture(
 mod tests {
     use super::*;
     use crate::assets::{Folder, Memory};
-    use crate::mesh::Mesh;
     #[allow(unused_imports)]
-    use crate::mesh::{GRAY, to_glb};
+    use crate::mesh::GRAY;
+    use crate::mesh::Mesh;
     use serde_json::{Map, Value};
 
     /// Reads `path` with assets found under `root`, as (mesh, facts); and reads it again from
@@ -824,7 +830,7 @@ vt 0 1
         bin.extend_from_slice(&[0, 0]);
         let (m, f) = load_bytes("a.stl", &bin);
         assert_eq!(f["triangles"], 1);
-        let glb = to_glb(&m.unwrap()).unwrap();
+        let glb = m.unwrap().to_glb().unwrap();
         assert!(glb.starts_with(b"glTF"));
 
         let ascii = "solid t\nfacet normal 0 0 1\nouter loop\nvertex 0 0 0\nvertex 1 0 0\nvertex 0 1 0\nendloop\nendfacet\nendsolid t\n";
@@ -939,7 +945,7 @@ end_header
         assert_eq!(m.prims.len(), 2);
         assert_eq!(m.triangles(), 10 * 2);
         assert_eq!(m.materials[m.prims[0].material].color, [1.0, 0.0, 0.0, 1.0]);
-        assert!(to_glb(&m).unwrap().starts_with(b"glTF"));
+        assert!(m.to_glb().unwrap().starts_with(b"glTF"));
     }
 
     #[test]
@@ -1458,7 +1464,7 @@ f 1/1 3/3 4/4
         assert_eq!(m.materials[m.prims[0].material].name, "Wood");
         assert_eq!(m.materials[m.prims[0].material].color_image, Some(0));
         assert_eq!(m.prims[0].uvs[0], [0.0, 1.0], "V flipped");
-        assert!(to_glb(&m).unwrap().starts_with(b"glTF"));
+        assert!(m.to_glb().unwrap().starts_with(b"glTF"));
     }
 
     #[cfg(all(feature = "dae", feature = "stl"))]

@@ -205,13 +205,17 @@ impl Hierarchy {
     fn current(&self, what: &str, no: usize) -> Result<usize> {
         match self.open.last() {
             Some(&j) => Ok(j),
-            None => bail!("BVH line {no}: {what} outside any joint's braces"),
+            None => bail!(Corrupt, "BVH line {no}: {what} outside any joint's braces"),
         }
     }
 
     /// Adds a joint under the innermost open one (or as a root), waiting for its `{`.
     fn add(&mut self, name: String, end: bool) -> Result<()> {
-        ensure!(self.joints.len() < MAX_NODES, "BVH has more than {MAX_NODES} joints");
+        ensure!(
+            self.joints.len() < MAX_NODES,
+            LimitExceeded,
+            "BVH has more than {MAX_NODES} joints"
+        );
         let i = self.joints.len();
         match self.open.last() {
             Some(&p) => self.joints[p].children.push(i),
@@ -238,7 +242,11 @@ impl Hierarchy {
                 Want::Keyword => {}
                 Want::Offset(k) => {
                     let Some(v) = finite(tok) else {
-                        bail!("BVH line {no}: OFFSET needs three numbers, not `{}`", show(tok));
+                        bail!(
+                            Corrupt,
+                            "BVH line {no}: OFFSET needs three numbers, not `{}`",
+                            show(tok)
+                        );
                     };
                     let j = self.current("OFFSET", no)?;
                     self.joints[j].offset[k] = v;
@@ -249,6 +257,7 @@ impl Hierarchy {
                     let n = std::str::from_utf8(tok).ok().and_then(|s| s.parse::<usize>().ok());
                     let Some(n) = n.filter(|&n| n <= MAX_CHANNELS) else {
                         bail!(
+                            Corrupt,
                             "BVH line {no}: CHANNELS needs a count up to {MAX_CHANNELS}, not `{}`",
                             show(tok)
                         );
@@ -271,6 +280,7 @@ impl Hierarchy {
             if !self.started {
                 ensure!(
                     tok.eq_ignore_ascii_case(b"HIERARCHY"),
+                    UnknownFormat,
                     "not a BVH file: it starts with `{}`, not HIERARCHY",
                     show(tok)
                 );
@@ -281,6 +291,7 @@ impl Hierarchy {
                 && tok != b"{"
             {
                 bail!(
+                    Corrupt,
                     "BVH line {no}: `{{` should follow joint `{}`, not `{}`",
                     self.joints[j].name,
                     show(tok)
@@ -289,21 +300,30 @@ impl Hierarchy {
             let is = |k: &[u8]| tok.eq_ignore_ascii_case(k);
             if tok == b"{" {
                 let Some(j) = self.pending.take() else {
-                    bail!("BVH line {no}: `{{` opens no joint");
+                    bail!(Corrupt, "BVH line {no}: `{{` opens no joint");
                 };
                 self.open.push(j);
             } else if tok == b"}" {
-                ensure!(self.open.pop().is_some(), "BVH line {no}: `}}` closes no joint");
+                ensure!(
+                    self.open.pop().is_some(),
+                    Corrupt,
+                    "BVH line {no}: `}}` closes no joint"
+                );
             } else if is(b"ROOT") || is(b"JOINT") {
                 if is(b"ROOT") {
                     if let Some(&j) = self.open.last() {
                         bail!(
+                            Corrupt,
                             "BVH line {no}: ROOT inside joint `{}` (a `}}` is missing)",
                             self.joints[j].name
                         );
                     }
                 } else {
-                    ensure!(!self.open.is_empty(), "BVH line {no}: JOINT outside any joint's braces");
+                    ensure!(
+                        !self.open.is_empty(),
+                        Corrupt,
+                        "BVH line {no}: JOINT outside any joint's braces"
+                    );
                 }
                 // The name is the rest of the line, up to a `{` on it.
                 let cut = rest.iter().position(|&b| b == b'{').unwrap_or(rest.len());
@@ -318,11 +338,11 @@ impl Hierarchy {
             } else if is(b"End") {
                 let site = token(rest).filter(|(t, _)| t.eq_ignore_ascii_case(b"Site"));
                 let Some((_, after)) = site else {
-                    bail!("BVH line {no}: `End` should be followed by `Site`");
+                    bail!(Corrupt, "BVH line {no}: `End` should be followed by `Site`");
                 };
                 rest = after;
                 let Some(&parent) = self.open.last() else {
-                    bail!("BVH line {no}: End Site outside any joint's braces");
+                    bail!(Corrupt, "BVH line {no}: End Site outside any joint's braces");
                 };
                 let name = format!("{}_end", self.joints[parent].name);
                 self.add(name, true)?;
@@ -333,6 +353,7 @@ impl Hierarchy {
                 let j = self.current("CHANNELS", no)?;
                 ensure!(
                     self.joints[j].channels.is_empty(),
+                    Corrupt,
                     "BVH line {no}: joint `{}` lists CHANNELS twice",
                     self.joints[j].name
                 );
@@ -342,7 +363,7 @@ impl Hierarchy {
                 self.finish()?;
                 return Ok(true);
             } else {
-                bail!("BVH line {no}: `{}` isn't part of a BVH hierarchy", show(tok));
+                bail!(Corrupt, "BVH line {no}: `{}` isn't part of a BVH hierarchy", show(tok));
             }
         }
         Ok(false)
@@ -350,18 +371,20 @@ impl Hierarchy {
 
     /// Checks the hierarchy is complete, at `MOTION` or the end of the file.
     fn finish(&self) -> Result<()> {
-        ensure!(self.started, "not a BVH file: it's empty");
+        ensure!(self.started, Empty, "not a BVH file: it's empty");
         if let Some(j) = self.pending.or(self.open.last().copied()) {
             bail!(
-                "BVH hierarchy ends inside joint `{}`: a brace is missing, or the file is cut short",
+                Truncated,
+                "BVH hierarchy is cut short inside joint `{}`, or a brace is missing",
                 self.joints[j].name
             );
         }
         ensure!(
             self.want == Want::Keyword,
-            "BVH hierarchy ends inside an OFFSET or CHANNELS"
+            Truncated,
+            "BVH hierarchy is cut short inside an OFFSET or CHANNELS"
         );
-        ensure!(!self.roots.is_empty(), "BVH hierarchy has no ROOT");
+        ensure!(!self.roots.is_empty(), Corrupt, "BVH hierarchy has no ROOT");
         Ok(())
     }
 }
@@ -414,7 +437,11 @@ impl Motion {
             if let Some(rest) = after_word(t, b"frames") {
                 let v = value(rest);
                 let Some(n) = std::str::from_utf8(v).ok().and_then(|s| s.parse::<u64>().ok()) else {
-                    bail!("BVH line {no}: the Frames count `{}` isn't a whole number", show(v));
+                    bail!(
+                        Corrupt,
+                        "BVH line {no}: the Frames count `{}` isn't a whole number",
+                        show(v)
+                    );
                 };
                 self.frames = Some(n);
             } else if let Some(rest) = after_word(t, b"frame").and_then(|r| after_word(trim(r), b"time")) {
@@ -427,6 +454,7 @@ impl Motion {
                 self.begin(columns, room, store);
             } else {
                 bail!(
+                    Corrupt,
                     "BVH line {no}: MOTION should go on with `Frames:` and `Frame Time:`, not `{}`",
                     show(t)
                 );
@@ -701,7 +729,7 @@ pub(super) fn load(input: Input<'_>, keep: Keep) -> Result<Document> {
 mod tests {
     use super::*;
     use crate::assets::Memory;
-    use crate::rig::Path;
+    use crate::rig::Property;
 
     fn read(text: &str) -> Result<Document> {
         load(Input::memory(text.as_bytes(), "t.bvh"), Keep::ALL)
@@ -776,10 +804,14 @@ Frame Time: 0.5
         let rig = doc.rig().unwrap();
         assert_eq!(rig.animations.len(), 1);
         let channels = &rig.animations[0].channels;
-        let paths: Vec<_> = channels.iter().map(|c| (c.node, c.path)).collect();
+        let paths: Vec<_> = channels.iter().map(|c| (c.node, c.property)).collect();
         assert_eq!(
             paths,
-            [(0, Path::Translation), (0, Path::Rotation), (1, Path::Rotation)]
+            [
+                (0, Property::Translation),
+                (0, Property::Rotation),
+                (1, Property::Rotation)
+            ]
         );
         assert_eq!(channels[0].times, [0.0, 0.5]);
         assert_eq!(channels[0].values, [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
@@ -926,15 +958,15 @@ Frame Time: 0.5
         let doc = read(text).unwrap();
         let rig = doc.rig().unwrap();
         let channels = &rig.animations[0].channels;
-        let paths: Vec<_> = channels.iter().map(|c| (c.node, c.path)).collect();
+        let paths: Vec<_> = channels.iter().map(|c| (c.node, c.property)).collect();
         assert_eq!(
             paths,
             [
-                (0, Path::Translation),
-                (0, Path::Rotation),
-                (0, Path::Scale),
-                (1, Path::Rotation),
-                (1, Path::Scale)
+                (0, Property::Translation),
+                (0, Property::Rotation),
+                (0, Property::Scale),
+                (1, Property::Rotation),
+                (1, Property::Scale)
             ]
         );
         assert_eq!(channels[2].values, [1.0, 1.0, 1.0, 2.0, 3.0, 0.5]);
@@ -987,7 +1019,7 @@ Frame Time: 0.5
             ("ROOT a\n{\n}\n", "HIERARCHY"),
             ("HIERARCHY\n", "no ROOT"),
             ("HIERARCHY\nJOINT a\n{\n}\n", "JOINT outside"),
-            ("HIERARCHY\nROOT a\n{\nOFFSET 0 0 0\n", "ends inside joint `a`"),
+            ("HIERARCHY\nROOT a\n{\nOFFSET 0 0 0\n", "is cut short inside joint `a`"),
             ("HIERARCHY\nROOT a\nOFFSET 0 0 0\n", "`{` should follow"),
             ("HIERARCHY\nROOT a\n{\nOFFSET 0 0\n}\n", "OFFSET needs three numbers"),
             ("HIERARCHY\nROOT a\n{\n}\n}\n", "closes no joint"),
@@ -1002,9 +1034,12 @@ Frame Time: 0.5
                 "twice",
             ),
             ("HIERARCHY\nROOT a\n{\nWIDGET 1\n}\n", "WIDGET"),
-            ("HIERARCHY\nROOT a\n{\nMOTION\nFrames: 0\n", "ends inside joint"),
+            ("HIERARCHY\nROOT a\n{\nMOTION\nFrames: 0\n", "is cut short inside joint"),
             ("HIERARCHY\nOFFSET 0 0 0\n", "outside"),
-            ("HIERARCHY\nROOT a\n{\nCHANNELS 2 Xrotation\n}\n", "ends inside joint"),
+            (
+                "HIERARCHY\nROOT a\n{\nCHANNELS 2 Xrotation\n}\n",
+                "is cut short inside joint",
+            ),
         ];
         for (text, want) in cases {
             let e = error(text);

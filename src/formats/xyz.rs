@@ -26,7 +26,7 @@ use super::stream::{f32_from, f64_from, lines, space};
 use crate::document::{Document, Keep};
 use crate::num::f32_of;
 use crate::source::{Axis, Fact, SourceInfo};
-use crate::{Context as _, Result};
+use crate::{Context as _, ErrorKind, Result};
 
 /// Bytes of text parsed per job.
 const PIECE: usize = if cfg!(test) { 16 << 10 } else { 2 << 20 };
@@ -36,10 +36,12 @@ const TOKENS: usize = 64;
 const SAMPLE: usize = 2000;
 
 pub(crate) fn load(input: Input<'_>, ext: &str, keep: Keep) -> Result<Document> {
-    let head = input.head(64 * 1024).context("reading the point cloud")?;
+    let head = input
+        .head(64 * 1024)
+        .context(ErrorKind::Corrupt, "reading the point cloud")?;
     let head = head.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&head);
     if ext == "ptx" {
-        let bytes = input.read().context("reading the PTX file")?;
+        let bytes = input.read().context(ErrorKind::Corrupt, "reading the PTX file")?;
         return ptx(&bytes, keep);
     }
     let first = head
@@ -48,7 +50,7 @@ pub(crate) fn load(input: Input<'_>, ext: &str, keep: Keep) -> Result<Document> 
         .find(|l| !l.is_empty())
         .unwrap_or_default();
     if ext == "asc" && first.len() >= 5 && first[..5].eq_ignore_ascii_case(b"ncols") {
-        let bytes = input.read().context("reading the grid")?;
+        let bytes = input.read().context(ErrorKind::Corrupt, "reading the grid")?;
         return grid(&bytes, keep);
     }
     let plan = Plan::sample(head, ext)?;
@@ -56,7 +58,7 @@ pub(crate) fn load(input: Input<'_>, ext: &str, keep: Keep) -> Result<Document> 
         let b = b.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(b);
         parse_all(b, &plan, keep)?
     } else {
-        let mut blocks = input.blocks().context("reading the point cloud")?;
+        let mut blocks = input.blocks().context(ErrorKind::Corrupt, "reading the point cloud")?;
         let target = keep.thread_count().max(1) * PIECE;
         let mut part = Part::new(&plan);
         let mut batch = Vec::new();
@@ -64,7 +66,10 @@ pub(crate) fn load(input: Input<'_>, ext: &str, keep: Keep) -> Result<Document> 
         loop {
             batch.clear();
             while batch.len() < target {
-                match blocks.text(lines).context("reading the point cloud")? {
+                match blocks
+                    .text(lines)
+                    .context(ErrorKind::Corrupt, "reading the point cloud")?
+                {
                     Some(t) => batch.extend_from_slice(t),
                     None => break,
                 }
@@ -210,7 +215,9 @@ impl Plan {
             }
         }
         let width = (3..=TOKENS).max_by_key(|&n| (counts[n], n)).filter(|&n| counts[n] > 0);
-        let width = width.with_context(|| format!("no points in the {} file", ext.to_ascii_uppercase()))?;
+        let width = width.with_context(ErrorKind::Empty, || {
+            format!("no points in the {} file", ext.to_ascii_uppercase())
+        })?;
         let rows: Vec<&Vec<f64>> = rows.iter().filter(|r| r.len() == width).collect();
         // Far away, measure from the middle of what was sampled.
         let mut min = [f64::INFINITY; 3];
@@ -577,13 +584,15 @@ fn ptx(bytes: &[u8], keep: Keep) -> Result<Document> {
             ];
             Some((cols, rows, position, axes, m))
         })();
-        let (cols, rows, position, axes, m) = head.context("a PTX scan's header is broken")?;
+        let (cols, rows, position, axes, m) = head.context(ErrorKind::Corrupt, "a PTX scan's header is broken")?;
         ensure!(
             cols.fract() == 0.0 && rows.fract() == 0.0 && cols >= 0.0 && rows >= 0.0,
+            Corrupt,
             "a PTX scan's size is broken"
         );
         ensure!(
             m.iter().flatten().all(|v| v.is_finite()),
+            Corrupt,
             "a PTX scan's matrix is broken"
         );
         let count = cols * rows;
@@ -591,6 +600,7 @@ fn ptx(bytes: &[u8], keep: Keep) -> Result<Document> {
         let most = keep.points() as f64;
         ensure!(
             count.le(&most),
+            LimitExceeded,
             "{count} points in a PTX scan, more than the {} allowed (Keep::max_points)",
             keep.points()
         );
@@ -657,7 +667,7 @@ fn ptx(bytes: &[u8], keep: Keep) -> Result<Document> {
             scan_ids.extend(std::iter::repeat_n(index as f32, n));
         }
     }
-    let plan = plan.context("no scans in the PTX file")?;
+    let plan = plan.context(ErrorKind::Empty, "no scans in the PTX file")?;
     let mut all = all.unwrap_or_else(|| Part::new(&plan));
     let mut plan = plan;
     if scans.len() > 1 {
@@ -720,12 +730,12 @@ fn grid(bytes: &[u8], keep: Keep) -> Result<Document> {
         if f64_from(key).is_some() {
             break;
         }
-        ensure!(keys.len() < 32, "the ESRI grid's header is broken");
+        ensure!(keys.len() < 32, Corrupt, "the ESRI grid's header is broken");
         let key = String::from_utf8_lossy(key).to_ascii_lowercase();
         let v = it
             .next()
             .and_then(f64_from)
-            .with_context(|| format!("the ESRI grid's {key} has no value"))?;
+            .with_context(ErrorKind::Corrupt, || format!("the ESRI grid's {key} has no value"))?;
         keys.insert(key.clone(), json!(v));
         match key.as_str() {
             "ncols" => cols = Some(v),
@@ -752,10 +762,11 @@ fn grid(bytes: &[u8], keep: Keep) -> Result<Document> {
         at = next;
     }
     let (Some(cols), Some(rows), Some(dx), Some(dy)) = (cols, rows, dx, dy) else {
-        bail!("the ESRI grid's header lacks its size or cell size");
+        bail!(Corrupt, "the ESRI grid's header lacks its size or cell size");
     };
     ensure!(
         cols.fract() == 0.0 && rows.fract() == 0.0 && cols >= 1.0 && rows >= 1.0 && dx.is_finite() && dy.is_finite(),
+        Corrupt,
         "the ESRI grid's size is broken"
     );
     let count = cols * rows;
@@ -763,6 +774,7 @@ fn grid(bytes: &[u8], keep: Keep) -> Result<Document> {
     let most = keep.points() as f64;
     ensure!(
         count.le(&most),
+        LimitExceeded,
         "{count} cells in the ESRI grid, more than the {} allowed (Keep::max_points)",
         keep.points()
     );

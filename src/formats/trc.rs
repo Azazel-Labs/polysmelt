@@ -61,11 +61,12 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document> {
     let first = lines.next().unwrap_or("");
     ensure!(
         first.split_whitespace().next() == Some("PathFileType"),
+        UnknownFormat,
         "not a TRC file: it starts with `{}`, not PathFileType",
         show(first)
     );
     let (Some(keys), Some(values)) = (lines.next(), lines.next()) else {
-        bail!("TRC file is cut short: its header is missing");
+        bail!(Truncated, "TRC file is cut short: its header is missing");
     };
     let header: Vec<(String, String)> = cells(keys, tabs)
         .into_iter()
@@ -85,6 +86,7 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document> {
     let row = cells(names_line, tabs);
     ensure!(
         row.first().is_some_and(|c| c.eq_ignore_ascii_case("Frame#")),
+        Corrupt,
         "TRC file's fourth line starts with `{}`, not Frame#",
         show(names_line)
     );

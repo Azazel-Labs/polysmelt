@@ -218,7 +218,8 @@ fn same_from_memory(case: &Case, ext: &str, from_file: &polysmelt::Result<Loaded
     match (from_file, &from_memory) {
         (Ok(a), Ok(b)) if glb(&a.0) == glb(&b.0) && a.0.facts == b.0.facts => Ok(()),
         (Ok(_), Ok(_)) => Err("reads differently from memory".into()),
-        (Err(_), Err(_)) => Ok(()),
+        (Err(a), Err(b)) if a.kind() == b.kind() => Ok(()),
+        (Err(a), Err(b)) => Err(format!("fails from memory with {b:?}, from its file with {a:?}")),
         (Ok(_), Err(err)) => Err(format!("fails to load from memory: {err}")),
         (Err(_), Ok(_)) => Err("loads from memory, though not from its file".into()),
     }
@@ -410,15 +411,15 @@ fn rig(e: &Map<String, Value>, doc: &Document, tol: f32) -> Result<(), String> {
         }
         for (path, want) in entry.get("keys").and_then(Value::as_object).into_iter().flatten() {
             let target = match path.as_str() {
-                "translation" => polysmelt::rig::Path::Translation,
-                "rotation" => polysmelt::rig::Path::Rotation,
-                "scale" => polysmelt::rig::Path::Scale,
+                "translation" => polysmelt::rig::Property::Translation,
+                "rotation" => polysmelt::rig::Property::Rotation,
+                "scale" => polysmelt::rig::Property::Scale,
                 _ => return Err(format!("{name}: no such path as {path:?}")),
             };
             let channel = rig
                 .animations
                 .get(animation)
-                .and_then(|a| a.channels.iter().find(|c| c.node == node && c.path == target));
+                .and_then(|a| a.channels.iter().find(|c| c.node == node && c.property == target));
             let ok = match (channel, want) {
                 (None, Value::Null) => true,
                 (Some(c), Value::Number(n)) => n.as_u64() == Some(c.times.len() as u64),
@@ -686,7 +687,7 @@ fn bind_pose(doc: &Document, rest: Option<&Mesh>) -> Result<(), String> {
         if r.indices != b.indices || r.skin_joints != b.skin_joints || r.skin_weights != b.skin_weights {
             return Err(format!("bind pose primitive {k}: different triangles or joints"));
         }
-        if !r.skinned() && (r.positions != b.positions || r.normals != b.normals) {
+        if !r.is_skinned() && (r.positions != b.positions || r.normals != b.normals) {
             return Err(format!("bind pose moved unskinned primitive {k}"));
         }
     }
@@ -726,20 +727,46 @@ fn round_trip(mesh: &Mesh, bytes: &[u8], tol: f32) -> Result<(), String> {
     Ok(())
 }
 
+/// What an error says, without the path it names first: `error` is matched against this, so a
+/// case's folder name can't match it.
+fn message(err: &polysmelt::Error) -> String {
+    let text = err.to_string();
+    match err.path().map(|p| format!("{}: ", p.display())) {
+        Some(prefix) => text.strip_prefix(&prefix).map_or(text.clone(), str::to_owned),
+        None => text,
+    }
+}
+
 /// Runs one case, returning what's wrong with it.
 fn run(case: &Case) -> Result<(), String> {
     let e = &case.expect;
     let ext = ext_of(&case.file);
     let tol = e.get("tolerance").and_then(Value::as_f64).unwrap_or(1e-4) as f32;
-    let loaded = Loader::new()
-        .assets(Folder::new(&case.dir))
-        .open(&case.file)
-        .and_then(flattened);
+    let loaded = Loader::new().assets(Folder::new(&case.dir)).open(&case.file);
+    // An error from loading names the file it was reading: the model or one it refers to.
+    let named = loaded
+        .as_ref()
+        .err()
+        .map(|err| err.path().is_some_and(|p| p.starts_with(&case.dir)));
+    let loaded = loaded.and_then(flattened);
     same_from_memory(case, &ext, &loaded)?;
     if let Some(want) = e.get("error").and_then(Value::as_str) {
+        let kind = e
+            .get("error_kind")
+            .and_then(Value::as_str)
+            .ok_or("has an `error` but no `error_kind`")?;
         return match loaded {
-            Err(err) if err.to_string().to_lowercase().contains(&want.to_lowercase()) => Ok(()),
-            Err(err) => Err(format!("failed with {err:?}, expected an error containing {want:?}")),
+            Err(err) if !message(&err).to_lowercase().contains(&want.to_lowercase()) => {
+                Err(format!("failed with {err:?}, expected an error containing {want:?}"))
+            }
+            Err(err) if format!("{:?}", err.kind()) != kind => {
+                Err(format!("failed with {err:?}, expected an error of kind {kind}"))
+            }
+            Err(err) if named == Some(false) => Err(format!(
+                "failed with {err:?}, expected the error to name a file in {}",
+                case.dir.display()
+            )),
+            Err(_) => Ok(()),
             Ok(_) => Err(format!("loaded, expected an error containing {want:?}")),
         };
     }
@@ -768,7 +795,7 @@ fn run(case: &Case) -> Result<(), String> {
         };
     }
     let mesh = mesh.ok_or("produced no mesh")?;
-    let bytes = polysmelt::mesh::to_glb(&mesh).map_err(|err| format!("to_glb failed: {err}"))?;
+    let bytes = mesh.to_glb().map_err(|err| format!("to_glb failed: {err}"))?;
     keep_mesh_glb(case, &bytes);
     round_trip(&mesh, &bytes, tol)?;
     // `flat_json`: the same, in the JSON of the flat mesh's GLB.

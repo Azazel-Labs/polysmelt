@@ -41,7 +41,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::{Context as _, Result};
+use crate::{Context as _, ErrorKind, Result};
 use openusd::usd::SchemaBase as _;
 use openusd::{ar, gf, sdf, tf, usd};
 use openusd_schemas::geom::{
@@ -125,8 +125,8 @@ fn load_capped(input: Input<'_>, assets: &dyn Assets, keep: Keep, max_nodes: usi
         None => {
             let stage = usd::Stage::builder()
                 .schema_registry(openusd_schemas::schema_registry())
-                .open(path.to_str().context("the path isn't UTF-8")?)
-                .map_err(|e| invalid!("{e}"))?;
+                .open(path.to_str().context(ErrorKind::Corrupt, "the path isn't UTF-8")?)
+                .context(ErrorKind::Corrupt, "opening the USD stage")?;
             let paths = prim_paths(&stage)?;
             (stage, paths)
         }
@@ -329,7 +329,7 @@ fn prim_paths(stage: &usd::Stage) -> Result<Vec<sdf::Path>> {
         .traverse(usd::PrimPredicate::DEFAULT.with_instance_proxies(true), |p| {
             paths.push(p.clone());
         })
-        .map_err(|e| invalid!("{e}"))?;
+        .context(ErrorKind::Corrupt, "composing the USD stage")?;
     Ok(paths)
 }
 
@@ -876,7 +876,12 @@ impl Reader<'_> {
             return Ok(());
         };
         self.drawn += self.mesh_triangles[mesh];
-        ensure!(self.drawn <= self.limit, "too many triangles (over {})", self.limit);
+        ensure!(
+            self.drawn <= self.limit,
+            LimitExceeded,
+            "too many triangles (over {})",
+            self.limit
+        );
         if let Some((skeleton, _)) = skin {
             self.pending.push(Pending {
                 node,
@@ -2181,7 +2186,12 @@ impl Reader<'_> {
             if ok {
                 faces.push((face, start, n));
                 triangles += n - 2;
-                ensure!(triangles <= self.limit, "too many triangles (over {})", self.limit);
+                ensure!(
+                    triangles <= self.limit,
+                    LimitExceeded,
+                    "too many triangles (over {})",
+                    self.limit
+                );
             }
             start = end;
         }
@@ -2269,7 +2279,7 @@ impl Reader<'_> {
             }
             let part = &mut parts[i];
             let prim = &mut part.prim;
-            let first = u32::try_from(prim.positions.len()).context("too many vertices")?;
+            let first = u32::try_from(prim.positions.len()).context(ErrorKind::LimitExceeded, "too many vertices")?;
             for (c, &corner) in corners.iter().enumerate().skip(start).take(n) {
                 #[allow(clippy::cast_sign_loss, reason = "faces keep only corners in 0..points.len()")]
                 let point = corner as usize;
@@ -3516,7 +3526,7 @@ fn open_in_memory(bytes: &[u8], input: Input<'_>, assets: &dyn Assets) -> Result
             .schema_registry(openusd_schemas::schema_registry())
             .resolver(resolver)
             .open(&root)
-            .map_err(|e| invalid!("{e}"))?;
+            .context(ErrorKind::Corrupt, "opening the USD stage")?;
         let paths = prim_paths(&stage)?;
         round += 1;
         let mut found = false;
@@ -4116,7 +4126,7 @@ def Xform "Root"
             "#usda 1.0\ndef Cube \"C\"\n{\n}\ndef Sphere \"S\"\n{\n}\ndef Cylinder \"Y\"\n{\n}\ndef Plane \"P\"\n{\n}\n",
             &[],
         );
-        assert!(!mesh.prims.is_empty());
+        assert_ne!(mesh.prims.len(), 0);
         for prim in &mesh.prims {
             assert_eq!(prim.uvs.len(), prim.positions.len());
             assert!(prim.uvs.iter().flatten().all(|v| (0.0..=1.0).contains(v)));
