@@ -30,7 +30,7 @@ use crate::document::{Document, Keep};
 use crate::mesh::{Material, srgb_to_linear};
 use crate::source::{Axis, Fact, Handedness};
 
-pub(crate) fn load<'a>(input: super::Input<'_>, ext: &str, _assets: &dyn Assets, keep: Keep) -> Result<Document<'a>> {
+pub(crate) fn load(input: super::Input<'_>, ext: &str, _assets: &dyn Assets, keep: Keep) -> Result<Document> {
     let bytes = input.read()?;
     let raw;
     let bytes: &[u8] = if ext == "zgl" || zipped(&bytes) {
@@ -110,7 +110,7 @@ struct Reader {
     unsupported: BTreeMap<String, usize>,
 }
 
-fn read(text: &str, limit: usize, keep: Keep) -> Result<Document<'static>> {
+fn read(text: &str, limit: usize, keep: Keep) -> Result<Document> {
     let xml = Xml::parse(text)?;
     let root = xml.root();
     ensure!(root.is("world"), "not XGL: the root is <{}>", root.name());
@@ -641,10 +641,10 @@ mod tests {
 <OBJECT><NAME>b</NAME><MESHREF>0</MESHREF></OBJECT>
 </WORLD>"#;
 
-    fn load(bytes: &[u8], name: &str) -> Result<Document<'static>> {
+    fn load(bytes: &[u8], name: &str) -> Result<Document> {
         let ext = name.rsplit('.').next().unwrap();
         let assets = Memory::new();
-        crate::formats::load_bytes(bytes, name, ext, &assets, Keep::ALL).map(Document::into_owned)
+        crate::formats::load_bytes(bytes, name, ext, &assets, Keep::ALL)
     }
 
     #[test]

@@ -223,7 +223,7 @@ impl Model {
 }
 
 /// Reads a `.pmx`, `.pmd` or `.vmd` file, told apart by its signature.
-pub(crate) fn load(input: Input<'_>, ext: &str, assets: &dyn Assets, keep: Keep) -> Result<Document<'static>> {
+pub(crate) fn load(input: Input<'_>, ext: &str, assets: &dyn Assets, keep: Keep) -> Result<Document> {
     let bytes = input.read()?;
     let stem = input
         .path
@@ -1077,7 +1077,7 @@ fn expand(morphs: &[Morph], i: usize, ratio: f32, depth: usize, acc: &mut HashMa
 }
 
 /// The model as a glTF document.
-fn build(m: Model, input: &Input<'_>, stem: &str, assets: &dyn Assets, keep: Keep) -> Result<Document<'static>> {
+fn build(m: Model, input: &Input<'_>, stem: &str, assets: &dyn Assets, keep: Keep) -> Result<Document> {
     let mut scene = Scene::default();
     let mut facts = Map::new();
     let nb = m.bones.len();
@@ -1570,7 +1570,7 @@ fn bone_keys(keys: &[BoneKey]) -> (Keys, Keys) {
 }
 
 /// Reads a `.vmd` motion.
-fn motion(data: &[u8], stem: &str, keep: Keep) -> Result<Document<'static>> {
+fn motion(data: &[u8], stem: &str, keep: Keep) -> Result<Document> {
     let mut b = Bin::new(data, "VMD");
     let head = b.bytes(30)?;
     let name_len = if head.starts_with(b"Vocaloid Motion Data 0002") {

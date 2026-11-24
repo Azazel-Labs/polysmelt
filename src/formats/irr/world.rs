@@ -66,7 +66,7 @@ struct World<'a> {
     nodes: usize,
 }
 
-pub(super) fn load<'a>(text: &str, dir: &Path, limit: usize, assets: &dyn Assets, keep: Keep) -> Result<Document<'a>> {
+pub(super) fn load(text: &str, dir: &Path, limit: usize, assets: &dyn Assets, keep: Keep) -> Result<Document> {
     let xml = Xml::parse(text)?;
     let root = xml.root();
     ensure!(
@@ -156,10 +156,7 @@ pub(super) fn load<'a>(text: &str, dir: &Path, limit: usize, assets: &dyn Assets
 
     // Files other readers load, each read once while it can be shared.
     let mut placed: HashMap<(PathBuf, Option<Vec<usize>>), Placed> = HashMap::new();
-    let sub = Keep {
-        max_triangles: limit,
-        ..keep
-    };
+    let sub = keep.with_max_triangles(limit);
     for g in grafts {
         let key = (g.path, g.materials);
         if let Some(p) = placed.get(&key).filter(|p| p.shareable) {
@@ -176,9 +173,9 @@ pub(super) fn load<'a>(text: &str, dir: &Path, limit: usize, assets: &dyn Assets
             missing.push(g.name);
             continue;
         };
-        match crate::formats::read(crate::formats::Input::memory(&bytes, &path), &ext, assets, sub) {
+        match crate::formats::read_input(crate::formats::Input::memory(&bytes, &path), &ext, assets, sub) {
             Ok(d) => {
-                let p = graft::graft(&mut doc, d.into_owned(), g.node, key.1.as_deref());
+                let p = graft::graft(&mut doc, d, g.node, key.1.as_deref());
                 placed.insert(key, p);
             }
             Err(e) => missing.push(format!("{}: {e:#}", g.name)),

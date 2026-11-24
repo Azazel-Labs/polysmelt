@@ -65,7 +65,7 @@ use crate::source::{Axis, Fact};
 const DEFAULT_RATE: f32 = 24.0;
 
 /// Reads an `.md5mesh` or `.md5anim` model.
-pub(crate) fn load(input: Input<'_>, ext: &str, assets: &dyn Assets, keep: Keep) -> Result<Document<'static>> {
+pub(crate) fn load(input: Input<'_>, ext: &str, assets: &dyn Assets, keep: Keep) -> Result<Document> {
     let data = input.read()?;
     let file = parse(&data)?;
     let stem = input
@@ -901,7 +901,7 @@ frame 1 {
 }
 "#;
 
-    fn read(text: &[u8], name: &str) -> Result<Document<'static>> {
+    fn read(text: &[u8], name: &str) -> Result<Document> {
         let ext = name.rsplit('.').next().unwrap_or("");
         load(Input::memory(text, name), ext, &Memory::new(), Keep::ALL)
     }

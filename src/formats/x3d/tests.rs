@@ -6,16 +6,13 @@ use crate::assets::Memory;
 use crate::document::Pose;
 use crate::mesh::Mesh;
 
-fn read_in(bytes: &[u8], name: &str, assets: &Memory, max: usize) -> Result<Document<'static>> {
-    let keep = Keep {
-        max_triangles: max,
-        ..Keep::ALL
-    };
+fn read_in(bytes: &[u8], name: &str, assets: &Memory, max: usize) -> Result<Document> {
+    let keep = Keep::ALL.with_max_triangles(max);
     let ext = name.rsplit('.').next().unwrap_or_default().to_owned();
-    super::super::load_bytes(bytes, name, &ext, assets, keep).map(Document::into_owned)
+    super::super::load_bytes(bytes, name, &ext, assets, keep)
 }
 
-fn read(text: &str, name: &str) -> Document<'static> {
+fn read(text: &str, name: &str) -> Document {
     read_in(text.as_bytes(), name, &Memory::new(), usize::MAX).unwrap()
 }
 
@@ -27,11 +24,11 @@ fn png() -> Vec<u8> {
     png
 }
 
-fn mesh(doc: &Document<'_>) -> Mesh {
+fn mesh(doc: &Document) -> Mesh {
     doc.flatten(Pose::Rest).unwrap().unwrap()
 }
 
-fn triangles(doc: &Document<'_>) -> u64 {
+fn triangles(doc: &Document) -> u64 {
     doc.facts["triangles"].as_u64().unwrap()
 }
 
@@ -79,7 +76,7 @@ const CUBE_X3D: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 </X3D>
 "#;
 
-fn check_cube(doc: &Document<'_>) {
+fn check_cube(doc: &Document) {
     assert_eq!(triangles(doc), 12);
     let m = mesh(doc);
     let (lo, hi) = bounds(&m);
@@ -470,8 +467,8 @@ fn damaged_files_never_panic() {
         ),
     ];
     let assets = Memory::new()
-        .with("a.wrl", samples[3].0.as_str())
-        .with("a.x3d", samples[4].0.as_str());
+        .with("a.wrl", samples[3].0.clone())
+        .with("a.x3d", samples[4].0.clone());
     let check = |bytes: &[u8], name: &str| {
         if let Ok(doc) = read_in(bytes, name, &assets, 64) {
             let _ = doc.flatten(Pose::Rest);
@@ -535,11 +532,11 @@ fn near(a: [f32; 3], b: [f32; 3]) -> bool {
     (0..3).all(|k| (a[k] - b[k]).abs() < 1e-5)
 }
 
-fn notes(doc: &Document<'_>) -> String {
+fn notes(doc: &Document) -> String {
     doc.json["asset"]["extras"]["source"]["notes"].to_string()
 }
 
-fn base_colors(doc: &Document<'_>) -> Vec<String> {
+fn base_colors(doc: &Document) -> Vec<String> {
     doc.json["materials"]
         .as_array()
         .unwrap()

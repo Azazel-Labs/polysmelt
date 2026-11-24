@@ -750,7 +750,7 @@ fn file_name(reference: &str) -> &str {
     reference.rsplit(['/', '\\']).next().unwrap_or(reference)
 }
 
-pub(crate) fn load(input: Input<'_>, ext: &str, assets: &dyn Assets, keep: Keep) -> Result<Document<'static>> {
+pub(crate) fn load(input: Input<'_>, ext: &str, assets: &dyn Assets, keep: Keep) -> Result<Document> {
     let bytes = input.read()?;
     let text = decode(&bytes);
     let amc = ext.eq_ignore_ascii_case("amc");
@@ -889,7 +889,7 @@ mod tests {
   end
 ";
 
-    fn asf(text: &str) -> Result<Document<'static>> {
+    fn asf(text: &str) -> Result<Document> {
         load(
             Input::memory(text.as_bytes(), "t.asf"),
             "asf",
@@ -898,12 +898,12 @@ mod tests {
         )
     }
 
-    fn amc(asf_text: &str, motion: &str) -> Result<Document<'static>> {
-        let assets = Memory::new().with("t.asf", asf_text.as_bytes());
+    fn amc(asf_text: &str, motion: &str) -> Result<Document> {
+        let assets = Memory::new().with("t.asf", asf_text.to_owned());
         load(Input::memory(motion.as_bytes(), "t.amc"), "amc", &assets, Keep::ALL)
     }
 
-    fn error(r: Result<Document<'static>>) -> String {
+    fn error(r: Result<Document>) -> String {
         match r {
             Ok(_) => panic!("read without error"),
             Err(e) => e.to_string(),
@@ -1062,10 +1062,7 @@ mod tests {
     fn keeping_no_animations_keeps_the_facts() {
         let text = "1\nroot 1 2 3 0 0 0\n";
         let assets = Memory::new().with("t.asf", ASF.as_bytes());
-        let keep = Keep {
-            animations: false,
-            ..Keep::ALL
-        };
+        let keep = Keep::ALL.with_animations(false);
         let none = load(Input::memory(text.as_bytes(), "t.amc"), "amc", &assets, keep).unwrap();
         let all = amc(ASF, text).unwrap();
         assert!(none.json.get("animations").is_none());

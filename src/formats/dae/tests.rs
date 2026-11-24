@@ -2,11 +2,11 @@ use super::*;
 use crate::assets::Memory;
 use crate::document::Pose;
 
-fn read_with(text: &[u8], name: &str, assets: &Memory, keep: Keep) -> Result<Document<'static>> {
+fn read_with(text: &[u8], name: &str, assets: &Memory, keep: Keep) -> Result<Document> {
     load(Input::memory(text, name), assets, keep)
 }
 
-fn read(text: &str) -> Document<'static> {
+fn read(text: &str) -> Document {
     read_with(text.as_bytes(), "t.dae", &Memory::new(), Keep::ALL).expect("reads")
 }
 
@@ -53,7 +53,7 @@ fn png() -> Vec<u8> {
     png
 }
 
-fn flat(d: &Document<'_>) -> crate::mesh::Mesh {
+fn flat(d: &Document) -> crate::mesh::Mesh {
     d.flatten(Pose::Rest).expect("flattens").expect("draws")
 }
 
@@ -475,14 +475,12 @@ fn flipped_bytes_read_or_fail_cleanly() {
 #[test]
 fn keep_flags_drop_what_they_say() {
     let text = everything();
-    let keep = Keep {
-        animations: false,
-        skins: false,
-        cameras: false,
-        lights: false,
-        materials: false,
-        ..Keep::ALL
-    };
+    let keep = Keep::ALL
+        .with_animations(false)
+        .with_skins(false)
+        .with_cameras(false)
+        .with_lights(false)
+        .with_materials(false);
     let d = read_with(text.as_bytes(), "t.dae", &Memory::new(), keep).unwrap();
     for key in ["animations", "skins", "cameras", "materials", "extensions"] {
         assert!(d.json.get(key).is_none(), "{key}");
@@ -504,10 +502,7 @@ fn lines_and_linestrips_are_segments() {
     let m = flat(&d);
     assert_eq!((m.triangles(), m.lines(), m.points()), (2, 3, 0));
     assert_eq!(d.json["meshes"][0]["primitives"].as_array().map(Vec::len), Some(3));
-    let keep = Keep {
-        lines_and_points: false,
-        ..Keep::ALL
-    };
+    let keep = Keep::ALL.with_lines_and_points(false);
     // The document keeps them; flattening leaves them out.
     let assets = Memory::new();
     let d = super::super::load_bytes(text.as_bytes(), "t.dae", "dae", &assets, keep).unwrap();
@@ -552,10 +547,7 @@ fn extras_go_when_not_kept() {
         r##"<node id="a"><instance_geometry url="#quad"/><extra><technique profile="X"><tag>1</tag></technique></extra></node>"##,
     );
     assert_eq!(read(&text).json["nodes"][0]["extras"]["extra"]["X"]["tag"], "1");
-    let keep = Keep {
-        extras: false,
-        ..Keep::ALL
-    };
+    let keep = Keep::ALL.with_extras(false);
     let d = read_with(text.as_bytes(), "t.dae", &Memory::new(), keep).unwrap();
     assert!(d.json["nodes"][0].get("extras").is_none());
 }

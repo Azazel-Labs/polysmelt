@@ -134,7 +134,7 @@ fn numbers<'a>(tokens: impl Iterator<Item = &'a str>, n: usize) -> Vec<f64> {
 }
 
 /// Reads an HTR file.
-pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document<'static>> {
+pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document> {
     let bytes = input.read()?;
     let text = scene::text(&bytes);
     let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
@@ -459,7 +459,7 @@ knee 0 -400 0 0 0 90 300
 [EndOfFile]
 ";
 
-    fn read(text: &str) -> Result<Document<'static>> {
+    fn read(text: &str) -> Result<Document> {
         load(Input::memory(text.as_bytes(), "t.htr"), Keep::ALL)
     }
 

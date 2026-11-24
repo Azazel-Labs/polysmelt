@@ -570,7 +570,7 @@ mod tests {
     #[test]
     fn an_animation_takes_its_own_frame_rate_before_the_files() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/gltf/skin_animated/skin.glb");
-        let mut doc = crate::formats::open(&path, crate::document::Keep::ALL).unwrap();
+        let mut doc = crate::open(&path).unwrap();
         assert_eq!(
             doc.rig().unwrap().animations[0].frame_rate,
             None,

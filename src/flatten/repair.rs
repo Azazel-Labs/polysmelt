@@ -17,7 +17,7 @@ use crate::num::{f32_of, usize_of};
 /// validator's 0.00674, so lengths that pass it are left alone.
 const UNIT: f64 = 5e-4;
 
-impl Document<'_> {
+impl Document {
     /// Puts right what the glTF 2.0 specification forbids and can be fixed without changing
     /// what the document draws or how it moves:
     ///
@@ -55,28 +55,13 @@ impl Document<'_> {
 /// of the new buffer that rewritten data went into, which `json` already lists after `doc`'s
 /// buffers; `None` when nothing needed new data. A step that can't read what it needs is
 /// skipped, so this never fails.
-pub(crate) fn repaired(doc: &Document<'_>, json: &mut Map<String, Value>) -> Option<Vec<u8>> {
-    repair_json(doc, json, false).0
-}
-
-/// [`repaired`], and the vertex and index data it read from files, for writing them without
-/// reading them again: (buffer, offset, bytes).
-pub(crate) fn repaired_keeping(doc: &Document<'_>, json: &mut Map<String, Value>) -> (Option<Vec<u8>>, Vec<Kept>) {
-    repair_json(doc, json, true)
-}
-
-/// Bytes of buffer `.0` at offset `.1`, as read from its file.
-pub(crate) type Kept = (usize, u64, Vec<u8>);
-
-fn repair_json(doc: &Document<'_>, json: &mut Map<String, Value>, keep: bool) -> (Option<Vec<u8>>, Vec<Kept>) {
+pub(crate) fn repaired(doc: &Document, json: &mut Map<String, Value>) -> Option<Vec<u8>> {
     let mut fix = Fix {
         doc,
         json,
         buffer: doc.buffers.len(),
         out: Vec::new(),
         done: BTreeSet::new(),
-        keep,
-        kept: Vec::new(),
     };
     let mut r = Reader::bare(doc);
     fix.strides(&mut r);
@@ -89,16 +74,16 @@ fn repair_json(doc: &Document<'_>, json: &mut Map<String, Value>, keep: bool) ->
     fix.nodes();
     fix.prune(&drop);
     if fix.out.is_empty() {
-        return (None, fix.kept);
+        return None;
     }
     fix.out.resize(fix.out.len().next_multiple_of(4), 0);
     let len = fix.out.len();
     push(fix.json, "buffers", json!({ "byteLength": len }));
-    (Some(fix.out), fix.kept)
+    Some(fix.out)
 }
 
 struct Fix<'d, 'j> {
-    doc: &'d Document<'d>,
+    doc: &'d Document,
     /// The copy being repaired. Data is read from `doc`, whose accessors keep their indices.
     json: &'j mut Map<String, Value>,
     /// The new buffer's index.
@@ -106,9 +91,6 @@ struct Fix<'d, 'j> {
     out: Vec<u8>,
     /// Accessors already rewritten.
     done: BTreeSet<usize>,
-    /// Whether to keep what's read from files, in `kept`.
-    keep: bool,
-    kept: Vec<Kept>,
 }
 
 /// What a vertex accessor is used as, for what's checked in it.
@@ -200,12 +182,6 @@ enum Scan {
 /// In place when they're in memory in one piece, as most are: checking a valid document then
 /// copies nothing.
 fn raw<'d>(r: &mut Reader<'d>, a: &Acc) -> Option<Cow<'d, [u8]>> {
-    located(r, a).map(|x| x.0)
-}
-
-/// [`raw`], and where in which buffer the bytes were read from when they were read from a
-/// file in one piece.
-fn located<'d>(r: &mut Reader<'d>, a: &Acc) -> Option<Located<'d>> {
     if a.sparse.is_some() || a.view.is_none() || a.padded() || a.decoded.is_some() {
         return None;
     }
@@ -225,24 +201,12 @@ fn located<'d>(r: &mut Reader<'d>, a: &Acc) -> Option<Located<'d>> {
         }
     })
     .ok()?;
-    (out.len() == a.count * es).then_some((Cow::Owned(out), None))
-}
-
-/// Bytes from [`located`], and their buffer and offset when they were read from a file.
-type Located<'d> = (Cow<'d, [u8]>, Option<(usize, u64)>);
-
-/// `bytes` from [`located`], to keep when they were read from a file.
-fn kept(keep: bool, bytes: Cow<'_, [u8]>, at: Option<(usize, u64)>) -> Option<Kept> {
-    match (bytes, at) {
-        // Small ones aren't worth it: writing around them costs more than reading them again.
-        (Cow::Owned(v), Some((buffer, start))) if keep && v.len() >= 64 << 10 => Some((buffer, start, v)),
-        _ => None,
-    }
+    (out.len() == a.count * es).then_some(Cow::Owned(out))
 }
 
 /// An accessor's elements when they're tightly packed in an uncompressed view: where they lie
-/// when that's in memory in one piece, else in one read of the file.
-fn tight<'d>(r: &mut Reader<'d>, a: &Acc) -> Option<Located<'d>> {
+/// when that's in one piece, else copied out of the parts they span.
+fn tight<'d>(r: &mut Reader<'d>, a: &Acc) -> Option<Cow<'d, [u8]>> {
     let (buffer, voff, vlen, stride, ext) = r.view(a.view?).ok()?;
     let es = a.esize();
     if ext || a.count == 0 || stride.is_some_and(|s| s > 0 && s != es) {
@@ -252,11 +216,11 @@ fn tight<'d>(r: &mut Reader<'d>, a: &Acc) -> Option<Located<'d>> {
     if a.offset.checked_add(span)? > vlen {
         return None;
     }
-    let doc: &'d Document<'d> = r.doc;
+    let doc: &'d Document = r.doc;
     let blob = doc.buffers.get(buffer)?;
     let start = voff.checked_add(a.offset)?;
     if let Some(s) = blob.slice(start, span) {
-        return Some((Cow::Borrowed(s), None));
+        return Some(Cow::Borrowed(s));
     }
     // Checked against the bytes there before allocating: a view's length is only what the
     // file claims.
@@ -265,7 +229,7 @@ fn tight<'d>(r: &mut Reader<'d>, a: &Acc) -> Option<Located<'d>> {
     }
     let mut out = vec![0; usize::try_from(span).ok()?];
     blob.read_at(start, &mut out).ok()?;
-    Some((Cow::Owned(out), Some((buffer, start))))
+    Some(Cow::Owned(out))
 }
 
 /// The components of a vertex accessor used as `role` that are to be unit length: 3 for
@@ -630,26 +594,21 @@ impl Fix<'_, '_> {
         // Which (indices, vertices) are fine (or unreadable), found together first: most are.
         let checks: BTreeSet<(usize, u64)> = indexed.iter().map(|x| (x.2, x.3)).collect();
         let checks: Vec<(usize, u64)> = checks.into_iter().collect();
-        let keep = self.keep;
         let fits: Vec<_> = checks
             .iter()
             .map(|&(ia, vcount)| {
-                let Ok(acc) = r.acc(ia) else { return (true, None) };
+                let Ok(acc) = r.acc(ia) else { return true };
                 if !matches!(acc.ctype, 5121 | 5123 | 5125) || acc.n != 1 {
-                    return (true, None);
+                    return true;
                 }
-                let Some((bytes, at)) = located(r, &acc) else {
-                    return (true, None);
-                };
-                (indices_fit(&bytes, acc.ctype, vcount), kept(keep, bytes, at))
+                raw(r, &acc).is_none_or(|bytes| indices_fit(&bytes, acc.ctype, vcount))
             })
             .collect();
         let mut fine = BTreeSet::new();
-        for (check, (fit, k)) in checks.into_iter().zip(fits) {
+        for (check, fit) in checks.into_iter().zip(fits) {
             if fit {
                 fine.insert(check);
             }
-            self.kept.extend(k);
         }
         for (m, p, ia, vcount, prim) in indexed {
             if fine.contains(&(ia, vcount)) {
@@ -797,30 +756,27 @@ impl Fix<'_, '_> {
         }
         // Valid data, most of it, is only read and scanned; what's to be put right is put
         // right after.
-        let keep = self.keep;
         let scans: Vec<_> = jobs
             .iter()
             .map(|&(a, role, _)| {
-                let Ok(acc) = r.acc(a) else { return (Scan::Skip, None) };
-                let Some((bytes, at)) = located(r, &acc) else {
-                    return (Scan::Skip, None);
+                let Ok(acc) = r.acc(a) else { return Scan::Skip };
+                let Some(bytes) = raw(r, &acc) else {
+                    return Scan::Skip;
                 };
                 let unit = unit_size(role, acc.n);
                 if acc.ctype == 5126 && (!all_finite(&bytes) || unit.is_some_and(|n| !all_unit(&bytes, n))) {
-                    return (Scan::Fix, None);
+                    return Scan::Fix;
                 }
                 let sparse = accessors.get(a).is_some_and(|x| x.get("sparse").is_some());
                 let checked = (role == Role::Position || declared(a)) && !sparse;
-                let found = Scan::Fine(if checked {
+                Scan::Fine(if checked {
                     bounds(&bytes, acc.ctype, acc.n)
                 } else {
                     None
-                });
-                (found, kept(keep, bytes, at))
+                })
             })
             .collect();
-        for (&(a, role, ctype), (scan, k)) in jobs.iter().zip(scans) {
-            self.kept.extend(k);
+        for (&(a, role, ctype), scan) in jobs.iter().zip(scans) {
             match scan {
                 Scan::Skip | Scan::Fine(None) => {}
                 Scan::Fine(Some((min, max))) => self.set_bounds(a, &min, &max, ctype),
@@ -1548,7 +1504,7 @@ mod tests {
         }
 
         /// The document of `rest`, the JSON's other lists, over this buffer.
-        fn doc(self, rest: Value) -> Document<'static> {
+        fn doc(self, rest: Value) -> Document {
             let mut d = Document::empty(Map::new());
             d.push_buffer(self.bytes);
             d.json.insert("bufferViews".into(), json!(self.views));
@@ -1566,13 +1522,13 @@ mod tests {
         b.floats(&p, "VEC3", &json!({ "min": [0.0, 0.0, 0.0], "max": [1.0, 1.0, 0.0] }))
     }
 
-    fn values(d: &Document<'_>, a: usize) -> Vec<f32> {
+    fn values(d: &Document, a: usize) -> Vec<f32> {
         let mut r = Reader::bare(d);
         let acc = r.acc(a).unwrap();
         f32s(&raw(&mut r, &acc).unwrap())
     }
 
-    fn repaired_doc(mut d: Document<'static>) -> Document<'static> {
+    fn repaired_doc(mut d: Document) -> Document {
         d.repair();
         d
     }
@@ -1736,54 +1692,5 @@ mod tests {
         d.repair();
         let uv = index(&d.json["meshes"][0]["primitives"][0]["attributes"], "TEXCOORD_0").unwrap();
         assert!(d.json["accessors"][uv].get("bufferView").is_none());
-    }
-
-    #[cfg(all(feature = "fs", feature = "gltf"))]
-    #[test]
-    fn what_repair_read_from_a_file_is_written_as_the_file_holds_it() {
-        use crate::assets::{Folder, Memory};
-        use crate::keep::Keep;
-        // Big enough that repair keeps what it reads to write it again; wrong bounds and
-        // normals too long, so the JSON changes and an extra buffer is written too.
-        let n = 7998;
-        let mut b = Build::default();
-        let p: Vec<f32> = (0..n * 3)
-            .map(|i| f32::from(u8::try_from(i % 97).unwrap()) * 0.5)
-            .collect();
-        let pa = b.floats(&p, "VEC3", &json!({ "min": [0.0, 0.0, 0.0], "max": [1.0, 1.0, 1.0] }));
-        let normals: Vec<f32> = (0..n * 3).map(|i| if i % 3 == 2 { 2.0 } else { 0.0 }).collect();
-        let na = b.floats(&normals, "VEC3", &json!({}));
-        let idx: Vec<u16> = (0..u16::try_from(n).unwrap()).rev().collect();
-        let ia = b.indices(&idx);
-        let len = b.bytes.len();
-        let gltf = json!({
-            "asset": { "version": "2.0" },
-            "buffers": [{ "byteLength": len }],
-            "bufferViews": b.views,
-            "accessors": b.accessors,
-            "meshes": [{ "primitives": [{ "attributes": { "POSITION": pa, "NORMAL": na }, "indices": ia }] }],
-            "nodes": [{ "mesh": 0 }],
-            "scenes": [{ "nodes": [0] }],
-            "scene": 0,
-        });
-        let glb = crate::gltf::write_glb(&gltf, Some(&b.bytes)).unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("t.glb");
-        std::fs::write(&path, &glb).unwrap();
-        // Read lazily, however small: the binary chunk stays in the file.
-        crate::formats::gltf::WHOLE_AT.set(0);
-        let from_file = crate::formats::load(&path, "glb", &Folder::new(dir.path()), Keep::ALL);
-        crate::formats::gltf::WHOLE_AT.set(crate::formats::gltf::WHOLE);
-        let from_file = from_file.unwrap();
-        let memory = Memory::default();
-        let in_memory = crate::formats::load_bytes(&glb, "t.glb", "glb", &memory, Keep::ALL).unwrap();
-        let (mut a, mut b) = (Vec::new(), Vec::new());
-        from_file.write_glb(&mut a).unwrap();
-        in_memory.write_glb(&mut b).unwrap();
-        assert!(a == b, "the same GLB either way");
-        let mut json = from_file.json.clone();
-        let (extra, kept) = repaired_keeping(&from_file, &mut json);
-        assert!(extra.is_some(), "the normals are rewritten");
-        assert!(!kept.is_empty(), "what was read from the file is kept");
     }
 }

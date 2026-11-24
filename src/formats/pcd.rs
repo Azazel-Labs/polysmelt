@@ -31,7 +31,7 @@ const FIELDS: usize = 4096;
 /// Bytes of text parsed per job.
 const PIECE: usize = if cfg!(test) { 64 << 10 } else { 4 << 20 };
 
-pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document<'static>> {
+pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document> {
     let bytes = input.read().context("reading the PCD file")?;
     read(&bytes, keep)
 }
@@ -412,7 +412,7 @@ fn bits(b: &[u8]) -> u32 {
     u32::from_le_bytes([b[0], b[1], b[2], b[3]])
 }
 
-fn read(bytes: &[u8], keep: Keep) -> Result<Document<'static>> {
+fn read(bytes: &[u8], keep: Keep) -> Result<Document> {
     let h = Header::parse(bytes)?;
     points::check_count(h.points, keep.points(), "PCD")?;
     let n = usize::try_from(h.points).unwrap_or(usize::MAX);
@@ -421,7 +421,7 @@ fn read(bytes: &[u8], keep: Keep) -> Result<Document<'static>> {
     let body = &bytes[h.start.min(bytes.len())..];
     let record = h.record().filter(|&r| r > 0).context("PCD records are too big")?;
     let (mut d, origin) = match h.data {
-        Data::Ascii => ascii(body, &h, &lay, n, keep.threads())?,
+        Data::Ascii => ascii(body, &h, &lay, n, keep.thread_count())?,
         Data::Binary => {
             let need = n
                 .checked_mul(record)
@@ -695,7 +695,7 @@ fn channel_scale(kind: Kind, size: usize, max: f32) -> f32 {
     }
 }
 
-fn cloud(d: Decoded, h: &Header, lay: &Layout, origin: [f64; 3]) -> Document<'static> {
+fn cloud(d: Decoded, h: &Header, lay: &Layout, origin: [f64; 3]) -> Document {
     let n = d.pos.len();
     let mut cloud = Cloud {
         positions: d.pos,
@@ -808,11 +808,11 @@ mod tests {
     use crate::document::Pose;
     use crate::source::Fact;
 
-    fn load(bytes: &[u8]) -> Result<Document<'static>> {
+    fn load(bytes: &[u8]) -> Result<Document> {
         read(bytes, Keep::ALL)
     }
 
-    fn attrs(doc: &Document<'_>) -> Vec<String> {
+    fn attrs(doc: &Document) -> Vec<String> {
         let mut v: Vec<String> = doc.json["meshes"][0]["primitives"][0]["attributes"]
             .as_object()
             .unwrap()
@@ -824,7 +824,7 @@ mod tests {
     }
 
     /// The values of attribute `name`, as floats (normalized ones scaled to 0..=1).
-    fn values(doc: &Document<'_>, name: &str) -> Vec<f32> {
+    fn values(doc: &Document, name: &str) -> Vec<f32> {
         let a = doc.json["meshes"][0]["primitives"][0]["attributes"][name]
             .as_u64()
             .unwrap() as usize;
@@ -1023,24 +1023,10 @@ nan nan nan 0 0
             .collect();
         let bytes = file("ascii", &pts);
         assert!(bytes.len() > 2 * PIECE);
-        let many = read(
-            &bytes,
-            Keep {
-                threads: 4,
-                ..Keep::ALL
-            },
-        )
-        .unwrap();
+        let many = read(&bytes, Keep::ALL.with_threads(4)).unwrap();
         let one = read(&bytes, Keep::ALL).unwrap();
         crate::keep::NO_THREADS.set(true);
-        let none = read(
-            &bytes,
-            Keep {
-                threads: 4,
-                ..Keep::ALL
-            },
-        )
-        .unwrap();
+        let none = read(&bytes, Keep::ALL.with_threads(4)).unwrap();
         crate::keep::NO_THREADS.set(false);
         assert_eq!(many.facts["points"], 40_000);
         for d in [&one, &none] {
@@ -1051,14 +1037,7 @@ nan nan nan 0 0
 
     #[test]
     fn too_many_points_are_refused() {
-        let err = read(
-            &file("binary", &sample()),
-            Keep {
-                max_points: 10,
-                ..Keep::ALL
-            },
-        )
-        .unwrap_err();
+        let err = read(&file("binary", &sample()), Keep::ALL.with_max_points(10)).unwrap_err();
         assert!(err.to_string().contains("Keep::max_points"), "{err}");
     }
 

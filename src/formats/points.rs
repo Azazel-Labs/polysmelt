@@ -189,7 +189,7 @@ impl Cloud {
         info: &SourceInfo,
         mut source: Map<String, Value>,
         mut facts: Map<String, Value>,
-    ) -> Document<'static> {
+    ) -> Document {
         info.write(&mut source);
         let source = Value::Object(source);
         self.drop_broken();

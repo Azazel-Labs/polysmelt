@@ -5,7 +5,7 @@
 pub(crate) const HEAD: usize = 4096;
 
 /// The format of the model whose first bytes are `head` (of `len` bytes in all, when known),
-/// named by the extension [`load`](super::load) reads it under; `None` when nothing in them
+/// named by the extension it's read under; `None` when nothing in them
 /// says.
 pub(crate) fn sniff(head: &[u8], len: Option<u64>) -> Option<&'static str> {
     binary(head, len).or_else(|| text(&narrow(head)))

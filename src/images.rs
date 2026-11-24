@@ -95,9 +95,6 @@ pub(crate) enum Source {
         allow(dead_code, reason = "only readers with textures make references")
     )]
     Ref(Reference, String),
-    /// A PNG or JPEG file, left in the file until its bytes are wanted, and its type.
-    #[cfg(feature = "fs")]
-    File(crate::document::FileSpan, &'static str),
 }
 
 impl From<Image> for Source {
@@ -208,14 +205,6 @@ impl Images {
     )]
     fn read_file(&mut self, assets: &dyn Assets, path: PathBuf, reference: &str) -> Option<usize> {
         if !self.lazy {
-            // A PNG or JPEG file as it is stays in the file: only its first bytes are read.
-            #[cfg(feature = "fs")]
-            if assets.reads_files()
-                && let Some((head, span)) = crate::document::FileSpan::open(&path, 4)
-                && let Some(mime) = crate::mesh::Image::mime_of(&head)
-            {
-                return Some(self.push(Source::File(span, mime)));
-            }
             let img = assets.load_image(&path)?;
             return Some(self.push(Source::Image(img)));
         }
@@ -355,7 +344,7 @@ pub struct ImageHandle<'d> {
     index: usize,
     json: &'d Value,
     reference: Option<&'d Reference>,
-    doc: &'d Document<'d>,
+    doc: &'d Document,
 }
 
 impl<'d> ImageHandle<'d> {
@@ -453,7 +442,7 @@ impl<'d> ImageHandle<'d> {
     }
 }
 
-impl Document<'_> {
+impl Document {
     /// The document's images, read or not. A load with
     /// [`Keep::image_bytes`](crate::document::Keep::image_bytes) off leaves the images it found
     /// unread: each is a glTF image with a `uri` (relative to the model's folder, for a file

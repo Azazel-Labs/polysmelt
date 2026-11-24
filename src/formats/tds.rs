@@ -1166,7 +1166,7 @@ impl Meshes {
 }
 
 #[allow(clippy::too_many_lines, reason = "one pass over the file's parts, in order")]
-pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document<'static>> {
+pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document> {
     let data = input.read()?;
     let main = chunks(&data)
         .next()
@@ -1880,7 +1880,7 @@ mod tests {
         chunk(MAIN, &chunk(EDITOR, &editor))
     }
 
-    fn read(name: &str, data: &[u8]) -> Result<Document<'static>> {
+    fn read(name: &str, data: &[u8]) -> Result<Document> {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join(name);
         std::fs::write(&p, data).unwrap();
@@ -1898,10 +1898,7 @@ mod tests {
     #[test]
     fn the_triangle_limit_refuses_bigger_models() {
         let read = |max_triangles| {
-            let keep = Keep {
-                max_triangles,
-                ..Keep::ALL
-            };
+            let keep = Keep::ALL.with_max_triangles(max_triangles);
             crate::formats::load_bytes(&square(), "s.3ds", "3ds", &crate::assets::Memory::new(), keep)
                 .map(|d| d.flatten(crate::document::Pose::Rest).unwrap().unwrap().triangles())
         };

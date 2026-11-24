@@ -4,9 +4,8 @@ version = "0.16.1"
 edition = "2024"
 # MIT-0, except the SketchUp reader (src/formats/skp), which is MIT: see its LICENSE-openskp.
 license = "MIT-0 AND MIT"
-# 1.88 for edition 2024's let chains (and `zip` 9). The `usd` feature, on by default, needs
-# 1.96 because `openusd` 0.8 does; CI checks both.
-rust-version = "1.88"
+# 1.96 because `openusd` 0.8 (the `usd` feature, on by default) needs it; CI checks it.
+rust-version = "1.96"
 description = "Pure-Rust 3D asset interchange: glTF/GLB reading and writing, meshopt compression, and readers for common mesh formats, SketchUp included"
 keywords = ["gltf", "glb", "meshopt", "3d", "mesh"]
 categories = ["graphics", "game-development", "parser-implementations", "encoding"]
@@ -22,8 +21,8 @@ all-features = true
 default = ["minimal", "fbx", "3mf", "usd", "draco", "webp", "skp", "dae", "x3d", "tga", "bmp", "gif", "tiff", "psd", "dds", "spz", "laz", "e57", "amf"]
 # The readers with no dependencies, and file access: `default-features = false, features = ["minimal"]`.
 minimal = ["fs", "stl", "ply", "vox", "obj", "3ds", "gltf", "bvh", "off", "dxf", "splat", "mmd", "directx", "md2", "md3", "md5", "iqm", "smd", "ms3d", "b3d", "asf", "c3d", "trc", "htr", "las", "pcd", "xyz", "lwo", "ac3d", "ogre", "flt", "ogex", "irr", "xgl"]
-# Reading from the file system: `formats::load`, `assets::Folder` and `gltf::files_in`. Without
-# it (for wasm, say), models load from memory with `formats::load_bytes` and `assets::Memory`.
+# Reading from the file system: `open`, `Loader::open`, `assets::Folder` and `gltf::files_in`.
+# Without it (for wasm, say), models load from memory with `read`, `Loader::read` and `assets::Memory`.
 fs = []
 stl = []
 ply = []

@@ -29,16 +29,13 @@
 //!   (`KHR_draco_mesh_compression`) needs the `draco` feature.
 //! - A required extension it can't honour is an error, unless it only changes how surfaces look.
 //!
-//! Accessors are read from a buffer in place when it's in memory, and a block at a time from a
-//! file, so the peak is little more than the mesh.
+//! Accessors are read from their buffers in place, so the peak is little more than the mesh.
 
 mod decode;
 mod repair;
 mod rig;
 
-#[cfg(all(test, feature = "gltf", feature = "fs"))]
 pub(crate) use repair::repaired;
-pub(crate) use repair::{Kept, repaired_keeping};
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -59,7 +56,7 @@ use crate::{Context as _, Result};
 /// How much of a buffer is read at once.
 const BLOCK: usize = 256 * 1024;
 
-impl Document<'_> {
+impl Document {
     /// The triangles, lines and points the default scene draws in `pose`, as one mesh with every
     /// transform, instance, morph and skin baked in; `None` when it draws nothing. Lines and
     /// points are left out when [`Document::lines_and_points`] says so.
@@ -431,7 +428,7 @@ struct Use {
 }
 
 struct Reader<'d> {
-    doc: &'d Document<'d>,
+    doc: &'d Document,
     json: &'d Map<String, Value>,
     /// The accessors and buffer views, looked up once: every attribute read names one of each.
     accessors: &'d [Value],
@@ -554,7 +551,7 @@ fn f32s<const N: usize>(v: Option<&Value>, default: [f32; N]) -> [f32; N] {
 
 impl<'d> Reader<'d> {
     #[allow(clippy::unnecessary_wraps, reason = "it fails without the draco feature")]
-    fn new(doc: &'d Document<'d>) -> Result<Self> {
+    fn new(doc: &'d Document) -> Result<Self> {
         let json = &doc.json;
         #[cfg(not(feature = "draco"))]
         ensure!(
@@ -574,7 +571,7 @@ impl<'d> Reader<'d> {
     }
 
     /// A reader that only reads accessors: none of the checks drawing needs.
-    fn bare(doc: &'d Document<'d>) -> Self {
+    fn bare(doc: &'d Document) -> Self {
         let json = &doc.json;
         let n = |key| list(json, key).len();
         Self {
@@ -3732,7 +3729,7 @@ mod tests {
     /// A document of a unit square's four corners (accessor 0), with index accessors 1
     /// (`[3, 2, 1, 0]`), 2 (two triangles) and 3 (`[0, 0, 1, 2, 3]`), drawn by `meshes` on
     /// `nodes`.
-    fn corners(meshes: serde_json::Value, nodes: serde_json::Value) -> crate::document::Document<'static> {
+    fn corners(meshes: serde_json::Value, nodes: serde_json::Value) -> crate::document::Document {
         let mut bin: Vec<u8> = [[0f32, 0., 0.], [1., 0., 0.], [1., 1., 0.], [0., 1., 0.]]
             .iter()
             .flatten()
@@ -3976,7 +3973,7 @@ mod tests {
                     .find(|p| p.extension().is_some_and(|e| e == "glb" || e == "gltf"))
                     .unwrap();
             }
-            let doc = crate::formats::open(&path, Keep::ALL).unwrap();
+            let doc = crate::open(&path).unwrap();
             let mut poses = vec![Pose::Rest, Pose::Bind];
             let animations = super::list(&doc.json, "animations").len();
             poses.extend((0..animations).map(|index| Pose::Animation { index, time: 0.4 }));

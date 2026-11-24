@@ -731,7 +731,7 @@ fn matrix(o: &Obj) -> Option<[f32; 16]> {
     ])
 }
 
-pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document<'static>> {
+pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document> {
     let data = input.read()?;
     let m = parse(&data)?;
     let dir = input.dir();
@@ -810,7 +810,7 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
     }
 
     // Then the objects' primitives, on threads when there's enough to share.
-    let threads = if corners > 200_000 { keep.threads() } else { 1 };
+    let threads = if corners > 200_000 { keep.thread_count() } else { 1 };
     let built = par_map(&jobs, threads, |(oi, mats, clip)| {
         let o = &m.objs[*oi];
         build(o, mats, o.texture.is_some(), *clip)
@@ -980,11 +980,11 @@ mod tests {
         png
     }
 
-    fn read(text: &str, assets: &Memory) -> Result<Document<'static>> {
+    fn read(text: &str, assets: &Memory) -> Result<Document> {
         load(Input::memory(text.as_bytes(), "t.ac"), assets, Keep::ALL)
     }
 
-    fn flat(doc: &Document<'_>) -> Mesh {
+    fn flat(doc: &Document) -> Mesh {
         doc.flatten(Pose::Rest).unwrap().unwrap()
     }
 
@@ -1281,7 +1281,7 @@ mod tests {
             text += "kids 0\n";
         }
         let with = |threads: usize| {
-            let keep = Keep { threads, ..Keep::ALL };
+            let keep = Keep::ALL.with_threads(threads);
             load(Input::memory(text.as_bytes(), "t.ac"), &Memory::new(), keep)
                 .unwrap()
                 .to_glb()

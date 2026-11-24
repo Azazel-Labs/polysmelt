@@ -19,12 +19,12 @@ use crate::source::{Axis, Fact, Handedness, SourceInfo};
 /// The bytes a splat takes.
 const SIZE: usize = 32;
 
-pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document<'static>> {
+pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document> {
     decode(&input.read()?, keep.points())
 }
 
 /// The splats in `bytes`, up to `max` of them.
-fn decode(bytes: &[u8], max: usize) -> Result<Document<'static>> {
+fn decode(bytes: &[u8], max: usize) -> Result<Document> {
     let (splats, rest) = bytes.as_chunks::<SIZE>();
     let n = splats.len();
     ensure!(

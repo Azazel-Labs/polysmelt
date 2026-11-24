@@ -380,7 +380,7 @@ impl Scene {
     }
 
     /// Writes the scene as a glTF document, keeping what `keep` says; more triangles than it allows is an error.
-    pub fn finish(mut self, keep: Keep) -> Result<Document<'static>> {
+    pub fn finish(mut self, keep: Keep) -> Result<Document> {
         let limit = keep.triangles();
         let tris = self.triangles();
         ensure!(tris <= limit, "too many triangles to convert (more than {limit})");

@@ -234,7 +234,7 @@ impl Splats {
         mut source: Map<String, Value>,
         rotation: Option<[f32; 4]>,
         mut facts: Map<String, Value>,
-    ) -> Document<'static> {
+    ) -> Document {
         let mut b = Builder::default();
         let degree = degree_of(self.sh.len());
         info.write(&mut source);

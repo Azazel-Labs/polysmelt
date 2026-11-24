@@ -42,7 +42,7 @@ const MAX_TEXTURE: usize = 1 << 28;
 const NONE: f32 = f32::NAN;
 
 /// Loads an AMF: an object's triangles as a mesh, constellations as nodes, and the facts worth keeping.
-pub(crate) fn load(input: super::Input<'_>) -> Result<Document<'static>> {
+pub(crate) fn load(input: super::Input<'_>) -> Result<Document> {
     let zipped = input.head(4)?.starts_with(b"PK\x03\x04");
     let amf = if zipped {
         let mut zip = zip::ZipArchive::new(input.seekable()?).context("this zipped AMF can't be opened")?;
@@ -871,7 +871,7 @@ struct Look {
     blend: bool,
 }
 
-fn build(a: &Amf, zipped: bool) -> Result<Document<'static>> {
+fn build(a: &Amf, zipped: bool) -> Result<Document> {
     let unit = a.unit.clone().unwrap_or_else(|| "millimeter".to_owned());
     let known = meters(&unit);
     let scale = known.unwrap_or(1e-3);
@@ -1354,11 +1354,11 @@ mod tests {
         assert_eq!(info.unit.as_deref(), Some("furlong"));
     }
 
-    fn load_str(xml: &str) -> Result<Document<'static>> {
+    fn load_str(xml: &str) -> Result<Document> {
         load(Input::memory(xml.as_bytes(), "t.amf"))
     }
 
-    fn flat(doc: &Document<'_>) -> crate::mesh::Mesh {
+    fn flat(doc: &Document) -> crate::mesh::Mesh {
         doc.flatten(crate::document::Pose::Rest).unwrap().unwrap()
     }
 
@@ -1399,7 +1399,7 @@ mod tests {
   <material id="4"><composite materialid="5">3</composite><composite materialid="6">1</composite><composite materialid="5">x*2</composite></material>
 </amf>"#;
 
-    fn source<'a>(doc: &'a Document<'_>) -> &'a Value {
+    fn source(doc: &Document) -> &Value {
         &doc.json["asset"]["extras"]["source"]
     }
 

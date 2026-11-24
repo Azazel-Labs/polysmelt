@@ -71,7 +71,7 @@ const NONE: u32 = u32::MAX;
 /// The most coordinates a position may have (`nOFF`'s dimension).
 const MAX_VALUES: usize = 32;
 
-pub(crate) fn load(input: Input<'_>) -> Result<Document<'static>> {
+pub(crate) fn load(input: Input<'_>) -> Result<Document> {
     let data = input.read()?;
     let data = data.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&data);
     let mut c = Cursor { d: data, at: 0 };
@@ -669,12 +669,9 @@ mod tests {
     use crate::document::{Keep, Pose};
     use crate::mesh::Mesh;
 
-    fn read_with(text: &[u8], max: usize) -> Result<Document<'static>> {
-        let keep = Keep {
-            max_triangles: max,
-            ..Keep::ALL
-        };
-        super::super::load_bytes(text, "t.off", "off", &Memory::new(), keep).map(Document::into_owned)
+    fn read_with(text: &[u8], max: usize) -> Result<Document> {
+        let keep = Keep::ALL.with_max_triangles(max);
+        super::super::load_bytes(text, "t.off", "off", &Memory::new(), keep)
     }
 
     fn mesh(text: &[u8]) -> Mesh {

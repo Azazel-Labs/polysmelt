@@ -45,7 +45,7 @@ const SIZES: [usize; 11] = [20, 28, 26, 34, 57, 63, 30, 36, 38, 59, 67];
 const FOOT: f64 = 0.3048;
 const US_FOOT: f64 = 1200.0 / 3937.0;
 
-pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document<'static>> {
+pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document> {
     let head = input.head(64 * 1024)?;
     let h = Header::parse(&head)?;
     if h.compressed {
@@ -58,13 +58,13 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document<'static>> {
 }
 
 #[cfg(feature = "laz")]
-fn compressed(input: Input<'_>, h: &Header, keep: Keep) -> Result<Document<'static>> {
+fn compressed(input: Input<'_>, h: &Header, keep: Keep) -> Result<Document> {
     let bytes = input.read()?;
     read(&Source::Laz(&bytes), h, keep)
 }
 
 #[cfg(not(feature = "laz"))]
-fn compressed(_: Input<'_>, _: &Header, _: Keep) -> Result<Document<'static>> {
+fn compressed(_: Input<'_>, _: &Header, _: Keep) -> Result<Document> {
     bail!("a LAZ (compressed LAS) file, and this build lacks the `laz` feature")
 }
 
@@ -599,7 +599,7 @@ struct Worker<'a> {
     laz: Option<std::marker::PhantomData<&'a ()>>,
 }
 
-fn read(src: &Source<'_>, h: &Header, keep: Keep) -> Result<Document<'static>> {
+fn read(src: &Source<'_>, h: &Header, keep: Keep) -> Result<Document> {
     let len = src.len()?;
     let records = records(src, h, len)?;
     let mut lay = layout(h.format);
@@ -651,10 +651,10 @@ fn read(src: &Source<'_>, h: &Header, keep: Keep) -> Result<Document<'static>> {
     let threads = if laz.as_ref().is_some_and(|l| !l.seekable()) {
         1
     } else {
-        keep.threads()
+        keep.thread_count()
     };
     #[cfg(not(feature = "laz"))]
-    let threads = keep.threads();
+    let threads = keep.thread_count();
     let threads = threads.clamp(1, jobs.len().max(1));
     let mut workers = Vec::new();
     for _ in 0..threads {
@@ -1248,7 +1248,7 @@ pub(crate) mod tests {
         b
     }
 
-    fn load_las(bytes: &[u8], keep: Keep) -> Result<Document<'static>> {
+    fn load_las(bytes: &[u8], keep: Keep) -> Result<Document> {
         super::load(Input::memory(bytes, "t.las"), keep)
     }
 
@@ -1367,15 +1367,7 @@ pub(crate) mod tests {
     #[test]
     fn too_many_points_are_refused_before_reading() {
         let bytes = las(2, 0, 0, &pts(10), &[]);
-        let e = load_las(
-            &bytes,
-            Keep {
-                max_points: 5,
-                ..Keep::ALL
-            },
-        )
-        .unwrap_err()
-        .to_string();
+        let e = load_las(&bytes, Keep::ALL.with_max_points(5)).unwrap_err().to_string();
         assert!(e.contains("max_points"), "{e}");
     }
 
@@ -1383,28 +1375,10 @@ pub(crate) mod tests {
     fn threads_read_the_same_cloud() {
         let bytes = las(2, 3, 0, &pts(BLOCK * 3 + 17), &[]);
         let one = load_las(&bytes, Keep::ALL).unwrap().to_glb().unwrap();
-        let many = load_las(
-            &bytes,
-            Keep {
-                threads: 4,
-                ..Keep::ALL
-            },
-        )
-        .unwrap()
-        .to_glb()
-        .unwrap();
+        let many = load_las(&bytes, Keep::ALL.with_threads(4)).unwrap().to_glb().unwrap();
         assert_eq!(one, many);
         crate::keep::NO_THREADS.set(true);
-        let none = load_las(
-            &bytes,
-            Keep {
-                threads: 4,
-                ..Keep::ALL
-            },
-        )
-        .unwrap()
-        .to_glb()
-        .unwrap();
+        let none = load_las(&bytes, Keep::ALL.with_threads(4)).unwrap().to_glb().unwrap();
         crate::keep::NO_THREADS.set(false);
         assert_eq!(one, none);
     }
@@ -1474,14 +1448,7 @@ pub(crate) mod tests {
             let packed = laz(&plain, 128);
             assert!(packed.len() < plain.len());
             let a = load_las(&plain, Keep::ALL).unwrap();
-            let b = super::load(
-                Input::memory(&packed, "t.laz"),
-                Keep {
-                    threads: 3,
-                    ..Keep::ALL
-                },
-            )
-            .unwrap();
+            let b = super::load(Input::memory(&packed, "t.laz"), Keep::ALL.with_threads(3)).unwrap();
             assert_eq!(b.json["asset"]["extras"]["source"]["format"], "LAZ");
             let fa = a.flatten(Pose::Rest).unwrap().unwrap();
             let fb = b.flatten(Pose::Rest).unwrap().unwrap();
@@ -1501,13 +1468,7 @@ pub(crate) mod tests {
         for _ in 0..250 {
             let mut b = packed.clone();
             points::corrupt(&mut b, &mut rng, 3);
-            let _ = super::load(
-                Input::memory(&b, "t.laz"),
-                Keep {
-                    threads: 2,
-                    ..Keep::ALL
-                },
-            );
+            let _ = super::load(Input::memory(&b, "t.laz"), Keep::ALL.with_threads(2));
         }
     }
 }

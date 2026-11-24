@@ -41,7 +41,7 @@ fn load(path: &Path) -> Model {
         }
     }
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
-    Model::load(&files, name, &|| 0.0).unwrap_or_else(|e| fail(format!("{}: {e}", path.display())))
+    Model::load(files, name, &|| 0.0).unwrap_or_else(|e| fail(format!("{}: {e}", path.display())))
 }
 
 /// `model` posed at `time` (at rest without), its skeleton as orange lines when it has nothing else to draw.

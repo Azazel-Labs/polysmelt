@@ -1210,7 +1210,7 @@ fn unit(units: i64) -> Option<(f64, &'static str)> {
     })
 }
 
-pub(crate) fn load(input: Input<'_>) -> Result<Document<'static>> {
+pub(crate) fn load(input: Input<'_>) -> Result<Document> {
     let data = input.read()?;
     let d = data.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&data);
     ensure!(!d.iter().all(u8::is_ascii_whitespace), "DXF file is empty");
@@ -1559,7 +1559,7 @@ impl Build {
         Ok(())
     }
 
-    fn finish(mut self) -> Result<Document<'static>> {
+    fn finish(mut self) -> Result<Document> {
         let top = Ctx {
             layer: self.layer0,
             rgb: WHITE,

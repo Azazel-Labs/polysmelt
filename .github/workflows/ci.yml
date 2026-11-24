@@ -2,7 +2,7 @@ name: CI
 
 # Formatting, clippy across the feature sets Hoard and wasm builds use, the tests (with the
 # conformance corpus, whose GLBs go through the Khronos validator), and the minimum Rust
-# versions the README promises.
+# version the README promises.
 
 on:
   push:
@@ -118,8 +118,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - rust: "1.88"
-            features: --no-default-features --features minimal,fbx,3mf,draco,webp,skp,dae,x3d,tga,bmp,gif,tiff,psd,dds,spz,mmd,directx,md2,md3,md5,iqm,smd,ms3d,b3d,asf,c3d,trc,htr,laz,e57,amf,ogre
           - rust: "1.96"
             features: ""
     steps:

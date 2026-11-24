@@ -172,12 +172,7 @@ fn adopt(json: &mut Map<String, Value>, parent: usize, children: &[usize]) {
 
 /// Grafts `src` into `dst` under node `parent`. With `materials`, a list as long as the grafted document's
 /// materials, its primitives use those of `dst` in their place.
-pub(super) fn graft(
-    dst: &mut Document<'static>,
-    src: Document<'static>,
-    parent: usize,
-    materials: Option<&[usize]>,
-) -> Placed {
+pub(super) fn graft(dst: &mut Document, src: Document, parent: usize, materials: Option<&[usize]>) -> Placed {
     let o = Offsets::of(&dst.json);
     let Document {
         json: mut s,
@@ -359,7 +354,7 @@ pub(super) fn graft(
 }
 
 /// Places a static graft again under node `parent`: its nodes copied, sharing its meshes.
-pub(super) fn repeat(dst: &mut Document<'static>, placed: &Placed, parent: usize) {
+pub(super) fn repeat(dst: &mut Document, placed: &Placed, parent: usize) {
     let at = len(&dst.json, "nodes");
     let Some(Value::Array(nodes)) = dst.json.get_mut("nodes") else {
         return;

@@ -338,11 +338,13 @@ fn inputs(dir: &Path, sizes: &[String]) -> Vec<Input> {
 type Load = fn(&Input) -> (Box<dyn std::any::Any>, usize);
 
 fn polysmelt(input: &Input) -> (Box<dyn std::any::Any>, usize) {
-    use polysmelt::document::{Keep, Pose};
+    use polysmelt::document::Pose;
     let dir = input.path.parent().unwrap();
-    let doc =
-        polysmelt::formats::load(&input.path, input.ext, &polysmelt::assets::Folder::new(dir), Keep::ALL).unwrap();
-    // A GLB is already the document, its arrays left in the file: the triangles drawn, decoded
+    let doc = polysmelt::Loader::new()
+        .assets(polysmelt::assets::Folder::new(dir))
+        .open(&input.path)
+        .unwrap();
+    // A GLB is already the document, its arrays kept as stored: the triangles drawn, decoded
     // (and skinned), are the like-for-like result (the gltf crate decodes them, unposed). The other formats' document
     // holds their arrays, as their competitors' results do.
     if input.ext == "glb" {
@@ -357,10 +359,12 @@ fn polysmelt(input: &Input) -> (Box<dyn std::any::Any>, usize) {
 /// Polysmelt's skinned meshes left in their bind pose (`Pose::Bind`): their vertices as stored,
 /// unposed, as the gltf crate gives them.
 fn polysmelt_bind(input: &Input) -> (Box<dyn std::any::Any>, usize) {
-    use polysmelt::document::{Keep, Pose};
+    use polysmelt::document::Pose;
     let dir = input.path.parent().unwrap();
-    let doc =
-        polysmelt::formats::load(&input.path, input.ext, &polysmelt::assets::Folder::new(dir), Keep::ALL).unwrap();
+    let doc = polysmelt::Loader::new()
+        .assets(polysmelt::assets::Folder::new(dir))
+        .open(&input.path)
+        .unwrap();
     let mesh = doc.flatten(Pose::Bind).unwrap().unwrap();
     let n = mesh.triangles();
     (Box::new((doc, mesh)), n)

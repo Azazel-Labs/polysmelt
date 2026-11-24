@@ -6,27 +6,24 @@ use crate::document::Pose;
 use crate::keep::Keep;
 use crate::mesh::Mesh;
 
-fn read_bytes(bytes: &[u8], max: usize) -> Result<Document<'static>> {
-    let keep = Keep {
-        max_triangles: max,
-        ..Keep::ALL
-    };
-    super::super::load_bytes(bytes, "a.dxf", "dxf", &Memory::new(), keep).map(Document::into_owned)
+fn read_bytes(bytes: &[u8], max: usize) -> Result<Document> {
+    let keep = Keep::ALL.with_max_triangles(max);
+    super::super::load_bytes(bytes, "a.dxf", "dxf", &Memory::new(), keep)
 }
 
-fn read(text: &str) -> Document<'static> {
+fn read(text: &str) -> Document {
     read_bytes(text.as_bytes(), usize::MAX).unwrap()
 }
 
-fn mesh(doc: &Document<'_>) -> Mesh {
+fn mesh(doc: &Document) -> Mesh {
     doc.flatten(Pose::Rest).unwrap().unwrap()
 }
 
-fn triangles(doc: &Document<'_>) -> u64 {
+fn triangles(doc: &Document) -> u64 {
     doc.facts["triangles"].as_u64().unwrap()
 }
 
-fn source<'a>(doc: &'a Document<'_>) -> &'a Value {
+fn source(doc: &Document) -> &Value {
     &doc.json["asset"]["extras"]["source"]
 }
 
@@ -568,14 +565,9 @@ fn lines_points_and_polylines() {
     let (lo, hi) = bounds(&m);
     assert!(near(lo, [0.0, 0.0, -2.0]) && near(hi, [5.0, 3.0, 0.0]), "{lo:?} {hi:?}");
     // Left out with lines and points.
-    let keep = Keep {
-        lines_and_points: false,
-        ..Keep::ALL
-    };
+    let keep = Keep::ALL.with_lines_and_points(false);
     let text = text(&drawing(6, "", "", entities), "\n");
-    let doc = super::super::load_bytes(text.as_bytes(), "a.dxf", "dxf", &Memory::new(), keep)
-        .map(Document::into_owned)
-        .unwrap();
+    let doc = super::super::load_bytes(text.as_bytes(), "a.dxf", "dxf", &Memory::new(), keep).unwrap();
     let m = doc.flatten(Pose::Rest).unwrap();
     assert_eq!(m.map_or(0, |m| m.lines() + m.points()), 0);
 }

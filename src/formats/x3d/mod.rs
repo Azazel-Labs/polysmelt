@@ -344,7 +344,7 @@ fn parse(bytes: &[u8]) -> Result<(Graph, Info)> {
     Ok((g, info))
 }
 
-pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document<'static>> {
+pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document> {
     let (mut graph, info) = parse(&input.read()?)?;
     let dir = input.path.parent().map(Path::to_path_buf).unwrap_or_default();
     let mut library = proto::Library::new();
@@ -884,7 +884,7 @@ impl Convert<'_> {
         Some(self.push_node(Value::Object(node)))
     }
 
-    fn finish(mut self, roots: &[usize], info: &Info) -> Document<'static> {
+    fn finish(mut self, roots: &[usize], info: &Info) -> Document {
         let mut source = Map::new();
         source.insert("encoding".into(), json!(info.encoding));
         if info.gzip {

@@ -279,7 +279,7 @@ struct Vox {
 
 /// `MagicaVoxel`: each model a mesh of the faces between its voxels and empty space, one
 /// primitive per color; the scene graph as nodes, hidden ones kept but hidden.
-pub(crate) fn vox(data: &[u8], keep: Keep) -> Result<Document<'static>> {
+pub(crate) fn vox(data: &[u8], keep: Keep) -> Result<Document> {
     let per_voxel = crate::mesh::MAX_TRIANGLES / MAX_VOXELS;
     let v = read(data, (keep.triangles() / per_voxel).max(MAX_VOXELS))?;
     let scene = v.nodes.contains_key(&0);
@@ -1657,15 +1657,9 @@ mod tests {
         f[at..at + 4].copy_from_slice(&u32::try_from(MAX_VOXELS + 1).unwrap().to_le_bytes());
         let err = |keep| format!("{:#}", vox(&f, keep).unwrap_err());
         assert!(err(Keep::ALL).contains("too many voxels"), "{}", err(Keep::ALL));
-        let lower = Keep {
-            max_triangles: 10,
-            ..Keep::ALL
-        };
+        let lower = Keep::ALL.with_max_triangles(10);
         assert!(err(lower).contains("too many voxels"), "{}", err(lower));
-        let higher = Keep {
-            max_triangles: crate::mesh::MAX_TRIANGLES * 2,
-            ..Keep::ALL
-        };
+        let higher = Keep::ALL.with_max_triangles(crate::mesh::MAX_TRIANGLES * 2);
         assert!(err(higher).contains("end early"), "{}", err(higher));
     }
 }

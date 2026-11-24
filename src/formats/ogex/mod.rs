@@ -463,7 +463,7 @@ struct Stats {
     spectra: usize,
 }
 
-pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document<'static>> {
+pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document> {
     let data = input.read()?;
     let t = Tree::parse(&data)?;
     let dir = input.dir().to_path_buf();
@@ -908,7 +908,7 @@ fn floats(b: &mut Builder, v: Vec<f32>, kind: &str, bounds: bool) -> usize {
     a
 }
 
-fn finish(mut c: Ctx<'_>) -> Document<'static> {
+fn finish(mut c: Ctx<'_>) -> Document {
     let mut nodes = std::mem::take(&mut c.nodes);
     for (k, kids) in c.kids.iter().enumerate() {
         if !kids.is_empty() {

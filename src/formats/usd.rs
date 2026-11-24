@@ -111,13 +111,13 @@ const MAX_NODES: usize = 1 << 20;
 const MAX_NESTING: usize = 8;
 
 /// The stage as a document; one with nothing to show (a material library, a layer of overrides) has no nodes.
-pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document<'static>> {
+pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document> {
     load_capped(input, assets, keep, MAX_NODES)
 }
 
 /// [`load`], making at most `max_nodes` nodes: past them the rest of the stage is left out, and
 /// `asset.extras.source` says so.
-fn load_capped(input: Input<'_>, assets: &dyn Assets, keep: Keep, max_nodes: usize) -> Result<Document<'static>> {
+fn load_capped(input: Input<'_>, assets: &dyn Assets, keep: Keep, max_nodes: usize) -> Result<Document> {
     let path = input.path;
     let (stage, paths) = match input.bytes() {
         Some(bytes) => open_in_memory(bytes, input, assets)?,
@@ -2738,8 +2738,6 @@ impl Reader<'_> {
         match self.images.list.get(image) {
             Some(crate::images::Source::Image(i)) => gray(&i.bytes),
             Some(crate::images::Source::Ref(r, _)) => r.bytes.as_deref().is_some_and(gray),
-            #[cfg(feature = "fs")]
-            Some(crate::images::Source::File(f, _)) => f.read_all().is_ok_and(|b| gray(&b)),
             None => false,
         }
     }
@@ -3780,7 +3778,7 @@ def Material \"Planks\"
         (dir, path)
     }
 
-    fn doc(usda: &str, images: &[(&str, bool)]) -> Document<'static> {
+    fn doc(usda: &str, images: &[(&str, bool)]) -> Document {
         let (dir, path) = stage(usda, images);
         load(Input::file(&path), &crate::assets::Folder::new(dir.path()), Keep::ALL).unwrap()
     }

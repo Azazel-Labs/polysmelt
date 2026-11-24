@@ -61,11 +61,14 @@ pub trait Assets {
         self.image(&bytes, name)
     }
 
-    /// Whether [`read`](Self::read) and [`load_image`](Self::load_image) read the file at the
-    /// path as it is, so a PNG or JPEG texture can be left in its file until it's written. `false`
-    /// by default.
-    fn reads_files(&self) -> bool {
-        false
+    /// [`read`](Self::read) as [`Bytes`](crate::Bytes), for bytes a document keeps (a glTF
+    /// buffer). By default the bytes `read` returns, copied only when they're borrowed; [`Memory`]
+    /// shares the bytes it holds.
+    fn read_shared(&self, path: &Path) -> Option<crate::Bytes> {
+        self.read(path).map(|b| match b {
+            Cow::Owned(v) => v.into(),
+            Cow::Borrowed(s) => crate::Bytes::copy_from_slice(s),
+        })
     }
 
     /// A texture file read as an embeddable image.
@@ -156,10 +159,6 @@ impl Assets for Folder {
         Image::from_png_or_jpeg(bytes.clone()).or_else(|| self.image(&bytes, name))
     }
 
-    fn reads_files(&self) -> bool {
-        true
-    }
-
     fn load_image(&self, path: &Path) -> Option<Image> {
         // The file as read becomes the image's bytes, rather than a copy of them.
         let bytes = self.read(path)?.into_owned();
@@ -209,9 +208,13 @@ impl Assets for Folder {
 /// (`\` and a leading `./` or `/` read the same). A reference is tried relative to the model,
 /// then by file name, then as the same name in another image format, the one nearest the model;
 /// a model naming no color texture takes one by name.
+///
+/// Files are held as [`Bytes`](crate::Bytes): a `Vec<u8>` or `Bytes` goes in without a copy, a
+/// clone of the `Memory` shares them, and what a document keeps of them (a glTF buffer, a PNG
+/// texture) is shared too.
 #[derive(Debug, Clone, Default)]
 pub struct Memory {
-    files: BTreeMap<String, Vec<u8>>,
+    files: BTreeMap<String, crate::Bytes>,
 }
 
 impl Memory {
@@ -222,21 +225,22 @@ impl Memory {
     }
 
     /// Adds (or replaces) the file at `path`.
-    pub fn insert(&mut self, path: &str, bytes: impl Into<Vec<u8>>) -> &mut Self {
+    pub fn insert(&mut self, path: &str, bytes: impl Into<crate::Bytes>) -> &mut Self {
         self.files.insert(memory_key(path), bytes.into());
         self
     }
 
     /// With the file at `path` added (or replaced).
     #[must_use]
-    pub fn with(mut self, path: &str, bytes: impl Into<Vec<u8>>) -> Self {
+    pub fn with(mut self, path: &str, bytes: impl Into<crate::Bytes>) -> Self {
         self.insert(path, bytes);
         self
     }
 
-    /// The file at `path`.
-    pub fn get(&self, path: &str) -> Option<&[u8]> {
-        self.files.get(&memory_key(path)).map(Vec::as_slice)
+    /// The file at `path`, as held: cloning it shares its bytes.
+    #[must_use]
+    pub fn get(&self, path: &str) -> Option<&crate::Bytes> {
+        self.files.get(&memory_key(path))
     }
 
     /// The files' paths, normalized, in order.
@@ -286,7 +290,20 @@ impl Assets for Memory {
     fn read(&self, path: &Path) -> Option<Cow<'_, [u8]>> {
         self.files
             .get(&memory_key(&path.to_string_lossy()))
-            .map(|b| Cow::Borrowed(b.as_slice()))
+            .map(|b| Cow::Borrowed(&b[..]))
+    }
+
+    fn read_shared(&self, path: &Path) -> Option<crate::Bytes> {
+        self.files.get(&memory_key(&path.to_string_lossy())).cloned()
+    }
+
+    fn image_shared(&self, bytes: crate::Bytes, name: &Path) -> Option<Image> {
+        Image::from_png_or_jpeg(bytes.clone()).or_else(|| self.image(&bytes, name))
+    }
+
+    fn load_image(&self, path: &Path) -> Option<Image> {
+        // The file as held becomes the image's bytes, rather than a copy of them.
+        self.image_shared(self.read_shared(path)?, path)
     }
 
     fn color_texture_for(&self, model: &Path) -> Option<PathBuf> {

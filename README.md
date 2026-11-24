@@ -11,6 +11,44 @@
 Pure-Rust 3D asset interchange, with glTF as the hub. Read what other tools write, keep what
 you don't understand, and write compact or plain files back out.
 
+## Usage
+
+```rust no_run
+use polysmelt::document::Pose;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Any format polysmelt reads: told by the extension, or else by the file's first bytes.
+    // The textures and libraries the model names are found beside it.
+    let doc = polysmelt::open("models/robot.fbx")?;
+
+    // What the file says about itself, and what it draws.
+    let info = doc.source_info();
+    println!("{:?}, up {:?}: {} triangles", info.format, info.up_axis, doc.triangles());
+
+    // Out as a GLB, everything it holds kept, or as flat, posed triangles.
+    doc.write_glb(std::io::BufWriter::new(std::fs::File::create("robot.glb")?))?;
+    let mesh = doc.flatten(Pose::Rest)?;
+    Ok(())
+}
+```
+
+A `Loader` chooses what `open` and `read` (for a model in memory) don't: what to keep, where
+the files a model names are found, and its format.
+
+```rust no_run
+use polysmelt::{Format, Keep, Loader, assets::Folder};
+
+fn main() -> polysmelt::Result<()> {
+    let doc = Loader::new()
+        .keep(Keep::ALL.with_animations(false))
+        .assets(Folder::new("textures"))
+        .format(Format::Obj)
+        .open("scan.txt")?;
+    let glb = doc.to_glb()?;
+    Ok(())
+}
+```
+
 ## Status
 
 Early. What exists today:
@@ -68,8 +106,8 @@ Early. What exists today:
   morphs as morph targets and `.material` scripts as materials), and motion capture: Acclaim `.asf` skeletons with `.amc` motions, HTR, and C3D
   and TRC marker tracks (each marker an animated node). Left-handed and Z-up sources are turned
   to glTF's axes, and keys are kept as the file gives them.
-  `formats::load` reads a file and `formats::load_bytes` a model already in memory; both
-  dispatch on the extension and return a `document::Document`.
+  `open` reads a file and `read` a model already in memory; both go by the extension (or else
+  the first bytes) and return a `Document`. `Format` names each format and its extensions.
 - **`document`**: the common form, a glTF 2.0 document (its JSON and its buffers' bytes).
   glTF passes through untouched: nothing is decoded, and `Document::to_glb` writes the
   buffers back as they are, compression included, with images embedded. The other formats
@@ -202,12 +240,12 @@ Early. What exists today:
 | `ogex` | OpenGEX (`.ogex`) | none |
 | `irr` | Irrlicht meshes (`.irrmesh`) and scenes (`.irr`) | none |
 | `xgl` | XGL (`.xgl`) and zipped XGL (`.zgl`) | none |
-| `fs` | Reading files: `formats::load`, `assets::Folder`, `gltf::files_in` | none |
+| `fs` | Reading files: `open`, `Loader::open`, `assets::Folder`, `gltf::files_in` | none |
 
 Every reader is on by default, and so are `fs`, `webp` and the six texture decoders. `minimal`
 is the thirty-three readers with no dependencies, plus `fs`, for
 `default-features = false, features = ["minimal"]`. Asking
-`formats::load` for a format whose feature is off returns an error that names the feature.
+`open` for a format whose feature is off returns an error that names the feature.
 
 Without `fs` the file APIs don't exist, so a build that has no file system (such as
 `wasm32-unknown-unknown`) fails to compile rather than failing when it runs. Models load from
@@ -217,20 +255,24 @@ memory instead:
 polysmelt = { version = "0.1", default-features = false, features = ["stl", "ply", "obj", "gltf", "usd"] }
 ```
 
-```rust
-use polysmelt::{assets::Memory, document::{Keep, Pose}, formats};
+```rust no_run
+use polysmelt::{Loader, assets::Memory, document::Pose};
 
-let assets = Memory::new().with("scene.bin", bin).with("albedo.png", png);
-let mut doc = formats::load_bytes(&gltf, "scene.gltf", "gltf", &assets, Keep::ALL)?;
-let glb = doc.to_glb()?; // the scene, losslessly
-let mesh = doc.flatten(Pose::Rest)?; // or flat triangles
-doc.decode()?; // or plain glTF, for a reader without Draco, meshopt or quantization
+fn show(gltf: Vec<u8>, bin: Vec<u8>, png: Vec<u8>) -> polysmelt::Result<()> {
+    // The bytes are shared, not copied: the document keeps what it needs of them.
+    let assets = Memory::new().with("scene.bin", bin).with("albedo.png", png);
+    let mut doc = Loader::new().assets(assets).read(gltf, "scene.gltf")?;
+    let glb = doc.to_glb()?; // the scene, losslessly
+    let mesh = doc.flatten(Pose::Rest)?; // or flat triangles
+    doc.decode()?; // or plain glTF, for a reader without Draco, meshopt or quantization
+    Ok(())
+}
 ```
 
 ### Minimum Rust
 
-Rust 1.88, with any features but `usd`. The `usd` feature, and so the default build, needs
-1.96, because `openusd` does. CI builds `minimal` on 1.88 and everything on 1.96.
+Rust 1.96, which `openusd` (the `usd` feature, on by default) needs. CI builds everything on
+1.96.
 
 ## Planned scope
 

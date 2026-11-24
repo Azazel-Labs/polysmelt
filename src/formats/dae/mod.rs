@@ -78,7 +78,7 @@ const MAX_DOCUMENTS: usize = 64;
 const MAX_EXTRA_VALUES: usize = 4096;
 
 /// The document in a `.dae` file or an archive, as glTF.
-pub(super) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document<'static>> {
+pub(super) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document> {
     let raw = input.read()?;
     let owned: Vec<u8>;
     let mut archive = None;

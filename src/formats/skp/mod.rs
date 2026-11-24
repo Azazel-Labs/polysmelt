@@ -36,14 +36,14 @@ use crate::source::{Axis, Converted, Fact, Handedness, SourceInfo};
 use crate::{Context, Result};
 
 /// Reads the `SketchUp` model `input`, with what it holds in a glTF document.
-pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document<'static>> {
+pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document> {
     let bytes = input.read()?;
     let (glb, major) = convert(&bytes, input.limit)?;
     // An empty model, or one of only edges, guides and text, has nothing to draw.
     let mut doc = match glb {
         Some(glb) => {
-            let name = input.path.to_string_lossy();
-            super::gltf::load(Input::memory(&glb, &name), &Memory::new(), keep)?.into_owned()
+            let glb = crate::Bytes::from(glb);
+            super::gltf::load(Input::shared(&glb, input.path), &Memory::new(), keep)?
         }
         None => Document::empty(Map::new()),
     };

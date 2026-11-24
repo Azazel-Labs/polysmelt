@@ -11,7 +11,7 @@ use crate::num::f32_of;
 use crate::rig::{Animation, Channel, Interpolation, Node, Path, Rig, Skin, Trs};
 use crate::{Context as _, Result};
 
-impl Document<'_> {
+impl Document {
     /// The document's nodes, skins and animations, accessors read. A document loaded with a
     /// [`Keep`](crate::document::Keep) that drops animation, skins or morphs has none of those.
     ///

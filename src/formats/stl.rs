@@ -33,7 +33,7 @@ type Tri = [[f32; 3]; 3];
 /// The bytes UTF-8 text may start with.
 const BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
 
-pub(crate) fn stl(input: Input<'_>) -> Result<Document<'static>> {
+pub(crate) fn stl(input: Input<'_>) -> Result<Document> {
     let mut blocks = input.blocks()?;
     let size = blocks.size_hint() as u64;
     let head = blocks.need(1024)?;
@@ -105,7 +105,7 @@ fn header_title(text: &str) -> Option<String> {
 }
 
 /// The document for `meshes` using `mesh`'s materials, with its triangles counted.
-fn document(meshes: Vec<(Option<String>, Vec<Prim>)>, mesh: &Mesh, source: Map<String, Value>) -> Document<'static> {
+fn document(meshes: Vec<(Option<String>, Vec<Prim>)>, mesh: &Mesh, source: Map<String, Value>) -> Document {
     let triangles: usize = meshes.iter().flat_map(|(_, p)| p).map(|p| p.indices.len() / 3).sum();
     let mut facts = Map::new();
     facts.insert("triangles".into(), json!(triangles));
@@ -437,7 +437,7 @@ fn finish_solid(solids: &mut Vec<(Option<String>, Prim)>, name: &[u8], w: Welder
 mod tests {
     use super::*;
 
-    fn read(bytes: &[u8]) -> Document<'static> {
+    fn read(bytes: &[u8]) -> Document {
         stl(Input::memory(bytes, "t.stl")).unwrap()
     }
 

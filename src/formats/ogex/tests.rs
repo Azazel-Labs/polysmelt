@@ -14,19 +14,19 @@ const PNG: &[u8] = &[
     0x1D, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
 ];
 
-fn read(text: &str) -> Result<Document<'static>> {
+fn read(text: &str) -> Result<Document> {
     load(Input::memory(text.as_bytes(), "t.ogex"), &Memory::new(), Keep::ALL)
 }
 
-fn read_with(text: &str, assets: &Memory) -> Result<Document<'static>> {
+fn read_with(text: &str, assets: &Memory) -> Result<Document> {
     load(Input::memory(text.as_bytes(), "t.ogex"), assets, Keep::ALL)
 }
 
-fn flat(doc: &Document<'_>) -> Mesh {
+fn flat(doc: &Document) -> Mesh {
     doc.flatten(Pose::Rest).unwrap().unwrap()
 }
 
-fn at(doc: &Document<'_>, time: f32) -> Mesh {
+fn at(doc: &Document, time: f32) -> Mesh {
     doc.flatten(Pose::Animation { index: 0, time }).unwrap().unwrap()
 }
 
@@ -34,7 +34,7 @@ fn close(a: [f32; 3], b: [f32; 3]) -> bool {
     a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-3)
 }
 
-fn source<'d>(doc: &'d Document<'_>) -> &'d Value {
+fn source(doc: &Document) -> &Value {
     &doc.json["asset"]["extras"]["source"]
 }
 
@@ -351,7 +351,7 @@ fn animated(transforms: &str, animation: &str) -> String {
     )
 }
 
-fn sampler<'d>(doc: &'d Document<'_>, path: &str) -> &'d Value {
+fn sampler<'d>(doc: &'d Document, path: &str) -> &'d Value {
     let a = &doc.json["animations"][0];
     let c = a["channels"]
         .as_array()

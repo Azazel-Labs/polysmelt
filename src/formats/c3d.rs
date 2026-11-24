@@ -314,7 +314,7 @@ fn screen_rotation(x: [f64; 3], y: [f64; 3]) -> Option<[f64; 4]> {
 }
 
 /// Reads a C3D file.
-pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document<'static>> {
+pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document> {
     let bytes = input.read()?;
     let b: &[u8] = &bytes;
     ensure!(
@@ -656,7 +656,7 @@ mod tests {
         ]
     }
 
-    fn read(b: &[u8]) -> Result<Document<'static>> {
+    fn read(b: &[u8]) -> Result<Document> {
         load(Input::memory(b, "t.c3d"), Keep::ALL)
     }
 

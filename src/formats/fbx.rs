@@ -444,7 +444,7 @@ fn scene_info(root: NodeHandle<'_>, creator: &str, info: &mut SourceInfo, detail
 }
 
 /// Reads an FBX file (binary 7.x, or ASCII) as a glTF document.
-pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document<'static>> {
+pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document> {
     // A file read is held as shared bytes, so that a big texture embedded in it can point into
     // it rather than be copied.
     let (borrowed, file) = match input.read()? {
@@ -4736,11 +4736,9 @@ Connections:  {{
         oo.chain(op).collect()
     }
 
-    fn read(text: &str) -> Document<'static> {
+    fn read(text: &str) -> Document {
         let memory = crate::assets::Memory::new();
-        crate::formats::load_bytes(text.as_bytes(), "t.fbx", "fbx", &memory, Keep::ALL)
-            .unwrap()
-            .into_owned()
+        crate::formats::load_bytes(text.as_bytes(), "t.fbx", "fbx", &memory, Keep::ALL).unwrap()
     }
 
     fn index(v: &Value) -> usize {
@@ -4748,7 +4746,7 @@ Connections:  {{
     }
 
     /// A float accessor's numbers.
-    fn accessor(doc: &Document<'_>, i: &Value) -> Vec<f32> {
+    fn accessor(doc: &Document, i: &Value) -> Vec<f32> {
         let a = &doc.json["accessors"][index(i)];
         let view = &doc.json["bufferViews"][index(&a["bufferView"])];
         let bytes = doc.buffer(index(&view["buffer"])).unwrap();
@@ -4768,7 +4766,7 @@ Connections:  {{
     }
 
     /// The node named `name`.
-    fn node<'d>(doc: &'d Document<'_>, name: &str) -> &'d Value {
+    fn node<'d>(doc: &'d Document, name: &str) -> &'d Value {
         doc.json["nodes"]
             .as_array()
             .unwrap()

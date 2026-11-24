@@ -33,7 +33,7 @@ const MESH: &str = r#"<?xml version="1.0"?>
 </buffer>
 </mesh>"#;
 
-fn load<'a>(bytes: &'a [u8], name: &'a str, assets: &'a Memory) -> Document<'a> {
+fn load<'a>(bytes: &'a [u8], name: &'a str, assets: &'a Memory) -> Document {
     let ext = name.rsplit('.').next().unwrap();
     load_bytes(bytes, name, ext, assets, Keep::ALL).unwrap()
 }
@@ -222,10 +222,7 @@ fn reads_a_scene_in_utf16() {
 #[test]
 fn keeps_to_the_limit() {
     let assets = Memory::new();
-    let keep = Keep {
-        max_triangles: 2,
-        ..Keep::ALL
-    };
+    let keep = Keep::ALL.with_max_triangles(2);
     assert!(load_bytes(MESH.as_bytes(), "q.irrmesh", "irrmesh", &assets, keep).is_err());
     assert!(load_bytes(SCENE.as_bytes(), "s.irr", "irr", &assets, keep).is_err());
 }

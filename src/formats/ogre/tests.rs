@@ -17,7 +17,7 @@ fn sweep(bytes: &[u8], load: impl Fn(&[u8])) {
     }
 }
 
-fn load_as(bytes: &[u8], name: &str, assets: &Memory) -> Result<Document<'static>> {
+fn load_as(bytes: &[u8], name: &str, assets: &Memory) -> Result<Document> {
     load(Input::memory(bytes, name), assets, Keep::ALL)
 }
 
@@ -78,7 +78,7 @@ fn hostile_skeletons_never_panic() {
     );
     // A sound mesh linked to a broken skeleton.
     sweep(skeleton, |b| {
-        let _ = load_as(mesh, "rig.mesh", &Memory::new().with("rig.skeleton", b));
+        let _ = load_as(mesh, "rig.mesh", &Memory::new().with("rig.skeleton", b.to_vec()));
     });
 }
 
@@ -105,7 +105,7 @@ fn hostile_material_scripts_never_panic() {
     let base = include_bytes!("../../../tests/corpus/ogre/materials/lib/base.material");
     sweep(script, |b| {
         let assets = Memory::new()
-            .with("mats.material", b)
+            .with("mats.material", b.to_vec())
             .with("lib/base.material", &base[..]);
         assert!(load_as(mesh, "mats.mesh", &assets).is_ok());
     });

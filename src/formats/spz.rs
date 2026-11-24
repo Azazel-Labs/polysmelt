@@ -43,13 +43,13 @@ const COLOR_SCALE: f32 = 0.15;
 /// Spherical-harmonic coefficients a channel has, by degree, beyond the base one.
 const DIM: [usize; 5] = [0, 3, 8, 15, 24];
 
-pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document<'static>> {
-    decode(&input.read()?, keep.points(), keep.threads())
+pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document> {
+    decode(&input.read()?, keep.points(), keep.thread_count())
 }
 
 /// The splats in an SPZ file, up to `max` of them. With more than one thread, the stream is
 /// inflated on another as the splats are unpacked.
-fn decode(bytes: &[u8], max: usize, threads: usize) -> Result<Document<'static>> {
+fn decode(bytes: &[u8], max: usize, threads: usize) -> Result<Document> {
     if let Some(&[b'N', b'G', b'S', b'P', v0, v1, v2, v3]) = bytes.first_chunk::<8>() {
         let version = u32::from_le_bytes([v0, v1, v2, v3]);
         ensure!(

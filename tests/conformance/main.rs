@@ -19,9 +19,9 @@ use std::path::{Path, PathBuf};
 
 use polysmelt::assets::{Folder, Memory};
 use polysmelt::document::{Document, Keep, Pose};
-use polysmelt::formats::{self, EXTENSIONS};
 use polysmelt::images::Location;
 use polysmelt::mesh::Mesh;
+use polysmelt::{Format, Loader};
 use serde_json::{Map, Value};
 
 fn corpus() -> PathBuf {
@@ -212,8 +212,9 @@ fn same_from_memory(case: &Case, ext: &str, from_file: &polysmelt::Result<Loaded
     }
     let bytes = std::fs::read(&case.file).unwrap();
     let name = relative(&case.file, &case.dir);
-    let from_memory = formats::load_bytes(&bytes, &name, ext, &memory, Keep::ALL).and_then(flattened);
-    let glb = |d: &Document<'_>| d.to_glb().ok();
+    let _ = ext;
+    let from_memory = Loader::new().assets(memory).read(bytes, &name).and_then(flattened);
+    let glb = |d: &Document| d.to_glb().ok();
     match (from_file, &from_memory) {
         (Ok(a), Ok(b)) if glb(&a.0) == glb(&b.0) && a.0.facts == b.0.facts => Ok(()),
         (Ok(_), Ok(_)) => Err("reads differently from memory".into()),
@@ -224,9 +225,9 @@ fn same_from_memory(case: &Case, ext: &str, from_file: &polysmelt::Result<Loaded
 }
 
 /// A case's document and the mesh it flattens to.
-type Loaded<'a> = (Document<'a>, Option<Mesh>);
+type Loaded = (Document, Option<Mesh>);
 
-fn flattened(doc: Document<'_>) -> polysmelt::Result<Loaded<'_>> {
+fn flattened(doc: Document) -> polysmelt::Result<Loaded> {
     let mesh = doc.flatten(Pose::Rest)?;
     Ok((doc, mesh))
 }
@@ -235,9 +236,9 @@ fn flattened(doc: Document<'_>) -> polysmelt::Result<Loaded<'_>> {
 /// `joints` across skins, `morph_targets` across meshes' first primitives, `channels` across animations), and
 /// `node_names` and primitive `attributes` that must be there, and `source`, fields the asset's
 /// `extras.source` must hold.
-fn document(e: &Map<String, Value>, doc: &Document<'_>) -> Result<(), String> {
+fn document(e: &Map<String, Value>, doc: &Document) -> Result<(), String> {
     let Some(want) = e.get("document") else { return Ok(()) };
-    let j = &doc.json;
+    let j = doc.json();
     let list = |k: &str| j.get(k).and_then(Value::as_array).cloned().unwrap_or_default();
     let sum = |k: &str, f: &dyn Fn(&Value) -> usize| list(k).iter().map(f).sum::<usize>();
     let len = |v: Option<&Value>| v.and_then(Value::as_array).map_or(0, Vec::len);
@@ -339,7 +340,7 @@ fn pointers(e: &Map<String, Value>, key: &str, json: &Map<String, Value>) -> Res
 }
 
 /// `poses`: the bounds of what's drawn in animation `animation` at `time` seconds.
-fn poses(e: &Map<String, Value>, doc: &Document<'_>, tol: f32) -> Result<(), String> {
+fn poses(e: &Map<String, Value>, doc: &Document, tol: f32) -> Result<(), String> {
     for p in e.get("poses").and_then(Value::as_array).into_iter().flatten() {
         let index = p["animation"].as_u64().unwrap_or(0) as usize;
         let time = p["time"].as_f64().unwrap_or(0.0) as f32;
@@ -369,7 +370,7 @@ fn poses(e: &Map<String, Value>, doc: &Document<'_>, tol: f32) -> Result<(), Str
 /// `parent` (a name, or `null` for a root), its `translation`, `rotation` (either sign) and `scale` in the rest pose,
 /// or with `time` (seconds) in animation `animation` (0 by default) at that time, and its `keys`: per path
 /// (`translation`, `rotation`, `scale`), the channel's key count, its key times, or `null` for no channel.
-fn rig(e: &Map<String, Value>, doc: &Document<'_>, tol: f32) -> Result<(), String> {
+fn rig(e: &Map<String, Value>, doc: &Document, tol: f32) -> Result<(), String> {
     let Some(entries) = e.get("rig").and_then(Value::as_array) else {
         return Ok(());
     };
@@ -436,18 +437,22 @@ fn rig(e: &Map<String, Value>, doc: &Document<'_>, tol: f32) -> Result<(), Strin
 /// `Document::decode`: the case decoded, written as a GLB and read back, has no compression or quantization left
 /// and flattens to the mesh it did.
 fn decoded(case: &Case, ext: &str, want: Option<&Mesh>, tol: f32) -> Result<(), String> {
-    let mut doc = formats::load(&case.file, ext, &Folder::new(&case.dir), Keep::ALL).map_err(|e| e.to_string())?;
+    let _ = ext;
+    let mut doc = Loader::new()
+        .assets(Folder::new(&case.dir))
+        .open(&case.file)
+        .map_err(|e| e.to_string())?;
     doc.decode().map_err(|err| format!("doesn't decode: {err}"))?;
     // The gltf crate refuses attribute names it doesn't know, KHR_gaussian_splatting's among them.
     let splats = doc
-        .json
+        .json()
         .get("extensionsUsed")
         .and_then(Value::as_array)
         .is_some_and(|used| used.iter().any(|e| e == "KHR_gaussian_splatting"));
     if !splats && let Some(why) = agrees_with_gltf_crate(&doc)? {
         return Err(format!("decoded, the gltf crate can't read it: {why}"));
     }
-    let text = serde_json::to_string(&doc.json).unwrap();
+    let text = serde_json::to_string(doc.json()).unwrap();
     for name in [
         "EXT_meshopt_compression",
         "KHR_meshopt_compression",
@@ -459,12 +464,12 @@ fn decoded(case: &Case, ext: &str, want: Option<&Mesh>, tol: f32) -> Result<(), 
         }
     }
     let accessors = doc
-        .json
+        .json()
         .get("accessors")
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let prims = doc.json.get("meshes").and_then(Value::as_array).into_iter().flatten();
+    let prims = doc.json().get("meshes").and_then(Value::as_array).into_iter().flatten();
     for p in prims.flat_map(|m| m["primitives"].as_array().cloned().unwrap_or_default()) {
         let targets = p.get("targets").and_then(Value::as_array).cloned().unwrap_or_default();
         for set in std::iter::once(&p["attributes"]).chain(&targets) {
@@ -483,9 +488,8 @@ fn decoded(case: &Case, ext: &str, want: Option<&Mesh>, tol: f32) -> Result<(), 
     if !splats {
         gltf::Gltf::from_slice(&glb).map_err(|err| format!("decoded, the gltf crate rejects it: {err}"))?;
     }
-    let none = Memory::new();
-    let back = formats::load_bytes(&glb, "decoded.glb", "glb", &none, Keep::ALL)
-        .map_err(|err| format!("decoded, its GLB doesn't read back: {err}"))?;
+    let back =
+        polysmelt::read(glb, "decoded.glb").map_err(|err| format!("decoded, its GLB doesn't read back: {err}"))?;
     let got = back
         .flatten(Pose::Rest)
         .map_err(|err| format!("decoded, it doesn't flatten: {err}"))?;
@@ -522,7 +526,7 @@ fn decoded(case: &Case, ext: &str, want: Option<&Mesh>, tol: f32) -> Result<(), 
 }
 
 /// Writes the case's document as a GLB under `target/conformance/`, for the Khronos validator.
-fn keep_glb(case: &Case, doc: &Document<'_>) -> Result<(), String> {
+fn keep_glb(case: &Case, doc: &Document) -> Result<(), String> {
     let rel = relative(&case.dir, &corpus());
     let out = Path::new(env!("CARGO_TARGET_TMPDIR"))
         .join("conformance")
@@ -549,9 +553,9 @@ fn keep_mesh_glb(case: &Case, bytes: &[u8]) {
 /// Every accessor with a buffer view reads the same through [`Document::read_floats`] as through the
 /// gltf crate, normalized integers mapped as glTF says. A document the gltf crate rejects or
 /// panics on is skipped, returning why: those are the gltf crate's to fix.
-fn agrees_with_gltf_crate(doc: &Document<'_>) -> Result<Option<String>, String> {
+fn agrees_with_gltf_crate(doc: &Document) -> Result<Option<String>, String> {
     use gltf::accessor::{DataType, Dimensions, util::Iter};
-    let Ok(root) = serde_json::from_value::<gltf::json::Root>(Value::Object(doc.json.clone())) else {
+    let Ok(root) = serde_json::from_value::<gltf::json::Root>(Value::Object(doc.json().clone())) else {
         return Ok(Some("its JSON doesn't parse as gltf::json::Root".into()));
     };
     let Ok(g) = gltf::Document::from_json(root) else {
@@ -564,7 +568,7 @@ fn agrees_with_gltf_crate(doc: &Document<'_>) -> Result<Option<String>, String> 
     let get = |b: gltf::Buffer<'_>| buffers.get(b.index()).map(Vec::as_slice);
     let compressed = |a: &gltf::Accessor<'_>| {
         a.view().is_some_and(|v| {
-            let j = &doc.json["bufferViews"][v.index()];
+            let j = &doc.json()["bufferViews"][v.index()];
             j.get("extensions").is_some()
         })
     };
@@ -663,7 +667,7 @@ fn agrees_with_gltf_crate(doc: &Document<'_>) -> Result<Option<String>, String> 
 /// centroid, skinned meshes posed by their joints.
 /// `Pose::Bind` draws what `Pose::Rest` does, triangle for triangle and with the same joints,
 /// unskinned primitives exactly as they are.
-fn bind_pose(doc: &Document<'_>, rest: Option<&Mesh>) -> Result<(), String> {
+fn bind_pose(doc: &Document, rest: Option<&Mesh>) -> Result<(), String> {
     let bind = doc.flatten(Pose::Bind).map_err(|e| format!("bind pose: {e}"))?;
     let (Some(rest), Some(bind)) = (rest, bind.as_ref()) else {
         return match (rest.is_some(), bind.is_some()) {
@@ -690,8 +694,7 @@ fn bind_pose(doc: &Document<'_>, rest: Option<&Mesh>) -> Result<(), String> {
 }
 
 fn round_trip(mesh: &Mesh, bytes: &[u8], tol: f32) -> Result<(), String> {
-    let none = Memory::new();
-    let back = formats::load_bytes(bytes, "mesh.glb", "glb", &none, Keep::ALL)
+    let back = polysmelt::read(bytes.to_vec(), "mesh.glb")
         .map_err(|err| format!("the mesh's GLB doesn't read back: {err}"))?
         .flatten(Pose::Rest)
         .map_err(|err| format!("the mesh's GLB doesn't flatten: {err}"))?;
@@ -728,7 +731,10 @@ fn run(case: &Case) -> Result<(), String> {
     let e = &case.expect;
     let ext = ext_of(&case.file);
     let tol = e.get("tolerance").and_then(Value::as_f64).unwrap_or(1e-4) as f32;
-    let loaded = formats::load(&case.file, &ext, &Folder::new(&case.dir), Keep::ALL).and_then(flattened);
+    let loaded = Loader::new()
+        .assets(Folder::new(&case.dir))
+        .open(&case.file)
+        .and_then(flattened);
     same_from_memory(case, &ext, &loaded)?;
     if let Some(want) = e.get("error").and_then(Value::as_str) {
         return match loaded {
@@ -751,7 +757,7 @@ fn run(case: &Case) -> Result<(), String> {
         }
     }
     document(e, &doc)?;
-    pointers(e, "json", &doc.json)?;
+    pointers(e, "json", doc.json())?;
     poses(e, &doc, tol)?;
     rig(e, &doc, tol)?;
     decoded(case, &ext, mesh.as_ref(), tol)?;
@@ -1260,7 +1266,8 @@ fn xgl() {
     check("xgl");
 }
 
-/// Every extension `formats::load` takes has cases, and every format a corpus folder.
+/// Every extension a [`Format`] has has cases (and `.xml`, read as the format its root names), and every format a
+/// corpus folder.
 #[test]
 fn corpus_covers_every_extension() {
     let mut seen = std::collections::HashSet::new();
@@ -1273,7 +1280,8 @@ fn corpus_covers_every_extension() {
             seen.insert(ext_of(&case.file));
         }
     }
-    let missing: Vec<_> = EXTENSIONS.iter().filter(|e| !seen.contains(**e)).collect();
+    let extensions = Format::all().flat_map(Format::extensions).copied().chain(["xml"]);
+    let missing: Vec<_> = extensions.filter(|e| !seen.contains(*e)).collect();
     assert!(missing.is_empty(), "no conformance cases for {missing:?}");
 }
 
@@ -1281,33 +1289,19 @@ fn corpus_covers_every_extension() {
 /// skip (material libraries, texture files, shaders) changes nothing that's kept.
 #[test]
 fn reading_less_matches_pruning() {
-    let none = Keep {
-        animations: false,
-        skins: false,
-        morph_targets: false,
-        materials: false,
-        textures: false,
-        cameras: false,
-        lights: false,
-        extras: false,
-        image_bytes: false,
-        ..Keep::ALL
-    };
+    let none = Keep::ALL
+        .with_animations(false)
+        .with_skins(false)
+        .with_morph_targets(false)
+        .with_materials(false)
+        .with_textures(false)
+        .with_cameras(false)
+        .with_lights(false)
+        .with_extras(false)
+        .with_image_bytes(false);
     let keeps = [
-        (
-            "no textures",
-            Keep {
-                textures: false,
-                ..Keep::ALL
-            },
-        ),
-        (
-            "no materials",
-            Keep {
-                materials: false,
-                ..Keep::ALL
-            },
-        ),
+        ("no textures", Keep::ALL.with_textures(false)),
+        ("no materials", Keep::ALL.with_materials(false)),
         ("meshes", Keep::MESHES),
         ("nothing", none),
     ];
@@ -1322,13 +1316,13 @@ fn reading_less_matches_pruning() {
             if !enabled(&ext) || needs.is_some_and(|f| !has_feature(f)) || case.expect.contains_key("error") {
                 continue;
             }
-            let assets = Folder::new(&case.dir);
+            let loader = Loader::new().assets(Folder::new(&case.dir));
             for (label, keep) in keeps {
-                let Ok(mut full) = formats::load(&case.file, &ext, &assets, Keep::ALL) else {
+                let Ok(mut full) = loader.open(&case.file) else {
                     continue;
                 };
                 full.prune(keep);
-                let less = match formats::load(&case.file, &ext, &assets, keep) {
+                let less = match loader.clone().keep(keep).open(&case.file) {
                     Ok(d) => d,
                     Err(e) => {
                         failures.push(format!("{} ({label}): {e}", case.name));
@@ -1344,13 +1338,13 @@ fn reading_less_matches_pruning() {
                     skip.push("materials");
                 }
                 let differ: Vec<String> = less
-                    .json
+                    .json()
                     .keys()
-                    .chain(full.json.keys())
-                    .filter(|k| !skip.contains(&k.as_str()) && less.json.get(*k) != full.json.get(*k))
+                    .chain(full.json().keys())
+                    .filter(|k| !skip.contains(&k.as_str()) && less.json().get(*k) != full.json().get(*k))
                     .map(|k| {
-                        let show = |d: &Document<'_>| {
-                            d.json.get(k).map_or_else(
+                        let show = |d: &Document| {
+                            d.json().get(k).map_or_else(
                                 || "none".to_owned(),
                                 |v| v.to_string().chars().take(300).collect::<String>(),
                             )
@@ -1358,15 +1352,15 @@ fn reading_less_matches_pruning() {
                         format!("{k}: {} vs pruned {}", show(&less), show(&full))
                     })
                     .collect();
-                let names = |d: &Document<'_>| -> Vec<Value> {
-                    d.json
+                let names = |d: &Document| -> Vec<Value> {
+                    d.json()
                         .get("materials")
                         .and_then(Value::as_array)
                         .map_or_else(Vec::new, |m| {
                             m.iter().map(|m| m.get("name").cloned().unwrap_or_default()).collect()
                         })
                 };
-                let flat = |d: &Document<'_>| d.flatten(Pose::Rest).ok().flatten().map(|m| format!("{:?}", m.prims));
+                let flat = |d: &Document| d.flatten(Pose::Rest).ok().flatten().map(|m| format!("{:?}", m.prims));
                 if !differ.is_empty() {
                     failures.push(format!("{} ({label}): {}", case.name, differ.join("; ")));
                 } else if names(&less) != names(&full) {
@@ -1394,10 +1388,7 @@ fn reading_less_matches_pruning() {
 /// its handle, to the image the full read has, and the rest of the document is the same.
 #[test]
 fn unread_images_load_as_read_ones() {
-    let light = Keep {
-        image_bytes: false,
-        ..Keep::ALL
-    };
+    let light = Keep::ALL.with_image_bytes(false);
     let (mut failures, mut pending) = (Vec::new(), 0);
     for dir in std::fs::read_dir(corpus()).unwrap().flatten() {
         if !dir.path().is_dir() || dir.file_name() == "tools" {
@@ -1410,10 +1401,11 @@ fn unread_images_load_as_read_ones() {
                 continue;
             }
             let assets = Folder::new(&case.dir);
-            let Ok(full) = formats::load(&case.file, &ext, &assets, Keep::ALL) else {
+            let loader = Loader::new().assets(assets.clone());
+            let Ok(full) = loader.open(&case.file) else {
                 continue;
             };
-            let mut less = match formats::load(&case.file, &ext, &assets, light) {
+            let mut less = match loader.keep(light).open(&case.file) {
                 Ok(d) => d,
                 Err(e) => {
                     failures.push(format!("{}: {e}", case.name));
@@ -1423,7 +1415,7 @@ fn unread_images_load_as_read_ones() {
             let mut bad = |why: String| failures.push(format!("{}: {why}", case.name));
             for h in less.images().filter(polysmelt::images::ImageHandle::is_pending) {
                 pending += 1;
-                let uri = less.json["images"][h.index()].get("uri").and_then(Value::as_str);
+                let uri = less.json()["images"][h.index()].get("uri").and_then(Value::as_str);
                 if uri.is_none() {
                     bad(format!("image {} is pending without a uri", h.index()));
                 }
@@ -1437,7 +1429,7 @@ fn unread_images_load_as_read_ones() {
                 bad(format!("unread images don't write: {e}"));
             }
             let unread = less.embed_images(&assets);
-            let read = |d: &Document<'_>| -> Vec<Option<(polysmelt::Bytes, &'static str)>> {
+            let read = |d: &Document| -> Vec<Option<(polysmelt::Bytes, &'static str)>> {
                 d.images()
                     .map(|h| h.load(&assets).ok().map(|i| (i.bytes, i.mime)))
                     .collect()
@@ -1456,10 +1448,10 @@ fn unread_images_load_as_read_ones() {
             }
             let skip = ["accessors", "bufferViews", "buffers", "images"];
             let differ: Vec<&String> = less
-                .json
+                .json()
                 .keys()
-                .chain(full.json.keys())
-                .filter(|k| !skip.contains(&k.as_str()) && less.json.get(*k) != full.json.get(*k))
+                .chain(full.json().keys())
+                .filter(|k| !skip.contains(&k.as_str()) && less.json().get(*k) != full.json().get(*k))
                 .collect();
             if !differ.is_empty() {
                 bad(format!("{differ:?} differ"));

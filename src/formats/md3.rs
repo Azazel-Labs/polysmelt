@@ -67,7 +67,7 @@ const MAX_MORPH_DATA: usize = 1 << 24;
 const SURFACE_HEADER: usize = 108;
 
 /// Reads an `.md3` model.
-pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document<'static>> {
+pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document> {
     let data = input.read()?;
     let file = parse(&data, keep.morph_targets)?;
     let stem = input

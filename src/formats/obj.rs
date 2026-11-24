@@ -2865,14 +2865,14 @@ fn loose_prim(b: &mut Builder, at: &[u32], lines: bool, v: &[[f32; 3]], colors: 
 /// OBJ, with MTL colors and textures (base color and normal map). Faces may mix corners with
 /// and without texture coordinates or normals. The file is read a block at a time, and each
 /// corner becomes a vertex of its part's primitive in its material as it's read.
-pub(crate) fn obj(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document<'static>> {
+pub(crate) fn obj(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document> {
     // UTF-16, as some Windows tools save text: read as the UTF-8 it says.
     if let Some(text) = utf16(&input.head(2)?)
         .map(|le| input.read().map(|all| String::from_utf16_lossy(&units(&all[2..], le))))
         .transpose()?
     {
         let utf8 = super::Input {
-            data: super::Data::Bytes(text.as_bytes()),
+            data: super::Data::Bytes(text.as_bytes(), None),
             ..input
         };
         return obj(utf8, assets, keep);
@@ -2882,7 +2882,7 @@ pub(crate) fn obj(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<D
     let dir = input.dir();
     let mut r = Reader::new(input.limit);
     // Threads only for models big enough to share out.
-    let threads = if size >= 2 * PIECE { keep.threads() } else { 1 };
+    let threads = if size >= 2 * PIECE { keep.thread_count() } else { 1 };
     let mut threaded = None;
     if threads > 1 {
         let (bytes, path) = (input.bytes(), input.path);
@@ -3415,7 +3415,7 @@ f 1 2 3
         }
     }
 
-    fn read_in(bytes: &[u8], assets: &Memory) -> Document<'static> {
+    fn read_in(bytes: &[u8], assets: &Memory) -> Document {
         obj(Input::memory(bytes, "t.obj"), assets, Keep::ALL).unwrap()
     }
 
@@ -3718,7 +3718,7 @@ f 1 2 3
                 limit,
                 ..Input::memory(text.as_bytes(), "t.obj")
             };
-            obj(input, &Memory::new(), Keep { threads, ..Keep::ALL }).map(|d| d.to_glb().unwrap())
+            obj(input, &Memory::new(), Keep::ALL.with_threads(threads)).map(|d| d.to_glb().unwrap())
         };
         let one = load(usize::MAX, 1).unwrap();
         let triangles = mesh(&text).triangles();
@@ -3740,7 +3740,7 @@ f 1 2 3
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("t.obj");
         std::fs::write(&path, &text).unwrap();
-        let keep = |threads| Keep { threads, ..Keep::ALL };
+        let keep = |threads| Keep::ALL.with_threads(threads);
         let glb = |input, keep| obj(input, &Memory::new(), keep).unwrap().to_glb().unwrap();
         let one = glb(Input::memory(text.as_bytes(), "t.obj"), keep(1));
         assert!(
@@ -3757,7 +3757,7 @@ f 1 2 3
         let text = mixed_lines(9, 4000).repeat(40);
         assert!(text.len() > 2 * PIECE, "too small for threads");
         let glb = |threads| {
-            let keep = Keep { threads, ..Keep::ALL };
+            let keep = Keep::ALL.with_threads(threads);
             obj(Input::memory(text.as_bytes(), "t.obj"), &Memory::new(), keep)
                 .unwrap()
                 .to_glb()
@@ -4015,10 +4015,7 @@ f 1 2 3
         // Without image bytes the maps are read all the same to pack them: the same materials, the packed image
         // embedded and the file used as it is left unread.
         let full = doc(Keep::ALL);
-        let lazy = doc(Keep {
-            image_bytes: false,
-            ..Keep::ALL
-        });
+        let lazy = doc(Keep::ALL.with_image_bytes(false));
         assert_eq!(lazy.json["materials"], full.json["materials"]);
         let uris: Vec<_> = (0..3).map(|i| lazy.json["images"][i]["uri"].as_str()).collect();
         assert_eq!(uris, [None, None, Some("rma.png")]);

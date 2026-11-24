@@ -88,7 +88,7 @@ struct Ms3d {
 }
 
 /// Reads a `.ms3d` file.
-pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document<'static>> {
+pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document> {
     let bytes = input.read()?;
     let m = parse(&bytes)?;
     let stem = input
@@ -653,7 +653,7 @@ mod tests {
         w.out
     }
 
-    fn read(bytes: &[u8]) -> Result<Document<'static>> {
+    fn read(bytes: &[u8]) -> Result<Document> {
         load(super::super::Input::memory(bytes, "t.ms3d"), &Memory::new(), Keep::ALL)
     }
 

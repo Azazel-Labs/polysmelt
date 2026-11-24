@@ -1838,7 +1838,7 @@ fn parents(layers: &[Layer]) -> Vec<Option<usize>> {
 }
 
 /// Reads a LightWave object.
-pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document<'static>> {
+pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document> {
     let data = input.read()?;
     let m = parse(&data)?;
     let dir = input.dir();
@@ -2334,11 +2334,11 @@ mod tests {
         png
     }
 
-    fn read(bytes: &[u8], assets: &Memory) -> Result<Document<'static>> {
+    fn read(bytes: &[u8], assets: &Memory) -> Result<Document> {
         load(Input::memory(bytes, "t.lwo"), assets, Keep::ALL)
     }
 
-    fn flat(doc: &Document<'_>) -> Mesh {
+    fn flat(doc: &Document) -> Mesh {
         doc.flatten(Pose::Rest).unwrap().unwrap()
     }
 

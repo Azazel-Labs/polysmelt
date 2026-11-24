@@ -52,7 +52,7 @@ fn number(cell: Option<&&str>) -> Option<f64> {
 }
 
 /// Reads a TRC file.
-pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document<'static>> {
+pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document> {
     let bytes = input.read()?;
     let text = scene::text(&bytes);
     let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
@@ -226,7 +226,7 @@ Frame#\tTime\tL.Knee\t\t\tR Knee\t\t\t
 3\t0.700\t120\t210\t290\t0\t510\tNaN
 ";
 
-    fn read(text: &str) -> Result<Document<'static>> {
+    fn read(text: &str) -> Result<Document> {
         load(Input::memory(text.as_bytes(), "t.trc"), Keep::ALL)
     }
 

@@ -1,6 +1,6 @@
 //! ASCII FBX (7.x), the text form some tools write (Asset Forge, which made many of Kenney's older kits, and others
-//! on request), read into the same tree as binary FBX, so it's read like any other; [`to_binary`] writes that tree as
-//! binary FBX for Blender, whose importer takes only binary. Values get the types binary FBX gives them, since Blender
+//! on request), read into the same tree as binary FBX, so it's read like any other; the tests write that tree back as
+//! binary FBX (`to_binary`) to check the two read alike. Values get the types binary FBX gives them, since Blender
 //! checks: object ids and connections are 64-bit, a property's values follow the type it declares, and an array takes
 //! the type its node always has. Nodes nest by a stack of their own, not the call stack, so any depth reads.
 
@@ -9,11 +9,13 @@ use std::borrow::Cow;
 use crate::{Context as _, Result};
 use base64::Engine as _;
 
-use super::fbx_tree::{Array, Attr, BINARY_MAGIC, Builder, Elem, NodeHandle, Tree, Version};
+#[cfg(test)]
+use super::fbx_tree::{Array, BINARY_MAGIC, Elem, NodeHandle};
+use super::fbx_tree::{Attr, Builder, Tree, Version};
 
 /// Whether `data` is an ASCII FBX file.
 #[must_use]
-pub fn is_ascii(data: &[u8]) -> bool {
+pub(crate) fn is_ascii(data: &[u8]) -> bool {
     !data.starts_with(b"Kaydara FBX Binary") && {
         let head = &data[..data.len().min(64 << 10)];
         head.windows(19).any(|w| w == b"FBXHeaderExtension:")
@@ -25,7 +27,8 @@ pub fn is_ascii(data: &[u8]) -> bool {
 /// # Errors
 ///
 /// When the text isn't ASCII FBX that parses.
-pub fn to_binary(data: &[u8]) -> Result<Vec<u8>> {
+#[cfg(test)]
+pub(crate) fn to_binary(data: &[u8]) -> Result<Vec<u8>> {
     write(&parse(data)?)
 }
 
@@ -536,6 +539,7 @@ fn attributes<'a>(name: &str, parent: &str, vals: &mut Vec<Val<'a>>, out: &mut V
 }
 
 /// `tree` as binary FBX 7.4, arrays stored.
+#[cfg(test)]
 fn write(tree: &Tree<'_>) -> Result<Vec<u8>> {
     /// A node written but not yet closed: where its header is, and whether it has children or attributes.
     struct Open<'t> {
@@ -614,6 +618,7 @@ fn write(tree: &Tree<'_>) -> Result<Vec<u8>> {
 }
 
 /// One attribute in binary FBX.
+#[cfg(test)]
 fn attribute(out: &mut Vec<u8>, a: &Attr<'_>) -> Result<()> {
     fn array<T: Elem>(out: &mut Vec<u8>, kind: u8, a: &Array<'_, T>) -> Result<()> {
         let v = a.to_vec().context("an array that can't be read")?;

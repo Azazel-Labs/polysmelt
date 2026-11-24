@@ -168,7 +168,7 @@ struct Stats {
     faces: usize,
 }
 
-pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document<'static>> {
+pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document> {
     let data = input.read()?;
     let db = parse::parse(&data)?;
     drop(data);
@@ -1541,7 +1541,7 @@ fn georeference(header: &Map<String, Value>) -> Option<Value> {
     Some(Value::Object(g))
 }
 
-fn finish(mut c: Ctx<'_>, mut s: Scene) -> Document<'static> {
+fn finish(mut c: Ctx<'_>, mut s: Scene) -> Document {
     for (k, kids) in s.kids.iter().enumerate() {
         if !kids.is_empty() {
             s.nodes[k]["children"] = json!(kids);

@@ -70,7 +70,7 @@ const DEFAULT_TICKS: f64 = 4800.0;
 const MAX_UV_SETS: usize = 8;
 
 /// Reads the model.
-pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document<'static>> {
+pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document> {
     let data = input.read()?;
     let file = parse_file(&data)?;
     let mut b = Build::new(assets, keep, input.dir());

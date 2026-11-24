@@ -16,15 +16,12 @@ const GEN_SKIN: &[u8] = include_bytes!("../../../tests/corpus/x/skin/cube.x");
 const GEN_DECL: &[u8] = include_bytes!("../../../tests/corpus/x/decl_data/cube.x");
 const RED_PNG: &[u8] = include_bytes!("../../../tests/corpus/x/texture/tex/red.png");
 
-fn read_bytes(bytes: &[u8], max: usize) -> Result<Document<'static>> {
-    let keep = Keep {
-        max_triangles: max,
-        ..Keep::ALL
-    };
-    super::super::load_bytes(bytes, "a.x", "x", &Memory::new(), keep).map(Document::into_owned)
+fn read_bytes(bytes: &[u8], max: usize) -> Result<Document> {
+    let keep = Keep::ALL.with_max_triangles(max);
+    super::super::load_bytes(bytes, "a.x", "x", &Memory::new(), keep)
 }
 
-fn read(text: &str) -> Document<'static> {
+fn read(text: &str) -> Document {
     read_bytes(text.as_bytes(), usize::MAX).unwrap()
 }
 
@@ -35,7 +32,7 @@ fn error(bytes: &[u8]) -> String {
     }
 }
 
-fn mesh(doc: &Document<'_>) -> Mesh {
+fn mesh(doc: &Document) -> Mesh {
     doc.flatten(Pose::Rest).unwrap().unwrap()
 }
 

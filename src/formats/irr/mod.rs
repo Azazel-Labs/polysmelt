@@ -49,7 +49,7 @@ use crate::source::{Axis, Fact, Handedness};
 use material::{IrrMaterial, Patch, Textures};
 use mesh::Buffer;
 
-pub(crate) fn load<'a>(input: super::Input<'_>, ext: &str, assets: &dyn Assets, keep: Keep) -> Result<Document<'a>> {
+pub(crate) fn load(input: super::Input<'_>, ext: &str, assets: &dyn Assets, keep: Keep) -> Result<Document> {
     let bytes = input.read()?;
     let text = crate::formats::xml::text(&bytes);
     if ext == "irr" || (ext != "irrmesh" && text.contains("<irr_scene")) {
@@ -60,7 +60,7 @@ pub(crate) fn load<'a>(input: super::Input<'_>, ext: &str, assets: &dyn Assets, 
 }
 
 /// A mesh file on its own: one node, one mesh, a primitive per buffer.
-fn irrmesh<'a>(text: &str, input: &super::Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document<'a>> {
+fn irrmesh(text: &str, input: &super::Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document> {
     let mesh = mesh::parse(text, input.limit)?;
     let dir = input.dir();
     let mut ctx = Ctx::new(assets, keep, dir);
@@ -168,7 +168,7 @@ impl<'a> Ctx<'a> {
     }
 
     /// Mirrors the scene into glTF's coordinates and writes it, with the materials' patches.
-    fn finish(mut self) -> Result<Document<'static>> {
+    fn finish(mut self) -> Result<Document> {
         let mut scene = std::mem::take(&mut self.scene);
         scene.images = std::mem::take(&mut self.tex.images.list);
         scene.info.up_axis = Fact::Assumed(Axis::PosY);

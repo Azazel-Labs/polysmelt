@@ -669,7 +669,7 @@ struct Body {
     local: Vec<[u32; 3]>,
 }
 
-pub(crate) fn ply(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document<'static>> {
+pub(crate) fn ply(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document> {
     let path = input.path;
     let mut blocks = input.blocks()?;
     // The header, whole.
@@ -1646,11 +1646,11 @@ fn writer(comment: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    fn load(bytes: &[u8]) -> Result<Document<'static>> {
+    fn load(bytes: &[u8]) -> Result<Document> {
         ply(Input::memory(bytes, "t.ply"), &crate::assets::Memory::new(), Keep::ALL)
     }
 
-    fn read(text: &str) -> Document<'static> {
+    fn read(text: &str) -> Document {
         load(text.as_bytes()).unwrap()
     }
 
@@ -1735,13 +1735,13 @@ end_header
         }
     }
 
-    fn attributes(doc: &Document<'_>) -> Vec<String> {
+    fn attributes(doc: &Document) -> Vec<String> {
         let prim = &doc.json["meshes"][0]["primitives"][0]["attributes"];
         prim.as_object().unwrap().keys().cloned().collect()
     }
 
     /// How many vertices the first primitive has.
-    fn vertex_count(doc: &Document<'_>) -> u64 {
+    fn vertex_count(doc: &Document) -> u64 {
         let pos = doc.json["meshes"][0]["primitives"][0]["attributes"]["POSITION"]
             .as_u64()
             .unwrap();
@@ -1947,7 +1947,7 @@ end_header
         out
     }
 
-    fn floats(doc: &Document<'_>, name: &str) -> Vec<f32> {
+    fn floats(doc: &Document, name: &str) -> Vec<f32> {
         let a = &doc.json["meshes"][0]["primitives"][0]["attributes"][name];
         doc.read_floats(usize::try_from(a.as_u64().unwrap()).unwrap())
             .unwrap()
@@ -2004,10 +2004,7 @@ end_header
 
     #[test]
     fn gaussian_splats_past_max_points_are_refused() {
-        let keep = Keep {
-            max_points: 2,
-            ..Keep::ALL
-        };
+        let keep = Keep::ALL.with_max_points(2);
         let bytes = splat_file(3, 0);
         let err = ply(Input::memory(&bytes, "t.ply"), &crate::assets::Memory::new(), keep).unwrap_err();
         assert!(err.to_string().contains("max_points"), "{err}");

@@ -5,11 +5,11 @@ use std::fmt::Display;
 
 use glam::{Mat4, Vec3};
 use polysmelt::assets::Memory;
-use polysmelt::document::{Bounds, Document, Keep, Pose};
-use polysmelt::formats;
+use polysmelt::document::{Bounds, Document, Pose};
 use polysmelt::mesh::Mesh;
 use polysmelt::rig::{Rig, Trs};
 use polysmelt::source::Fact;
+use polysmelt::{Format, Loader};
 use serde_json::{Map, Value, json};
 
 /// The most bones the GPU skinning path takes: a 16 KiB uniform buffer of matrices, WebGL 2's least.
@@ -30,7 +30,7 @@ pub enum Motion {
 
 /// A model read and ready to draw.
 pub struct Model {
-    pub doc: Document<'static>,
+    pub doc: Document,
     pub rig: Rig,
     /// What's drawn: in the bind pose for [`Motion::Gpu`], else at rest.
     pub mesh: Option<Mesh>,
@@ -109,7 +109,7 @@ pub fn pick_main<'a>(files: impl IntoIterator<Item = (&'a str, &'a [u8])>) -> Op
             (2, i)
         } else if ext == "xml" {
             (3, 0)
-        } else if SIDE_FILES.contains(&ext.as_str()) || formats::detect(bytes).is_none() {
+        } else if SIDE_FILES.contains(&ext.as_str()) || Format::detect(bytes).is_none() {
             continue;
         } else {
             (4, 0)
@@ -138,8 +138,11 @@ fn count(json: &Map<String, Value>, key: &str) -> usize {
 impl Model {
     /// Reads `name` from `files` (where the files it refers to are found too) and flattens it. `now` is a clock in
     /// milliseconds, for the timings the panel shows.
-    pub fn load(files: &Memory, name: &str, now: &dyn Fn() -> f64) -> Result<Self, String> {
-        let bytes = files.get(name).ok_or_else(|| format!("{name} isn't among the files"))?;
+    pub fn load(files: Memory, name: &str, now: &dyn Fn() -> f64) -> Result<Self, String> {
+        let bytes = files
+            .get(name)
+            .ok_or_else(|| format!("{name} isn't among the files"))?
+            .clone();
         let ext = extension(name);
         if unsupported(&ext) {
             return Err(format!(
@@ -148,9 +151,10 @@ impl Model {
             ));
         }
         let t0 = now();
-        let doc = formats::load_bytes(bytes, name, &ext, files, Keep::ALL)
-            .map_err(|e| format!("{e:#}"))?
-            .into_owned();
+        let doc = Loader::new()
+            .assets(files)
+            .read(bytes, name)
+            .map_err(|e| format!("{e:#}"))?;
         let t1 = now();
         let rig = doc.rig().map_err(|e| format!("{e:#}"))?;
         let animated = !rig.animations.is_empty();
@@ -315,7 +319,7 @@ impl Model {
     /// What the panel shows, as JSON.
     fn describe(&self, parse_ms: f64, flatten_ms: f64) -> Value {
         let src = self.doc.source_info();
-        let json = &self.doc.json;
+        let json = self.doc.json();
         let counts = self.doc.counts();
         let meters = src.output_meters_per_unit();
         let size = self.bounds.map(|b| {
@@ -394,7 +398,7 @@ impl Model {
 
 /// Whether skinning on the GPU poses the model as flattening it would: every primitive drawn is skinned, nothing
 /// sets morph weights, and nothing is drawn as lines or points (which the GPU path doesn't skin).
-fn gpu_skinnable(doc: &Document<'_>, rig: &Rig, rest: Option<&Mesh>) -> bool {
+fn gpu_skinnable(doc: &Document, rig: &Rig, rest: Option<&Mesh>) -> bool {
     let Some(rest) = rest else {
         return false;
     };
@@ -469,7 +473,7 @@ mod tests {
     #[test]
     fn gpu_skinning_poses_as_flattening_does() {
         let (files, name) = corpus("gltf/skin_animated/skin.glb");
-        let model = Model::load(&files, &name, &clock).unwrap();
+        let model = Model::load(files, &name, &clock).unwrap();
         assert_eq!(model.motion, Motion::Gpu);
         let bind = model.mesh.as_ref().unwrap();
         let (t0, t1) = model.span(0);
@@ -494,7 +498,7 @@ mod tests {
     #[test]
     fn motion_capture_frames_its_skeleton() {
         let (files, name) = corpus("bvh/humanoid/humanoid.bvh");
-        let model = Model::load(&files, &name, &clock).unwrap();
+        let model = Model::load(files, &name, &clock).unwrap();
         assert!(model.bones_only());
         assert!(model.has_skeleton());
         assert!(model.bounds.is_some());
@@ -504,7 +508,7 @@ mod tests {
     #[test]
     fn morph_animation_moves_vertices() {
         let (files, name) = corpus("fbx/blender_shape_key_animated/shape_key_animated.fbx");
-        let model = Model::load(&files, &name, &clock).unwrap();
+        let model = Model::load(files, &name, &clock).unwrap();
         assert_eq!(model.motion, Motion::Cpu);
         let (t0, t1) = model.span(0);
         let a = model.flatten(Some((0, t0))).unwrap().unwrap();

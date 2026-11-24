@@ -85,7 +85,7 @@ struct Smd {
 }
 
 /// Reads an `.smd` or `.vta` file (`ext`).
-pub(crate) fn load(input: super::Input<'_>, ext: &str, assets: &dyn Assets, keep: Keep) -> Result<Document<'static>> {
+pub(crate) fn load(input: super::Input<'_>, ext: &str, assets: &dyn Assets, keep: Keep) -> Result<Document> {
     let bytes = input.read()?;
     let text = scene::text(&bytes);
     let smd = parse(&text, keep.triangles())?;
@@ -834,7 +834,7 @@ mod tests {
     use crate::assets::Memory;
     use serde_json::Value;
 
-    fn read(text: &str, name: &str) -> Result<Document<'static>> {
+    fn read(text: &str, name: &str) -> Result<Document> {
         let ext = name.rsplit('.').next().unwrap_or("");
         load(
             super::super::Input::memory(text.as_bytes(), name),

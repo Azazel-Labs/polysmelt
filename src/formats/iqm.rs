@@ -72,7 +72,7 @@ const BLENDWEIGHTS: u32 = 5;
 const COLOR: u32 = 6;
 
 /// Reads an `.iqm` model.
-pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document<'static>> {
+pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document> {
     let data = input.read()?;
     let file = parse(&data, keep.animations)?;
     let stem = input

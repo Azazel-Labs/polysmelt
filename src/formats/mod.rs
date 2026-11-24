@@ -1,4 +1,4 @@
-//! Model formats read natively: STL (binary and ASCII), PLY (ASCII and binary), `MagicaVoxel`
+//! The readers. Model formats read natively: STL (binary and ASCII), PLY (ASCII and binary), `MagicaVoxel`
 //! `.vox`, OBJ (with its MTL materials and textures), FBX (binary and ASCII), 3DS, 3MF, USD,
 //! glTF (`.gltf` and `.glb`), `SketchUp` (`.skp`), BVH motion capture, COLLADA (`.dae`, and
 //! the `.zae` and `.kmz` archives that hold one), VRM (`.vrm`, `.vrma`), OFF, X3D and VRML97
@@ -11,14 +11,10 @@
 //! `MilkShape` 3D (`.ms3d`), `Blitz3D` (`.b3d`), OGRE (`.mesh`, `.skeleton`, and their `.xml` forms, with
 //! `.material` scripts), and motion capture: ASF/AMC, C3D, TRC and HTR.
 //! Each becomes a [`Document`]: glTF as it is, the others converted; textures are embedded so the
-//! document stands on its own. Each format is behind a cargo feature of its name (`3ds` and
-//! `3mf` for those two, `xyz` for the text point clouds, `ac3d` for `.ac`, `mmd` for PMX, PMD
-//! and VMD, `directx` for `.x`, `asf` for ASF and AMC, `irr` for Irrlicht's two). A [`Keep`] says what to keep; by
-//! default, everything.
+//! document stands on its own. Each format is behind a cargo feature (see [`Format`]). A [`Keep`]
+//! says what to keep; by default, everything.
 //!
-//! [`load_bytes`] reads a model already in memory, with the files it refers to found through
-//! [`Assets`] (such as [`Memory`](crate::assets::Memory)). [`load`] reads a file, and needs the
-//! `fs` feature.
+//! [`open`] and [`read`] are the ways in, and [`Loader`] for what they don't choose.
 
 use std::borrow::Cow;
 use std::io;
@@ -26,10 +22,10 @@ use std::path::Path;
 
 use serde_json::json;
 
-use crate::Result;
 use crate::assets::Assets;
 use crate::document::{Document, Keep};
 use crate::mesh::MAX_TRIANGLES;
+use crate::{Bytes, Result};
 
 #[cfg(feature = "ac3d")]
 mod ac3d;
@@ -59,11 +55,12 @@ mod e57;
 #[cfg(feature = "fbx")]
 mod fbx;
 #[cfg(feature = "fbx")]
-pub mod fbx_ascii;
+mod fbx_ascii;
 #[cfg(feature = "fbx")]
 mod fbx_tree;
 #[cfg(feature = "flt")]
 mod flt;
+mod format;
 #[cfg(feature = "gltf")]
 pub(crate) mod gltf;
 #[cfg(feature = "gltf")]
@@ -78,6 +75,7 @@ mod iqm;
 mod irr;
 #[cfg(feature = "las")]
 mod las;
+mod loader;
 #[cfg(feature = "lwo")]
 mod lwo;
 #[cfg(feature = "md2")]
@@ -213,8 +211,13 @@ mod xml;
 #[cfg(feature = "xyz")]
 mod xyz;
 
-/// The extensions [`load`] handles, whether or not this build has their feature.
-pub const EXTENSIONS: &[&str] = &[
+pub use format::Format;
+#[cfg(feature = "fs")]
+pub use loader::open;
+pub use loader::{Loader, read};
+
+/// The extensions read, whether or not this build has their feature: [`Format`]'s, and `xml`.
+pub(crate) const EXTENSIONS: &[&str] = &[
     "stl", "ply", "vox", "obj", "fbx", "3ds", "3mf", "usd", "usda", "usdc", "usdz", "gltf", "glb", "skp", "bvh", "dae",
     "zae", "kmz", "off", "vrm", "vrma", "x3d", "x3dv", "x3dz", "wrl", "wrz", "dxf", "splat", "spz", "las", "laz",
     "pcd", "xyz", "pts", "ptx", "asc", "e57", "amf", "lwo", "ac", "pmx", "pmd", "vmd", "x", "md2", "md3", "md5mesh",
@@ -222,93 +225,69 @@ pub const EXTENSIONS: &[&str] = &[
     "ogex", "irrmesh", "irr", "xgl", "zgl",
 ];
 
-/// Reads the model at `path`, keeping what `keep` says: the format is told by the path's
-/// extension (in any case), or, when that names none, by the file's first bytes; the files it
-/// refers to are found from its folder, as a [`Folder`](crate::assets::Folder) rooted there
-/// finds them.
-///
-/// ```no_run
-/// use polysmelt::document::Keep;
-/// let doc = polysmelt::formats::open("models/Duck.DAE", Keep::ALL)?;
-/// std::fs::write("Duck.glb", doc.to_glb()?)?;
-/// # Ok::<(), Box<dyn std::error::Error>>(())
-/// ```
-///
-/// # Errors
-///
-/// When the file can't be read, its format is none [`load`] reads (or one whose feature is off),
-/// or the model doesn't parse.
-#[cfg(feature = "fs")]
-pub fn open(path: impl AsRef<Path>, keep: Keep) -> Result<Document<'static>> {
-    // A bare file name's folder is the current one, which its references are found from.
-    let path = std::path::absolute(path.as_ref())?;
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-    let folder = crate::assets::Folder::new(path.parent().unwrap_or(&path));
-    load(&path, ext, &folder, keep)
-}
-
 /// The format of a model whose bytes (all of them, or its start) are `bytes`, told from its
-/// signature or first words and named by the extension [`load`] reads it under; `None` when
-/// they don't say. A binary STL, which has no signature, is told only from all of its bytes.
-#[must_use]
-pub fn detect(bytes: &[u8]) -> Option<&'static str> {
+/// signature or first words and named by the extension it's read under; `None` when they don't
+/// say. A binary STL, which has no signature, is told only from all of its bytes.
+fn detect(bytes: &[u8]) -> Option<&'static str> {
     detect::sniff(&bytes[..bytes.len().min(detect::HEAD)], Some(bytes.len() as u64))
 }
 
-/// Reads the model at `path`, whose format is named by `ext` (without the dot, in any case),
-/// keeping what `keep` says. An `ext` that names no format (or is empty) has the format told
-/// from the file's first bytes, and an `.xml` file is read as the format its root element
-/// names (COLLADA, X3D, AMF, OGRE, an Irrlicht mesh or scene, or XGL).
-///
-/// # Errors
-///
-/// When the file can't be read, `ext` names no reader (or one whose feature is off), or the
-/// model doesn't parse.
+/// The extension a model with extension `ext` is read under when it's read as `format`: see
+/// [`Format::extension_for`].
+fn extension_as<'e>(input: Input<'_>, ext: &'e str, format: Option<Format>) -> &'e str {
+    match format {
+        None => ext,
+        Some(f) => f.extension_for(ext, || {
+            let head = input.head(detect::HEAD).ok()?;
+            detect::sniff(&head, input.len())
+        }),
+    }
+}
+
+/// For tests: [`load_as`] with the format named by `ext` alone.
+#[cfg(all(test, feature = "fs"))]
+pub(crate) fn load(path: &Path, ext: &str, assets: &dyn Assets, keep: Keep) -> Result<Document> {
+    load_as(path, ext, None, assets, keep)
+}
+
+/// Reads the model at `path` as `format`, or else as the format `ext` names (without the dot,
+/// in any case), keeping what `keep` says. An `ext` that names no format (or is empty) has the
+/// format told from the file's first bytes, and an `.xml` file is read as the format its root
+/// element names (COLLADA, X3D, AMF, OGRE, an Irrlicht mesh or scene, or XGL).
 #[cfg(feature = "fs")]
-pub fn load(path: &Path, ext: &str, assets: &dyn Assets, keep: Keep) -> Result<Document<'static>> {
+fn load_as(path: &Path, ext: &str, format: Option<Format>, assets: &dyn Assets, keep: Keep) -> Result<Document> {
     use std::io::Read as _;
     // Opening a file costs more than reading a small one, and readers look at a model more than
     // once (its start, then all of it): a small model is read whole, from one opening. glTF's
     // reader decides that for itself, and USD's opens the layers a file names from beside it.
-    if !matches!(ext, "gltf" | "glb" | "vrm" | "vrma" | "usd" | "usda" | "usdc" | "usdz")
+    let whole = !matches!(ext, "gltf" | "glb" | "vrm" | "vrma" | "usd" | "usda" | "usdc" | "usdz")
+        && !matches!(format, Some(Format::Gltf | Format::Vrm | Format::Usd));
+    if whole
         && let Ok(mut file) = std::fs::File::open(path)
         && let Ok(len) = file.metadata().map(|m| m.len())
         && len <= SMALL_FILE
     {
         let mut bytes = Vec::with_capacity(usize::try_from(len).unwrap_or(0));
         file.read_to_end(&mut bytes)?;
-        let input = Input {
-            path,
-            data: Data::Bytes(&bytes),
-            limit: MAX_TRIANGLES,
-        };
-        return read(input, ext, assets, keep).map(Document::into_owned);
+        let bytes = Bytes::from(bytes);
+        let input = Input::shared(&bytes, path);
+        return read_input(input, extension_as(input, ext, format), assets, keep);
     }
-    read(Input::file(path), ext, assets, keep).map(Document::into_owned)
+    let input = Input::file(path);
+    read_input(input, extension_as(input, ext, format), assets, keep)
 }
 
-/// The largest model [`load`] reads whole before parsing, rather than streaming it from the file.
+/// The largest model [`load_as`] reads whole before parsing, rather than streaming it from the file.
 #[cfg(feature = "fs")]
 const SMALL_FILE: u64 = 1 << 20;
 
-/// Reads a model already in memory, whose format is named by `ext` (without the dot, in any
-/// case, or told from the bytes as [`load`] tells it), keeping what `keep` says. `name` is the model's path among `assets`: the files it
-/// refers to (MTL libraries, textures, glTF buffers, USD layers) are found from its folder and
-/// read through [`Assets::read`]. A model that refers to nothing reads with any name and an
-/// empty [`Memory`](crate::assets::Memory). The document may borrow from `bytes` and `assets`
-/// (a GLB's binary chunk is used in place); [`Document::into_owned`] makes it outlive them.
-///
-/// # Errors
-///
-/// When `ext` names no reader (or one whose feature is off) or the model doesn't parse.
-pub fn load_bytes<'a>(
-    bytes: &'a [u8],
-    name: &'a str,
-    ext: &str,
-    assets: &'a dyn Assets,
-    keep: Keep,
-) -> Result<Document<'a>> {
-    read(Input::memory(bytes, name), ext, assets, keep)
+/// For tests: reads a model already in memory, whose format is named by `ext` (without the dot,
+/// in any case, or told from the bytes), keeping what `keep` says. `name` is the model's path
+/// among `assets`, which the files it refers to are read through.
+#[cfg(test)]
+#[allow(dead_code, reason = "the readers' tests read through it, each with its feature")]
+pub(crate) fn load_bytes(bytes: &[u8], name: &str, ext: &str, assets: &dyn Assets, keep: Keep) -> Result<Document> {
+    read_input(Input::memory(bytes, name), ext, assets, keep)
 }
 
 /// A model to read: its path (or, in memory, its name), where its bytes are, and the most
@@ -344,8 +323,9 @@ enum Data<'a> {
     /// The file at the path, read as needed.
     #[cfg(feature = "fs")]
     File,
-    /// The whole model, in memory.
-    Bytes(&'a [u8]),
+    /// The whole model, in memory, and the [`Bytes`] holding it when there are any: what the
+    /// document keeps of it (a GLB's binary chunk) is shared from those rather than copied.
+    Bytes(&'a [u8], Option<&'a Bytes>),
 }
 
 /// A stream that seeks, for zip archives.
@@ -371,9 +351,35 @@ impl<'a> Input<'a> {
     pub fn memory(bytes: &'a [u8], name: &'a str) -> Self {
         Self {
             path: Path::new(name),
-            data: Data::Bytes(bytes),
+            data: Data::Bytes(bytes, None),
             limit: MAX_TRIANGLES,
         }
+    }
+
+    /// A model in memory held as [`Bytes`], at `path`: what the document keeps of it is shared,
+    /// not copied.
+    pub fn shared(bytes: &'a Bytes, path: &'a Path) -> Self {
+        Self {
+            path,
+            data: Data::Bytes(bytes, Some(bytes)),
+            limit: MAX_TRIANGLES,
+        }
+    }
+
+    /// `part` of the model's bytes as [`Bytes`]: shared with the model's when it's held as
+    /// [`Bytes`], copied otherwise.
+    #[cfg_attr(
+        not(feature = "gltf"),
+        allow(dead_code, reason = "only the glTF reader keeps input bytes")
+    )]
+    pub fn share(&self, part: &[u8]) -> Bytes {
+        if let Data::Bytes(_, Some(owner)) = self.data {
+            let (all, sub) = (owner.as_ptr_range(), part.as_ptr_range());
+            if all.start <= sub.start && sub.end <= all.end {
+                return owner.slice_ref(part);
+            }
+        }
+        Bytes::copy_from_slice(part)
     }
 
     /// The model's length in bytes, when it can be told.
@@ -383,7 +389,7 @@ impl<'a> Input<'a> {
     )]
     pub fn len(&self) -> Option<u64> {
         match self.data {
-            Data::Bytes(b) => Some(b.len() as u64),
+            Data::Bytes(b, _) => Some(b.len() as u64),
             #[cfg(feature = "fs")]
             Data::File => std::fs::metadata(self.path).ok().map(|m| m.len()),
         }
@@ -401,7 +407,7 @@ impl<'a> Input<'a> {
     )]
     pub fn bytes(&self) -> Option<&'a [u8]> {
         match self.data {
-            Data::Bytes(b) => Some(b),
+            Data::Bytes(b, _) => Some(b),
             #[cfg(feature = "fs")]
             Data::File => None,
         }
@@ -414,7 +420,7 @@ impl<'a> Input<'a> {
     )]
     pub fn read(&self) -> io::Result<Cow<'a, [u8]>> {
         match self.data {
-            Data::Bytes(b) => Ok(Cow::Borrowed(b)),
+            Data::Bytes(b, _) => Ok(Cow::Borrowed(b)),
             #[cfg(feature = "fs")]
             Data::File => std::fs::read(self.path).map(Cow::Owned),
         }
@@ -427,7 +433,7 @@ impl<'a> Input<'a> {
     )]
     pub fn head(&self, n: usize) -> io::Result<Cow<'a, [u8]>> {
         match self.data {
-            Data::Bytes(b) => Ok(Cow::Borrowed(&b[..b.len().min(n)])),
+            Data::Bytes(b, _) => Ok(Cow::Borrowed(&b[..b.len().min(n)])),
             #[cfg(feature = "fs")]
             Data::File => {
                 use std::io::Read as _;
@@ -446,7 +452,7 @@ impl<'a> Input<'a> {
     )]
     pub fn blocks(&self) -> io::Result<stream::Blocks<'a>> {
         match self.data {
-            Data::Bytes(b) => Ok(stream::Blocks::slice(b)),
+            Data::Bytes(b, _) => Ok(stream::Blocks::slice(b)),
             #[cfg(feature = "fs")]
             Data::File => {
                 let file = std::fs::File::open(self.path)?;
@@ -464,14 +470,14 @@ impl<'a> Input<'a> {
     )]
     pub fn seekable(&self) -> io::Result<Box<dyn ReadSeek + 'a>> {
         match self.data {
-            Data::Bytes(b) => Ok(Box::new(io::Cursor::new(b))),
+            Data::Bytes(b, _) => Ok(Box::new(io::Cursor::new(b))),
             #[cfg(feature = "fs")]
             Data::File => Ok(Box::new(std::fs::File::open(self.path)?)),
         }
     }
 }
 
-fn read<'a>(input: Input<'a>, ext: &str, assets: &'a dyn Assets, keep: Keep) -> Result<Document<'a>> {
+pub(crate) fn read_input(input: Input<'_>, ext: &str, assets: &dyn Assets, keep: Keep) -> Result<Document> {
     let lower;
     let mut ext = if ext.bytes().any(|b| b.is_ascii_uppercase()) {
         lower = ext.to_ascii_lowercase();
@@ -523,7 +529,7 @@ fn read<'a>(input: Input<'a>, ext: &str, assets: &'a dyn Assets, keep: Keep) -> 
     Ok(doc)
 }
 
-fn convert<'a>(input: Input<'a>, ext: &str, assets: &'a dyn Assets, keep: Keep) -> Result<Document<'a>> {
+fn convert(input: Input<'_>, ext: &str, assets: &dyn Assets, keep: Keep) -> Result<Document> {
     let _ = (input, assets, keep);
     match ext {
         #[cfg(feature = "stl")]
@@ -1237,12 +1243,9 @@ f 1/1 3/3 4/4
 
     /// Reads `bytes` as model `name` from memory, taking at most `max` triangles.
     #[allow(dead_code)]
-    fn limited<'a>(name: &'a str, bytes: &'a [u8], max: usize) -> crate::Result<Document<'a>> {
+    fn limited<'a>(name: &'a str, bytes: &'a [u8], max: usize) -> crate::Result<Document> {
         static EMPTY: std::sync::LazyLock<Memory> = std::sync::LazyLock::new(Memory::new);
-        let keep = Keep {
-            max_triangles: max,
-            ..Keep::ALL
-        };
+        let keep = Keep::ALL.with_max_triangles(max);
         super::load_bytes(bytes, name, name.rsplit('.').next().unwrap(), &*EMPTY, keep)
     }
 
@@ -1482,6 +1485,6 @@ f 1/1 3/3 4/4
         let dir = tempfile::tempdir().unwrap();
         let upper = dir.path().join("Cube.DAE");
         std::fs::write(&upper, &dae).unwrap();
-        assert_eq!(super::open(&upper, Keep::ALL).unwrap().counts().triangles, want);
+        assert_eq!(crate::open(&upper).unwrap().counts().triangles, want);
     }
 }

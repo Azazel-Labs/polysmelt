@@ -169,15 +169,18 @@ impl Viewer {
 
     /// The file among those added most likely to be the model.
     pub fn pick_main(&self) -> Option<String> {
-        model::pick_main(self.files.paths().map(|p| (p, self.files.get(p).unwrap_or_default())))
+        model::pick_main(
+            self.files
+                .paths()
+                .map(|p| (p, self.files.get(p).map_or(&[][..], |b| &b[..]))),
+        )
     }
 
     /// Reads `name` from the files added and shows it, in place of what was shown. Gives what the panel shows, as
     /// JSON. The files are forgotten after.
     pub fn load(&mut self, name: &str) -> Result<String, JsValue> {
         let files = std::mem::replace(&mut self.files, Memory::new());
-        let model = Model::load(&files, name, &now).map_err(error)?;
-        drop(files);
+        let model = Model::load(files, name, &now).map_err(error)?;
         self.generation += 1;
         let (center, radius) = model.sphere();
         self.home = Orbit::framing(center, radius);

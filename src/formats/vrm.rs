@@ -27,7 +27,7 @@ fn vrm_extension(name: &str) -> bool {
     name == "VRM" || name.starts_with("VRMC_")
 }
 
-pub(crate) fn load<'a>(input: Input<'a>, assets: &'a dyn Assets, keep: Keep) -> Result<Document<'a>> {
+pub(crate) fn load<'a>(input: Input<'a>, assets: &'a dyn Assets, keep: Keep) -> Result<Document> {
     let mut doc = super::gltf::load(input, assets, keep)?;
     let json = &mut doc.json;
     if let Some(Value::Array(required)) = json.get_mut("extensionsRequired") {
@@ -197,10 +197,8 @@ mod tests {
         out
     }
 
-    fn read(bytes: &[u8], ext: &str) -> Document<'static> {
-        super::super::load_bytes(bytes, "a.vrm", ext, &Memory::new(), Keep::ALL)
-            .unwrap()
-            .into_owned()
+    fn read(bytes: &[u8], ext: &str) -> Document {
+        super::super::load_bytes(bytes, "a.vrm", ext, &Memory::new(), Keep::ALL).unwrap()
     }
 
     #[test]

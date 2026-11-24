@@ -35,7 +35,7 @@ struct Plan {
     accessors: BTreeMap<usize, Data>,
 }
 
-impl Document<'_> {
+impl Document {
     /// Rewrites the document as plain glTF 2.0 that any reader takes:
     ///
     /// - meshopt-compressed buffer views (`EXT_meshopt_compression`, `KHR_meshopt_compression`)
@@ -93,7 +93,7 @@ fn has_draco(json: &Map<String, Value>) -> bool {
 }
 
 /// Decodes everything [`Document::decode`] replaces, changing nothing yet.
-fn read(doc: &Document<'_>) -> Result<Plan> {
+fn read(doc: &Document) -> Result<Plan> {
     let json = &doc.json;
     // Only accessors are read: a required extension decoding leaves alone stays required.
     let mut r = Reader::bare(doc);
@@ -320,7 +320,7 @@ fn from_draco(declared: &Value, bytes: &[u8], n: usize, is_indices: bool, attrs:
 
 /// Writes the plan into the document: the decoded bytes into a new buffer, views and accessors
 /// pointed at them, Draco and meshopt extensions removed.
-fn apply(doc: &mut Document<'_>, plan: &Plan) {
+fn apply(doc: &mut Document, plan: &Plan) {
     let buffer = doc.buffers.len();
     let mut out: Vec<u8> = Vec::new();
     let mut place = |bytes: &[u8]| {
@@ -402,7 +402,7 @@ fn strip(obj: &mut Map<String, Value>, names: &[&str]) {
 }
 
 /// Drops buffers no view points into, renumbering the views'.
-fn drop_unused_buffers(doc: &mut Document<'_>) {
+fn drop_unused_buffers(doc: &mut Document) {
     let views = list(&doc.json, "bufferViews");
     let mut used = vec![false; doc.buffers.len()];
     for b in views.iter().filter_map(|v| index(v, "buffer")) {

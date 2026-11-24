@@ -21,18 +21,25 @@ use crate::mesh::{MAX_POINTS, MAX_TRIANGLES, TRIANGLE_CEILING};
 /// Without textures, a material's factors are its own: a reader that would have found a color
 /// texture doesn't turn the base color white for it.
 ///
+/// A `Keep` is built from [`Keep::ALL`] (or [`Keep::MESHES`], [`Keep::LIGHT`]) with a `with_`
+/// setter for each switch, which chain and work in `const`s:
+///
 /// ```
-/// use polysmelt::document::Keep;
+/// use polysmelt::Keep;
 /// // Static meshes for an engine that animates nothing, but still skins them.
-/// let keep = Keep { animations: false, ..Keep::ALL };
+/// let keep = Keep::ALL.with_animations(false);
 /// # assert!(keep.skins);
 /// // A 100-million-triangle scan, past the default limit.
-/// let keep = Keep { max_triangles: 120_000_000, ..Keep::ALL };
-/// // A 40-million-point lidar scan, drawn as points.
-/// let keep = Keep { max_points: 40_000_000, ..Keep::ALL };
+/// let keep = Keep::ALL.with_max_triangles(120_000_000);
+/// // A 40-million-point lidar scan, drawn as points, read on every core.
+/// const SCAN: Keep = Keep::ALL.with_max_points(40_000_000).with_threads(0);
 /// // Only the surfaces: no points or lines in the flattened mesh.
-/// let keep = Keep { lines_and_points: false, ..Keep::ALL };
+/// let keep = Keep::ALL.with_lines_and_points(false);
 /// ```
+///
+/// New switches may come in later versions, each keeping by default what it switches, so a
+/// `Keep` can't be written out field by field.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[allow(clippy::struct_excessive_bools, reason = "independent switches")]
 pub struct Keep {
@@ -125,6 +132,97 @@ impl Keep {
         ..Keep::MESHES
     };
 
+    /// With [`Keep::animations`] set to `animations`.
+    #[must_use]
+    pub const fn with_animations(mut self, animations: bool) -> Self {
+        self.animations = animations;
+        self
+    }
+
+    /// With [`Keep::skins`] set to `skins`.
+    #[must_use]
+    pub const fn with_skins(mut self, skins: bool) -> Self {
+        self.skins = skins;
+        self
+    }
+
+    /// With [`Keep::morph_targets`] set to `morph_targets`.
+    #[must_use]
+    pub const fn with_morph_targets(mut self, morph_targets: bool) -> Self {
+        self.morph_targets = morph_targets;
+        self
+    }
+
+    /// With [`Keep::materials`] set to `materials`.
+    #[must_use]
+    pub const fn with_materials(mut self, materials: bool) -> Self {
+        self.materials = materials;
+        self
+    }
+
+    /// With [`Keep::textures`] set to `textures`.
+    #[must_use]
+    pub const fn with_textures(mut self, textures: bool) -> Self {
+        self.textures = textures;
+        self
+    }
+
+    /// With [`Keep::image_bytes`] set to `image_bytes`.
+    #[must_use]
+    pub const fn with_image_bytes(mut self, image_bytes: bool) -> Self {
+        self.image_bytes = image_bytes;
+        self
+    }
+
+    /// With [`Keep::cameras`] set to `cameras`.
+    #[must_use]
+    pub const fn with_cameras(mut self, cameras: bool) -> Self {
+        self.cameras = cameras;
+        self
+    }
+
+    /// With [`Keep::lights`] set to `lights`.
+    #[must_use]
+    pub const fn with_lights(mut self, lights: bool) -> Self {
+        self.lights = lights;
+        self
+    }
+
+    /// With [`Keep::extras`] set to `extras`.
+    #[must_use]
+    pub const fn with_extras(mut self, extras: bool) -> Self {
+        self.extras = extras;
+        self
+    }
+
+    /// With [`Keep::max_triangles`] set to `max_triangles`.
+    #[must_use]
+    pub const fn with_max_triangles(mut self, max_triangles: usize) -> Self {
+        self.max_triangles = max_triangles;
+        self
+    }
+
+    /// With [`Keep::lines_and_points`] set to `lines_and_points`.
+    #[must_use]
+    pub const fn with_lines_and_points(mut self, lines_and_points: bool) -> Self {
+        self.lines_and_points = lines_and_points;
+        self
+    }
+
+    /// With [`Keep::max_points`] set to `max_points`.
+    #[must_use]
+    pub const fn with_max_points(mut self, max_points: usize) -> Self {
+        self.max_points = max_points;
+        self
+    }
+
+    /// With [`Keep::threads`] set to `threads`.
+    #[must_use]
+    pub const fn with_threads(mut self, threads: usize) -> Self {
+        self.threads = threads;
+        self
+    }
+
     /// [`Keep::max_triangles`], clamped to [`TRIANGLE_CEILING`].
     pub(crate) fn triangles(self) -> usize {
         self.max_triangles.min(TRIANGLE_CEILING)
@@ -149,7 +247,7 @@ impl Keep {
         )),
         allow(dead_code, reason = "only the OBJ and SPZ readers take threads")
     )]
-    pub(crate) fn threads(self) -> usize {
+    pub(crate) fn thread_count(self) -> usize {
         if cfg!(all(target_family = "wasm", not(target_feature = "atomics"))) {
             1
         } else if self.threads == 0 {
@@ -259,7 +357,7 @@ fn extensions_present(v: &Value, out: &mut BTreeSet<String>) {
     }
 }
 
-impl Document<'_> {
+impl Document {
     /// Drops what `keep` doesn't keep. The JSON stays valid glTF: references to what went are
     /// removed with it, and extensions no longer used are unlisted. Extensions Polysmelt doesn't
     /// know that refer to dropped materials, textures or cameras may be left pointing at them.
@@ -434,7 +532,7 @@ mod tests {
 
     use super::*;
 
-    fn doc(v: Value) -> Document<'static> {
+    fn doc(v: Value) -> Document {
         let Value::Object(json) = v else { unreachable!() };
         let mut d = Document::empty(Map::new());
         d.json = json;

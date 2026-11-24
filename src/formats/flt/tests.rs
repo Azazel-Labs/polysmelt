@@ -205,15 +205,15 @@ const SQUARE: [Vertex; 4] = [
     ([0.0, 1.0, 0.0], [0.0, 1.0], None),
 ];
 
-fn read(b: &[u8], assets: &Memory) -> Result<Document<'static>> {
+fn read(b: &[u8], assets: &Memory) -> Result<Document> {
     load(Input::memory(b, "t.flt"), assets, Keep::ALL)
 }
 
-fn read_named(b: &[u8], name: &str, assets: &Memory) -> Result<Document<'static>> {
+fn read_named(b: &[u8], name: &str, assets: &Memory) -> Result<Document> {
     load(Input::memory(b, name), assets, Keep::ALL)
 }
 
-fn flat(doc: &Document<'_>) -> Mesh {
+fn flat(doc: &Document) -> Mesh {
     doc.flatten(Pose::Rest).unwrap().unwrap()
 }
 

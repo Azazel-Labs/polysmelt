@@ -90,12 +90,12 @@ fn open<'a>(input: &Input<'a>) -> Result<(Reader<'a>, Rc<Meter>)> {
     Ok((reader, meter))
 }
 
-pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document<'static>> {
+pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document> {
     let (mut reader, meter) = open(&input)?;
     let scans = reader.pointclouds();
     let total = scans.iter().fold(0_u64, |a, s| a.saturating_add(s.records));
     points::check_count(total, keep.points(), "E57")?;
-    let threads = keep.threads();
+    let threads = keep.thread_count();
     let parts: Vec<Part> = if threads > 1 && scans.len() > 1 {
         // Each thread opens the file for itself: a reader holds its place in the file.
         let jobs: Vec<usize> = (0..scans.len()).collect();
@@ -445,7 +445,7 @@ fn scan(reader: &mut Reader<'_>, meter: &Meter, pc: &PointCloud) -> Result<Part>
 }
 
 /// The scans together in one document.
-fn document(reader: &Reader<'_>, scans: &[PointCloud], parts: Vec<Part>) -> Result<Document<'static>> {
+fn document(reader: &Reader<'_>, scans: &[PointCloud], parts: Vec<Part>) -> Result<Document> {
     let n: usize = parts.iter().map(|p| p.positions.len()).sum();
     let origin = parts
         .iter()
@@ -778,11 +778,11 @@ mod tests {
         out.into_inner()
     }
 
-    fn read(bytes: &[u8], keep: Keep) -> Result<Document<'static>> {
+    fn read(bytes: &[u8], keep: Keep) -> Result<Document> {
         load(Input::memory(bytes, "t.e57"), keep)
     }
 
-    fn data(doc: &Document<'_>, key: &str) -> Vec<u8> {
+    fn data(doc: &Document, key: &str) -> Vec<u8> {
         let j = &doc.json;
         let a = j["meshes"][0]["primitives"][0]["attributes"][key].as_u64().unwrap() as usize;
         let acc = &j["accessors"][a];
@@ -793,14 +793,14 @@ mod tests {
         doc.buffer(0).unwrap()[start..start + len].to_vec()
     }
 
-    fn floats(doc: &Document<'_>, key: &str) -> Vec<f32> {
+    fn floats(doc: &Document, key: &str) -> Vec<f32> {
         data(doc, key)
             .chunks_exact(4)
             .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect()
     }
 
-    fn u16s(doc: &Document<'_>, key: &str) -> Vec<u16> {
+    fn u16s(doc: &Document, key: &str) -> Vec<u16> {
         data(doc, key)
             .chunks_exact(2)
             .map(|c| u16::from_le_bytes([c[0], c[1]]))
@@ -860,7 +860,7 @@ mod tests {
         };
         let bytes = file(&[(5, None), (5, Some(turn))], 0.0, None);
         for threads in [1, 2] {
-            let doc = read(&bytes, Keep { threads, ..Keep::ALL }).unwrap();
+            let doc = read(&bytes, Keep::ALL.with_threads(threads)).unwrap();
             assert_eq!(doc.facts["points"], 10);
             let p = floats(&doc, "POSITION");
             // The second scan's first point, local (0, 2, 3): file (8, 20, 3), glTF (8, 3, -20).
@@ -961,14 +961,7 @@ mod tests {
     #[test]
     fn too_many_points_are_refused() {
         let bytes = file(&[(100, None)], 0.0, None);
-        let err = read(
-            &bytes,
-            Keep {
-                max_points: 99,
-                ..Keep::ALL
-            },
-        )
-        .unwrap_err();
+        let err = read(&bytes, Keep::ALL.with_max_points(99)).unwrap_err();
         assert!(err.to_string().contains("max_points"), "{err}");
     }
 

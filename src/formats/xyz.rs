@@ -35,7 +35,7 @@ const TOKENS: usize = 64;
 /// Lines looked at to tell what the values are.
 const SAMPLE: usize = 2000;
 
-pub(crate) fn load(input: Input<'_>, ext: &str, keep: Keep) -> Result<Document<'static>> {
+pub(crate) fn load(input: Input<'_>, ext: &str, keep: Keep) -> Result<Document> {
     let head = input.head(64 * 1024).context("reading the point cloud")?;
     let head = head.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&head);
     if ext == "ptx" {
@@ -57,7 +57,7 @@ pub(crate) fn load(input: Input<'_>, ext: &str, keep: Keep) -> Result<Document<'
         parse_all(b, &plan, keep)?
     } else {
         let mut blocks = input.blocks().context("reading the point cloud")?;
-        let target = keep.threads().max(1) * PIECE;
+        let target = keep.thread_count().max(1) * PIECE;
         let mut part = Part::new(&plan);
         let mut batch = Vec::new();
         let mut first = true;
@@ -408,7 +408,7 @@ impl Part {
         points::check_count(u64::try_from(self.pos.len()).unwrap_or(u64::MAX), keep.points(), "text")
     }
 
-    fn cloud(self, plan: &Plan, format: &str, source: Value) -> Document<'static> {
+    fn cloud(self, plan: &Plan, format: &str, source: Value) -> Document {
         let mut cloud = Cloud {
             positions: self.pos,
             colors: self.colors,
@@ -444,7 +444,7 @@ fn parse_all(text: &[u8], plan: &Plan, keep: Keep) -> Result<Part> {
     let pieces: Vec<&[u8]> = cuts.windows(2).map(|w| &text[w[0]..w[1]]).collect();
     // A piece holds at most a point per two bytes; refusing too many is up to the caller.
     let limit = keep.points().saturating_add(1);
-    let parts = points::map(pieces, keep.threads(), |t| parse(t, plan, None, limit));
+    let parts = points::map(pieces, keep.thread_count(), |t| parse(t, plan, None, limit));
     let mut all = Part::new(plan);
     for p in parts {
         all.append(p, keep)?;
@@ -542,7 +542,7 @@ fn numbers<const N: usize>(b: &[u8], at: &mut usize) -> Option<[f64; N]> {
 }
 
 /// The scans of a PTX file.
-fn ptx(bytes: &[u8], keep: Keep) -> Result<Document<'static>> {
+fn ptx(bytes: &[u8], keep: Keep) -> Result<Document> {
     let bytes = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
     let mut at = 0;
     let mut scans = Vec::new();
@@ -635,7 +635,7 @@ fn ptx(bytes: &[u8], keep: Keep) -> Result<Document<'static>> {
         });
         let pieces = split_lines(body);
         let limit = keep.points().saturating_add(1);
-        let parts = points::map(pieces, keep.threads(), |t| parse(t, plan, Some(&m), limit));
+        let parts = points::map(pieces, keep.thread_count(), |t| parse(t, plan, Some(&m), limit));
         let index = scans.len();
         scans.push(json!({
             "columns": cols,
@@ -704,7 +704,7 @@ fn split_lines(text: &[u8]) -> Vec<&[u8]> {
 }
 
 /// An ESRI ASCII grid: a point at each cell's center that has a value.
-fn grid(bytes: &[u8], keep: Keep) -> Result<Document<'static>> {
+fn grid(bytes: &[u8], keep: Keep) -> Result<Document> {
     let bytes = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
     let mut at = 0;
     let mut keys: Map<String, Value> = Map::new();
@@ -825,7 +825,7 @@ fn grid(bytes: &[u8], keep: Keep) -> Result<Document<'static>> {
 
 /// The document of `cloud`, its source info `format`, with Z up assumed (and turned Y-up) and its
 /// units unknown, over `source`'s details.
-fn document(cloud: Cloud, format: &str, source: Value) -> Document<'static> {
+fn document(cloud: Cloud, format: &str, source: Value) -> Document {
     let mut info = SourceInfo {
         format: Some(format.into()),
         up_axis: Fact::Assumed(Axis::PosZ),
@@ -847,12 +847,12 @@ fn document(cloud: Cloud, format: &str, source: Value) -> Document<'static> {
 mod tests {
     use super::*;
 
-    fn load_text(text: &str, ext: &str, keep: Keep) -> Result<Document<'static>> {
+    fn load_text(text: &str, ext: &str, keep: Keep) -> Result<Document> {
         let name = format!("cloud.{ext}");
-        load(Input::memory(text.as_bytes(), &name), ext, keep).map(Document::into_owned)
+        load(Input::memory(text.as_bytes(), &name), ext, keep)
     }
 
-    fn attrs(doc: &Document<'_>) -> Vec<String> {
+    fn attrs(doc: &Document) -> Vec<String> {
         let mut v: Vec<String> = doc.json["meshes"][0]["primitives"][0]["attributes"]
             .as_object()
             .unwrap()
@@ -863,7 +863,7 @@ mod tests {
         v
     }
 
-    fn values(doc: &Document<'_>, name: &str) -> Vec<f32> {
+    fn values(doc: &Document, name: &str) -> Vec<f32> {
         let a = doc.json["meshes"][0]["primitives"][0]["attributes"][name]
             .as_u64()
             .unwrap() as usize;
@@ -980,25 +980,9 @@ mod tests {
             .collect();
         assert!(text.len() > 4 * PIECE);
         let one = load_text(&text, "xyz", Keep::ALL).unwrap();
-        let many = load_text(
-            &text,
-            "xyz",
-            Keep {
-                threads: 4,
-                ..Keep::ALL
-            },
-        )
-        .unwrap();
+        let many = load_text(&text, "xyz", Keep::ALL.with_threads(4)).unwrap();
         crate::keep::NO_THREADS.set(true);
-        let none = load_text(
-            &text,
-            "xyz",
-            Keep {
-                threads: 4,
-                ..Keep::ALL
-            },
-        )
-        .unwrap();
+        let none = load_text(&text, "xyz", Keep::ALL.with_threads(4)).unwrap();
         crate::keep::NO_THREADS.set(false);
         assert_eq!(one.facts["points"], 20_000);
         for d in [&many, &none] {
@@ -1024,22 +1008,8 @@ mod tests {
             .collect();
         let path = std::env::temp_dir().join(format!("polysmelt-xyz-{}.xyz", std::process::id()));
         std::fs::write(&path, &text).unwrap();
-        let file = load(
-            Input::file(&path),
-            "xyz",
-            Keep {
-                threads: 2,
-                ..Keep::ALL
-            },
-        );
-        let small = load(
-            Input::file(&path),
-            "xyz",
-            Keep {
-                max_points: 20_000,
-                ..Keep::ALL
-            },
-        );
+        let file = load(Input::file(&path), "xyz", Keep::ALL.with_threads(2));
+        let small = load(Input::file(&path), "xyz", Keep::ALL.with_max_points(20_000));
         std::fs::remove_file(&path).unwrap();
         let file = file.unwrap();
         let memory = load_text(&text, "xyz", Keep::ALL).unwrap();
@@ -1052,15 +1022,7 @@ mod tests {
     #[test]
     fn too_many_points_are_refused() {
         let text: String = (0..100).map(|i| format!("{i} 0 0\n")).collect();
-        let err = load_text(
-            &text,
-            "xyz",
-            Keep {
-                max_points: 10,
-                ..Keep::ALL
-            },
-        )
-        .unwrap_err();
+        let err = load_text(&text, "xyz", Keep::ALL.with_max_points(10)).unwrap_err();
         assert!(err.to_string().contains("Keep::max_points"), "{err}");
         let err = load_text("ncols 100000\nnrows 100000\ncellsize 1\n1\n", "asc", Keep::ALL).unwrap_err();
         assert!(err.to_string().contains("Keep::max_points"), "{err}");

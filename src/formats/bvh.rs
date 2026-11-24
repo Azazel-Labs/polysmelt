@@ -531,7 +531,7 @@ fn key_times(kept: &[u64], frame_time: f64) -> Vec<f32> {
     times
 }
 
-pub(super) fn load(input: Input<'_>, keep: Keep) -> Result<Document<'static>> {
+pub(super) fn load(input: Input<'_>, keep: Keep) -> Result<Document> {
     let mut blocks = input.blocks()?;
     let size = blocks.size_hint();
     let mut h = Hierarchy::new();
@@ -703,7 +703,7 @@ mod tests {
     use crate::assets::Memory;
     use crate::rig::Path;
 
-    fn read(text: &str) -> Result<Document<'static>> {
+    fn read(text: &str) -> Result<Document> {
         load(Input::memory(text.as_bytes(), "t.bvh"), Keep::ALL)
     }
 
@@ -1047,10 +1047,7 @@ Frame Time: 0.5
     #[test]
     fn keeping_no_animations_keeps_the_facts() {
         let all = read(TWO).unwrap();
-        let keep = Keep {
-            animations: false,
-            ..Keep::ALL
-        };
+        let keep = Keep::ALL.with_animations(false);
         let none = load(Input::memory(TWO.as_bytes(), "t.bvh"), keep).unwrap();
         assert!(none.json.get("animations").is_none());
         assert_eq!(all.facts, none.facts);

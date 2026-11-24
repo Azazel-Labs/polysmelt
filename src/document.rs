@@ -10,19 +10,16 @@
 //! - [`Document::decode`] rewrites it as plain glTF 2.0: meshopt and Draco decoded, quantized
 //!   attributes as floats.
 //! - [`Document::prune`] drops what a [`Keep`] doesn't keep (animations, skins, materials, ...);
-//!   the loaders in [`formats`](crate::formats) apply it.
+//!   a [`Loader`](crate::Loader) applies it as it reads.
 //!
-//! The JSON's buffers have no `uri`: each has its bytes here, in memory, in a file the document
-//! reads as needed (a GLB's binary chunk), or, for a meshopt fallback buffer, nowhere. Images
-//! name a buffer view, or keep their `uri` when the file they name wasn't found.
+//! The JSON's buffers have no `uri`: each has its bytes here, in memory, or, for a meshopt
+//! fallback buffer, nowhere. A document owns everything it holds (it borrows nothing and keeps no
+//! file open), and cloning one shares its bytes rather than copying them. Images name a buffer
+//! view, or keep their `uri` when the file they name wasn't found.
 
 use std::borrow::Cow;
 use std::fmt;
-#[cfg(feature = "fs")]
-use std::fs::File;
 use std::io::Write;
-#[cfg(feature = "fs")]
-use std::sync::Mutex;
 
 use serde_json::{Map, Value, json};
 
@@ -38,12 +35,16 @@ use crate::{Context as _, Result};
 pub use crate::keep::Keep;
 
 /// A model as a glTF 2.0 document: its JSON, its buffers' bytes, and facts about the source.
-pub struct Document<'a> {
-    /// The glTF JSON. Its buffers have no `uri`; their bytes are held by the document (see
-    /// [`Document::buffer`] and [`Document::push_buffer`]).
-    pub json: Map<String, Value>,
+///
+/// It owns all it holds, so it outlives whatever it was read from, and a clone shares the
+/// buffers' bytes rather than copying them. [`Document::default`] draws nothing; a [`Mesh`]
+/// converts into one.
+#[derive(Clone)]
+pub struct Document {
+    /// The glTF JSON (see [`Document::json`]).
+    pub(crate) json: Map<String, Value>,
     /// Buffer `i`'s bytes, for each of the JSON's buffers.
-    pub(crate) buffers: Vec<Blob<'a>>,
+    pub(crate) buffers: Vec<Blob>,
     /// Facts worth recording about the source: `triangles`, and per format `points`, `lines`,
     /// `vertices`, `voxels`, `voxel_size`, `models`, `objects`, `colors`, `application`, and for
     /// motion capture `joints`, `channels`, `frames`, `frame_time` and `dropped_frames`.
@@ -60,13 +61,13 @@ pub struct Document<'a> {
     pub(crate) max_points: usize,
 }
 
-impl fmt::Debug for Document<'_> {
+impl fmt::Debug for Document {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Document")
             .field("json", &self.json)
             .field("buffers", &self.buffers.iter().map(Blob::len).collect::<Vec<_>>())
             .field("facts", &self.facts)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -78,7 +79,12 @@ pub enum Pose {
     Rest,
     /// Animation `index` at `time` seconds: the channels it has override the rest pose; before
     /// its first key or after its last, the first or last value holds.
-    Animation { index: usize, time: f32 },
+    Animation {
+        /// Which of the document's animations.
+        index: usize,
+        /// Seconds from the animation's start (its keys' time 0).
+        time: f32,
+    },
     /// As `Rest`, but skinned meshes as their files store them: in the pose they were bound in,
     /// their vertices not moved by their joints, and the skeleton where the inverse bind matrices
     /// put it. Joints and weights still come with them, to pose with your own skinning. Quicker
@@ -91,7 +97,9 @@ pub enum Pose {
 /// are counted.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Counts {
+    /// Triangles: a strip or fan of n points is n - 2 of them.
     pub triangles: usize,
+    /// Points drawn as points.
     pub points: usize,
     /// Line segments: a strip or loop of n points is n - 1 or n of them.
     pub lines: usize,
@@ -103,7 +111,9 @@ pub struct Counts {
 /// An axis-aligned box: what [`Document::bounds`] gives.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Bounds {
+    /// The least x, y and z.
     pub min: [f32; 3],
+    /// The greatest x, y and z.
     pub max: [f32; 3],
 }
 
@@ -122,16 +132,11 @@ impl Bounds {
 }
 
 /// Where a buffer's bytes are.
-pub(crate) enum Blob<'a> {
-    /// In memory, borrowed from the input (a GLB's binary chunk, an asset).
-    #[cfg_attr(not(feature = "gltf"), allow(dead_code, reason = "only the glTF reader makes one"))]
-    Borrowed(&'a [u8]),
-    /// In memory, owned and shareable: images slice it rather than copy it.
+#[derive(Clone)]
+pub(crate) enum Blob {
+    /// Shared bytes (a GLB's binary chunk, a file, an image): images slice them rather than copy
+    /// them.
     Bytes(Bytes),
-    /// A stretch of a file, read as needed.
-    #[cfg(feature = "fs")]
-    #[cfg_attr(not(feature = "gltf"), allow(dead_code, reason = "only the glTF reader makes one"))]
-    File(FileSpan),
     /// Typed arrays a reader built, laid end to end.
     Parts(Parts),
     /// A meshopt fallback buffer that isn't there: only its length. Views on it decode from
@@ -140,149 +145,9 @@ pub(crate) enum Blob<'a> {
     Missing(u64),
 }
 
-/// A stretch of a file: `len` bytes from `base`.
-#[cfg(feature = "fs")]
-pub(crate) struct FileSpan {
-    file: Mutex<Cursor>,
-    base: u64,
-    len: u64,
-}
-
-#[cfg(feature = "fs")]
-impl fmt::Debug for FileSpan {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("FileSpan")
-            .field("base", &self.base)
-            .field("len", &self.len)
-            .finish_non_exhaustive()
-    }
-}
-
-/// A [`FileSpan`]'s file and the blocks of it last read.
-#[cfg(feature = "fs")]
-struct Cursor {
-    file: File,
-    /// Where the file's cursor is relative to the span's base, to skip needless seeks.
-    at: u64,
-    /// Up to [`BLOCKS`] blocks of [`BLOCK`] bytes, each by its start (a multiple of `BLOCK` from
-    /// the span's base), the most recently used last. Small reads (animation keys, a skin's
-    /// matrices, little meshes' accessors) come from here rather than each its own system call,
-    /// and since the blocks don't overlap, reads that hop between a few places in the file (a
-    /// mesh's vertices and its indices) read each part of it once.
-    blocks: Vec<(u64, Vec<u8>)>,
-}
-
-/// The size of the blocks small reads go through; reads this big or bigger go to the file.
-#[cfg(feature = "fs")]
-const BLOCK: usize = 64 * 1024;
-
-/// How many blocks a [`FileSpan`] keeps.
-#[cfg(feature = "fs")]
-const BLOCKS: usize = 8;
-
-#[cfg(feature = "fs")]
-impl FileSpan {
-    /// The file at `path`, whole, with its first `n` bytes (fewer when it's shorter).
-    pub(crate) fn open(path: &std::path::Path, n: u64) -> Option<(Vec<u8>, Self)> {
-        use std::io::Read as _;
-        let mut file = File::open(path).ok()?;
-        let len = file.metadata().ok()?.len();
-        let mut head = Vec::new();
-        (&mut file).take(n).read_to_end(&mut head).ok()?;
-        let at = head.len() as u64;
-        Some((head, Self::new(file, 0, len, at)))
-    }
-
-    /// The whole span, read.
-    #[cfg_attr(
-        not(feature = "usd"),
-        allow(dead_code, reason = "only the USD reader reads a texture whole")
-    )]
-    pub(crate) fn read_all(&self) -> Result<Vec<u8>> {
-        let mut out = vec![0; usize_of(self.len)];
-        self.read_at(0, &mut out)?;
-        Ok(out)
-    }
-
-    /// `len` bytes of `file` from `base`; its cursor is at `base + at`.
-    #[cfg_attr(not(feature = "gltf"), allow(dead_code, reason = "only the glTF reader makes one"))]
-    pub(crate) fn new(file: File, base: u64, len: u64, at: u64) -> Self {
-        Self {
-            file: Mutex::new(Cursor {
-                file,
-                at,
-                blocks: Vec::new(),
-            }),
-            base,
-            len,
-        }
-    }
-
-    /// Copies the bytes from `off` into `out`, which must lie within the span.
-    /// Writes bytes `from..to`, read through `chunk` a MiB at a time.
-    fn write_range(&self, from: u64, to: u64, chunk: &mut Vec<u8>, w: &mut dyn Write) -> Result<()> {
-        let mut at = from;
-        while at < to {
-            let n = usize_of((to - at).min(1 << 20));
-            chunk.resize(n, 0);
-            self.read_at(at, chunk)?;
-            w.write_all(chunk)?;
-            at += n as u64;
-        }
-        Ok(())
-    }
-
-    fn read_at(&self, off: u64, out: &mut [u8]) -> Result<()> {
-        ensure!(
-            off.checked_add(out.len() as u64).is_some_and(|end| end <= self.len),
-            "read past the end of a file's glTF data"
-        );
-        let mut c = self.file.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        if out.len() >= BLOCK {
-            return self.read_file(&mut c, off, out);
-        }
-        let mut done = 0;
-        while done < out.len() {
-            let at = off + done as u64;
-            let start = at - at % BLOCK as u64;
-            let block = if let Some(i) = c.blocks.iter().position(|(s, _)| *s == start) {
-                c.blocks.remove(i)
-            } else {
-                // Reuse the least recently used block's buffer once all are in use.
-                let mut b = if c.blocks.len() >= BLOCKS {
-                    c.blocks.remove(0).1
-                } else {
-                    Vec::new()
-                };
-                b.resize(usize_of((self.len - start).min(BLOCK as u64)), 0);
-                self.read_file(&mut c, start, &mut b)?;
-                (start, b)
-            };
-            let from = usize_of(at - start);
-            let n = (out.len() - done).min(block.1.len() - from);
-            out[done..done + n].copy_from_slice(&block.1[from..from + n]);
-            done += n;
-            c.blocks.push(block);
-        }
-        Ok(())
-    }
-
-    fn read_file(&self, c: &mut Cursor, off: u64, out: &mut [u8]) -> Result<()> {
-        use std::io::{Read, Seek, SeekFrom};
-        if c.at != off {
-            c.file.seek(SeekFrom::Start(self.base + off))?;
-        }
-        // Until the read succeeds, the cursor isn't known.
-        c.at = u64::MAX;
-        c.file.read_exact(out)?;
-        c.at = off + out.len() as u64;
-        Ok(())
-    }
-}
-
 /// Typed arrays laid end to end, each at a 4-byte boundary, read as little-endian bytes in
 /// place.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct Parts {
     /// Each part and its offset.
     list: Vec<(u64, Part)>,
@@ -290,15 +155,13 @@ pub(crate) struct Parts {
 }
 
 /// One typed array of a [`Parts`].
+#[derive(Clone)]
 pub(crate) enum Part {
     F32(Vec<f32>),
     Vec3(Vec<[f32; 3]>),
     U32(Vec<u32>),
     U16(Vec<u16>),
     Bytes(Bytes),
-    /// A file's bytes, read when they're wanted (a texture file, written as it is).
-    #[cfg(feature = "fs")]
-    File(FileSpan),
 }
 
 #[allow(dead_code, reason = "readers use the part types their formats need")]
@@ -347,45 +210,26 @@ impl Part {
         Part::Bytes(v.into())
     }
 
-    /// The part as a GLB stores it, when it's in memory. Typed parts exist only on little-endian
-    /// targets, where their memory is that.
-    #[cfg_attr(
-        not(feature = "fs"),
-        allow(clippy::unnecessary_wraps, reason = "only a file part isn't in memory")
-    )]
-    fn as_bytes(&self) -> Option<&[u8]> {
-        Some(match self {
+    /// The part as a GLB stores it. Typed parts exist only on little-endian targets, where their
+    /// memory is that.
+    fn as_bytes(&self) -> &[u8] {
+        match self {
             Part::F32(v) => bytemuck::cast_slice(v),
             Part::Vec3(v) => bytemuck::cast_slice(v),
             Part::U32(v) => bytemuck::cast_slice(v),
             Part::U16(v) => bytemuck::cast_slice(v),
             Part::Bytes(v) => v,
-            #[cfg(feature = "fs")]
-            Part::File(_) => return None,
-        })
+        }
     }
 
     fn len(&self) -> u64 {
-        match self {
-            #[cfg(feature = "fs")]
-            Part::File(f) => f.len,
-            _ => self.as_bytes().map_or(0, <[u8]>::len) as u64,
-        }
+        self.as_bytes().len() as u64
     }
 
     /// Copies the part's bytes `from..from + out.len()` into `out`.
-    #[cfg_attr(
-        not(feature = "fs"),
-        allow(clippy::unnecessary_wraps, reason = "only reading a file part can fail")
-    )]
-    fn read_at(&self, from: u64, out: &mut [u8]) -> Result<()> {
-        #[cfg(feature = "fs")]
-        if let Part::File(f) = self {
-            return f.read_at(from, out);
-        }
-        let b = self.as_bytes().expect("only a file's part isn't in memory");
+    fn read_at(&self, from: u64, out: &mut [u8]) {
+        let b = self.as_bytes();
         out.copy_from_slice(&b[usize_of(from)..usize_of(from) + out.len()]);
-        Ok(())
     }
 }
 
@@ -407,7 +251,7 @@ impl Parts {
 
     fn slice(&self, off: u64, len: u64) -> Option<&[u8]> {
         let (at, part) = &self.list[self.part_at(off)?];
-        let bytes = part.as_bytes()?;
+        let bytes = part.as_bytes();
         let start = usize_of(off - at);
         bytes.get(start..start.checked_add(usize_of(len))?)
     }
@@ -422,7 +266,7 @@ impl Parts {
         Some(bytes.slice(start..end))
     }
 
-    fn read_at(&self, off: u64, out: &mut [u8]) -> Result<()> {
+    fn read_at(&self, off: u64, out: &mut [u8]) {
         out.fill(0);
         let end = off + out.len() as u64;
         let first = self.part_at(off).unwrap_or(0);
@@ -432,10 +276,9 @@ impl Parts {
             }
             let (from, to) = (off.max(*at), end.min(at + part.len()));
             if from < to {
-                part.read_at(from - at, &mut out[usize_of(from - off)..usize_of(to - off)])?;
+                part.read_at(from - at, &mut out[usize_of(from - off)..usize_of(to - off)]);
             }
         }
-        Ok(())
     }
 
     fn write_to(&self, len: u64, w: &mut dyn Write) -> Result<()> {
@@ -446,12 +289,7 @@ impl Parts {
             }
             write_zeros(w, (*at).min(len) - pos)?;
             let take = (len - at).min(part.len());
-            match (part.as_bytes(), part) {
-                (Some(bytes), _) => w.write_all(&bytes[..usize_of(take)])?,
-                #[cfg(feature = "fs")]
-                (None, Part::File(f)) => f.write_range(0, take, &mut Vec::new(), w)?,
-                (None, _) => unreachable!("only a file's part isn't in memory"),
-            }
+            w.write_all(&part.as_bytes()[..usize_of(take)])?;
             pos = at + take;
         }
         write_zeros(w, len.saturating_sub(pos))
@@ -470,9 +308,7 @@ struct Glb {
     /// Each buffer in the binary chunk: (buffer, offset, length).
     layout: Vec<(usize, u64, u64)>,
     /// Bytes repair made, the last buffer.
-    extra: Option<Blob<'static>>,
-    /// What repair rewrote in buffers, sorted by buffer and offset.
-    kept: Vec<crate::flatten::Kept>,
+    extra: Option<Blob>,
 }
 
 impl Glb {
@@ -480,7 +316,7 @@ impl Glb {
         clippy::cast_possible_truncation,
         reason = "the binary chunk is smaller than `total`, which is checked to fit"
     )]
-    fn write(&self, doc: &Document<'_>, w: &mut dyn Write) -> Result<()> {
+    fn write(&self, doc: &Document, w: &mut dyn Write) -> Result<()> {
         w.write_all(&self.head)?;
         if let Some(padded) = self.padded {
             w.write_all(&(padded as u32).to_le_bytes())?;
@@ -493,9 +329,7 @@ impl Glb {
                     .get(i)
                     .or(self.extra.as_ref())
                     .context("glTF buffer is missing")?;
-                let from = self.kept.partition_point(|k| k.0 < i);
-                let to = self.kept.partition_point(|k| k.0 <= i);
-                blob.write_keeping(len, w, &self.kept[from..to])?;
+                blob.write_to(len, w)?;
                 pos = at + len;
             }
             write_zeros(w, padded - pos)?;
@@ -510,13 +344,10 @@ fn write_zeros(w: &mut dyn Write, n: u64) -> Result<()> {
     Ok(())
 }
 
-impl Blob<'_> {
+impl Blob {
     pub(crate) fn len(&self) -> u64 {
         match self {
-            Blob::Borrowed(b) => b.len() as u64,
             Blob::Bytes(b) => b.len() as u64,
-            #[cfg(feature = "fs")]
-            Blob::File(f) => f.len,
             Blob::Parts(p) => p.len,
             Blob::Missing(n) => *n,
         }
@@ -525,11 +356,8 @@ impl Blob<'_> {
     /// `len` bytes from `off`, in place, when they are in memory in one piece.
     pub(crate) fn slice(&self, off: u64, len: u64) -> Option<&[u8]> {
         match self {
-            Blob::Borrowed(b) => b.get(usize_of(off)..usize_of(off.checked_add(len)?)),
             Blob::Bytes(b) => b.get(usize_of(off)..usize_of(off.checked_add(len)?)),
             Blob::Parts(p) => p.slice(off, len),
-            #[cfg(feature = "fs")]
-            Blob::File(_) => None,
             Blob::Missing(_) => None,
         }
     }
@@ -544,7 +372,7 @@ impl Blob<'_> {
         let shared = match self {
             Blob::Bytes(b) => Some(b.slice(usize_of(off)..usize_of(end))),
             Blob::Parts(p) => p.shared(off, len),
-            _ => None,
+            Blob::Missing(_) => None,
         };
         if let Some(b) = shared {
             return Ok(b);
@@ -567,41 +395,14 @@ impl Blob<'_> {
             .filter(|&e| e <= self.len())
             .context("glTF data runs past the end of its buffer")?;
         match self {
-            Blob::Borrowed(b) => out.copy_from_slice(&b[usize_of(off)..usize_of(end)]),
             Blob::Bytes(b) => out.copy_from_slice(&b[usize_of(off)..usize_of(end)]),
-            #[cfg(feature = "fs")]
-            Blob::File(f) => f.read_at(off, out)?,
-            Blob::Parts(p) => p.read_at(off, out)?,
+            Blob::Parts(p) => p.read_at(off, out),
             Blob::Missing(_) => bail!("glTF data is in a meshopt fallback buffer, which holds none"),
         }
         Ok(())
     }
 
     /// Writes the first `len` bytes.
-    /// [`Blob::write_to`], with `kept` (sorted by offset) holding bytes already read from
-    /// this blob's file, to write instead of reading them again.
-    fn write_keeping(&self, len: u64, w: &mut dyn Write, kept: &[crate::flatten::Kept]) -> Result<()> {
-        #[cfg(feature = "fs")]
-        if let (Blob::File(f), false) = (self, kept.is_empty()) {
-            ensure!(len <= f.len, "glTF buffer holds {} bytes but declares {len}", f.len);
-            let mut chunk = Vec::new();
-            let mut pos = 0;
-            for (_, start, bytes) in kept {
-                let end = (start + bytes.len() as u64).min(len);
-                if end <= pos {
-                    continue;
-                }
-                let from = (*start).max(pos);
-                f.write_range(pos, from, &mut chunk, w)?;
-                w.write_all(&bytes[usize_of(from - start)..usize_of(end - start)])?;
-                pos = end;
-            }
-            return f.write_range(pos, len, &mut chunk, w);
-        }
-        let _ = kept;
-        self.write_to(len, w)
-    }
-
     fn write_to(&self, len: u64, w: &mut dyn Write) -> Result<()> {
         ensure!(
             len <= self.len(),
@@ -609,25 +410,11 @@ impl Blob<'_> {
             self.len()
         );
         match self {
-            Blob::Borrowed(b) => w.write_all(&b[..usize_of(len)])?,
             Blob::Bytes(b) => w.write_all(&b[..usize_of(len)])?,
-            #[cfg(feature = "fs")]
-            Blob::File(f) => f.write_range(0, len, &mut Vec::new(), w)?,
             Blob::Parts(p) => p.write_to(len, w)?,
             Blob::Missing(_) => bail!("a meshopt fallback buffer has no bytes to write"),
         }
         Ok(())
-    }
-
-    fn into_owned(self) -> Blob<'static> {
-        match self {
-            Blob::Borrowed(b) => Blob::Bytes(Bytes::copy_from_slice(b)),
-            Blob::Bytes(b) => Blob::Bytes(b),
-            #[cfg(feature = "fs")]
-            Blob::File(f) => Blob::File(f),
-            Blob::Parts(p) => Blob::Parts(p),
-            Blob::Missing(n) => Blob::Missing(n),
-        }
     }
 }
 
@@ -635,7 +422,40 @@ fn list<'v>(obj: &'v Map<String, Value>, key: &str) -> &'v [Value] {
     obj.get(key).and_then(Value::as_array).map_or(&[], Vec::as_slice)
 }
 
-impl<'a> Document<'a> {
+impl Default for Document {
+    /// A document that draws nothing: only the `asset` glTF requires.
+    fn default() -> Self {
+        Self::empty(Map::new())
+    }
+}
+
+impl From<Mesh> for Document {
+    /// The document for a mesh: one node drawing one mesh, a primitive per material (and one for
+    /// the lines and one for the points of each, sharing its vertices), its arrays moved into the
+    /// document's buffer without a copy. Skinned primitives, when the mesh has a skeleton, are a
+    /// second mesh on a node with a skin: a node per bone, and inverse bind matrices that bind
+    /// the vertices where they are, so the document draws as the mesh does and moves with its
+    /// bones.
+    fn from(mesh: Mesh) -> Self {
+        Self::from_mesh(mesh, Map::new())
+    }
+}
+
+impl Document {
+    /// The glTF JSON. Its buffers have no `uri`: their bytes are held by the document (see
+    /// [`Document::buffer`]).
+    #[must_use]
+    pub fn json(&self) -> &Map<String, Value> {
+        &self.json
+    }
+
+    /// The glTF JSON, to change. Its `buffers` list must stay one entry for each buffer the
+    /// document holds: add buffers with [`Document::push_buffer`], and leave out a `uri`, which
+    /// is ignored.
+    pub fn json_mut(&mut self) -> &mut Map<String, Value> {
+        &mut self.json
+    }
+
     /// What the file this was read from says about itself: its units, up axis, frame rate, author, tool and
     /// dates, each declared, assumed or unknown, and what the reader converted (see [`crate::source`]). A glTF
     /// file read as it is reports glTF's own: meters, +Y up, right-handed, its `generator` and `copyright`.
@@ -663,9 +483,8 @@ impl<'a> Document<'a> {
         info
     }
 
-    /// A document that draws nothing: only the `asset` glTF requires.
-    #[must_use]
-    pub fn empty(facts: Map<String, Value>) -> Document<'static> {
+    /// A document that draws nothing (only the `asset` glTF requires), with `facts`.
+    pub(crate) fn empty(facts: Map<String, Value>) -> Document {
         let Value::Object(json) = json!({ "asset": { "version": "2.0", "generator": "polysmelt" } }) else {
             unreachable!()
         };
@@ -677,20 +496,6 @@ impl<'a> Document<'a> {
             max_triangles: MAX_TRIANGLES,
             lines_and_points: true,
             max_points: MAX_POINTS,
-        }
-    }
-
-    /// The document with every borrowed buffer copied, so it outlives its input.
-    #[must_use]
-    pub fn into_owned(self) -> Document<'static> {
-        Document {
-            json: self.json,
-            buffers: self.buffers.into_iter().map(Blob::into_owned).collect(),
-            facts: self.facts,
-            refs: self.refs,
-            max_triangles: self.max_triangles,
-            lines_and_points: self.lines_and_points,
-            max_points: self.max_points,
         }
     }
 
@@ -733,12 +538,11 @@ impl<'a> Document<'a> {
         self.max_points = n.min(TRIANGLE_CEILING);
     }
 
-    /// Buffer `i`'s bytes, whole (borrowed when they are in memory in one piece).
+    /// Buffer `i`'s bytes, whole (borrowed when they are in one piece).
     ///
     /// # Errors
     ///
-    /// When buffer `i` doesn't exist, holds no bytes (a meshopt fallback buffer), or its file
-    /// can't be read.
+    /// When buffer `i` doesn't exist or holds no bytes (a meshopt fallback buffer).
     pub fn buffer(&self, i: usize) -> Result<Cow<'_, [u8]>> {
         let b = self
             .buffers
@@ -771,41 +575,44 @@ impl<'a> Document<'a> {
     }
 
     /// Adds a buffer holding `bytes` (a `Vec<u8>` or [`Bytes`], neither copied); returns its
-    /// index.
+    /// index. A JSON `buffers` that isn't a list (left so by [`Document::json_mut`]) is first
+    /// rebuilt as one entry for each buffer the document holds.
     pub fn push_buffer(&mut self, bytes: impl Into<Bytes>) -> usize {
         self.push_blob(Blob::Bytes(bytes.into()))
     }
 
-    pub(crate) fn push_blob(&mut self, blob: Blob<'a>) -> usize {
-        let buffers = self
-            .json
-            .entry("buffers")
-            .or_insert_with(|| json!([]))
-            .as_array_mut()
-            .expect("glTF buffers is a list");
-        buffers.push(json!({ "byteLength": blob.len() }));
+    pub(crate) fn push_blob(&mut self, blob: Blob) -> usize {
+        let held = &self.buffers;
+        let buffers = self.json.entry("buffers").or_insert_with(|| json!([]));
+        if !buffers.is_array() {
+            *buffers = held.iter().map(|b| json!({ "byteLength": b.len() })).collect();
+        }
+        if let Value::Array(list) = buffers {
+            list.push(json!({ "byteLength": blob.len() }));
+        }
         self.buffers.push(blob);
         self.buffers.len() - 1
     }
 
-    /// Adds a buffer view of a whole buffer; returns its index.
+    /// Adds a buffer view; returns its index. A JSON `bufferViews` that isn't a list becomes
+    /// one.
     pub(crate) fn push_view(&mut self, view: Value) -> usize {
-        let views = self
-            .json
-            .entry("bufferViews")
-            .or_insert_with(|| json!([]))
-            .as_array_mut()
-            .expect("glTF bufferViews is a list");
-        views.push(view);
-        views.len() - 1
+        let views = self.json.entry("bufferViews").or_insert_with(|| json!([]));
+        if !views.is_array() {
+            *views = json!([]);
+        }
+        let Value::Array(list) = views else {
+            unreachable!("made a list above")
+        };
+        list.push(view);
+        list.len() - 1
     }
 
     /// The document as a GLB.
     ///
     /// # Errors
     ///
-    /// When a buffer holds fewer bytes than it declares, a buffer's file can't be read, or the
-    /// GLB would be over 4 GiB.
+    /// When a buffer holds fewer bytes than it declares or the GLB would be over 4 GiB.
     pub fn to_glb(&self) -> Result<Vec<u8>> {
         let glb = self.glb()?;
         // Sized up front: a GLB with animation or many textures runs to megabytes.
@@ -815,17 +622,23 @@ impl<'a> Document<'a> {
     }
 
     /// Writes the document as a GLB: the JSON with every buffer's bytes in its binary chunk,
-    /// each where its buffer views (and meshopt data) now point.
+    /// each where its buffer views (and meshopt data) now point. Writes go straight to `w`, a
+    /// piece at a time: wrap a file in a [`BufWriter`](std::io::BufWriter).
+    ///
+    /// ```no_run
+    /// let doc = polysmelt::open("models/Duck.dae")?;
+    /// let file = std::fs::File::create("Duck.glb")?;
+    /// doc.write_glb(std::io::BufWriter::new(file))?;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     ///
     /// # Errors
     ///
     /// As [`Document::to_glb`], and when writing fails.
-    #[allow(
-        clippy::cast_possible_truncation,
-        reason = "each chunk is smaller than `total`, which is checked to fit"
-    )]
-    pub fn write_glb(&self, w: &mut dyn Write) -> Result<()> {
-        self.glb()?.write(self, w)
+    pub fn write_glb<W: Write>(&self, mut w: W) -> Result<()> {
+        self.glb()?.write(self, &mut w)?;
+        w.flush()?;
+        Ok(())
     }
 
     /// The GLB as it will be written: its JSON chunk, and where each buffer goes in its binary
@@ -836,10 +649,7 @@ impl<'a> Document<'a> {
     )]
     fn glb(&self) -> Result<Glb> {
         let mut json = self.json.clone();
-        // What repair read from files is written from memory rather than read again.
-        let (extra, mut kept) = crate::flatten::repaired_keeping(self, &mut json);
-        let extra = extra.map(|b| Blob::Bytes(b.into()));
-        kept.sort_unstable_by_key(|k| (k.0, k.1));
+        let extra = crate::flatten::repaired(self, &mut json).map(|b| Blob::Bytes(b.into()));
         let (json, layout, bin_len) = self.glb_json(json, extra.as_ref())?;
         let mut head = vec![0; 20];
         serde_json::to_writer(&mut head, &Value::Object(json))?;
@@ -859,7 +669,6 @@ impl<'a> Document<'a> {
             padded,
             layout,
             extra,
-            kept,
         })
     }
 
@@ -870,7 +679,7 @@ impl<'a> Document<'a> {
     fn glb_json(
         &self,
         mut json: Map<String, Value>,
-        extra: Option<&Blob<'_>>,
+        extra: Option<&Blob>,
     ) -> Result<(Map<String, Value>, Vec<(usize, u64, u64)>, Option<u64>)> {
         let buffers = list(&json, "buffers");
         let held = self.buffers.len() + usize::from(extra.is_some());
@@ -942,14 +751,9 @@ impl<'a> Document<'a> {
         Ok((json, layout, Some(bin_len)))
     }
 
-    /// The document for a mesh: one node drawing one mesh, a primitive per material (and one for
-    /// the lines and one for the points of each, sharing its vertices),
-    /// its arrays moved into the document's buffer without a copy. Skinned primitives, when the
-    /// mesh has a skeleton, are a second mesh on a node with a skin: a node per bone, and
-    /// inverse bind matrices that bind the vertices where they are, so the document draws as the
-    /// mesh does and moves with its bones.
-    #[must_use]
-    pub fn from_mesh(mesh: Mesh, facts: Map<String, Value>) -> Document<'static> {
+    /// The document for a mesh, as [`From<Mesh>`](#impl-From<Mesh>-for-Document) makes it, with
+    /// `facts`.
+    pub(crate) fn from_mesh(mesh: Mesh, facts: Map<String, Value>) -> Document {
         let Mesh {
             prims,
             materials,
@@ -980,7 +784,7 @@ impl<'a> Document<'a> {
         source: Option<Value>,
         facts: Map<String, Value>,
         skeleton: &[Bone],
-    ) -> Document<'static> {
+    ) -> Document {
         let materials = texcoords(&mut meshes, materials);
         let mut b = Builder::default();
         let rig = (!skeleton.is_empty() && meshes.iter().any(|(_, p)| !p.is_empty() && p.iter().all(Prim::skinned)))
@@ -1460,8 +1264,6 @@ impl Builder {
             .map(|s| match s {
                 Source::Image(i) => i.into_png_or_jpeg().map(Source::Image),
                 r @ Source::Ref(..) => Some(r),
-                #[cfg(feature = "fs")]
-                f @ Source::File(..) => Some(f),
             })
             .collect();
         let mut next = 0;
@@ -1489,11 +1291,6 @@ impl Builder {
                     self.refs.insert(i, r);
                     json!({ "uri": uri })
                 }
-                #[cfg(feature = "fs")]
-                Source::File(span, mime) => {
-                    let v = self.view(Part::File(span), None);
-                    json!({ "bufferView": v, "mimeType": mime })
-                }
             })
             .collect();
         let (textures, samplers, used) = w.finish();
@@ -1519,7 +1316,7 @@ impl Builder {
 
     /// The document: `json` (scenes, nodes, meshes and the rest) with the asset, the accessors,
     /// the views and the one buffer they're on.
-    pub(crate) fn finish(self, mut json: Map<String, Value>, facts: Map<String, Value>) -> Document<'static> {
+    pub(crate) fn finish(self, mut json: Map<String, Value>, facts: Map<String, Value>) -> Document {
         let asset = json.entry("asset").or_insert_with(|| json!({}));
         asset["version"] = json!("2.0");
         if asset.get("generator").is_none() {
@@ -1560,45 +1357,5 @@ impl Builder {
         self.accessors
             .push(json!({ "bufferView": v, "componentType": ctype, "count": count, "type": kind }));
         self.accessors.len() - 1
-    }
-}
-
-#[cfg(all(test, feature = "fs"))]
-mod tests {
-    use std::io::Write as _;
-
-    use super::{BLOCK, FileSpan};
-
-    #[test]
-    fn a_file_span_reads_what_the_file_holds_however_it_is_read() {
-        let bytes: Vec<u8> = (0..12 * BLOCK + 77)
-            .map(|i| (i * 7 + i / 251).to_le_bytes()[0])
-            .collect();
-        let mut file = tempfile::tempfile().unwrap();
-        file.write_all(b"head").unwrap();
-        file.write_all(&bytes).unwrap();
-        let span = FileSpan::new(file, 4, bytes.len() as u64, u64::MAX);
-        let len = bytes.len();
-        // Forward in small steps, hopping around more blocks than are kept, backward, across a
-        // block's end, big reads, the very end.
-        let mut reads: Vec<(usize, usize)> = (0..200).map(|k| (k * 997 % len, 1 + k % 300)).collect();
-        reads.extend((0..100).map(|k| (k * 104_729 % len, 1 + k * 389 % BLOCK)));
-        reads.extend([
-            (BLOCK - 3, 10),
-            (5, BLOCK),
-            (BLOCK - 1, BLOCK - 1),
-            (0, len),
-            (len - 1, 1),
-            (len - 40, 40),
-            (100, 0),
-            (BLOCK, 2),
-        ]);
-        reads.extend((0..50).rev().map(|k| (k * 3989, 64)));
-        for (off, n) in reads {
-            let n = n.min(len - off);
-            let mut out = vec![0; n];
-            span.read_at(off as u64, &mut out).unwrap();
-            assert_eq!(out, bytes[off..off + n], "{n} bytes at {off}");
-        }
     }
 }

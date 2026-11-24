@@ -258,7 +258,7 @@ fn parse(data: &[u8]) -> Result<Parsed> {
 }
 
 /// Reads an OGRE mesh or skeleton, binary or XML.
-pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document<'static>> {
+pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document> {
     let data = input.read()?;
     let name = input
         .path
@@ -646,13 +646,7 @@ fn library(file: &MeshFile, stem: &str, input: &Input<'_>, assets: &dyn Assets) 
     clippy::too_many_lines,
     reason = "one pass over the mesh, in the order glTF wants it"
 )]
-fn mesh_document(
-    file: &MeshFile,
-    stem: &str,
-    input: &Input<'_>,
-    assets: &dyn Assets,
-    keep: Keep,
-) -> Result<Document<'static>> {
+fn mesh_document(file: &MeshFile, stem: &str, input: &Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document> {
     let mut scene = Scene::default();
     let mut facts = Map::new();
 
@@ -1268,7 +1262,7 @@ fn weights_channel(
 
 /// Sets what the shared material writer doesn't: blending by a texture's alpha, texture coordinate sets past the
 /// first, and the scripts' other properties as extras.
-fn finish_materials(doc: &mut Document<'_>, posts: &[MaterialPost], keep: Keep) {
+fn finish_materials(doc: &mut Document, posts: &[MaterialPost], keep: Keep) {
     let Some(Value::Array(mats)) = doc.json.get_mut("materials") else {
         return;
     };

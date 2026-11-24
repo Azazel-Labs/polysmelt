@@ -333,7 +333,7 @@ type Fast = std::hash::BuildHasherDefault<crate::mesh::FxHasher>;
 
 // Load a 3MF: the build as nodes, an object's triangles as a mesh with a primitive per look, and
 /// the facts worth keeping.
-pub(crate) fn load(input: super::Input<'_>, keep: Keep) -> Result<Document<'static>> {
+pub(crate) fn load(input: super::Input<'_>, keep: Keep) -> Result<Document> {
     let mut zip: Zip<'_> = ZipArchive::new(input.seekable()?).context("not a 3MF file (it isn't a zip)")?;
     let names: HashMap<String, String> = zip
         .file_names()
@@ -2007,7 +2007,7 @@ mod tests {
             .collect()
     }
 
-    fn flat(doc: &Document<'_>) -> crate::mesh::Mesh {
+    fn flat(doc: &Document) -> crate::mesh::Mesh {
         doc.flatten(crate::document::Pose::Rest).unwrap().unwrap()
     }
 
@@ -2063,10 +2063,7 @@ mod tests {
         let bytes = std::fs::read(f.path()).unwrap();
         let assets = crate::assets::Memory::new();
         let read = |max_triangles| {
-            let keep = Keep {
-                max_triangles,
-                ..Keep::ALL
-            };
+            let keep = Keep::ALL.with_max_triangles(max_triangles);
             crate::formats::load_bytes(&bytes, "q.3mf", "3mf", &assets, keep)
         };
         // The file's two triangles are refused as they're parsed, under a limit of two.
@@ -2132,13 +2129,13 @@ mod tests {
 
     const CORE: &str = r#"<?xml version="1.0"?><model unit="millimeter" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02""#;
 
-    fn load_zip(files: &[(&str, &str)]) -> Document<'static> {
+    fn load_zip(files: &[(&str, &str)]) -> Document {
         let f = zip_of(files);
         load(crate::formats::Input::file(f.path()), Keep::ALL).unwrap()
     }
 
     /// The hidden nodes' names and `extras.volumeType`.
-    fn hidden(doc: &Document<'_>) -> Vec<(String, String)> {
+    fn hidden(doc: &Document) -> Vec<(String, String)> {
         let nodes = doc.json["nodes"].as_array().unwrap();
         let mut out: Vec<(String, String)> = nodes
             .iter()

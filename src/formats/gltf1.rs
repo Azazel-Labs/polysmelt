@@ -821,7 +821,7 @@ fn light(id: &str, l: &Value) -> Option<Value> {
 }
 
 /// Makes the changes the upgrade left for when the buffers are read.
-pub(crate) fn finish(doc: &mut Document<'_>, fix: &Fixups) -> Result<()> {
+pub(crate) fn finish(doc: &mut Document, fix: &Fixups) -> Result<()> {
     for &a in &fix.joints {
         let (floats, n) = floats(doc, a)?;
         let joints: Vec<u16> = floats
@@ -893,14 +893,14 @@ pub(crate) fn finish(doc: &mut Document<'_>, fix: &Fixups) -> Result<()> {
 }
 
 /// A new buffer and a view of it.
-fn push(doc: &mut Document<'_>, bytes: Vec<u8>) -> usize {
+fn push(doc: &mut Document, bytes: Vec<u8>) -> usize {
     let len = bytes.len();
     let b = doc.push_buffer(bytes);
     doc.push_view(json!({ "buffer": b, "byteLength": len }))
 }
 
 /// Float accessor `a`'s components, and its count.
-fn floats(doc: &Document<'_>, a: usize) -> Result<(Vec<f32>, usize)> {
+fn floats(doc: &Document, a: usize) -> Result<(Vec<f32>, usize)> {
     let acc = &doc.json["accessors"][a];
     let get = |v: &Value, k: &str| v.get(k).and_then(Value::as_u64).unwrap_or(0);
     ensure!(get(acc, "componentType") == 5126, "glTF 1.0 accessor {a} isn't float");

@@ -117,7 +117,7 @@ static NORMALS: [[f32; 3]; 162] = [
 ];
 
 /// Reads an `.md2` model.
-pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document<'static>> {
+pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document> {
     let data = input.read()?;
     let model = parse(&data, keep.morph_targets)?;
     let stem = input

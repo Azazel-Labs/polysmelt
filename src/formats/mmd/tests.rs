@@ -154,7 +154,7 @@ fn pmx_sample(utf8: bool, size: u8) -> Vec<u8> {
     w.out
 }
 
-fn read(bytes: &[u8], name: &str) -> Result<Document<'static>> {
+fn read(bytes: &[u8], name: &str) -> Result<Document> {
     let assets = Memory::new().with("tex/skin.png", PNG.to_vec());
     let ext = name.rsplit('.').next().unwrap();
     load(super::super::Input::memory(bytes, name), ext, &assets, Keep::ALL)
@@ -250,11 +250,7 @@ fn pmx_morph_targets_and_skin() {
 #[test]
 fn reading_less_drops_morphs_and_skins() {
     let bytes = pmx_sample(true, 2);
-    let keep = Keep {
-        morph_targets: false,
-        skins: false,
-        ..Keep::ALL
-    };
+    let keep = Keep::ALL.with_morph_targets(false).with_skins(false);
     let doc = load(
         super::super::Input::memory(&bytes, "m.pmx"),
         "pmx",
