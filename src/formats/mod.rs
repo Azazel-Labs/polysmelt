@@ -158,7 +158,8 @@ mod stl;
     feature = "pcd",
     feature = "xyz",
     feature = "ac3d",
-    feature = "ogex"
+    feature = "ogex",
+    feature = "smd"
 ))]
 #[cfg_attr(
     not(all(feature = "obj", feature = "ply", feature = "stl", feature = "bvh")),
