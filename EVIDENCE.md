@@ -157,7 +157,7 @@ Files no library here reads, Polysmelt included: 11 (Polysmelt's outcome and err
 | assimp/models/glTF2/SchemaFailures/sceneWrongType.gltf | err | glTF buffer "BoxTextured0.bin": No such file or directory (os error 2) |
 | assimp/models/glTF2/malformed_sparse.gltf | err | glTF sparse accessor has no values |
 | assimp/models/invalid/OutOfMemory.off | err | OFF has no faces |
-| assimp/models/invalid/crash-30d6d0f7c529b3b66b4131700b7a4580cd7082df.ply | err | unknown PLY type     |
+| assimp/models/invalid/crash-30d6d0f7c529b3b66b4131700b7a4580cd7082df.ply | err | unknown PLY type \x00\x00\x00 |
 | assimp/models/invalid/empty.3ds | err | not a 3DS file |
 | assimp/models/invalid/empty.off | err | OFF file is empty |
 | assimp/models/invalid/empty.ply | err | PLY header has no end_header |

@@ -71,11 +71,18 @@ def load_json(path, default=None):
         return default
 
 
+def printable(s):
+    """Text for a Markdown cell: newlines become spaces and other control characters (an error
+    message can quote raw file bytes) are written as escapes, so the report stays plain text."""
+    s = str(s).replace("\r\n", " ").replace("\n", " ")
+    return "".join(c if c >= " " and c != "\x7f" else f"\\x{ord(c):02x}" for c in s)
+
+
 def table(head, rows, align=None):
     align = align or ["---"] + ["---:"] * (len(head) - 1)
     out = ["| " + " | ".join(head) + " |", "| " + " | ".join(align) + " |"]
     for r in rows:
-        out.append("| " + " | ".join(str(c).replace("|", "\\|").replace("\n", " ") for c in r) + " |")
+        out.append("| " + " | ".join(printable(c).replace("|", "\\|") for c in r) + " |")
     return "\n".join(out) + "\n"
 
 
@@ -84,7 +91,7 @@ def code(s):
 
 
 def short(s, n=110):
-    s = str(s or "").replace("\n", " ").replace("|", "/")
+    s = printable(s or "").replace("|", "/")
     return s if len(s) <= n else s[: n - 1] + "…"
 
 
