@@ -54,11 +54,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let glb = match cmd.as_str() {
                 "compress" => gltf::compress(&data)?,
                 "compress-khr" => {
-                    let options = gltf::CompressOptions {
-                        level: 3,
-                        color_filter: true,
-                        ..gltf::CompressOptions::KHR
-                    };
+                    let options = gltf::CompressOptions::KHR.level(3).color_filter(true);
                     gltf::compress_with(&data, options)?
                 }
                 "decompress" => gltf::decompress(&data)?,

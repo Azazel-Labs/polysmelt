@@ -1009,7 +1009,10 @@ pub fn encode_filter_quat(data: &[[f32; 4]], bits: u32) -> Vec<u8> {
 }
 
 /// How [`encode_filter_exp`] picks exponents, meshoptimizer's `meshopt_EncodeExpMode`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// Non-exhaustive: meshoptimizer may add modes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum ExpMode {
     /// Each component its own exponent, so the most precision per value. A zero keeps the
     /// exponent the same component had in the element before, which compresses better.
@@ -1106,15 +1109,83 @@ pub fn encode_filter_color(data: &[[f32; 4]], stride: usize, bits: u32) -> Vec<u
     out
 }
 
-/// Applies the named filter to decoded attribute data in place.
+/// A meshopt filter: how decoded attribute data was transformed before it was encoded, undone
+/// by [`apply_filter`]. Parses from, and displays as, its name in the glTF extensions
+/// (`"OCTAHEDRAL"`).
+///
+/// Non-exhaustive: the meshopt extensions may add filters.
+///
+/// ```
+/// use polysmelt::meshopt::Filter;
+///
+/// let filter: Filter = "QUATERNION".parse()?;
+/// assert_eq!(filter, Filter::Quaternion);
+/// assert_eq!(Filter::Color.to_string(), "COLOR");
+/// assert!("SPLINE".parse::<Filter>().is_err());
+/// # Ok::<(), polysmelt::Error>(())
+/// ```
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Filter {
+    /// `NONE`: the data as it is.
+    #[default]
+    None,
+    /// `OCTAHEDRAL`: unit vectors, two components each (4 or 8 byte elements).
+    Octahedral,
+    /// `QUATERNION`: unit quaternions, three components and an index (8 byte elements).
+    Quaternion,
+    /// `EXPONENTIAL`: floats as an exponent and mantissa each (elements a multiple of 4 bytes).
+    Exponential,
+    /// `COLOR` (`KHR_meshopt_compression` only): RGBA colors as `YCoCg` (4 or 8 byte elements).
+    Color,
+}
+
+impl Filter {
+    /// The filter's name in the glTF extensions: `"OCTAHEDRAL"`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Filter::None => "NONE",
+            Filter::Octahedral => "OCTAHEDRAL",
+            Filter::Quaternion => "QUATERNION",
+            Filter::Exponential => "EXPONENTIAL",
+            Filter::Color => "COLOR",
+        }
+    }
+}
+
+impl std::fmt::Display for Filter {
+    /// [`Filter::as_str`].
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for Filter {
+    type Err = Error;
+
+    /// A filter by its name in the glTF extensions, exactly (`"OCTAHEDRAL"`).
+    fn from_str(s: &str) -> Result<Self> {
+        Ok(match s {
+            "NONE" => Filter::None,
+            "OCTAHEDRAL" => Filter::Octahedral,
+            "QUATERNION" => Filter::Quaternion,
+            "EXPONENTIAL" => Filter::Exponential,
+            "COLOR" => Filter::Color,
+            _ => return Err(bad(&format!("unknown filter {}", crate::shown(s.as_bytes())))),
+        })
+    }
+}
+
+/// Undoes `filter` on decoded attribute data in place, elements of `stride` bytes.
 ///
 /// # Errors
 ///
-/// When `filter` is unknown, or `stride` doesn't suit it.
-pub fn apply_filter(filter: &str, data: &mut [u8], stride: usize) -> Result<()> {
+/// When `stride` doesn't suit the filter.
+pub fn apply_filter(filter: Filter, data: &mut [u8], stride: usize) -> Result<()> {
     match filter {
-        "NONE" => {}
-        "OCTAHEDRAL" if stride == 4 => {
+        Filter::None => {}
+        Filter::Octahedral if stride == 4 => {
             for e in data.chunks_exact_mut(4) {
                 let [x, y, z] = octahedral(
                     [f32::from(e[0] as i8), f32::from(e[1] as i8), f32::from(e[2] as i8)],
@@ -1123,7 +1194,7 @@ pub fn apply_filter(filter: &str, data: &mut [u8], stride: usize) -> Result<()> 
                 e[..3].copy_from_slice(&[x as i8 as u8, y as i8 as u8, z as i8 as u8]);
             }
         }
-        "OCTAHEDRAL" if stride == 8 => {
+        Filter::Octahedral if stride == 8 => {
             for e in data.chunks_exact_mut(8) {
                 let c = |i: usize| f32::from(i16::from_le_bytes([e[2 * i], e[2 * i + 1]]));
                 let out = octahedral([c(0), c(1), c(2)], 32767.0);
@@ -1132,7 +1203,7 @@ pub fn apply_filter(filter: &str, data: &mut [u8], stride: usize) -> Result<()> 
                 }
             }
         }
-        "QUATERNION" if stride == 8 => {
+        Filter::Quaternion if stride == 8 => {
             for e in data.chunks_exact_mut(8) {
                 let c = |i: usize| i16::from_le_bytes([e[2 * i], e[2 * i + 1]]);
                 let range = std::f32::consts::FRAC_1_SQRT_2;
@@ -1151,7 +1222,7 @@ pub fn apply_filter(filter: &str, data: &mut [u8], stride: usize) -> Result<()> 
                 }
             }
         }
-        "EXPONENTIAL" if stride.is_multiple_of(4) => {
+        Filter::Exponential if stride.is_multiple_of(4) => {
             for e in data.chunks_exact_mut(4) {
                 let v = i32::from_le_bytes([e[0], e[1], e[2], e[3]]);
                 let m = (v << 8) >> 8;
@@ -1159,7 +1230,7 @@ pub fn apply_filter(filter: &str, data: &mut [u8], stride: usize) -> Result<()> 
                 e.copy_from_slice(&f.to_le_bytes());
             }
         }
-        "COLOR" if stride == 4 => {
+        Filter::Color if stride == 4 => {
             for e in data.chunks_exact_mut(4) {
                 let rgba = ycocg(
                     [e[0].into(), i32::from(e[1] as i8), i32::from(e[2] as i8), e[3].into()],
@@ -1170,7 +1241,7 @@ pub fn apply_filter(filter: &str, data: &mut [u8], stride: usize) -> Result<()> 
                 }
             }
         }
-        "COLOR" if stride == 8 => {
+        Filter::Color if stride == 8 => {
             for e in data.chunks_exact_mut(8) {
                 let c = |i: usize| u16::from_le_bytes([e[2 * i], e[2 * i + 1]]);
                 let rgba = ycocg(
@@ -1406,7 +1477,7 @@ mod tests {
         let mut c8 = vec![
             0x40, 0x7f, 0xc1, 0xff, 0x7f, 0x00, 0x7f, 0xc0, 0x40, 0x81, 0xc0, 0xa0, 0x66, 0x00, 0x00, 0xdf,
         ];
-        apply_filter("COLOR", &mut c8, 4).unwrap();
+        apply_filter(Filter::Color, &mut c8, 4).unwrap();
         for (i, &v) in c8.iter().enumerate() {
             assert!((f32::from(v) / 255.0 - want[i / 4][i % 4]).abs() < 1e-2, "{i}: {v}");
         }
@@ -1416,7 +1487,7 @@ mod tests {
             0x0000, 0x0000, 0x0dff,
         ];
         let mut b: Vec<u8> = c12.iter().flat_map(|v| v.to_le_bytes()).collect();
-        apply_filter("COLOR", &mut b, 8).unwrap();
+        apply_filter(Filter::Color, &mut b, 8).unwrap();
         for (i, c) in b.chunks_exact(2).enumerate() {
             let v = f32::from(u16::from_le_bytes([c[0], c[1]])) / 65535.0;
             assert!((v - want[i / 4][i % 4]).abs() < 1e-3, "{i}: {v}");
@@ -1449,7 +1520,7 @@ mod tests {
             let v = [r.f32() - 0.5, r.f32() - 0.5, r.f32() - 0.5];
             let n = normalize(v).unwrap_or([0.0, 0.0, 1.0]);
             let mut e = encode_oct8(n, -1.0).to_vec();
-            apply_filter("OCTAHEDRAL", &mut e, 4).unwrap();
+            apply_filter(Filter::Octahedral, &mut e, 4).unwrap();
             let d = normalize([f32::from(e[0] as i8), f32::from(e[1] as i8), f32::from(e[2] as i8)]).unwrap();
             let dot: f32 = (0..3).map(|i| d[i] * n[i]).sum();
             assert!(dot > 0.999, "{n:?} -> {d:?}");
@@ -1655,7 +1726,7 @@ mod tests {
         ] {
             let mut enc = encode_filter_exp(&exp, 8, 15, mode);
             assert_eq!(words(&enc), want, "{mode:?}");
-            apply_filter("EXPONENTIAL", &mut enc, 8).unwrap();
+            apply_filter(Filter::Exponential, &mut enc, 8).unwrap();
             for (d, x) in words(&enc).into_iter().map(f32::from_bits).zip(exp) {
                 assert!((d - x).abs() < 1e-3, "{mode:?}: {d} {x}");
             }
@@ -1663,13 +1734,13 @@ mod tests {
         let zero = [0.0, -0.0, 1.175_494_4e-38, -1.175_494_4e-38];
         let mut enc = encode_filter_exp(&zero, 4, 15, ExpMode::Separate);
         assert_eq!(words(&enc), [0xf200_0000, 0xf200_0000, 0x8e00_0000, 0x8e00_0000]);
-        apply_filter("EXPONENTIAL", &mut enc, 4).unwrap();
+        apply_filter(Filter::Exponential, &mut enc, 4).unwrap();
         assert!(words(&enc).into_iter().all(|w| f32::from_bits(w) == 0.0));
         // At 24 bits an all-ones mantissa rounds up to 2^23, which clamps.
         let overflow = [0.999_999_94, -0.999_999_94, 255.999_98, 1.0];
         let mut enc = encode_filter_exp(&overflow, 4, 24, ExpMode::Separate);
         assert_eq!(words(&enc), [0xe97f_ffff, 0xe980_0000, 0xf17f_ffff, 0xea40_0000]);
-        apply_filter("EXPONENTIAL", &mut enc, 4).unwrap();
+        apply_filter(Filter::Exponential, &mut enc, 4).unwrap();
         let got: Vec<f32> = words(&enc).into_iter().map(f32::from_bits).collect();
         assert_eq!(got, [0.999_999_9, -1.0, 255.999_97, 1.0]);
         let shared = [0.0, 0.1, -0.025, -0.0];
@@ -1685,7 +1756,7 @@ mod tests {
         ] {
             let mut enc = encode_filter_exp(&shared, 8, 15, mode);
             assert_eq!(words(&enc), want, "{mode:?}");
-            apply_filter("EXPONENTIAL", &mut enc, 8).unwrap();
+            apply_filter(Filter::Exponential, &mut enc, 8).unwrap();
             let got: Vec<f32> = words(&enc).into_iter().map(f32::from_bits).collect();
             assert!(got[0] == 0.0 && got[3] == 0.0, "{mode:?}");
         }
@@ -1737,7 +1808,7 @@ mod tests {
         for (stride, bits, min_dot) in [(4, 8, 0.999), (8, 10, 0.9999), (8, 12, 0.999_99), (8, 16, 0.999_999)] {
             let data: Vec<[f32; 4]> = vectors.iter().map(|v| [v[0], v[1], v[2], -1.0]).collect();
             let mut enc = encode_filter_oct(&data, stride, bits);
-            apply_filter("OCTAHEDRAL", &mut enc, stride).unwrap();
+            apply_filter(Filter::Octahedral, &mut enc, stride).unwrap();
             for (e, v) in enc.chunks_exact(stride).zip(&data) {
                 let d = normalize([0, 1, 2].map(|i| component(e, i, stride, true))).unwrap();
                 let dot = (0..3).map(|i| d[i] * v[i]).sum::<f32>();
@@ -1749,7 +1820,7 @@ mod tests {
         let quats: Vec<[f32; 4]> = (0..500).map(|_| unit(4)).collect();
         for (bits, min_dot) in [(8, 0.998), (12, 0.9999), (16, 0.9999)] {
             let mut enc = encode_filter_quat(&quats, bits);
-            apply_filter("QUATERNION", &mut enc, 8).unwrap();
+            apply_filter(Filter::Quaternion, &mut enc, 8).unwrap();
             for (e, q) in enc.chunks_exact(8).zip(&quats) {
                 let d = [0, 1, 2, 3].map(|i| component(e, i, 8, true));
                 let dot = (0..4).map(|i| d[i] * q[i]).sum::<f32>().abs();
@@ -1773,7 +1844,7 @@ mod tests {
                     })
                     .collect();
                 let mut enc = encode_filter_exp(&data, stride, bits, mode);
-                apply_filter("EXPONENTIAL", &mut enc, stride).unwrap();
+                apply_filter(Filter::Exponential, &mut enc, stride).unwrap();
                 let got: Vec<f32> = words(&enc).into_iter().map(f32::from_bits).collect();
                 // The error is half a step of the exponent the value shared, in units of the
                 // largest value sharing it.
@@ -1798,7 +1869,7 @@ mod tests {
         let colors: Vec<[f32; 4]> = (0..500).map(|_| [0; 4].map(|_| r.f32())).collect();
         for (stride, bits) in [(4, 8), (4, 5), (8, 10), (8, 12), (8, 16)] {
             let mut enc = encode_filter_color(&colors, stride, bits);
-            apply_filter("COLOR", &mut enc, stride).unwrap();
+            apply_filter(Filter::Color, &mut enc, stride).unwrap();
             let step = 1.0 / ((1u32 << bits) - 1) as f32;
             let output = if stride == 4 { 0.5 / 255.0 } else { 0.5 / 65535.0 };
             for (e, c) in enc.chunks_exact(stride).zip(&colors) {
