@@ -64,8 +64,23 @@ fn opt<'a>(opts: &'a BTreeMap<String, Vec<String>>, k: &str) -> Option<&'a str> 
     opts.get(k).and_then(|v| v.last()).map(String::as_str)
 }
 
+/// A comma-separated list; a comma inside parentheses belongs to the item, as in the loader
+/// name `polysmelt (threads: 0, all cores)`.
 fn list_opt(opts: &BTreeMap<String, Vec<String>>, k: &str) -> Option<Vec<String>> {
-    opt(opts, k).map(|v| v.split(',').map(|s| s.trim().to_owned()).filter(|s| !s.is_empty()).collect())
+    opt(opts, k).map(|v| {
+        let mut depth = 0i32;
+        v.split(|c: char| {
+            match c {
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                _ => {}
+            }
+            c == ',' && depth == 0
+        })
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .collect()
+    })
 }
 
 fn main() {
