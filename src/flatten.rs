@@ -104,7 +104,8 @@ impl Document<'_> {
     /// order, without padding), as a renderer reads them: meshopt-compressed views decoded,
     /// sparse substitutions applied, normalized integers mapped to [0, 1] or [-1, 1] and other
     /// integers as they are (exact below 2^24). An accessor without a buffer view reads as
-    /// zeros under its sparse values: Draco-compressed data needs [`Document::decode`] first.
+    /// zeros under its sparse values, unless a Draco stream holds it: then it reads as that stream
+    /// decodes (which needs the `draco` feature).
     ///
     /// # Errors
     ///
@@ -112,6 +113,7 @@ impl Document<'_> {
     /// compressed view doesn't decode.
     pub fn read_floats(&self, accessor: usize) -> Result<(usize, Vec<f32>)> {
         let mut r = Reader::bare(self);
+        r.draco_holding(accessor)?;
         let a = r.acc(accessor)?;
         let values = match a.n {
             1 => r.read_acc(&a, [0.0])?.into_flattened(),
@@ -131,7 +133,9 @@ impl Document<'_> {
     ///
     /// As [`Document::read_floats`], and when the accessor isn't unsigned integer scalars.
     pub fn read_indices(&self, accessor: usize) -> Result<Vec<u32>> {
-        Reader::bare(self).read_indices(accessor)
+        let mut r = Reader::bare(self);
+        r.draco_holding(accessor)?;
+        r.read_indices(accessor)
     }
 
     /// How many triangles, points and line segments the default scene draws (every instance
@@ -928,6 +932,38 @@ impl<'d> Reader<'d> {
     }
 
     /// An index accessor's values.
+    /// Decodes the Draco stream holding accessor `i`, when it has no buffer view of its own and
+    /// a primitive's `KHR_draco_mesh_compression` names it.
+    fn draco_holding(&mut self, i: usize) -> Result<()> {
+        if self.draco.iter().any(|d| d.0 == i) || self.get("accessors", i)?.get("bufferView").is_some() {
+            return Ok(());
+        }
+        let meshes = self.meshes;
+        let found = meshes.iter().flat_map(|m| items(m, "primitives")).find_map(|p| {
+            let ext = p.get("extensions")?.get("KHR_draco_mesh_compression")?;
+            let attrs = p.get("attributes")?;
+            let names = ext.get("attributes").and_then(Value::as_object);
+            let holds = index(p, "indices") == Some(i)
+                || names
+                    .into_iter()
+                    .flat_map(|n| n.keys())
+                    .any(|n| index(attrs, n) == Some(i));
+            holds.then(|| (ext, attrs, index(p, "indices")))
+        });
+        let Some((ext, attrs, indices)) = found else {
+            return Ok(());
+        };
+        #[cfg(feature = "draco")]
+        {
+            self.decode_draco(ext, attrs, indices)
+        }
+        #[cfg(not(feature = "draco"))]
+        {
+            let _ = (ext, attrs, indices);
+            bail!("glTF accessor {i} is Draco-compressed, which needs Polysmelt's `draco` feature")
+        }
+    }
+
     fn read_indices(&mut self, i: usize) -> Result<Vec<u32>> {
         let a = self.acc(i)?;
         self.read_index_acc(i, &a)
@@ -3813,5 +3849,29 @@ mod tests {
         assert_eq!(back.prims[1].points, mesh.prims[1].points);
         assert!(back.prims[1].normals.is_empty(), "no normals are made up for points");
         assert!(to_glb(&back).unwrap() == glb, "written again, the same bytes");
+    }
+
+    #[cfg(feature = "draco")]
+    #[test]
+    fn draco_compressed_accessors_read_as_their_stream_decodes() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/gltf/blender_draco/draco.glb");
+        let dir = path.parent().unwrap();
+        let doc = crate::formats::load(&path, "glb", &Folder::new(dir), Keep::ALL).unwrap();
+        let mut decoded = crate::formats::load(&path, "glb", &Folder::new(dir), Keep::ALL).unwrap();
+        decoded.decode().unwrap();
+        let prim = &doc.json["meshes"][0]["primitives"][0];
+        let position = usize::try_from(prim["attributes"]["POSITION"].as_u64().unwrap()).unwrap();
+        let indices = usize::try_from(prim["indices"].as_u64().unwrap()).unwrap();
+        assert!(
+            doc.json["accessors"][position].get("bufferView").is_none(),
+            "the data is in the stream"
+        );
+        let (n, floats) = doc.read_floats(position).unwrap();
+        assert_eq!((n, &floats), (3, &decoded.read_floats(position).unwrap().1));
+        assert!(floats.iter().any(|&f| f != 0.0), "not zeros");
+        assert_eq!(
+            doc.read_indices(indices).unwrap(),
+            decoded.read_indices(indices).unwrap()
+        );
     }
 }
