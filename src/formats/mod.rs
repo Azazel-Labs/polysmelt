@@ -753,12 +753,19 @@ vt 0 1
 
     #[test]
     fn missing_feature_and_unknown_extension() {
+        #[cfg_attr(
+            all(feature = "usd", feature = "gltf"),
+            allow(unused_variables, reason = "only for a missing feature")
+        )]
         let err = |ext| {
             load(Path::new("x"), ext, &Folder::new("."), Keep::ALL)
                 .unwrap_err()
                 .to_string()
         };
-        assert!(err("blend").contains("not a model format"));
+        // An unknown extension is sniffed first: bytes that say nothing leave it unknown.
+        let none = Memory::new();
+        let blend = super::load_bytes(b"BLENDER-v300 not modeled here", "x.blend", "blend", &none, Keep::ALL);
+        assert!(blend.unwrap_err().to_string().contains("not a model format"));
         #[cfg(not(feature = "usd"))]
         assert!(err("usdz").contains("without the `usd` feature"));
         #[cfg(not(feature = "gltf"))]
