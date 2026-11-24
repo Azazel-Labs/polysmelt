@@ -7,8 +7,9 @@
 //! stops at 3). The coordinate system extension record names the file's axes; without it they
 //! are right, up and back, glTF's own. Axes that differ only in direction are flipped in the
 //! data; those that also swap up and forward are turned on the node, as turning spherical
-//! harmonics would cost precision. The header's version, spherical-harmonic degree and
-//! antialiasing flag go in the asset's `extras.source`. Version 4 (zstd streams in a container
+//! harmonics would cost precision. The source info has the header's version and the axes' up and
+//! handedness (declared by the record, else glTF's, assumed); the spherical-harmonic degree, the
+//! antialiasing flag and the record's coordinate system code stay in the asset's `extras.source`. Version 4 (zstd streams in a container
 //! of their own) isn't read.
 //!
 //! The point count is checked against [`Keep::max_points`], and the data is inflated only as
@@ -27,6 +28,7 @@ use crate::document::{Document, Keep};
 use crate::gaussian::{REST, Splats, rotation};
 use crate::keep::spawn;
 use crate::num::usize_of;
+use crate::source::{Axis, Fact, Handedness, SourceInfo};
 use crate::{Context as _, Result};
 
 /// "NGSP", little-endian, which starts the header.
@@ -76,13 +78,10 @@ fn decode(bytes: &[u8], max: usize, threads: usize) -> Result<Document<'static>>
         n <= max,
         "{n} gaussian splats, more than the {max} allowed (Keep::max_points)"
     );
-    let mut source = json!({
-        "format": "SPZ",
-        "version": version,
-        "antialiased": flags & 1 != 0,
-    });
+    let mut source = Map::new();
+    source.insert("antialiased".into(), json!(flags & 1 != 0));
     if degree > 3 {
-        source["droppedShDegree"] = json!(degree);
+        source.insert("droppedShDegree".into(), json!(degree));
     }
     let pos_size = if version == 1 { 6 } else { 9 };
     let rot_size = if version >= 3 { 4 } else { 3 };
@@ -111,11 +110,21 @@ fn decode(bytes: &[u8], max: usize, threads: usize) -> Result<Document<'static>>
     let records = &data[core..];
     let system = if flags & 2 != 0 { coordinates(records) } else { 0 };
     if system != 0 {
-        source["coordinateSystem"] = json!(system);
+        source.insert("coordinateSystem".into(), json!(system));
     }
     let (flip, turn) = axes(system);
     s.flip(flip);
-    Ok(s.document(source, turn, Map::new()))
+    let (up_axis, handedness) = frame(system);
+    let mut info = SourceInfo {
+        format: Some("SPZ".into()),
+        version: Some(version.to_string()),
+        up_axis,
+        handedness,
+        ..SourceInfo::default()
+    };
+    info.converted.up_axis = up_axis.value() != Some(&Axis::PosY);
+    info.converted.handedness = handedness.value() == Some(&Handedness::Left);
+    Ok(s.document(&info, source, turn, Map::new()))
 }
 
 /// The splats unpacked as their bytes are inflated: the sizes of the sections of the stream (each a
@@ -313,6 +322,26 @@ fn axes(system: u32) -> ([f32; 3], Option<[f32; 4]>) {
     }
 }
 
+/// A coordinate system's up axis and handedness: declared when the file names the system, else
+/// glTF's own (+Y up, right-handed), assumed as SPZ's default.
+fn frame(system: u32) -> (Fact<Axis>, Fact<Handedness>) {
+    // Bit 0 is right (not left), bit 1 up (not down) and bit 2 forward (not back); the second
+    // letter is up or down in systems 1 to 8, the third in 9 to 16. Either way, each of left, down
+    // and forward flips a right-handed system (RUB, RFU).
+    let (k, up, down) = match system {
+        1..=8 => (system - 1, Axis::PosY, Axis::NegY),
+        9..=16 => (system - 9, Axis::PosZ, Axis::NegZ),
+        _ => return (Fact::Assumed(Axis::PosY), Fact::Assumed(Handedness::Right)),
+    };
+    let flips = u32::from(k & 1 == 0) + u32::from(k & 2 == 0) + u32::from(k & 4 != 0);
+    let hand = if flips % 2 == 0 {
+        Handedness::Right
+    } else {
+        Handedness::Left
+    };
+    (Fact::Declared(if k & 2 != 0 { up } else { down }), Fact::Declared(hand))
+}
+
 /// A rotation packed as its three smallest components, 10 bits each (9 of magnitude and a sign),
 /// below the two bits that say which of x, y, z, w is the largest, which is positive.
 fn smallest_three(mut packed: u32) -> [f32; 4] {
@@ -411,6 +440,11 @@ mod tests {
                     "version {version}, degree {degree}"
                 );
                 assert_eq!(doc.json["asset"]["extras"]["source"]["antialiased"], true);
+                let info = doc.source_info();
+                assert_eq!(info.version, Some(version.to_string()));
+                assert_eq!(info.up_axis, Fact::Assumed(Axis::PosY));
+                assert_eq!(info.meters_per_unit, Fact::Unknown);
+                assert!(!info.converted.up_axis && !info.converted.handedness);
                 doc.to_glb().unwrap();
                 let m = doc.flatten(Pose::Rest).unwrap().unwrap();
                 assert_eq!(m.points(), 50);
@@ -459,6 +493,29 @@ mod tests {
 
     #[test]
     fn coordinate_systems_flip_and_turn() {
+        assert_eq!(frame(0), (Fact::Assumed(Axis::PosY), Fact::Assumed(Handedness::Right)));
+        // RUB, RDF and LUB; RFU, RBU and LFD.
+        assert_eq!(
+            frame(4),
+            (Fact::Declared(Axis::PosY), Fact::Declared(Handedness::Right))
+        );
+        assert_eq!(
+            frame(6),
+            (Fact::Declared(Axis::NegY), Fact::Declared(Handedness::Right))
+        );
+        assert_eq!(frame(3), (Fact::Declared(Axis::PosY), Fact::Declared(Handedness::Left)));
+        assert_eq!(
+            frame(12),
+            (Fact::Declared(Axis::PosZ), Fact::Declared(Handedness::Right))
+        );
+        assert_eq!(
+            frame(16),
+            (Fact::Declared(Axis::PosZ), Fact::Declared(Handedness::Left))
+        );
+        assert_eq!(
+            frame(9),
+            (Fact::Declared(Axis::NegZ), Fact::Declared(Handedness::Right))
+        );
         assert_eq!(axes(0), ([1.0, 1.0, 1.0], None));
         assert_eq!(axes(4), ([1.0, 1.0, 1.0], None));
         assert_eq!(axes(6), ([1.0, -1.0, -1.0], None));

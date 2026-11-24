@@ -60,8 +60,8 @@
     ],
     "source": {
       "format": "3DS",
-      "upAxis": "Z",
-      "version": 3,
+      "upAxis": "+Z",
+      "version": "3",
       "meshVersion": 3,
       "masterScale": 1.0
     }

@@ -24,6 +24,6 @@
   "uvs": false,
   "json": {
     "/asset/extras/source/unit": "millimeter",
-    "/asset/extras/source/upAxis": "Z"
+    "/asset/extras/source/upAxis": "+Z"
   }
 }

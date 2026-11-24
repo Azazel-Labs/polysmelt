@@ -178,7 +178,7 @@ case(FMT, "scene_translation",
      {"scene.vox": scene([CUBE2], [(0, {"_t": "10 0 3"}, {"_name": "crate"}, 0)])},
      {"spec": EXT + ": nTRN _t translation; the model centred on floor(size / 2); _name names the node",
       "source": SRC, "area": 24, "bounds": bounds([9, -1, 2], [11, 1, 4]),
-      "document": {"nodes": 2, "node_names": ["crate"], "source": {"format": "VOX", "version": 200}}})
+      "document": {"nodes": 2, "node_names": ["crate"], "source": {"format": "VOX", "version": "200"}}})
 
 case(FMT, "scene_odd_size_pivot",
      {"scene.vox": scene([((3, 1, 1), block(3, 1, 1))], [(0, {}, {}, 0)])},

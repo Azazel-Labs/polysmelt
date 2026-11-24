@@ -11,14 +11,21 @@
 //! are a mesh in its own space, shared wherever it's placed in the same filament, its corners
 //! sharing vertices as the object's triangles do. A part or volume that isn't printed is a hidden
 //! node (`KHR_node_visibility`) named for what it is. A component that leads back to an object it's
-//! inside is left out. Object names, types and part numbers, the model's metadata, its unit and the
-//! slicer's filament colors go in extras.
+//! inside is left out. Object names, types and part numbers, the model's metadata and the slicer's filament
+//! colors go in extras.
+//!
+//! The source's units are declared by the model's `unit`, or millimeters assumed when it has none, as the
+//! specification says; its up axis is +Z and its handedness right, as the specification fixes them. The
+//! model's metadata the specification names (`Title`, `Designer`, `Description`, `Copyright`,
+//! `LicenseTerms`, `CreationDate`, `ModificationDate`, `Application`) are the source's title, author,
+//! description, copyright, license, dates and tool; the rest stay in its `metadata`.
 
 use std::collections::{HashMap, HashSet};
 use std::io::{BufReader, Read};
 
 use crate::document::{Builder, Document, Keep};
 use crate::images::{Images, Location};
+use crate::source::{Axis, Fact, Handedness, SourceInfo};
 use crate::{Context as _, Result};
 use quick_xml::events::{BytesStart, Event};
 use serde_json::{Map, Value, json};
@@ -195,7 +202,6 @@ struct Part {
     /// The display properties of a group, by group id.
     group_display: HashMap<u32, u32>,
     build: Vec<Item>,
-    application: Option<String>,
     /// Every `<metadata name>` and its text.
     metadata: Vec<(String, String)>,
     unit: Option<String>,
@@ -399,12 +405,8 @@ pub(crate) fn load(input: super::Input<'_>, keep: Keep) -> Result<Document<'stat
     let mut facts = Map::new();
     facts.insert("triangles".into(), json!(out.triangles));
     facts.insert("objects".into(), json!(main.build.len()));
-    facts.insert("unit".into(), json!(unit));
     if out.distinct.len() > 1 {
         facts.insert("colors".into(), json!(out.distinct.len()));
-    }
-    if let Some(app) = main.application.as_ref().filter(|a| !a.is_empty()) {
-        facts.insert("application".into(), json!(app));
     }
 
     let mut images = Images::new(!keep.image_bytes, std::path::Path::new(""));
@@ -449,10 +451,45 @@ pub(crate) fn load(input: super::Input<'_>, keep: Keep) -> Result<Document<'stat
         materials.push(material);
     }
 
-    let mut source = json!({ "format": "3MF", "unit": unit, "metersPerUnit": scale, "upAxis": "Z" });
-    if !main.metadata.is_empty() {
-        let m: Map<String, Value> = main.metadata.iter().map(|(k, v)| (k.clone(), json!(v))).collect();
-        source["metadata"] = Value::Object(m);
+    let mut info = SourceInfo {
+        format: Some("3MF".into()),
+        meters_per_unit: if main.unit.is_some() {
+            Fact::Declared(scale)
+        } else {
+            Fact::Assumed(scale)
+        },
+        unit: Some(unit),
+        up_axis: Fact::Declared(Axis::PosZ),
+        handedness: Fact::Declared(Handedness::Right),
+        ..SourceInfo::default()
+    };
+    info.converted.units = (scale - 1.0).abs() > f64::EPSILON;
+    info.converted.up_axis = true;
+    let mut source = json!({});
+    let mut metadata = Map::new();
+    for (k, v) in &main.metadata {
+        let slot = match k.to_ascii_lowercase().as_str() {
+            "title" => &mut info.title,
+            "designer" => &mut info.author,
+            "description" => &mut info.description,
+            "copyright" => &mut info.copyright,
+            "licenseterms" => &mut info.license,
+            "creationdate" => &mut info.created,
+            "modificationdate" => &mut info.modified,
+            "application" => &mut info.tool,
+            _ => {
+                metadata.insert(k.clone(), json!(v));
+                continue;
+            }
+        };
+        if slot.is_none() && !v.is_empty() {
+            *slot = Some(v.clone());
+        } else {
+            metadata.insert(k.clone(), json!(v));
+        }
+    }
+    if !metadata.is_empty() {
+        source["metadata"] = Value::Object(metadata);
     }
     if !slicer.filaments.is_empty() {
         let hex: Vec<String> = slicer
@@ -464,6 +501,9 @@ pub(crate) fn load(input: super::Input<'_>, keep: Keep) -> Result<Document<'stat
     }
     if out.dropped > 0 {
         source["droppedComponents"] = json!(out.dropped);
+    }
+    if let Value::Object(m) = &mut source {
+        info.write(m);
     }
     let Emit {
         mut b,
@@ -991,9 +1031,6 @@ fn parse_part(r: impl Read, triangles: &mut usize, limit: usize) -> Result<Part>
             Event::Text(t) => {
                 if let Some(name) = meta.take() {
                     let text = String::from_utf8_lossy(&t).trim().to_owned();
-                    if name.eq_ignore_ascii_case("Application") {
-                        part.application = Some(text.clone());
-                    }
                     part.metadata.push((name, text));
                 }
                 buf.clear();
@@ -1672,7 +1709,14 @@ mod tests {
         assert_eq!(facts["triangles"], 4);
         assert_eq!(facts["objects"], 2);
         assert_eq!(facts["colors"], 2);
-        assert_eq!(facts["application"], "Test Exporter");
+        let info = doc.source_info();
+        assert_eq!(info.tool.as_deref(), Some("Test Exporter"));
+        assert!(doc.json["asset"]["extras"]["source"].get("metadata").is_none());
+        assert_eq!(info.meters_per_unit, Fact::Declared(0.001));
+        assert_eq!(info.unit.as_deref(), Some("millimeter"));
+        assert_eq!(info.up_axis, Fact::Declared(Axis::PosZ));
+        assert!(info.converted.units && info.converted.up_axis);
+        assert!(facts.get("application").is_none() && facts.get("unit").is_none());
         assert_eq!(colors(&mesh), [[255, 0, 0], [0, 0, 255]]);
         // The first item moved 100 mm along x.
         assert!(mesh.prims[0].positions.iter().any(|p| p[0] >= 0.1));

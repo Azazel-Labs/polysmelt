@@ -98,7 +98,7 @@ CUBE = {"triangles": 12, "faces_outward": True, "facts": {"triangles": 12, "obje
 case(FMT, "cube_millimeters", {"cube.amf": amf(obj(1, CUBE10, [volume(TRIS)]))},
      {"spec": f"{SPEC}: a 10 mm cube, millimeters when the unit is unsaid, Z up", "source": SRC, **CUBE,
       "bounds": bounds(CUBE10, 1e-3), "area": 6e-4, "colors": False, "uvs": False,
-      "json": {"/asset/extras/source/unit": "millimeter", "/asset/extras/source/upAxis": "Z"}})
+      "json": {"/asset/extras/source/unit": "millimeter", "/asset/extras/source/upAxis": "+Z"}})
 
 for unit, scale in [("inch", 0.0254), ("feet", 0.3048), ("meter", 1.0), ("centimeter", 0.01), ("micron", 1e-6)]:
     case(FMT, f"unit_{unit}", {"cube.amf": amf(obj(1, CUBE_V, [volume(TRIS)]), unit)},
@@ -108,7 +108,8 @@ for unit, scale in [("inch", 0.0254), ("feet", 0.3048), ("meter", 1.0), ("centim
 case(FMT, "unit_unknown", {"cube.amf": amf(obj(1, CUBE10, [volume(TRIS)]), "furlong")},
      {"spec": f"{SPEC}: a unit the standard doesn't name, read as millimeters and marked", "source": SRC,
       "triangles": 12, "bounds": bounds(CUBE10, 1e-3),
-      "json": {"/asset/extras/source/unit": "furlong", "/asset/extras/source/unknownUnit": True}})
+      "json": {"/asset/extras/source/unit": "furlong", "/asset/extras/source/metersPerUnit": 0.001,
+               "/asset/extras/source/assumed/0": "metersPerUnit"}})
 
 VCOL = {0: (1, 0, 0), 1: (0, 1, 0), 2: (0, 0, 1), 3: (1, 1, 0), 4: (0, 1, 1), 5: (1, 0, 1), 6: (0.5, 0.5, 0.5),
         7: (1, 1, 1)}
@@ -200,8 +201,8 @@ meta = ('<metadata type="name">Calibration cube</metadata><metadata type="author
         '<metadata type="cad">amf.py</metadata>')
 case(FMT, "metadata", {"cube.amf": amf(meta + obj(1, CUBE10, [volume(TRIS)]))},
      {"spec": f"{SPEC}: the model's metadata", "source": SRC, "triangles": 12,
-      "json": {"/asset/extras/source/metadata/name": "Calibration cube",
-               "/asset/extras/source/metadata/author": "tools/corpus"}})
+      "json": {"/asset/extras/source/title": "Calibration cube", "/asset/extras/source/author": "tools/corpus",
+               "/asset/extras/source/tool": "amf.py", "/asset/extras/source/metadata": None}})
 
 # Curved triangles: the edges' normals and tangents are dropped, the flat triangles stay.
 edge = "<edge><v1>0</v1><dx1>0</dx1><dy1>0</dy1><dz1>1</dz1><v2>1</v2><dx2>0</dx2><dy2>0</dy2><dz2>1</dz2></edge>"

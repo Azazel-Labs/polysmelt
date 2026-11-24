@@ -16,6 +16,7 @@
   },
   "json": {
     "/asset/extras/source/unit": "furlong",
-    "/asset/extras/source/unknownUnit": true
+    "/asset/extras/source/metersPerUnit": 0.001,
+    "/asset/extras/source/assumed/0": "metersPerUnit"
   }
 }

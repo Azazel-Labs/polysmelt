@@ -14,8 +14,8 @@
 //! is the `_SCAN` attribute when there are several. An ESRI grid is a point per cell with a
 //! value, at the cell's center.
 //!
-//! The formats name no units or axes; these clouds come from surveys and scanners, so they are
-//! taken as meters with Z up, and turned Y-up. Far from the origin, positions are measured from a
+//! The formats name no units or axes; these clouds come from surveys and scanners, so Z up is
+//! assumed and turned Y-up. The units are unknown, and left as they are. Far from the origin, positions are measured from a
 //! point near the cloud, which the node's translation carries back.
 
 use serde_json::{Map, Value, json};
@@ -25,6 +25,7 @@ use super::points::{self, Cloud, Column};
 use super::stream::{f32_from, f64_from, lines, space};
 use crate::document::{Document, Keep};
 use crate::num::f32_of;
+use crate::source::{Axis, Fact, SourceInfo};
 use crate::{Context as _, Result};
 
 /// Bytes of text parsed per job.
@@ -82,13 +83,8 @@ pub(crate) fn load(input: Input<'_>, ext: &str, keep: Keep) -> Result<Document<'
         part
     };
     part.check(keep)?;
-    let source = json!({
-        "format": ext.to_ascii_uppercase(),
-        "columns": plan.described(),
-        "units": "unknown, taken as meters",
-        "axes": "Z-up source turned Y-up: glTF x = x, y = z, z = -y",
-    });
-    Ok(part.cloud(&plan, source))
+    let source = json!({ "columns": plan.described() });
+    Ok(part.cloud(&plan, &ext.to_ascii_uppercase(), source))
 }
 
 /// `s` without spaces and control characters at its ends.
@@ -412,7 +408,7 @@ impl Part {
         points::check_count(u64::try_from(self.pos.len()).unwrap_or(u64::MAX), keep.points(), "text")
     }
 
-    fn cloud(self, plan: &Plan, source: Value) -> Document<'static> {
+    fn cloud(self, plan: &Plan, format: &str, source: Value) -> Document<'static> {
         let mut cloud = Cloud {
             positions: self.pos,
             colors: self.colors,
@@ -423,7 +419,7 @@ impl Part {
         for ((_, name), values) in plan.columns.iter().zip(self.columns) {
             cloud.columns.push(Column::new(name, values));
         }
-        cloud.document(source, Map::new())
+        document(cloud, format, source)
     }
 }
 
@@ -668,14 +664,8 @@ fn ptx(bytes: &[u8], keep: Keep) -> Result<Document<'static>> {
         plan.columns.push((usize::MAX, "SCAN".into()));
         all.columns.push(scan_ids);
     }
-    let source = json!({
-        "format": "PTX",
-        "scans": scans,
-        "columns": plan.described_ptx(),
-        "units": "unknown, taken as meters",
-        "axes": "Z-up source turned Y-up: glTF x = x, y = z, z = -y",
-    });
-    Ok(all.cloud(&plan, source))
+    let source = json!({ "scans": scans, "columns": plan.described_ptx() });
+    Ok(all.cloud(&plan, "PTX", source))
 }
 
 impl Plan {
@@ -829,14 +819,21 @@ fn grid(bytes: &[u8], keep: Keep) -> Result<Document<'static>> {
             f32_of(origin[1] - p[1]),
         ]);
     }
-    let source = json!({
-        "format": "ESRI ASCII grid",
-        "header": keys,
-        "cellsRead": z.len(),
-        "units": "unknown, taken as meters",
-        "axes": "Z-up source turned Y-up: glTF x = east, y = up, z = south",
-    });
-    Ok(cloud.document(source, Map::new()))
+    let source = json!({ "header": keys, "cellsRead": z.len() });
+    Ok(document(cloud, "ESRI ASCII grid", source))
+}
+
+/// The document of `cloud`, its source info `format`, with Z up assumed (and turned Y-up) and its
+/// units unknown, over `source`'s details.
+fn document(cloud: Cloud, format: &str, source: Value) -> Document<'static> {
+    let mut info = SourceInfo {
+        format: Some(format.into()),
+        up_axis: Fact::Assumed(Axis::PosZ),
+        ..SourceInfo::default()
+    };
+    info.converted.up_axis = true;
+    let Value::Object(source) = source else { unreachable!() };
+    cloud.document(&info, source, Map::new())
 }
 
 #[cfg(test)]
@@ -915,6 +912,13 @@ mod tests {
         assert_eq!(&n[..6], &[0.0, 1.0, 0.0, 0.6, 0.0, -0.8]);
         let cols = &doc.json["asset"]["extras"]["source"]["columns"];
         assert_eq!(cols[3], "normal x");
+        let info = doc.source_info();
+        assert_eq!(info.format.as_deref(), Some("XYZ"));
+        assert_eq!(
+            (info.meters_per_unit, info.up_axis),
+            (Fact::Unknown, Fact::Assumed(Axis::PosZ))
+        );
+        assert!(info.converted.up_axis && !info.converted.units);
         assert_eq!(cols[8], "blue");
     }
 

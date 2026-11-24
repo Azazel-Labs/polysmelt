@@ -7,8 +7,8 @@
 //! attribute per value (`_NAME_0`, `_NAME_1`, ...), up to [`COLUMNS`] of them. `_` fields are
 //! padding. Points whose position isn't a number (the holes in an organized cloud) are left out.
 //!
-//! The format says nothing of units or axes: positions are taken as meters, in the axes they
-//! are stored in. The sensor's viewpoint, the cloud's width and height and the fields are in the
+//! The format says nothing of units or axes: positions are kept as they are stored, and the
+//! source info leaves units and up axis unknown. The sensor's viewpoint, the cloud's width and height and the fields are in the
 //! asset's extras. Double-precision positions far from the origin are measured from a point near
 //! the first one, which the node's translation carries back.
 
@@ -19,6 +19,7 @@ use super::points::{self, Cloud, Column};
 use super::stream::{f32_from, f64_from, space};
 use crate::document::{Document, Keep};
 use crate::num::f32_of;
+use crate::source::SourceInfo;
 use crate::{Context as _, Result};
 
 /// The most custom attributes made from the fields that aren't position, normal or color.
@@ -766,8 +767,6 @@ fn cloud(d: Decoded, h: &Header, lay: &Layout, origin: [f64; 3]) -> Document<'st
         .collect();
     let v = h.viewpoint;
     let mut source = json!({
-        "format": "PCD",
-        "version": h.version,
         "data": match h.data {
             Data::Ascii => "ascii",
             Data::Binary => "binary",
@@ -778,16 +777,22 @@ fn cloud(d: Decoded, h: &Header, lay: &Layout, origin: [f64; 3]) -> Document<'st
         "height": h.height,
         "points": h.points,
         "viewpoint": { "translation": [v[0], v[1], v[2]], "rotation": [v[4], v[5], v[6], v[3]] },
-        "axes": "as stored; the format names none",
     });
     if !lay.dropped.is_empty() {
         source["droppedValues"] = json!(lay.dropped);
     }
     let mut facts = Map::new();
     if n as u64 != h.points {
-        facts.insert("declaredPoints".into(), json!(h.points));
+        facts.insert("declared_points".into(), json!(h.points));
     }
-    cloud.document(source, facts)
+    // The format says nothing of units or axes.
+    let info = SourceInfo {
+        format: Some("PCD".into()),
+        version: Some(h.version.clone()).filter(|v| !v.is_empty()),
+        ..SourceInfo::default()
+    };
+    let Value::Object(source) = source else { unreachable!() };
+    cloud.document(&info, source, facts)
 }
 
 #[cfg(test)]
@@ -801,6 +806,7 @@ fn cloud(d: Decoded, h: &Header, lay: &Layout, origin: [f64; 3]) -> Document<'st
 mod tests {
     use super::*;
     use crate::document::Pose;
+    use crate::source::Fact;
 
     fn load(bytes: &[u8]) -> Result<Document<'static>> {
         read(bytes, Keep::ALL)
@@ -858,6 +864,11 @@ nan nan nan 0 0
     fn ascii_reads_with_packed_colors() {
         let doc = load(ASCII.as_bytes()).unwrap();
         assert_eq!(doc.facts["points"], 2);
+        let info = doc.source_info();
+        assert_eq!(info.format.as_deref(), Some("PCD"));
+        assert_eq!(info.version.as_deref(), Some("0.7"));
+        assert_eq!((info.meters_per_unit, info.up_axis), (Fact::Unknown, Fact::Unknown));
+        assert!(!info.converted.units && !info.converted.up_axis);
         assert_eq!(attrs(&doc), ["COLOR_0", "POSITION", "_INTENSITY"]);
         let p = values(&doc, "POSITION");
         assert_eq!(&p[..6], &[0.5, 1.0, -2.0, 1.0, 2.0, 3.0]);

@@ -81,7 +81,7 @@
     ],
     "source": {
       "format": "SPZ",
-      "version": 3,
+      "version": "3",
       "shDegree": 0,
       "antialiased": false
     }

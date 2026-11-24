@@ -2,7 +2,8 @@
 //! position and linear scale (three floats each), its base color and opacity (a byte each, the
 //! color as the sRGB value the base spherical harmonics give) and its rotation (w, x, y, z, a
 //! byte each from -1 at 0 to 1 at 256). The axes are right, down and forward, as 3D gaussian
-//! splatting's PLY files have them, and are flipped to glTF's.
+//! splatting's PLY files have them, and are flipped to glTF's; the source info has -Y up and
+//! right-handed, assumed, and no units.
 //!
 //! The format has no view-dependent color, so the splats have degree 0 alone. Bytes past the
 //! last whole splat are counted in the asset's `extras.source` and otherwise ignored.
@@ -13,6 +14,7 @@ use super::Input;
 use crate::Result;
 use crate::document::{Document, Keep};
 use crate::gaussian::{SH_C0, Splats, rotation};
+use crate::source::{Axis, Fact, Handedness, SourceInfo};
 
 /// The bytes a splat takes.
 const SIZE: usize = 32;
@@ -40,11 +42,19 @@ fn decode(bytes: &[u8], max: usize) -> Result<Document<'static>> {
         s.rotations.push(rotation(x, y, z, w));
     }
     s.flip([1.0, -1.0, -1.0]);
-    let mut source = json!({ "format": "splat" });
+    let mut source = Map::new();
     if !rest.is_empty() {
-        source["trailingBytes"] = json!(rest.len());
+        source.insert("trailingBytes".into(), json!(rest.len()));
     }
-    Ok(s.document(source, None, Map::new()))
+    // Right, down and forward: the convention, which the file doesn't state.
+    let mut info = SourceInfo {
+        format: Some("splat".into()),
+        up_axis: Fact::Assumed(Axis::NegY),
+        handedness: Fact::Assumed(Handedness::Right),
+        ..SourceInfo::default()
+    };
+    info.converted.up_axis = true;
+    Ok(s.document(&info, source, None, Map::new()))
 }
 
 #[cfg(test)]
@@ -88,6 +98,11 @@ mod tests {
         let doc = decode(&bytes, 10).unwrap();
         assert_eq!(doc.facts["splats"], 1);
         assert_eq!(doc.json["asset"]["extras"]["source"]["trailingBytes"], 3);
+        let info = doc.source_info();
+        assert_eq!(info.format.as_deref(), Some("splat"));
+        assert_eq!(info.up_axis, Fact::Assumed(Axis::NegY));
+        assert_eq!(info.meters_per_unit, Fact::Unknown);
+        assert!(info.converted.up_axis && !info.converted.handedness);
         let m = doc.flatten(Pose::Rest).unwrap().unwrap();
         let p = &m.prims[0];
         assert_eq!(p.positions, [[1.0, -2.0, -3.0]]);

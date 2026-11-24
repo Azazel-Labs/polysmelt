@@ -9,9 +9,11 @@
 //! classification, returns, scan angle, user data, point source, GPS time, near infrared and the
 //! extra bytes the file describes become custom attributes. Waveform packets are left out.
 //!
-//! The scale, offset, coordinate system (EPSG code and WKT) and units are facts, under
-//! `georeference`; the header's other fields and the variable-length records' names are in the
-//! asset's extras. A file declaring more points than [`Keep::max_points`] is refused before any
+//! The source info has the coordinate system's horizontal linear unit as declared units (unknown
+//! when it has none), Z up and right-handed by the format, the generating software as its tool,
+//! the creation day and year as its creation date, and the scale, offset, coordinate system (EPSG
+//! code and WKT) and units as its georeference. The header's other fields and the variable-length
+//! records' names are kept beside them. A file declaring more points than [`Keep::max_points`] is refused before any
 //! are read. Points are read a block at a time, on several threads when [`Keep::threads`] allows.
 
 use std::borrow::Cow;
@@ -21,10 +23,12 @@ use std::sync::{Mutex, PoisonError};
 use serde_json::{Map, Value, json};
 
 use super::Input;
+use super::dates;
 use super::points::{self, Cloud, Column};
 use crate::document::{Document, Keep};
 use crate::keep::spawn;
 use crate::num::{f32_of, usize_of};
+use crate::source::{Axis, Fact, Handedness, SourceInfo};
 use crate::{Context as _, Result};
 
 /// Points decoded per job when the file sets no other size (LAS, or LAZ without chunks).
@@ -800,16 +804,11 @@ fn read(src: &Source<'_>, h: &Header, keep: Keep) -> Result<Document<'static>> {
         constant,
     };
     let mut source = json!({
-        "format": if h.compressed { "LAZ" } else { "LAS" },
-        "version": format!("{}.{}", h.version.0, h.version.1),
         "pointFormat": h.format,
         "pointRecordLength": h.record,
         "fileSourceId": h.file_source,
         "globalEncoding": h.encoding,
         "systemIdentifier": h.system,
-        "generatingSoftware": h.software,
-        "creationDay": h.day,
-        "creationYear": h.year,
         "pointsByReturn": h.by_return,
         "bounds": { "min": h.min, "max": h.max },
     });
@@ -832,7 +831,6 @@ fn read(src: &Source<'_>, h: &Header, keep: Keep) -> Result<Document<'static>> {
     if !list.is_empty() {
         source["records"] = json!(list);
     }
-    let mut facts = Map::new();
     let mut g = json!({
         "scale": h.scale,
         "offset": h.offset.map(|c| c + 0.0),
@@ -853,8 +851,26 @@ fn read(src: &Source<'_>, h: &Header, keep: Keep) -> Result<Document<'static>> {
     if let Some(k) = geo.kind {
         g["kind"] = json!(k);
     }
-    facts.insert("georeference".into(), g);
-    Ok(cloud.document(source, facts))
+    let mut info = SourceInfo {
+        format: Some((if h.compressed { "LAZ" } else { "LAS" }).into()),
+        version: Some(format!("{}.{}", h.version.0, h.version.1)),
+        meters_per_unit: geo
+            .horizontal
+            .as_ref()
+            .map_or(Fact::Unknown, |&(_, m)| Fact::Declared(m)),
+        unit: geo.horizontal.as_ref().map(|(name, _)| name.replace("metre", "meter")),
+        // East, north and up, by the format.
+        up_axis: Fact::Declared(Axis::PosZ),
+        handedness: Fact::Declared(Handedness::Right),
+        tool: Some(h.software.clone()).filter(|t| !t.is_empty()),
+        created: created(h.year, h.day),
+        georeference: Some(g),
+        ..SourceInfo::default()
+    };
+    info.converted.units = unit.iter().any(|&u| (u - 1.0).abs() > f64::EPSILON);
+    info.converted.up_axis = true;
+    let Value::Object(source) = source else { unreachable!() };
+    Ok(cloud.document(&info, source, Map::new()))
 }
 
 /// The jobs for `n` points read a block at a time.
@@ -881,6 +897,15 @@ fn guid(g: &[u8; 16]) -> String {
     format!("{d1:08x}-{d2:04x}-{d3:04x}-{}-{}", hex(&g[8..10]), hex(&g[10..16]))
 }
 
+/// The header's creation date (`year`, and `day` of it from 1) in ISO 8601, as written when it
+/// isn't a date, and `None` when it's left out (zero).
+fn created(year: u16, day: u16) -> Option<String> {
+    if year == 0 || day == 0 {
+        return None;
+    }
+    Some(dates::day_of_year(year, day).unwrap_or_else(|| format!("{year}, day {day}")))
+}
+
 /// The coordinate system, as far as the file says.
 struct Geo {
     epsg: Option<u32>,
@@ -890,6 +915,8 @@ struct Geo {
     /// Meters per unit along each source axis.
     unit: [f64; 3],
     unit_name: String,
+    /// The horizontal unit's name and meters, when the coordinate system has a linear one.
+    horizontal: Option<(String, f64)>,
 }
 
 impl Geo {
@@ -901,6 +928,7 @@ impl Geo {
             kind: None,
             unit: [1.0; 3],
             unit_name: "unknown, taken as meters".into(),
+            horizontal: None,
         };
         let find = |user: &str, id: u16| records.iter().find(|r| r.user == user && r.id == id);
         // WKT, which LAS 1.4 asks for (global encoding bit 4), or the GeoTIFF keys.
@@ -915,6 +943,7 @@ impl Geo {
                 if let Some((name, h)) = crs.horizontal {
                     let v = crs.vertical.map_or(h, |(_, v)| v);
                     g.unit = [h, h, v];
+                    g.horizontal = Some((name.clone(), h));
                     g.unit_name = name;
                 } else if crs.kind == "geographic" {
                     g.unit_name = "degrees".into();
@@ -960,6 +989,7 @@ impl Geo {
         if let Some((name, h)) = horizontal {
             let v = vertical.map_or(h, |(_, v)| v);
             g.unit = [h, h, v];
+            g.horizontal = Some((name.into(), h));
             g.unit_name = name.into();
         } else if g.kind == Some("geographic") {
             g.unit_name = "degrees".into();
@@ -977,13 +1007,13 @@ impl Geo {
 /// A `GeoTIFF` linear unit code's name and size in meters.
 fn linear_unit(code: u16) -> Option<(&'static str, f64)> {
     Some(match code {
-        9001 => ("metre", 1.0),
+        9001 => ("meter", 1.0),
         9002 => ("foot", FOOT),
         9003 => ("US survey foot", US_FOOT),
         9005 => ("Clarke's foot", 0.304_797_265_4),
         9014 => ("fathom", 1.8288),
         9030 => ("nautical mile", 1852.0),
-        9036 => ("kilometre", 1000.0),
+        9036 => ("kilometer", 1000.0),
         9096 => ("yard", 0.9144),
         _ => return None,
     })
@@ -1265,10 +1295,15 @@ pub(crate) mod tests {
     fn far_points_keep_their_detail_through_the_translation() {
         let bytes = las(2, 0, 0, &pts(3), &[]);
         let doc = load_las(&bytes, Keep::ALL).unwrap();
+        // No coordinate system: units unknown, and left as they are.
+        let info = doc.source_info();
+        assert_eq!(info.meters_per_unit, Fact::Unknown);
+        assert!(!info.converted.units && info.converted.up_axis);
+        assert_eq!((info.tool, info.created), (None, None));
         let t = doc.json["nodes"][0]["translation"].as_array().unwrap();
         assert_eq!(t[0], 500_001.0);
         assert_eq!(t[2], -4_000_000.0);
-        assert_eq!(doc.facts["georeference"]["scale"][0], 0.01);
+        assert_eq!(doc.source_info().georeference.unwrap()["scale"][0], 0.01);
     }
 
     #[test]
@@ -1278,9 +1313,22 @@ pub(crate) mod tests {
             .iter()
             .flat_map(|v| v.to_le_bytes())
             .collect();
-        let bytes = las(2, 0, 0, &pts(2), &[("LASF_Projection", 34735, keys)]);
+        let mut bytes = las(2, 0, 0, &pts(2), &[("LASF_Projection", 34735, keys)]);
+        bytes[58..66].copy_from_slice(b"Scanner ");
+        bytes[90..92].copy_from_slice(&60u16.to_le_bytes());
+        bytes[92..94].copy_from_slice(&2024u16.to_le_bytes());
         let doc = load_las(&bytes, Keep::ALL).unwrap();
-        let g = &doc.facts["georeference"];
+        let info = doc.source_info();
+        assert_eq!(info.format.as_deref(), Some("LAS"));
+        assert_eq!(info.version.as_deref(), Some("1.2"));
+        assert_eq!(info.meters_per_unit, Fact::Declared(US_FOOT));
+        assert_eq!(info.unit.as_deref(), Some("US survey foot"));
+        assert_eq!(info.up_axis, Fact::Declared(Axis::PosZ));
+        assert!(info.converted.units && info.converted.up_axis);
+        assert_eq!(info.tool.as_deref(), Some("Scanner"));
+        assert_eq!(info.created.as_deref(), Some("2024-02-29"));
+        assert!(doc.facts.get("georeference").is_none());
+        let g = &info.georeference.unwrap();
         assert_eq!(g["epsg"], 2263);
         assert_eq!(g["kind"], "projected");
         assert!((g["toMeters"][0].as_f64().unwrap() - US_FOOT).abs() < 1e-12);
@@ -1298,7 +1346,7 @@ pub(crate) mod tests {
         let mut bytes = las(4, 6, 0, &pts(2), &[("LASF_Projection", 2112, wkt.to_vec())]);
         bytes[6] = 16;
         let doc = load_las(&bytes, Keep::ALL).unwrap();
-        let g = &doc.facts["georeference"];
+        let g = &doc.source_info().georeference.unwrap();
         assert_eq!(g["epsg"], 2263);
         assert!((g["toMeters"][0].as_f64().unwrap() - US_FOOT).abs() < 1e-9);
     }

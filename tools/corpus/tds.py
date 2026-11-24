@@ -178,7 +178,7 @@ case(FMT, "cube_no_smoothing", {"cube.3ds": model(obj("Cube", trimesh(CUBE_V, CU
      {"spec": SPEC + ": a mesh without smoothing groups shows faceted", "source": SRC, **FLAT,
       "material_count": 1, "uvs": False,
       "document": {"nodes": 2, "meshes": 1, "node_names": ["Cube", "RootNode"],
-                   "source": {"format": "3DS", "upAxis": "Z", "version": 3, "meshVersion": 3,
+                   "source": {"format": "3DS", "upAxis": "+Z", "version": "3", "meshVersion": 3,
                               "masterScale": 1.0}}})
 
 case(FMT, "cube_smoothing_zero",

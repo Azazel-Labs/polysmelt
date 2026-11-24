@@ -14,7 +14,8 @@
 //! `MATL` (or legacy `MATT`) metal, roughness, emission and glass carry over, glass's
 //! transparency as opacity too. The asset's `extras.source` keeps the palette, every material,
 //! the layers, render settings, cameras, notes and index map. Coordinates turn from Z-up to
-//! glTF's Y-up.
+//! glTF's Y-up. The source info has Z up and right-handed, and the step animation's frame rate,
+//! all assumed; a voxel's size is unknown.
 
 use std::collections::HashMap;
 
@@ -23,6 +24,7 @@ use serde_json::{Map, Value, json};
 use crate::document::{Builder, Document, Keep};
 use crate::material::{Factor, Full};
 use crate::mesh::{Material, Prim, srgb_to_linear};
+use crate::source::{Axis, Fact, Handedness, SourceInfo};
 use crate::{Context as _, Result};
 
 /// The most voxels a file may hold, unless [`Keep::max_triangles`] is raised past its default,
@@ -402,9 +404,6 @@ pub(crate) fn vox(data: &[u8], keep: Keep) -> Result<Document<'static>> {
 /// The asset's `extras.source`: what the file says that the nodes and materials don't.
 fn source(v: &Vox) -> Value {
     let mut s = Map::new();
-    s.insert("format".into(), json!("VOX"));
-    s.insert("version".into(), json!(v.version));
-    s.insert("upAxis".into(), json!("Z"));
     if let Some(p) = &v.palette {
         let hex: Vec<String> = p[1..]
             .iter()
@@ -432,9 +431,6 @@ fn source(v: &Vox) -> Value {
             .collect();
         s.insert("layers".into(), json!(layers));
     }
-    if v.nodes.contains_key(&0) {
-        s.insert("framesPerSecond".into(), json!(FRAMES_PER_SECOND));
-    }
     for (key, list) in [("render", &v.render), ("cameras", &v.cameras)] {
         if !list.is_empty() {
             s.insert(key.into(), json!(list));
@@ -449,6 +445,21 @@ fn source(v: &Vox) -> Value {
     if !v.skipped.is_empty() {
         s.insert("skipped".into(), json!(v.skipped));
     }
+    // Z up and right-handed is the editor's convention, not the file's word; a voxel has no size.
+    let mut info = SourceInfo {
+        format: Some("VOX".into()),
+        version: Some(v.version.to_string()),
+        up_axis: Fact::Assumed(Axis::PosZ),
+        handedness: Fact::Assumed(Handedness::Right),
+        frame_rate: if v.nodes.contains_key(&0) {
+            Fact::Assumed(f64::from(FRAMES_PER_SECOND))
+        } else {
+            Fact::Unknown
+        },
+        ..SourceInfo::default()
+    };
+    info.converted.up_axis = true;
+    info.write(&mut s);
     Value::Object(s)
 }
 
@@ -1603,6 +1614,12 @@ mod tests {
         extra.extend(chunk(b"MATT", &matt));
 
         let doc = vox(&file([1, 1, 1], &[[0, 0, 0, 1]], &extra), Keep::ALL).unwrap();
+        let info = doc.source_info();
+        assert_eq!(info.format.as_deref(), Some("VOX"));
+        assert_eq!(info.up_axis, Fact::Assumed(Axis::PosZ));
+        assert_eq!(info.handedness, Fact::Assumed(Handedness::Right));
+        assert_eq!(info.meters_per_unit, Fact::Unknown);
+        assert!(info.converted.up_axis && !info.converted.units);
         let materials = doc.json["materials"].as_array().unwrap();
         let alpha = |m: &Value| m["pbrMetallicRoughness"]["baseColorFactor"][3].as_f64().unwrap();
         assert!((alpha(&materials[0]) - 0.25).abs() < 1e-6, "{}", materials[0]);

@@ -50,7 +50,6 @@
   "faces_outward": true,
   "winding_matches_normals": true,
   "facts": {
-    "unit": "millimeter",
     "objects": 1,
     "triangles": 12
   },
@@ -65,7 +64,8 @@
       "format": "3MF",
       "unit": "millimeter",
       "metersPerUnit": 0.001,
-      "upAxis": "Z"
+      "upAxis": "+Z",
+      "handedness": "right"
     }
   }
 }

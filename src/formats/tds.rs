@@ -17,6 +17,10 @@
 //! texture seam doesn't crease them), and a material shaded flat ignores them. A mesh matrix that mirrors leaves its
 //! faces wound inside out in world space; they are turned back. An opacity map that is the color map uses its alpha.
 //! 3DS is Z up; the data stays so under a root node that turns it to glTF's Y up.
+//!
+//! The source info has Z up and right-handed, and 30 frames a second when there is a keyframer, all assumed (the file
+//! says none of them), and no units: 3DS has none. The master scale isn't applied; it is kept as `masterScale`, beside
+//! the `meshVersion`, the `ambient` light and the `keyframer`'s name, revision, length and segment.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -32,6 +36,7 @@ use crate::images::Images;
 use crate::material::{self, Alpha, Factor, Full, Specular, Tex, UvTransform};
 use crate::mesh::{FastMap, GRAY, Material, Prim, face_normal, srgb_to_linear};
 use crate::num::u32_of;
+use crate::source::{Axis, Fact, Handedness, SourceInfo};
 
 const MAIN: u16 = 0x4D4D;
 /// A 3D Studio project file, which holds the same editor chunk.
@@ -1168,13 +1173,13 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         .filter(|&(id, _)| id == MAIN || id == PROJECT)
         .map(|(_, b)| b);
     let Some(main) = main else { bail!("not a 3DS file") };
-    let mut source = json!({ "format": "3DS", "upAxis": "Z" });
+    let mut source = Map::new();
     let (mut editor, mut kf) = (&[][..], Keyframer::default());
     for (id, b) in chunks(main) {
         match id {
             VERSION => {
                 if let Some(v) = u32_at(b, 0) {
-                    source["version"] = json!(v);
+                    source.insert("version".into(), json!(v));
                 }
             }
             EDITOR if editor.is_empty() => editor = b,
@@ -1199,17 +1204,17 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         match id {
             MESH_VERSION => {
                 if let Some(v) = u32_at(b, 0) {
-                    source["meshVersion"] = json!(v);
+                    source.insert("meshVersion".into(), json!(v));
                 }
             }
             MASTER_SCALE => {
                 if let Some(s) = f32_at(b, 0) {
-                    source["masterScale"] = clean(s);
+                    source.insert("masterScale".into(), clean(s));
                 }
             }
             AMBIENT_LIGHT => {
                 if let Some(c) = color_raw(b) {
-                    source["ambient"] = c;
+                    source.insert("ambient".into(), c);
                 }
             }
             MATERIAL => {
@@ -1543,7 +1548,8 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
             animations.push(json!({ "name": "keyframer", "channels": channels, "samplers": samplers }));
         }
     }
-    if !kf.nodes.is_empty() || kf.revision.is_some() {
+    let animated = !kf.nodes.is_empty() || kf.revision.is_some();
+    if animated {
         let mut k = Map::new();
         if !kf.name.is_empty() {
             k.insert("name".into(), json!(kf.name));
@@ -1557,8 +1563,22 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         if let Some(s) = kf.segment {
             k.insert("segment".into(), json!(s));
         }
-        source["keyframer"] = Value::Object(k);
+        source.insert("keyframer".into(), Value::Object(k));
     }
+    let mut info = SourceInfo {
+        format: Some("3DS".into()),
+        version: source.get("version").map(ToString::to_string),
+        up_axis: Fact::Assumed(Axis::PosZ),
+        handedness: Fact::Assumed(Handedness::Right),
+        frame_rate: if animated {
+            Fact::Assumed(f64::from(FRAMES_PER_SECOND))
+        } else {
+            Fact::Unknown
+        },
+        ..SourceInfo::default()
+    };
+    info.converted.up_axis = true;
+    info.write(&mut source);
 
     // Z-up to Y-up: a quarter turn about X.
     let h = std::f32::consts::FRAC_1_SQRT_2;
@@ -1893,7 +1913,13 @@ mod tests {
             .map(|n| n["name"].as_str().unwrap())
             .collect();
         assert_eq!(names, ["Floor", "Wall", "RootNode"]);
-        assert_eq!(doc.json["asset"]["extras"]["source"]["upAxis"], "Z");
+        let info = doc.source_info();
+        assert_eq!(info.format.as_deref(), Some("3DS"));
+        assert_eq!(info.up_axis, Fact::Assumed(Axis::PosZ));
+        assert_eq!(info.handedness, Fact::Assumed(Handedness::Right));
+        assert_eq!(info.meters_per_unit, Fact::Unknown);
+        assert_eq!(info.frame_rate, Fact::Unknown, "no keyframer");
+        assert!(info.converted.up_axis && !info.converted.units);
         let red = &doc.json["materials"][0]["extras"]["3ds"];
         assert_eq!(red["diffuse"], json!([255, 0, 0]));
         assert_eq!(red["transparency"], json!(25.0));
@@ -1985,6 +2011,7 @@ mod tests {
         assert_eq!(doc.json["nodes"][1]["name"], "Arm");
         assert_eq!(doc.json["nodes"][0]["children"], json!([1]));
         assert_eq!(doc.json["animations"][0]["channels"].as_array().unwrap().len(), 2);
+        assert_eq!(doc.source_info().frame_rate, Fact::Assumed(30.0));
 
         // At rest, everything is where the editor has it (turned Y up).
         let mesh = doc.flatten(Pose::Rest).unwrap().unwrap();

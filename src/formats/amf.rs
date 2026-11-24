@@ -4,7 +4,12 @@
 //! asks), materials' metadata and the colors of composite materials mixed by their proportions, 2D
 //! textures (gray channels combined into one image) with each triangle's texture coordinates, and
 //! constellations, placed as nodes wherever an instance puts them. The model's Z-up unit (millimeters
-//! when unsaid) turns into glTF's Y-up meters at a root node.
+//! when unsaid) turns into glTF's Y-up meters at a root node. The source's units are declared when the
+//! `unit` attribute names one the format knows, and millimeters assumed otherwise; its up axis is +Z
+//! by the format's convention (assumed). The model's metadata of the kinds the standard names (`name`,
+//! `description`, `author`, `cad`) and the common others (`copyright`, `license`, creation and
+//! modification dates) are the source's title, description, author, tool and so on; the rest stay in
+//! its `metadata`.
 //!
 //! Dropped, and counted in the source extras: the curved edges of curved triangles (their flat
 //! triangles stay), colors and proportions given as formulas, 3D textures past their first layer,
@@ -22,6 +27,7 @@ use crate::document::{Builder, Document};
 use crate::images::Source;
 use crate::material::{Alpha, CLAMP, Full, REPEAT, Tex};
 use crate::mesh::{GRAY, Image, Material, Prim, srgb_to_linear};
+use crate::source::{Axis, Fact, SourceInfo};
 use crate::{Context as _, Result};
 
 /// The most unzipped from a zipped AMF: more is a zip bomb, not a model.
@@ -705,6 +711,31 @@ fn base64(text: &[u8]) -> Option<Vec<u8>> {
         .ok()
 }
 
+/// Moves the model's metadata of the kinds [`SourceInfo`] has from `metadata` into `info`: the standard's
+/// `name`, `description`, `author` and `cad`, and the copyright, license and dates other writers add.
+fn take_metadata(info: &mut SourceInfo, metadata: &mut Map<String, Value>) {
+    let keys: Vec<String> = metadata.keys().cloned().collect();
+    for key in keys {
+        let slot = match key.to_ascii_lowercase().as_str() {
+            "name" | "title" => &mut info.title,
+            "description" => &mut info.description,
+            "author" | "designer" => &mut info.author,
+            "cad" | "application" => &mut info.tool,
+            "copyright" => &mut info.copyright,
+            "license" | "licenseterms" => &mut info.license,
+            "creationdate" | "created" => &mut info.created,
+            "modificationdate" | "modified" => &mut info.modified,
+            _ => continue,
+        };
+        if slot.is_some() {
+            continue;
+        }
+        if let Some(Value::String(v)) = metadata.remove(&key) {
+            *slot = Some(v.trim().to_owned());
+        }
+    }
+}
+
 /// Meters per unit: the units the format names, and a few spelled other ways.
 fn meters(unit: &str) -> Option<f64> {
     Some(match unit.to_ascii_lowercase().as_str() {
@@ -1070,18 +1101,30 @@ fn build(a: &Amf, zipped: bool) -> Result<Document<'static>> {
     }
     let Place { mut nodes, dropped, .. } = place;
 
-    let mut source = json!({ "format": "AMF", "unit": unit, "metersPerUnit": scale, "upAxis": "Z" });
-    if let Some(v) = &a.version {
-        source["version"] = json!(v);
-    }
+    let mut info = SourceInfo {
+        format: Some("AMF".into()),
+        version: a.version.clone(),
+        meters_per_unit: match known {
+            Some(m) if a.unit.is_some() => Fact::Declared(m),
+            _ => Fact::Assumed(scale),
+        },
+        unit: Some(unit),
+        up_axis: Fact::Assumed(Axis::PosZ),
+        ..SourceInfo::default()
+    };
+    info.converted.units = (scale - 1.0).abs() > f64::EPSILON;
+    info.converted.up_axis = true;
+    let mut metadata = a.metadata.clone();
+    take_metadata(&mut info, &mut metadata);
+    let mut source = json!({});
     if zipped {
         source["zipped"] = json!(true);
     }
-    if known.is_none() {
-        source["unknownUnit"] = json!(true);
+    if !metadata.is_empty() {
+        source["metadata"] = Value::Object(metadata);
     }
-    if !a.metadata.is_empty() {
-        source["metadata"] = Value::Object(a.metadata.clone());
+    if let Value::Object(m) = &mut source {
+        info.write(m);
     }
     for (key, n) in [
         ("droppedCurvedEdges", a.curved),
@@ -1106,7 +1149,6 @@ fn build(a: &Amf, zipped: bool) -> Result<Document<'static>> {
         .sum();
     facts.insert("triangles".into(), json!(in_scene));
     facts.insert("objects".into(), json!(a.objects.len()));
-    facts.insert("unit".into(), json!(unit));
 
     // Z-up to Y-up (a quarter turn about X), and the unit to meters.
     let h = std::f32::consts::FRAC_1_SQRT_2;
@@ -1289,6 +1331,29 @@ mod tests {
     use super::*;
     use crate::formats::Input;
 
+    #[test]
+    fn millimeters_are_assumed_when_unsaid_and_metadata_is_source_info() {
+        let cube = |head: &str| {
+            format!(
+                "<amf{head}><metadata type=\"cad\">a tool</metadata><metadata type=\"tolerance\">0.1</metadata>                 <object id=\"1\"><mesh><vertices>{}</vertices><volume><triangle><v1>0</v1><v2>1</v2><v3>2</v3></triangle>                 </volume></mesh></object></amf>",
+                "<vertex><coordinates><x>0</x><y>0</y><z>0</z></coordinates></vertex>                 <vertex><coordinates><x>1</x><y>0</y><z>0</z></coordinates></vertex>                 <vertex><coordinates><x>0</x><y>1</y><z>0</z></coordinates></vertex>"
+            )
+        };
+        let doc = load_str(&cube("")).unwrap();
+        let info = doc.source_info();
+        assert_eq!(info.meters_per_unit, Fact::Assumed(0.001));
+        assert_eq!(info.unit.as_deref(), Some("millimeter"));
+        assert_eq!(info.tool.as_deref(), Some("a tool"));
+        assert_eq!(source(&doc)["metadata"], json!({ "tolerance": "0.1" }));
+        assert!(doc.facts.get("unit").is_none());
+        let info = load_str(&cube(" unit=\"meter\"")).unwrap().source_info();
+        assert_eq!(info.meters_per_unit, Fact::Declared(1.0));
+        assert!(!info.converted.units, "meters need no scaling");
+        let info = load_str(&cube(" unit=\"furlong\"")).unwrap().source_info();
+        assert_eq!(info.meters_per_unit, Fact::Assumed(0.001), "read as millimeters");
+        assert_eq!(info.unit.as_deref(), Some("furlong"));
+    }
+
     fn load_str(xml: &str) -> Result<Document<'static>> {
         load(Input::memory(xml.as_bytes(), "t.amf"))
     }
@@ -1344,8 +1409,14 @@ mod tests {
         let src = source(&doc);
         assert_eq!(src["unit"], "inch");
         assert_eq!(src["metersPerUnit"], 0.0254);
-        assert_eq!(src["metadata"]["author"], "A & B");
-        assert_eq!(src["metadata"]["name"], "Split Pyramid");
+        let info = doc.source_info();
+        assert_eq!(info.meters_per_unit, Fact::Declared(0.0254));
+        assert_eq!(info.up_axis, Fact::Assumed(Axis::PosZ));
+        assert!(info.converted.units && info.converted.up_axis && !info.converted.handedness);
+        assert_eq!(info.output_meters_per_unit(), Fact::Declared(1.0));
+        assert_eq!(info.author.as_deref(), Some("A & B"));
+        assert_eq!(info.title.as_deref(), Some("Split Pyramid"));
+        assert!(src.get("metadata").is_none(), "nothing else to keep");
         assert_eq!(src["droppedCurvedEdges"], 1);
         assert_eq!(src["droppedTriangles"], 1);
         assert_eq!(src["droppedFormulas"], 1);

@@ -15,7 +15,8 @@
     ]
   },
   "json": {
-    "/asset/extras/source/units": null,
+    "/asset/extras/source/unit": null,
+    "/asset/extras/source/metersPerUnit": null,
     "/nodes/0/scale": null
   }
 }
