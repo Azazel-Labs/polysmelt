@@ -72,9 +72,7 @@ def expect(spec, names, rows, rate=100.0, meters=0.001, facts=None, rate_given=T
             entry["translation"] = [0, 0, 0]
             rig.append(entry)
             rig.append({"node": names[m], "keys": {"translation": None}})
-    f = {"markers": points, "frames": len(rows), "frame_rate": rate, "frame_time": 1 / rate, "up_axis_assumed": True}
-    if not rate_given:
-        f["frame_time_guessed"] = True
+    f = {"markers": points, "frames": len(rows)}
     if missing:
         f["missing_samples"] = missing
     if never:
@@ -87,8 +85,8 @@ def expect(spec, names, rows, rate=100.0, meters=0.001, facts=None, rate_given=T
         "facts": f,
         "document": {"nodes": points + 1, "animations": 1 if channels else 0, "channels": channels,
                      "node_names": ["markers"] + list(names)},
-        "json": {"/asset/extras/source/format": "TRC", "/asset/extras/source/upAxis": "Y", "/scenes/0/nodes": [0],
-                 "/asset/extras/source/frameRate": rate},
+        "json": {"/asset/extras/source/format": "TRC", "/asset/extras/source/upAxis": "+Y", "/scenes/0/nodes": [0],
+                 "/asset/extras/source/frameRate": rate, "/asset/extras/source/metersPerUnit": meters},
         "rig": rig + list(extra),
     }
     if channels:
@@ -120,7 +118,7 @@ ROWS = [
 e = expect("a tab-separated file as biomechanics tools write it: names over three columns, an empty cell missing",
            NAMES, kept(ROWS),
            extra=[{"node": "R.Knee", "time": 0.01, "translation": [-0.119, 0.501, 0.0405]}],
-           json={"/asset/extras/source/units": "mm", "/asset/extras/source/pathFileType": "4",
+           json={"/asset/extras/source/unit": "mm", "/asset/extras/source/pathFileType": "4",
                  "/asset/extras/source/cameraRate": 100, "/asset/extras/source/origDataRate": 100,
                  "/asset/extras/source/origDataStartFrame": 1, "/asset/extras/source/origNumFrames": 4})
 case(FMT, "basic", {"basic.trc": write(NAMES, ROWS)}, e)
@@ -137,12 +135,12 @@ case(FMT, "nan_cells", {"nan_cells.trc": text}, e)
 for units in ("m", "cm", "in"):
     rows = [(1, 0, [(1, 2, 3)]), (2, 0.5, [(2, 3, 4)])]
     e = expect(f"Units {units}", ["a"], kept(rows), rate=2.0, meters=UNITS[units],
-               json={"/asset/extras/source/units": units})
+               json={"/asset/extras/source/unit": units})
     case(FMT, f"units_{units}", {f"units_{units}.trc": write(["a"], rows, rate=2.0, units=units)}, e)
 
 rows = [(1, 0, [(1, 2, 3)]), (2, 0.5, [(2, 3, 4)])]
-e = expect("a Units the reader doesn't know: the values as they are, and noted", ["a"], kept(rows), rate=2.0,
-           meters=1.0, facts={"units_unknown": True}, json={"/asset/extras/source/units": "furlongs"})
+e = expect("a Units the reader doesn't know: the values as they are, its length unknown", ["a"], kept(rows), rate=2.0,
+           meters=1.0, json={"/asset/extras/source/unit": "furlongs", "/asset/extras/source/metersPerUnit": None})
 case(FMT, "unknown_units", {"unknown_units.trc": write(["a"], rows, rate=2.0, units="furlongs")}, e)
 
 # --- Spaces, frame numbers for times, and rows the reader drops. ---
@@ -175,7 +173,8 @@ e = expect("columns the fourth line names nothing for: marker<n>", ["a", "marker
 case(FMT, "unnamed_markers", {"unnamed_markers.trc": text}, e)
 
 rows = [(1, 0, [(1, 2, 3)]), (2, 0.5, [(2, 3, 4)])]
-e = expect("no DataRate: 60 frames per second, noted", ["a"], kept(rows), rate=60.0, rate_given=False)
+e = expect("no DataRate: 60 frames per second, assumed", ["a"], kept(rows), rate=60.0, rate_given=False,
+           json={"/asset/extras/source/assumed": ["upAxis", "frameRate"]})
 case(FMT, "no_data_rate", {"no_data_rate.trc": write(["a"], rows, rate=None)}, e)
 
 text = "﻿" + write(NAMES, ROWS, nl="\r\n")

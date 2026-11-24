@@ -9,8 +9,7 @@
     "joints": 2,
     "frames": 3,
     "animations": 2,
-    "meshes": 1,
-    "frame_rate_guessed": true
+    "meshes": 1
   },
   "document": {
     "nodes": 3,
@@ -39,7 +38,10 @@
       "loop": true
     },
     "/animations/1/name": "hold",
-    "/animations/1/extras": null,
+    "/animations/1/extras": {
+      "frameRate": 24.0
+    },
+    "/asset/extras/source/frameRate": 10.0,
     "/meshes/0/primitives/0/attributes/TANGENT": null
   },
   "uvs_include": [

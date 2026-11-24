@@ -73,7 +73,7 @@
   },
   "json": {
     "/asset/extras/source/format": "SMD",
-    "/asset/extras/source/upAxis": "Z",
+    "/asset/extras/source/upAxis": "+Z",
     "/materials/1/name": "metal"
   }
 }

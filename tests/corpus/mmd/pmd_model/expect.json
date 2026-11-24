@@ -58,11 +58,11 @@
     "morph_targets": 2,
     "source": {
       "format": "PMD",
-      "version": 1.0,
+      "version": "1.0",
       "encoding": "Shift-JIS",
-      "name": "\u30e2\u30c7\u30eb",
+      "title": "\u30e2\u30c7\u30eb",
       "englishName": "Model",
-      "comment": "\u30b3\u30e1\u30f3\u30c8",
+      "description": "\u30b3\u30e1\u30f3\u30c8",
       "englishComment": "A comment"
     }
   },

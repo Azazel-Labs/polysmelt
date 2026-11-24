@@ -4,7 +4,8 @@
 //! chunks, the vertex declarations of v1.30 on (every element type, half floats and packed colors included), the
 //! level of detail layouts of v1.40, v1.41, v1.8 and v1.100, and the edge lists and extremes they may carry
 //! (skipped). The XML layouts are read as OGRE's converter writes them. A `.xml` file is told apart by its top
-//! element. OGRE models are right-handed and Y up with counter-clockwise faces, as glTF's are, so nothing is turned.
+//! element. OGRE models are right-handed and Y up with counter-clockwise faces, as glTF's are, so nothing is turned
+//! (the source info assumes both, as the engine's convention; the units' length is unknown).
 //!
 //! Each submesh of level of detail 0 becomes a primitive; one on the shared geometry gets only the shared vertices
 //! it uses. Strips, fans and line strips become lists; a submesh without indices draws its vertices in order.
@@ -43,6 +44,7 @@ use crate::assets::Assets;
 use crate::document::{Document, Keep};
 use crate::images::Images;
 use crate::mesh::{Material, srgb_to_linear};
+use crate::source::{Axis, Fact, Handedness};
 
 /// The most morph target and weights animation floats kept: offsets for every target's vertices, and every key's
 /// weights.
@@ -277,8 +279,7 @@ pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
             let bones = add_bones(&mut scene, &skel);
             let links = linked(&skel, &input, assets, &mut facts);
             add_skeleton_animations(&mut scene, &skel, &bones, &links, &mut facts);
-            scene.source.insert("format".into(), json!("OGRE"));
-            scene.source.insert("version".into(), json!(skel.version));
+            convention(&mut scene, &skel.version);
             scene.source.insert("kind".into(), json!("skeleton"));
             if skel.big_endian {
                 scene.source.insert("byteOrder".into(), json!("big-endian"));
@@ -292,6 +293,14 @@ pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
             scene.finish(keep)
         }
     }
+}
+
+/// The source info every OGRE file shares: its format and version, and the engine's right-handed, Y up convention.
+fn convention(scene: &mut Scene, version: &str) {
+    scene.info.format = Some("OGRE".into());
+    scene.info.version = Some(version.to_owned());
+    scene.info.up_axis = Fact::Assumed(Axis::PosY);
+    scene.info.handedness = Fact::Assumed(Handedness::Right);
 }
 
 /// The bones' nodes, in the skeleton's order, each found by its handle.
@@ -1061,8 +1070,7 @@ fn mesh_document(
     }
 
     // Source and facts.
-    scene.source.insert("format".into(), json!("OGRE"));
-    scene.source.insert("version".into(), json!(file.version));
+    convention(&mut scene, &file.version);
     if file.big_endian {
         scene.source.insert("byteOrder".into(), json!("big-endian"));
     }

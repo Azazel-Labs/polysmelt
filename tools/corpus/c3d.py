@@ -199,15 +199,11 @@ def expect(spec, labels, frames, scale=0.1, rate=100.0, meters=0.001, root=Z_UP,
             entry["translation"] = [0, 0, 0]
             rig.append(entry)
             rig.append({"node": names[m], "keys": {"translation": None}})
-    f = {"markers": points, "frames": len(frames), "frame_rate": rate, "frame_time": 1 / rate}
-    if not rate_given:
-        f["frame_time_guessed"] = True
+    f = {"markers": points, "frames": len(frames)}
     if missing:
         f["missing_samples"] = missing
     if never:
         f["markers_never_seen"] = never
-    if root == Z_UP and "up_axis_assumed" not in (facts or {}):
-        f["up_axis_assumed"] = True
     f.update(facts or {})
     f = {k: v for k, v in f.items() if v is not None}
     e = {
@@ -217,7 +213,8 @@ def expect(spec, labels, frames, scale=0.1, rate=100.0, meters=0.001, root=Z_UP,
         "facts": f,
         "document": {"nodes": points + 1, "animations": 1 if channels else 0, "channels": channels,
                      "node_names": ["markers"] + names},
-        "json": {"/asset/extras/source/format": "C3D", "/scenes/0/nodes": [0]},
+        "json": {"/asset/extras/source/format": "C3D", "/asset/extras/source/frameRate": rate,
+                 "/asset/extras/source/metersPerUnit": meters, "/scenes/0/nodes": [0]},
         "rig": rig + list(extra),
     }
     if channels:
@@ -254,10 +251,11 @@ for proc in ("Intel", "DEC", "MIPS"):
                            "translation": [r((a + b) / 2 * 0.001) for a, b in
                                            zip(stored(FRAMES[0][1], scale), stored(FRAMES[2][1], scale))]}],
                    json={"/asset/extras/source/processor": proc, "/asset/extras/source/storage": storage,
-                         "/asset/extras/source/units": "mm", "/asset/extras/source/upAxis": "+Z",
+                         "/asset/extras/source/unit": "mm", "/asset/extras/source/upAxis": "+Z",
+                         "/asset/extras/source/assumed": ["metersPerUnit", "upAxis"],
                          "/asset/extras/source/frameRate": 100, "/asset/extras/source/firstFrame": 1,
                          "/asset/extras/source/scale": scale, "/asset/extras/source/company": "Test Lab",
-                         "/asset/extras/source/software": "corpus 1.0", "/asset/extras/source/subject": "Subject A",
+                         "/asset/extras/source/tool": "corpus 1.0", "/asset/extras/source/subject": "Subject A",
                          "/nodes/1/extras/description": "left hip"})
         case(FMT, name, {f"{name}.c3d": build(proc, LABELS, FRAMES, scale, params=params,
                                               descriptions=["left hip", "right hip", "left knee"])}, e)
@@ -272,13 +270,13 @@ for xs, ys, units, meters, name in (("+X", "+Y", "m", 1.0, "screen_y_up_meters")
     e = expect(f"X_SCREEN {xs}, Y_SCREEN {ys}: the root turns them to glTF's +X and +Y; UNITS {units}", ["a", "b"],
                frames, scale=-1.0, meters=meters, root=turn(xs, ys),
                json={"/asset/extras/source/upAxis": ys, "/asset/extras/source/xScreen": xs,
-                     "/asset/extras/source/units": units})
+                     "/asset/extras/source/unit": units, "/asset/extras/source/assumed": None})
     case(FMT, name, {f"{name}.c3d": build("Intel", ["a", "b"], frames, -1.0, params=params)}, e)
 
 params = {"POINT:UNITS": text("furlongs")}
 frames = [[(1, 2, 3)], [(2, 3, 4)]]
-e = expect("a UNITS the reader doesn't know: the values as they are, and noted", ["m"], frames, scale=-1.0, meters=1.0,
-           facts={"units_unknown": True})
+e = expect("a UNITS the reader doesn't know: the values as they are, its length unknown", ["m"], frames, scale=-1.0,
+           meters=1.0, json={"/asset/extras/source/unit": "furlongs", "/asset/extras/source/metersPerUnit": None})
 case(FMT, "unknown_units", {"unknown_units.c3d": build("Intel", ["m"], frames, -1.0, params=params)}, e)
 
 params = {"POINT:X_SCREEN": text("+X"), "POINT:Y_SCREEN": text("+X")}
@@ -326,8 +324,8 @@ e = expect("parameters at block 3; marker count, scale, rate and data block from
            "DATA_START when the header has zeros", LABELS, frames, rate=50.0)
 case(FMT, "layout_from_parameters", {"layout_from_parameters.c3d": raw}, e)
 
-e = expect("no frame rate in the header or parameters: 30 frames per second, noted", LABELS, frames, rate=30.0,
-           rate_given=False)
+e = expect("no frame rate in the header or parameters: 30 frames per second, assumed", LABELS, frames, rate=30.0,
+           rate_given=False, json={"/asset/extras/source/assumed": ["metersPerUnit", "upAxis", "frameRate"]})
 case(FMT, "no_frame_rate", {"no_frame_rate.c3d": build("Intel", LABELS, frames, rate=0.0)}, e)
 
 # --- Analog data and events are left out, and counted. ---

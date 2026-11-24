@@ -5,9 +5,6 @@
   "facts": {
     "markers": 1,
     "frames": 3,
-    "frame_rate": 10.0,
-    "frame_time": 0.1,
-    "up_axis_assumed": true,
     "dropped_rows": 3
   },
   "document": {
@@ -21,11 +18,12 @@
   },
   "json": {
     "/asset/extras/source/format": "TRC",
-    "/asset/extras/source/upAxis": "Y",
+    "/asset/extras/source/upAxis": "+Y",
     "/scenes/0/nodes": [
       0
     ],
     "/asset/extras/source/frameRate": 10.0,
+    "/asset/extras/source/metersPerUnit": 0.001,
     "/animations/0/name": "motion",
     "/animations/0/samplers/0/interpolation": "LINEAR",
     "/asset/extras/source/startTime": 0.0

@@ -560,7 +560,7 @@ case(FMT, "animation", {"anim.x": scene(anim_scene)},
      {"spec": SPEC + ": AnimationSet, Animation and AnimationKey: rotation (w first, conjugated), scale, position "
                      "and matrix keys; AnimTicksPerSecond; AnimationOptions in the animation's extras",
       "source": SRC, "triangles": 24,
-      "json": {"/asset/extras/source/ticksPerSecond": 24, "/animations/0/name": "Spin",
+      "json": {"/asset/extras/source/frameRate": 24, "/animations/0/name": "Spin",
                "/animations/1/name": "Move",
                "/animations/0/extras/animationOptions/0": {"node": "Spinner", "closed": True,
                                                            "splinePositions": False}},
@@ -650,7 +650,7 @@ for f, enc in [("test_cube_text.x", "text"), ("test_cube_binary.x", "binary"),
     copy(f[:-2], {"spec": SPEC + f": a cube exported as {enc}, skinned to its own frame",
                           "source": BSD.format(f), **REAL_CUBE,
                           "json": {"/asset/extras/source/encoding": enc,
-                                   "/asset/extras/source/ticksPerSecond": 24}})
+                                   "/asset/extras/source/frameRate": 24}})
 
 copy("kwxport_cube",
      {"spec": SPEC + ": a cube with vertex colors and three materials, as kW Xport exports it (DeclData, "

@@ -4,10 +4,7 @@
   "no_mesh": true,
   "facts": {
     "markers": 1,
-    "frames": 2,
-    "frame_rate": 100.0,
-    "frame_time": 0.01,
-    "up_axis_assumed": true
+    "frames": 2
   },
   "document": {
     "nodes": 2,
@@ -20,6 +17,8 @@
   },
   "json": {
     "/asset/extras/source/format": "C3D",
+    "/asset/extras/source/frameRate": 100.0,
+    "/asset/extras/source/metersPerUnit": 0.001,
     "/scenes/0/nodes": [
       0
     ],

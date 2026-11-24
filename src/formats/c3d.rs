@@ -21,7 +21,14 @@
 //! is filled in by the keys on each side, and the missing samples are counted. Lengths become meters from
 //! `POINT:UNITS` (millimeters when it's absent). The root turns the capture so that `POINT:Y_SCREEN`, the axis that
 //! points up on screen, is glTF's Y and `POINT:X_SCREEN` is its X; a file without them is taken to be Z-up, as
-//! laboratory captures nearly all are, and that is noted.
+//! laboratory captures nearly all are.
+//!
+//! The source info has `POINT:UNITS` as the `unit` and its length as `metersPerUnit`, declared (assumed `mm` when
+//! it's absent, unknown when it names a unit that isn't known, which leaves lengths as they are); `POINT:Y_SCREEN`
+//! as the up axis, declared (assumed `+Z` without the screen axes); the header's rate, or `POINT:RATE`, as
+//! `frameRate`, declared (an assumed default when neither gives one); and `MANUFACTURER:SOFTWARE` as the `tool`.
+//! `MANUFACTURER:COMPANY`, `MANUFACTURER:VERSION_LABEL` and `SUBJECTS:NAMES` are kept as `company`,
+//! `softwareVersion` and `subject`, `POINT:X_SCREEN` as `xScreen`.
 //!
 //! Analog channels (force plates, EMG and such) and the header's events have no glTF form, so they're left out and
 //! counted. A file whose last frame doesn't fit in the header's 16 bits gives its frame count in `TRIAL` or
@@ -37,6 +44,7 @@ use super::scene::{self, Animation, Channel, Interp, Node, Path, Scene};
 use crate::Result;
 use crate::document::{Document, Keep};
 use crate::num::f32_of;
+use crate::source::{Axis, Fact, meters_in};
 
 /// Frames per second when neither the header nor `POINT:RATE` gives one.
 const DEFAULT_RATE: f64 = 30.0;
@@ -266,19 +274,6 @@ fn seconds(f: usize, rate: f64) -> f32 {
     f32_of(f as f64 / rate)
 }
 
-/// The length of a unit name in meters.
-fn unit_length(s: &str) -> Option<f64> {
-    Some(match s.trim().to_ascii_lowercase().as_str() {
-        "mm" | "millimeter" | "millimeters" | "millimetre" | "millimetres" => 0.001,
-        "cm" | "centimeter" | "centimeters" | "centimetre" | "centimetres" => 0.01,
-        "dm" => 0.1,
-        "m" | "meter" | "meters" | "metre" | "metres" => 1.0,
-        "in" | "inch" | "inches" => 0.0254,
-        "ft" | "foot" | "feet" => 0.3048,
-        _ => return None,
-    })
-}
-
 /// A screen axis (`+X`, `-Z`, `Y`, …) as a unit vector.
 fn axis(s: &str) -> Option<[f64; 3]> {
     let s = s.trim().to_ascii_uppercase();
@@ -474,7 +469,7 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document<'static>> {
     // Units and the up axis.
     let units = params.string("POINT:UNITS");
     let meters = match &units {
-        Some(u) => unit_length(u),
+        Some(u) => meters_in(u),
         None => Some(0.001),
     };
     let x_screen = params.string("POINT:X_SCREEN");
@@ -485,28 +480,34 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document<'static>> {
     };
     let turn = screen.unwrap_or_else(|| scene::Z_UP_TO_Y_UP.map(f64::from));
 
+    let info = &mut scene.info;
+    info.format = Some("C3D".into());
+    info.meters_per_unit = match (&units, meters) {
+        (Some(_), Some(m)) => Fact::Declared(m),
+        (None, Some(m)) => Fact::Assumed(m),
+        (_, None) => Fact::Unknown,
+    };
+    info.unit = Some(units.clone().unwrap_or_else(|| "mm".into()));
+    info.up_axis = match y_screen.as_deref().and_then(Axis::parse) {
+        Some(up) if screen.is_some() => Fact::Declared(up),
+        _ => Fact::Assumed(Axis::PosZ),
+    };
+    info.frame_rate = match rate_given {
+        Some(r) => Fact::Declared(r),
+        None => Fact::Assumed(rate),
+    };
+    info.tool = params.string("MANUFACTURER:SOFTWARE");
     let mut source = Map::new();
-    source.insert("format".into(), json!("C3D"));
     source.insert("processor".into(), json!(rd.p.name()));
     source.insert("storage".into(), json!(if floats { "float" } else { "integer" }));
-    source.insert("units".into(), json!(units.as_deref().unwrap_or("mm")));
-    source.insert(
-        "upAxis".into(),
-        json!(if screen.is_some() {
-            y_screen.as_deref().unwrap_or("+Z")
-        } else {
-            "+Z"
-        }),
-    );
     if let Some(x) = &x_screen {
         source.insert("xScreen".into(), json!(x));
     }
-    source.insert("frameRate".into(), json!(rate));
     source.insert("firstFrame".into(), json!(first));
     source.insert("scale".into(), json!(scale));
     for (key, name) in [
         ("MANUFACTURER:COMPANY", "company"),
-        ("MANUFACTURER:SOFTWARE", "software"),
+        ("MANUFACTURER:VERSION_LABEL", "softwareVersion"),
         ("SUBJECTS:NAMES", "subject"),
     ] {
         if let Some(v) = params.string(key) {
@@ -517,11 +518,6 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document<'static>> {
     let facts = &mut scene.facts;
     facts.insert("markers".into(), json!(points));
     facts.insert("frames".into(), json!(frames));
-    facts.insert("frame_rate".into(), json!(rate));
-    facts.insert("frame_time".into(), json!(1.0 / rate));
-    if rate_given.is_none() {
-        facts.insert("frame_time_guessed".into(), json!(true));
-    }
     if invalid > 0 {
         facts.insert("missing_samples".into(), json!(invalid));
     }
@@ -546,12 +542,6 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document<'static>> {
     }
     if params.cut_short {
         facts.insert("parameters_cut_short".into(), json!(true));
-    }
-    if meters.is_none() {
-        facts.insert("units_unknown".into(), json!(true));
-    }
-    if screen.is_none() {
-        facts.insert("up_axis_assumed".into(), json!(true));
     }
     scene.source = source;
     scene.scale(f32_of(meters.unwrap_or(1.0)));
@@ -683,7 +673,12 @@ mod tests {
                 assert_eq!(doc.facts["markers"], json!(2), "{p:?}");
                 assert_eq!(doc.facts["frames"], json!(3));
                 assert_eq!(doc.facts["missing_samples"], json!(1));
-                assert_eq!(doc.facts["up_axis_assumed"], json!(true));
+                let info = doc.source_info();
+                assert_eq!(info.up_axis, Fact::Assumed(Axis::PosZ), "{p:?}");
+                assert_eq!(info.meters_per_unit, Fact::Assumed(0.001));
+                assert_eq!(info.unit.as_deref(), Some("mm"));
+                assert_eq!(info.frame_rate, Fact::Declared(10.0));
+                assert!(info.converted.units && info.converted.up_axis);
                 let rig = doc.rig().unwrap();
                 assert_eq!(rig.nodes[1].name.as_deref(), Some("LASI"));
                 assert_eq!(rig.nodes[2].name.as_deref(), Some("marker2"));
@@ -715,7 +710,12 @@ mod tests {
             &[("X_SCREEN", "+X"), ("Y_SCREEN", "+Y"), ("UNITS", "m")],
         );
         let doc = read(&b).unwrap();
-        assert!(doc.facts.get("up_axis_assumed").is_none());
+        let info = doc.source_info();
+        assert_eq!(info.format.as_deref(), Some("C3D"));
+        assert_eq!(info.up_axis, Fact::Declared(Axis::PosY));
+        assert_eq!(info.meters_per_unit, Fact::Declared(1.0));
+        assert_eq!(info.unit.as_deref(), Some("m"));
+        assert!(!info.converted.units);
         let rig = doc.rig().unwrap();
         assert!(near(&rig.nodes[1].rest.translation, &[100.0, 200.0, 300.0]));
         assert!(near(&rig.nodes[0].rest.rotation, &[0.0, 0.0, 0.0, 1.0]));

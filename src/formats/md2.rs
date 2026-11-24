@@ -22,7 +22,9 @@
 //! in the source facts. GL commands (the triangle strips and fans the engine draws with) repeat the triangles and
 //! are skipped.
 //!
-//! The format is Z up, so the mesh node is turned for glTF's Y up; game units are kept unscaled.
+//! The format is Z up by the engine's convention, so the mesh node is turned for glTF's Y up (the source info's
+//! `upAxis` is an assumed `+Z`, converted); game units are kept unscaled, and their length unknown. The assumed
+//! frame rate is recorded when there are frames to animate.
 //!
 //! A file cut short, an offset past its end, a negative count, or a triangle naming a position or texture
 //! coordinate past its list is an error. Counts are checked against the file's size before anything is allocated
@@ -43,6 +45,7 @@ use crate::document::{Document, Keep};
 use crate::images::Images;
 use crate::mesh::{FastMap, Material};
 use crate::num::{f32_of, u32_of};
+use crate::source::{Axis, Fact};
 
 /// Frames a second: the rate the engine's game logic runs at, as the format stores none.
 const RATE: f32 = 10.0;
@@ -185,10 +188,12 @@ pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
 
     scene.facts.insert("frames".into(), json!(model.names.len()));
     scene.facts.insert("skins".into(), json!(model.skins.len()));
-    scene.source.insert("format".into(), json!("MD2"));
-    scene.source.insert("version".into(), json!(model.version));
-    scene.source.insert("upAxis".into(), json!("Z"));
-    scene.source.insert("frameRate".into(), json!(RATE));
+    scene.info.format = Some("MD2".into());
+    scene.info.version = Some(model.version.to_string());
+    scene.info.up_axis = Fact::Assumed(Axis::PosZ);
+    if model.names.len() > 1 {
+        scene.info.frame_rate = Fact::Assumed(f64::from(RATE));
+    }
     if !model.skins.is_empty() {
         scene.source.insert("skins".into(), json!(model.skins));
     }
@@ -487,5 +492,23 @@ mod tests {
         sweep(bytes, |b| {
             let _ = load(Input::memory(b, "quad.md2"), &crate::assets::Memory::new(), Keep::ALL);
         });
+    }
+
+    #[test]
+    fn source_info_is_game_units_z_up_at_ten_frames_a_second() {
+        let bytes = include_bytes!("../../tests/corpus/md2/morph_frame_groups/quad.md2");
+        let doc = load(
+            Input::memory(bytes, "quad.md2"),
+            &crate::assets::Memory::new(),
+            Keep::ALL,
+        )
+        .unwrap();
+        let info = doc.source_info();
+        assert_eq!(info.format.as_deref(), Some("MD2"));
+        assert_eq!(info.version.as_deref(), Some("8"));
+        assert_eq!(info.meters_per_unit, Fact::Unknown);
+        assert_eq!(info.up_axis, Fact::Assumed(Axis::PosZ));
+        assert_eq!(info.frame_rate, Fact::Assumed(10.0));
+        assert!(info.converted.up_axis && !info.converted.units);
     }
 }

@@ -5,8 +5,7 @@
   "facts": {
     "joints": 2,
     "channels": 9,
-    "frames": 3,
-    "frame_time": 0.04
+    "frames": 3
   },
   "document": {
     "nodes": 3,
@@ -42,7 +41,7 @@
     ],
     "/nodes/2/children": null,
     "/nodes/1/rotation": null,
-    "/asset/extras/source/upAxis": "Y",
+    "/asset/extras/source/upAxis": "+Y",
     "/asset/extras/source/frames": 3,
     "/animations/0/name": "motion",
     "/scenes/0/nodes": [

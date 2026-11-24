@@ -62,7 +62,7 @@
     ],
     "joints": 2,
     "source": {
-      "version": 2.1,
+      "version": "2.1",
       "encoding": "UTF-8",
       "additionalUvs": 2
     }

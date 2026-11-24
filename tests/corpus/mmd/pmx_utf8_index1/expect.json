@@ -78,11 +78,13 @@
     ],
     "source": {
       "format": "PMX",
-      "version": 2.0,
+      "version": "2.0",
       "encoding": "UTF-8",
-      "name": "\u30e2\u30c7\u30eb",
+      "title": "\u30e2\u30c7\u30eb",
       "englishName": "model",
-      "comment": "\u30b3\u30e1\u30f3\u30c8"
+      "description": "\u30b3\u30e1\u30f3\u30c8",
+      "metersPerUnit": 0.08,
+      "handedness": "left"
     }
   },
   "facts": {

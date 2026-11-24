@@ -246,3 +246,15 @@ fn every_byte_order_and_form_agree() {
     assert_eq!(bin.json["meshes"], xml.json["meshes"]);
     assert_eq!(bin.json["accessors"], xml.json["accessors"]);
 }
+
+#[test]
+fn source_info_is_the_engine_convention() {
+    let doc = load_as(QUAD, "quad.mesh", &Memory::new()).unwrap();
+    let info = doc.source_info();
+    assert_eq!(info.format.as_deref(), Some("OGRE"));
+    assert_eq!(info.version.as_deref(), Some("MeshSerializer_v1.100"));
+    assert_eq!(info.up_axis, Fact::Assumed(Axis::PosY));
+    assert_eq!(info.handedness, Fact::Assumed(Handedness::Right));
+    assert_eq!(info.meters_per_unit, Fact::Unknown);
+    assert_eq!(info.converted, crate::source::Converted::default());
+}

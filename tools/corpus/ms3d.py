@@ -167,7 +167,7 @@ case(FMT, "quad_material_texture", {
     "facts": {"triangles": 2, "joints": 0, "groups": 1},
     "json": {
         "/asset/extras/source/format": "MS3D",
-        "/asset/extras/source/version": 4,
+        "/asset/extras/source/version": "4",
         "/asset/extras/source/frameRate": 24.0,
         "/asset/extras/source/alphamaps": ["mask.png"],
         "/meshes/0/extras/groups": ["plane"],
@@ -202,7 +202,7 @@ case(FMT, "ends_after_groups", {
     "source": SRC,
     "triangles": 2,
     "bounds": {"min": [0, 0, 0], "max": [1, 1, 0]},
-    "json": {"/asset/extras/source/version": 3, "/materials": None},
+    "json": {"/asset/extras/source/version": "3", "/materials": None},
 })
 
 # A skeleton: two joints with rest rotations, keys relative to the rest, a triangle on each.

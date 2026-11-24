@@ -28,6 +28,6 @@
   },
   "json": {
     "/asset/extras/source/encoding": "text",
-    "/asset/extras/source/ticksPerSecond": 24
+    "/asset/extras/source/frameRate": 24
   }
 }

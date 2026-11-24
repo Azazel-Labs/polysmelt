@@ -26,7 +26,10 @@
 //! the model when there is one (`surface,texture` lines, as player models name theirs). Shader scripts, which can
 //! name a different texture for a shader, aren't read; frame bounds are dropped.
 //!
-//! The format is Z up, so the scene's roots are turned for glTF's Y up; game units are kept unscaled.
+//! The format is Z up by the engine's convention, so the scene's roots are turned for glTF's Y up (the source info's
+//! `upAxis` is an assumed `+Z`, converted); game units are kept unscaled, and their length unknown. With more than
+//! one frame the assumed frame rate is recorded. The header's name (the model's path in the game's folders) is kept
+//! as `name`.
 //!
 //! A file cut short, an offset past its end, a negative count, a surface that doesn't start with `IDP3` or has no
 //! frames, or a triangle naming a vertex past its surface's is an error. Counts are checked against the file's size
@@ -48,6 +51,7 @@ use crate::document::{Document, Keep};
 use crate::images::Images;
 use crate::mesh::Material;
 use crate::num::{f32_of, u32_of};
+use crate::source::{Axis, Fact};
 
 /// Frames a second, as the format stores none.
 const RATE: f32 = 10.0;
@@ -183,14 +187,15 @@ pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
     scene.facts.insert("frames".into(), json!(n_frames));
     scene.facts.insert("surfaces".into(), json!(file.surface_count));
     scene.facts.insert("tags".into(), json!(n_tags));
-    scene.source.insert("format".into(), json!("MD3"));
-    scene.source.insert("version".into(), json!(file.version));
+    scene.info.format = Some("MD3".into());
+    scene.info.version = Some(file.version.to_string());
     if !file.name.is_empty() {
+        // The model's path in the game's folders, not a title.
         scene.source.insert("name".into(), json!(file.name));
     }
-    scene.source.insert("upAxis".into(), json!("Z"));
+    scene.info.up_axis = Fact::Assumed(Axis::PosZ);
     if n_frames > 1 {
-        scene.source.insert("frameRate".into(), json!(RATE));
+        scene.info.frame_rate = Fact::Assumed(f64::from(RATE));
     }
     scene.rotate_roots(Z_UP_TO_Y_UP);
     scene.finish(keep)
@@ -564,5 +569,24 @@ mod tests {
         sweep(bytes, |b| {
             let _ = load(Input::memory(b, "thing.md3"), &crate::assets::Memory::new(), Keep::ALL);
         });
+    }
+
+    #[test]
+    fn source_info_is_game_units_z_up_at_ten_frames_a_second() {
+        let bytes = include_bytes!("../../tests/corpus/md3/surfaces_tag_and_skin/thing.md3");
+        let doc = load(
+            Input::memory(bytes, "thing.md3"),
+            &crate::assets::Memory::new(),
+            Keep::ALL,
+        )
+        .unwrap();
+        let info = doc.source_info();
+        assert_eq!(info.format.as_deref(), Some("MD3"));
+        assert_eq!(info.version.as_deref(), Some("15"));
+        assert_eq!(info.meters_per_unit, Fact::Unknown);
+        assert_eq!(info.up_axis, Fact::Assumed(Axis::PosZ));
+        assert_eq!(info.frame_rate, Fact::Assumed(10.0));
+        assert!(info.converted.up_axis && !info.converted.units);
+        assert_eq!(doc.json["asset"]["extras"]["source"]["name"], "models/thing/thing.md3");
     }
 }

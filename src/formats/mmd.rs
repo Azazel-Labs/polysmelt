@@ -25,6 +25,12 @@
 //! The format is left-handed and Y up with a unit of 8 cm, so the scene is mirrored through its XY plane and
 //! scaled by 0.08 into meters. Text is UTF-16 or UTF-8 in PMX, as its header says, and Shift-JIS in PMD and VMD.
 //!
+//! The source info has the handedness as declared (the format defines it) and converted, the up axis `+Y` assumed,
+//! and `metersPerUnit` an assumed 0.08 (the unit's length is the users' convention, not the format's), converted.
+//! A model's name is its `title` and its comment its `description`; the English name and comment stay as
+//! `englishName` and `englishComment`. A motion's `frameRate` is 30, the rate its frame numbers count at, and the
+//! model it was made for is kept as `model`.
+//!
 //! A file cut short in its vertices, faces, materials, bones or morphs, a negative count, or a count past the end
 //! of the file is an error. Display frames and physics after the morphs are read as far as they go.
 
@@ -42,6 +48,7 @@ use crate::document::{Document, Keep};
 use crate::images::Images;
 use crate::mesh::{Material, srgb_to_linear};
 use crate::num::{f32_of, u32_of};
+use crate::source::{Axis, Fact, Handedness, SourceInfo};
 
 /// Meters per MMD unit.
 const UNIT: f32 = 0.08;
@@ -1406,20 +1413,20 @@ fn build(m: Model, input: &Input<'_>, stem: &str, assets: &dyn Assets, keep: Kee
     scene.scale(UNIT);
 
     let mut source = Map::new();
-    source.insert("format".into(), json!(m.format));
-    // The version as written (2.1, not the nearest float to it, 2.0999999).
-    source.insert(
-        "version".into(),
-        json!((f64::from(m.version) * 1000.0).round() / 1000.0),
-    );
+    convention(&mut scene.info);
+    scene.info.format = Some(m.format.into());
+    // The version as written (2.1, not the nearest float to it, 2.0999999), with its tenths (2.0).
+    let version = (f64::from(m.version) * 1000.0).round() / 1000.0;
+    scene.info.version = Some(if version.fract() == 0.0 {
+        format!("{version:.1}")
+    } else {
+        version.to_string()
+    });
+    let text = |s: &str| (!s.is_empty()).then(|| s.to_owned());
+    scene.info.title = text(&m.name);
+    scene.info.description = text(&m.comment);
     source.insert("encoding".into(), json!(m.encoding));
-    source.insert("metersPerUnit".into(), json!(UNIT));
-    for (key, v) in [
-        ("name", &m.name),
-        ("englishName", &m.english_name),
-        ("comment", &m.comment),
-        ("englishComment", &m.english_comment),
-    ] {
+    for (key, v) in [("englishName", &m.english_name), ("englishComment", &m.english_comment)] {
         if !v.is_empty() {
             source.insert(key.into(), json!(v));
         }
@@ -1698,10 +1705,11 @@ fn motion(data: &[u8], stem: &str, keep: Keep) -> Result<Document<'static>> {
     }
 
     let mut source = Map::new();
-    source.insert("format".into(), json!("VMD"));
+    convention(&mut scene.info);
+    scene.info.format = Some("VMD".into());
+    // Keys are frame numbers, which the format counts at 30 a second.
+    scene.info.frame_rate = Fact::Declared(FPS);
     source.insert("model".into(), json!(model));
-    source.insert("frameRate".into(), json!(FPS));
-    source.insert("metersPerUnit".into(), json!(UNIT));
     if !morph_keys.is_empty() {
         facts.insert("morph_keys".into(), json!(morph_keys.len()));
         let mut names: Vec<String> = Vec::new();
@@ -1732,6 +1740,14 @@ fn motion(data: &[u8], stem: &str, keep: Keep) -> Result<Document<'static>> {
     scene.mirror_z();
     scene.scale(UNIT);
     scene.finish(keep)
+}
+
+/// The source info the formats share: left-handed and Y up, as the format defines, in units taken as 8 cm.
+fn convention(info: &mut SourceInfo) {
+    // 0.08 as written, not the f32 widened (0.0799999982).
+    info.meters_per_unit = Fact::Assumed(0.08);
+    info.up_axis = Fact::Assumed(Axis::PosY);
+    info.handedness = Fact::Declared(Handedness::Left);
 }
 
 #[cfg(test)]

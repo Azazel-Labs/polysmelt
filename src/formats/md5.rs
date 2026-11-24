@@ -32,12 +32,14 @@
 //! nodes' rest pose is the first frame's, so the base frame gives only what no frame animates: the engine never
 //! reads the rest, and some exporters write the base frame's quaternions with the other sign of `w` from their
 //! frames'. Frame k is at k over `frameRate` seconds (24 when the rate isn't a positive number, as the engine
-//! plays them, noted in the facts). The frames become one linear animation, named after the file: a translation
+//! plays them, an assumed `frameRate` in the source info). The frames become one linear animation, named after the file: a translation
 //! channel for each joint with a position bit, a rotation channel for each with a quaternion bit. Per-frame
 //! `bounds` are dropped. A mesh and its animations are separate files, each read on its own; both share the joint
 //! names that tie them together.
 //!
-//! The format is Z up, so the scene's roots are turned for glTF's Y up; game units are kept unscaled.
+//! The format is Z up by the engine's convention, so the scene's roots are turned for glTF's Y up (the source info's
+//! `upAxis` is an assumed `+Z`, converted); game units are kept unscaled, and their length unknown. The exporter's
+//! `commandline` is kept as written.
 //!
 //! A file cut short, a number that isn't one, or an index past what its block holds (a vertex's weights, a weight's
 //! joint, a triangle's vertex, a joint's parent, a frame's components) is an error. Counts are checked against the
@@ -45,7 +47,7 @@
 
 use std::collections::HashMap;
 
-use serde_json::{Map, Value, json};
+use serde_json::{Map, json};
 
 use super::Input;
 use super::scene::{
@@ -57,6 +59,7 @@ use crate::document::{Document, Keep};
 use crate::images::Images;
 use crate::mesh::Material;
 use crate::num::{f32_of, u32_of};
+use crate::source::{Axis, Fact};
 
 /// The frame rate taken when a file gives none that's usable: the engine's.
 const DEFAULT_RATE: f32 = 24.0;
@@ -81,9 +84,9 @@ pub(crate) fn load(input: Input<'_>, ext: &str, assets: &dyn Assets, keep: Keep)
     } else {
         build_mesh(&file.mesh.unwrap_or_default(), &stem, &input, assets, keep)?
     };
-    scene.source.insert("format".into(), json!("MD5"));
-    scene.source.insert("version".into(), json!(file.version));
-    scene.source.insert("upAxis".into(), json!("Z"));
+    scene.info.format = Some("MD5".into());
+    scene.info.version = Some(file.version.to_string());
+    scene.info.up_axis = Fact::Assumed(Axis::PosZ);
     if !file.commandline.is_empty() {
         scene.source.insert("commandline".into(), json!(file.commandline));
     }
@@ -832,14 +835,13 @@ fn build_anim(a: &AnimFile, stem: &str) -> Result<Scene> {
     let mut facts = Map::new();
     facts.insert("joints".into(), json!(n));
     facts.insert("frames".into(), json!(a.frames.len()));
-    facts.insert("frame_rate".into(), json!(rate));
     facts.insert("components".into(), json!(components));
-    if guessed {
-        facts.insert("frame_rate_guessed".into(), Value::Bool(true));
-    }
     scene.facts = facts;
     scene.source.insert("frames".into(), json!(a.frames.len()));
-    scene.source.insert("frameRate".into(), json!(rate));
+    scene.info.frame_rate = match a.frame_rate {
+        Some(r) if !guessed => Fact::Declared(r),
+        _ => Fact::Assumed(f64::from(rate)),
+    };
     Ok(scene)
 }
 
@@ -928,6 +930,16 @@ frame 1 {
         assert_eq!(a["channels"].as_array().unwrap().len(), 2);
         assert_eq!(doc.facts["frames"], 2);
         assert!(doc.flatten(Pose::Rest).unwrap().is_none());
+        let info = doc.source_info();
+        assert_eq!(info.format.as_deref(), Some("MD5"));
+        assert_eq!(info.version.as_deref(), Some("10"));
+        assert_eq!(info.frame_rate, Fact::Declared(10.0));
+        assert_eq!(info.meters_per_unit, Fact::Unknown);
+        assert_eq!(info.up_axis, Fact::Assumed(Axis::PosZ));
+        assert!(info.converted.up_axis);
+        let guessed = ANIM.replace("frameRate 10", "frameRate 0");
+        let doc = read(guessed.as_bytes(), "walk.md5anim").unwrap();
+        assert_eq!(doc.source_info().frame_rate, Fact::Assumed(24.0));
     }
 
     #[test]

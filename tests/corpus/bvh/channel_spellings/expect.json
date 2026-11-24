@@ -5,8 +5,7 @@
   "facts": {
     "joints": 1,
     "channels": 7,
-    "frames": 2,
-    "frame_time": 0.04
+    "frames": 2
   },
   "document": {
     "nodes": 2,
@@ -21,6 +20,10 @@
     "/asset/extras/source/format": "BVH",
     "/scenes/0/nodes": [
       0
+    ],
+    "/asset/extras/source/frameRate": 25.0,
+    "/asset/extras/source/assumed": [
+      "upAxis"
     ],
     "/animations/0/name": "motion",
     "/animations/0/samplers/0/interpolation": "LINEAR"

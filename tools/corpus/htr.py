@@ -175,10 +175,7 @@ class Htr:
 
 def expect(spec, h, extra=(), facts=None, every=True, **more):
     animated = [n for n, _ in h.segments if h.rows.get(n)]
-    f = {"segments": len(h.segments), "frames": max([len(h.rows.get(n, [])) for n, _ in h.segments] + [0]),
-         "frame_time": 1 / (h.rate or 30.0)}
-    if not h.rate:
-        f["frame_time_guessed"] = True
+    f = {"segments": len(h.segments), "frames": max([len(h.rows.get(n, [])) for n, _ in h.segments] + [0])}
     if not h.hierarchy:
         f["global"] = True
     scaled = sum(1 for n in animated for row in h.rows[n] if len(row) > 7 and abs(row[7] - 1) > 1e-9)
@@ -197,7 +194,11 @@ def expect(spec, h, extra=(), facts=None, every=True, **more):
         "facts": f,
         "document": {"nodes": len(h.names()), "animations": 1 if animated else 0, "channels": 2 * len(animated),
                      "node_names": h.names()},
-        "json": {"/asset/extras/source/format": "HTR", "/asset/extras/source/upAxis": h.gravity,
+        "json": {"/asset/extras/source/format": "HTR",
+                 "/asset/extras/source/upAxis": h.gravity if h.gravity.startswith("-") else "+" + h.gravity,
+                 "/asset/extras/source/unit": h.units, "/asset/extras/source/metersPerUnit": h.meters,
+                 "/asset/extras/source/frameRate": h.rate or 30.0,
+                 "/asset/extras/source/assumed": None if h.rate else ["frameRate"],
                  "/scenes/0/nodes": [i for i, (n, _) in enumerate(h.segments) if h.parent(n) is None]},
         "rig": rig + list(extra),
     }
@@ -236,11 +237,11 @@ def three(**kw):
 
 h = three()
 write("basic", "three segments: base poses as the rest pose, rows relative to it as T(base + row)·R(base)·R(row)", h,
-      json={"/asset/extras/source/units": "mm", "/asset/extras/source/eulerRotationOrder": "ZYX",
+      json={"/asset/extras/source/unit": "mm", "/asset/extras/source/eulerRotationOrder": "ZYX",
             "/asset/extras/source/rotationUnits": "Degrees", "/asset/extras/source/boneLengthAxis": "Y",
             "/asset/extras/source/scaleFactor": 1, "/asset/extras/source/frames": 3,
-            "/asset/extras/source/fileVersion": "1", "/asset/extras/source/dataType": "HTRS",
-            "/asset/extras/source/frameTime": 1 / 60})
+            "/asset/extras/source/version": "1", "/asset/extras/source/dataType": "HTRS",
+            "/asset/extras/source/frameRate": 60})
 
 for order in ("XYZ", "YXZ", "ZXY", "XZY"):
     write(f"euler_{order.lower()}", f"EulerRotationOrder {order}: R{order[0].lower()}·R{order[1].lower()}·"
@@ -258,10 +259,10 @@ for g in ("Z", "-X"):
 for units, meters, name in (("cm", 0.01, "units_cm"), ("1/10.000 m", 0.1, "units_fraction"),
                             ("2.54cm", 0.0254, "units_attached"), ("in", 0.0254, "units_inches")):
     write(name, f"CalibrationUnits `{units}`", three(units=units, meters=meters),
-          json={"/asset/extras/source/units": units})
+          json={"/asset/extras/source/unit": units})
 
-write("units_unknown", "CalibrationUnits the reader doesn't know: the values as they are, and noted",
-      three(units="cubits", meters=1.0), facts={"units_unknown": True})
+write("units_unknown", "CalibrationUnits the reader doesn't know: the values as they are, its length unknown",
+      three(units="cubits", meters=1.0), json={"/asset/extras/source/metersPerUnit": None})
 
 for axis, name in (("X", "bone_axis_x"), ("-Z", "bone_axis_minus_z")):
     write(name, f"BoneLengthAxis {axis}: the `_end` nodes along it", three(length_axis=axis))
@@ -278,7 +279,7 @@ late["Spine"] = late["Spine"][1:]
 write("first_frame_five", "frames numbered from 5: frame n at (n − 5) / DataFrameRate; a segment with fewer rows",
       Htr(SEGS, BASE, late))
 
-write("no_frame_rate", "no DataFrameRate: 30 frames per second, noted", three(rate=None))
+write("no_frame_rate", "no DataFrameRate: 30 frames per second, assumed", three(rate=None))
 
 # --- Rows the reader drops or counts. ---
 

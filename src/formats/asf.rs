@@ -22,7 +22,8 @@
 //! `:RADIANS`, which override the ASF's angle unit for the motion, and `:SAMPLES-PER-SECOND`) come frames: a frame
 //! number alone on a line, then a line per bone with its name and a value per dof (per `order` entry for the root).
 //! Frame k (counting the frames as they come, not by their numbers) is at k / 120 seconds, the rate motion capture
-//! studios record AMC at, unless `:SAMPLES-PER-SECOND` gives another; a guessed rate is noted in the facts. A bone
+//! studios record AMC at, unless `:SAMPLES-PER-SECOND` gives another (the source info's `frameRate`, assumed when the
+//! file doesn't give it). A bone
 //! moves by `C·M·C⁻¹`, where `C` is the rotation its `axis` gives and `M` the product of its dof rotations; both
 //! apply their rotations in the order listed (`rx ry rz` is Rz·Ry·Rx on column vectors). The root's `C` comes from
 //! its `orientation`, and its translation columns set its position outright. A bone's translation dofs move it along
@@ -38,7 +39,9 @@
 //! motion's own name (`walk.asf` for `walk.amc`), then by the name up to its last `_` (`02.asf` for `02_01.amc`, as
 //! subject-and-trial collections name them). Not finding it is an error.
 //!
-//! Lengths become meters (an inch is 0.0254 m, divided by `length`); the format is Y up, as glTF is. Nothing is
+//! Lengths become meters (an inch is 0.0254 m, divided by `length`): the source info's `metersPerUnit`, declared
+//! when `:units` gives `length` and assumed (an inch) when it doesn't. The skeleton's `name` is its `title` and its
+//! `version` the source's. Capture is Y up, as glTF is; the file doesn't say so, so `+Y` is assumed. Nothing is
 //! allocated from a count the file gives: the bones are capped, and keys take room as lines are read.
 
 use std::collections::HashMap;
@@ -51,6 +54,7 @@ use crate::Result;
 use crate::assets::Assets;
 use crate::document::{Document, Keep};
 use crate::num::f32_of;
+use crate::source::{Axis, Fact};
 
 /// Bones a skeleton may have: far past any capture rig.
 const MAX_BONES: usize = 32_768;
@@ -143,6 +147,8 @@ struct Skeleton {
     version: Option<String>,
     /// `:units length`: lengths times 1/`length` are inches.
     length: f64,
+    /// Whether `:units` gave `length` (else it's 1, inches).
+    length_given: bool,
     mass: Option<f64>,
     /// Whether angles are in radians (`angle rad`), not degrees.
     radians: bool,
@@ -214,6 +220,7 @@ fn parse_asf(text: &str) -> Result<Skeleton> {
         name: None,
         version: None,
         length: 1.0,
+        length_given: false,
         mass: None,
         radians: false,
         root: Bone::new("root".into()),
@@ -272,6 +279,7 @@ fn parse_asf(text: &str) -> Result<Skeleton> {
                         "ASF line {no}: the length unit must be above 0, not {v}"
                     );
                     sk.length = v;
+                    sk.length_given = true;
                 }
                 "mass" => sk.mass = Some(number(tokens.next(), "mass", no)?),
                 "angle" => {
@@ -772,18 +780,25 @@ pub(crate) fn load(input: Input<'_>, ext: &str, assets: &dyn Assets, keep: Keep)
     let mut scene = Scene::default();
     let rig = build(&sk, &mut scene);
     let mut source = Map::new();
-    source.insert("format".into(), json!(if amc { "AMC" } else { "ASF" }));
-    source.insert("upAxis".into(), json!("Y"));
+    let info = &mut scene.info;
+    info.format = Some(if amc { "AMC" } else { "ASF" }.into());
+    info.version.clone_from(&sk.version);
+    info.title.clone_from(&sk.name);
+    let meters = INCH / sk.length;
+    info.meters_per_unit = if sk.length_given {
+        Fact::Declared(meters)
+    } else {
+        Fact::Assumed(meters)
+    };
+    if (sk.length - 1.0).abs() < 1e-12 {
+        info.unit = Some("inch".into());
+    }
+    // Motion capture stands Y up, as the format's own examples do, but the file doesn't say so.
+    info.up_axis = Fact::Assumed(Axis::PosY);
     source.insert("length".into(), json!(sk.length));
     source.insert("angle".into(), json!(if sk.radians { "rad" } else { "deg" }));
     if let Some(m) = sk.mass {
         source.insert("mass".into(), json!(m));
-    }
-    if let Some(n) = &sk.name {
-        source.insert("name".into(), json!(n));
-    }
-    if let Some(v) = &sk.version {
-        source.insert("version".into(), json!(v));
     }
     if let Some(f) = &skeleton_file {
         source.insert("skeleton".into(), json!(f));
@@ -803,17 +818,18 @@ pub(crate) fn load(input: Input<'_>, ext: &str, assets: &dyn Assets, keep: Keep)
         let (animation, motion) = parse_amc(&text, &sk, &rig, &scene);
         let facts = &mut scene.facts;
         facts.insert("frames".into(), json!(motion.frames));
-        facts.insert("frame_time".into(), json!(motion.frame_time));
-        if !motion.rate_given {
-            facts.insert("frame_time_guessed".into(), json!(true));
-        }
         if motion.dropped > 0 {
             facts.insert("dropped_lines".into(), json!(motion.dropped));
         }
         if motion.unknown > 0 {
             facts.insert("unknown_bone_lines".into(), json!(motion.unknown));
         }
-        source.insert("frameTime".into(), json!(motion.frame_time));
+        let rate = 1.0 / motion.frame_time;
+        scene.info.frame_rate = if motion.rate_given {
+            Fact::Declared(rate)
+        } else {
+            Fact::Assumed(rate)
+        };
         source.insert("frames".into(), json!(motion.frames));
         if keep.animations
             && let Some(a) = animation
@@ -918,6 +934,14 @@ mod tests {
         assert_eq!(nodes[2]["extras"]["dof"], json!(["rz", "l"]));
         assert_eq!(doc.json["asset"]["extras"]["source"]["format"], "ASF");
         assert!(doc.json.get("animations").is_none());
+        let info = doc.source_info();
+        // `length 0.0254` makes the unit a meter, as the file declares.
+        assert_eq!(info.meters_per_unit, Fact::Declared(1.0));
+        assert_eq!(info.up_axis, Fact::Assumed(Axis::PosY));
+        assert_eq!(info.frame_rate, Fact::Unknown);
+        assert_eq!(info.title.as_deref(), Some("test"));
+        assert_eq!(info.version.as_deref(), Some("1.10"));
+        assert!(!info.converted.units && !info.converted.up_axis);
     }
 
     #[test]
@@ -925,7 +949,8 @@ mod tests {
         let text = "#!OML:ASF elsewhere/t.asf\n:FULLY-SPECIFIED\n:DEGREES\n1\nroot 1 2 3 0 0 0\nupper 0 0 0\nlower 0 0\n2\nroot 1 2 3 0 0 0\nupper 90 0 0\nlower 45 0.5\n";
         let doc = amc(ASF, text).unwrap();
         assert_eq!(doc.facts["frames"], json!(2));
-        assert_eq!(doc.facts["frame_time_guessed"], json!(true));
+        assert!(doc.facts.get("frame_time_guessed").is_none());
+        assert_eq!(doc.source_info().frame_rate, Fact::Assumed(120.0));
         assert_eq!(doc.json["asset"]["extras"]["source"]["skeleton"], "t.asf");
         let rig = doc.rig().unwrap();
         let a = &rig.animations[0];
@@ -963,8 +988,9 @@ mod tests {
     fn radians_and_rate() {
         let text = ":RADIANS\n:SAMPLES-PER-SECOND 60\n1\nlower 1.5707963267948966 0\n2\nlower 0 0\n";
         let doc = amc(ASF, text).unwrap();
-        assert_eq!(doc.facts["frame_time"], json!(1.0 / 60.0));
-        assert!(doc.facts.get("frame_time_guessed").is_none());
+        let info = doc.source_info();
+        assert_eq!(info.frame_rate, Fact::Declared(60.0));
+        assert_eq!(info.format.as_deref(), Some("AMC"));
         let rig = doc.rig().unwrap();
         let s = std::f32::consts::FRAC_1_SQRT_2;
         assert!(near(&rig.pose(Some(0), 0.0)[2].rotation, &[0.0, 0.0, s, s]));

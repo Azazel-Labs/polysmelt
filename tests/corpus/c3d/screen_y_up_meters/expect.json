@@ -4,9 +4,7 @@
   "no_mesh": true,
   "facts": {
     "markers": 2,
-    "frames": 2,
-    "frame_rate": 100.0,
-    "frame_time": 0.01
+    "frames": 2
   },
   "document": {
     "nodes": 3,
@@ -20,6 +18,8 @@
   },
   "json": {
     "/asset/extras/source/format": "C3D",
+    "/asset/extras/source/frameRate": 100.0,
+    "/asset/extras/source/metersPerUnit": 1.0,
     "/scenes/0/nodes": [
       0
     ],
@@ -27,7 +27,8 @@
     "/animations/0/samplers/0/interpolation": "LINEAR",
     "/asset/extras/source/upAxis": "+Y",
     "/asset/extras/source/xScreen": "+X",
-    "/asset/extras/source/units": "m"
+    "/asset/extras/source/unit": "m",
+    "/asset/extras/source/assumed": null
   },
   "rig": [
     {

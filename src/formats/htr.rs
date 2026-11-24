@@ -22,9 +22,13 @@
 //! numbers, or one that isn't a finite number, or whose frame number doesn't follow the row before it, is left out
 //! and counted; so are rows in a section that names no segment. The scale factor column stretches the bone, which
 //! glTF has no way to say, so rows whose factor isn't 1 are counted, and the factor is dropped. The header's
-//! `ScaleFactor` is recorded and not applied. A missing or bad `DataFrameRate` is taken as 30, and noted.
+//! `ScaleFactor` is recorded and not applied. A missing or bad `DataFrameRate` is taken as 30.
 //!
-//! Lengths become meters, and a Z (or X) gravity axis is turned to glTF's Y up. Nothing is allocated from a count
+//! Lengths become meters, and a Z (or X) gravity axis is turned to glTF's Y up. The source info has
+//! `CalibrationUnits` as the `unit` and its length as `metersPerUnit`, declared (unknown when it's missing or not a
+//! unit, which leaves lengths as they are), `GlobalAxisofGravity` as the up axis, declared (`+Y` assumed when it's
+//! missing, unknown when it isn't an axis), `DataFrameRate` as `frameRate`, declared (30 assumed), and
+//! `FileVersion` as the version. Nothing is allocated from a count
 //! the file gives: the segments are capped, and rows take room as they're read.
 
 use std::collections::HashMap;
@@ -36,6 +40,7 @@ use super::scene::{self, Animation, Channel, Interp, Node, Path, Scene};
 use crate::Result;
 use crate::document::{Document, Keep};
 use crate::num::f32_of;
+use crate::source::{Axis, Fact, meters_in};
 
 /// Segments a file may have: far past any capture rig.
 const MAX_SEGMENTS: usize = 32_768;
@@ -79,15 +84,7 @@ fn unit_length(s: &str) -> Option<f64> {
         let split = s.find(|c: char| c.is_ascii_alphabetic()).unwrap_or(s.len());
         (s[..split].trim(), &s[split..])
     };
-    let base = match unit.to_ascii_lowercase().as_str() {
-        "mm" | "millimeter" | "millimeters" | "millimetre" | "millimetres" => 0.001,
-        "cm" | "centimeter" | "centimeters" | "centimetre" | "centimetres" => 0.01,
-        "dm" | "decimeter" | "decimeters" => 0.1,
-        "m" | "meter" | "meters" | "metre" | "metres" => 1.0,
-        "in" | "inch" | "inches" => 0.0254,
-        "ft" | "foot" | "feet" => 0.3048,
-        _ => return None,
-    };
+    let base = meters_in(unit)?;
     let factor = if amount.is_empty() {
         1.0
     } else if let Some((n, d)) = amount.split_once('/') {
@@ -372,13 +369,20 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document<'static>> {
         });
     }
 
+    let info = &mut scene.info;
+    info.format = Some("HTR".into());
+    info.version = get("FileVersion").map(str::to_owned);
+    info.unit = units.map(str::to_owned);
+    info.meters_per_unit = meters.map_or(Fact::Unknown, Fact::Declared);
+    info.up_axis = match (get("GlobalAxisofGravity"), Axis::parse(gravity)) {
+        (Some(_), Some(a)) if up.is_some() => Fact::Declared(a),
+        (None, _) => Fact::Assumed(Axis::PosY),
+        _ => Fact::Unknown,
+    };
+    info.frame_rate = rate.map_or(Fact::Assumed(DEFAULT_RATE), Fact::Declared);
     let mut source = Map::new();
-    source.insert("format".into(), json!("HTR"));
-    source.insert("upAxis".into(), json!(gravity));
     for (key, name) in [
-        ("FileVersion", "fileVersion"),
         ("DataType", "dataType"),
-        ("CalibrationUnits", "units"),
         ("RotationUnits", "rotationUnits"),
         ("EulerRotationOrder", "eulerRotationOrder"),
         ("BoneLengthAxis", "boneLengthAxis"),
@@ -392,14 +396,9 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document<'static>> {
             source.insert(name.into(), json!(v));
         }
     }
-    source.insert("frameTime".into(), json!(frame_time));
     let facts = &mut scene.facts;
     facts.insert("segments".into(), json!(segments.len()));
     facts.insert("frames".into(), json!(frames));
-    facts.insert("frame_time".into(), json!(frame_time));
-    if rate.is_none() {
-        facts.insert("frame_time_guessed".into(), json!(true));
-    }
     if dropped > 0 {
         facts.insert("dropped_rows".into(), json!(dropped));
     }
@@ -411,12 +410,6 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document<'static>> {
     }
     if unknown_parents > 0 {
         facts.insert("unknown_parents".into(), json!(unknown_parents));
-    }
-    if meters.is_none() {
-        facts.insert("units_unknown".into(), json!(true));
-    }
-    if up.is_none() {
-        facts.insert("up_axis_unknown".into(), json!(true));
     }
     if length_axis.is_none() {
         facts.insert("bone_length_axis_unknown".into(), json!(true));
@@ -525,7 +518,15 @@ knee 0 -400 0 0 0 90 300
         let text = HTR
             .replace("GlobalAxisofGravity Y", "GlobalAxisofGravity Z")
             .replace("CalibrationUnits mm", "CalibrationUnits 1/10.000 m");
-        let rig = read(&text).unwrap().rig().unwrap();
+        let doc = read(&text).unwrap();
+        let info = doc.source_info();
+        assert_eq!(info.format.as_deref(), Some("HTR"));
+        assert_eq!(info.up_axis, Fact::Declared(Axis::PosZ));
+        assert_eq!(info.meters_per_unit, Fact::Declared(0.1));
+        assert_eq!(info.unit.as_deref(), Some("1/10.000 m"));
+        assert_eq!(info.frame_rate, Fact::Declared(10.0));
+        assert!(info.converted.units && info.converted.up_axis);
+        let rig = doc.rig().unwrap();
         // 1000 tenths of a meter up Z is 100 m up Y.
         assert!(near(&rig.nodes[0].rest.translation, &[0.0, 0.0, -100.0]));
         assert_eq!(unit_length("mm"), Some(0.001));
@@ -556,7 +557,10 @@ knee 0 -400 0 0 0 90 300
             "[Header]\nDataFrameRate 0\n[BasePosition]\na 0 0 0 0 0 0 1\nb 1 0 0 0 0 0 1\n[a]\n0 0 0 0 0 0 0 1\n";
         let doc = read(text).unwrap();
         assert_eq!(doc.facts["global"], json!(true));
-        assert_eq!(doc.facts["frame_time_guessed"], json!(true));
+        let info = doc.source_info();
+        assert_eq!(info.frame_rate, Fact::Assumed(30.0));
+        assert_eq!(info.up_axis, Fact::Assumed(Axis::PosY));
+        assert_eq!(info.meters_per_unit, Fact::Unknown);
         assert_eq!(doc.json["scenes"][0]["nodes"], json!([0, 1]));
     }
 

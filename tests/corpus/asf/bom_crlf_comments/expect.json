@@ -22,11 +22,13 @@
   },
   "json": {
     "/asset/extras/source/format": "ASF",
-    "/asset/extras/source/upAxis": "Y",
+    "/asset/extras/source/upAxis": "+Y",
+    "/asset/extras/source/metersPerUnit": 0.05644444444444444,
     "/scenes/0/nodes": [
       0
     ],
-    "/animations": null
+    "/animations": null,
+    "/asset/extras/source/frameRate": null
   },
   "rig": [
     {

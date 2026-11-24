@@ -5,8 +5,7 @@
   "facts": {
     "joints": 2,
     "channels": 9,
-    "frames": 0,
-    "frame_time": 0.04
+    "frames": 0
   },
   "document": {
     "nodes": 3,

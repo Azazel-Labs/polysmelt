@@ -4,8 +4,7 @@
   "no_mesh": true,
   "facts": {
     "segments": 3,
-    "frames": 3,
-    "frame_time": 0.016666666666666666
+    "frames": 3
   },
   "document": {
     "nodes": 5,
@@ -21,21 +20,23 @@
   },
   "json": {
     "/asset/extras/source/format": "HTR",
-    "/asset/extras/source/upAxis": "Y",
+    "/asset/extras/source/upAxis": "+Y",
+    "/asset/extras/source/unit": "mm",
+    "/asset/extras/source/metersPerUnit": 0.001,
+    "/asset/extras/source/frameRate": 60,
+    "/asset/extras/source/assumed": null,
     "/scenes/0/nodes": [
       0
     ],
     "/animations/0/name": "motion",
     "/animations/0/samplers/0/interpolation": "LINEAR",
-    "/asset/extras/source/units": "mm",
     "/asset/extras/source/eulerRotationOrder": "ZYX",
     "/asset/extras/source/rotationUnits": "Degrees",
     "/asset/extras/source/boneLengthAxis": "Y",
     "/asset/extras/source/scaleFactor": 1,
     "/asset/extras/source/frames": 3,
-    "/asset/extras/source/fileVersion": "1",
-    "/asset/extras/source/dataType": "HTRS",
-    "/asset/extras/source/frameTime": 0.016666666666666666
+    "/asset/extras/source/version": "1",
+    "/asset/extras/source/dataType": "HTRS"
   },
   "rig": [
     {
