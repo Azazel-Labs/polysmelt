@@ -30,7 +30,7 @@ cases.
 | Format | Cases | Generated | Blender 5.2 exports |
 | --- | --- | --- | --- |
 | STL | 29 | 27 | 2 |
-| PLY | 36 | 32 | 4 |
+| PLY | 37 | 33 | 4 |
 | VOX | 27 | 27 | none |
 | OBJ | 58 | 49 | 9 |
 | 3DS | 48 | 48 | none |
@@ -45,6 +45,8 @@ cases.
 | VRM | 7 | 7 | none |
 | X3D | 53 | 53 | none |
 | DXF | 34 | 34 | none |
+| Gaussian splats (`.splat`) | 7 | 7 | none |
+| SPZ | 19 | 19 | none |
 
 - **Generated** cases are written byte by byte by `tools/corpus/<format>.py` (3DS is
   `tds.py`, 3MF is `threemf.py`, COLLADA is `dae.py`). Each one targets one clause of the format's specification,
@@ -82,7 +84,8 @@ python tools/corpus/obj.py
   from Z up to Y up.
 - **PLY**: ASCII and binary in both byte orders, and every property type. Covers vertex
   colors in each encoding, the various UV property names, n-gons and triangle strips, point
-  clouds and Gaussian splats. Also unknown elements and broken headers.
+  clouds and gaussian splats (read as `KHR_gaussian_splatting`, with spherical harmonics of
+  degree 1). Also unknown elements and broken headers.
 - **VOX**: palettes (default and off-by-one), materials, and the scene graph: transforms,
   rotations, mirrors, groups, instances and hidden layers or nodes. Also version 150 packs
   and unknown chunks.
@@ -209,6 +212,16 @@ python tools/corpus/obj.py
   points; text and binary. Also colors by layer, index, true color and
   block, layers turned off or frozen, paper space, `$INSUNITS`, CRLF, bare CR and a byte order
   mark, skipped entities and truncation. Errors: empty files and files that aren't DXF.
+- **Gaussian splats** (`splat/`): the 32-byte `.splat` layout, its axes flipped to glTF's
+  and its base color and opacity drawn as point colors; trailing bytes, an empty file and a
+  splat at an infinite position. Also glTF files that already use `KHR_gaussian_splatting`:
+  drawn in their base spherical harmonics' color in either color space, or in a COLOR_0
+  they give.
+- **SPZ**: versions 1 to 3 (half-float and fixed-point positions, three-byte and
+  smallest-three rotations), spherical harmonics of degrees 1 to 3 and degree 4 dropped, the
+  antialiased flag, and the coordinate system record (axes flipped, or turned on the node)
+  among other records or without the flag that says records follow. Errors: truncation, a
+  count past `Keep::max_points`, version 4, an unknown version, an unzipped stream.
 
 ## `expect.json`
 

@@ -2,7 +2,8 @@
 //! `.vox`, OBJ (with its MTL materials and textures), FBX (binary and ASCII), 3DS, 3MF, USD,
 //! glTF (`.gltf` and `.glb`), `SketchUp` (`.skp`), BVH motion capture, COLLADA (`.dae`, and
 //! the `.zae` and `.kmz` archives that hold one), VRM (`.vrm`, `.vrma`), OFF, X3D and VRML97
-//! (`.x3d`, `.x3dv`, `.wrl`, and gzipped `.x3dz`, `.wrz`) and DXF meshes.
+//! (`.x3d`, `.x3dv`, `.wrl`, and gzipped `.x3dz`, `.wrz`), DXF meshes, and gaussian splats
+//! (`.splat`, `.spz`, and PLY's own, as `KHR_gaussian_splatting`).
 //! Each becomes a [`Document`]: glTF as it is, the others converted; textures are embedded so the
 //! document stands on its own. Each format is behind a cargo feature of its name (`3ds` and
 //! `3mf` for those two). A [`Keep`] says what to keep; by default, everything.
@@ -46,6 +47,10 @@ mod off;
 mod ply;
 #[cfg(feature = "skp")]
 mod skp;
+#[cfg(feature = "splat")]
+mod splat;
+#[cfg(feature = "spz")]
+mod spz;
 #[cfg(feature = "stl")]
 mod stl;
 #[cfg(any(
@@ -80,7 +85,7 @@ mod xform;
 /// The extensions [`load`] handles, whether or not this build has their feature.
 pub const EXTENSIONS: &[&str] = &[
     "stl", "ply", "vox", "obj", "fbx", "3ds", "3mf", "usd", "usda", "usdc", "usdz", "gltf", "glb", "skp", "bvh", "dae",
-    "zae", "kmz", "off", "vrm", "vrma", "x3d", "x3dv", "x3dz", "wrl", "wrz", "dxf",
+    "zae", "kmz", "off", "vrm", "vrma", "x3d", "x3dv", "x3dz", "wrl", "wrz", "dxf", "splat", "spz",
 ];
 
 /// Reads the model at `path`, whose format is named by `ext` (lowercase, without the dot),
@@ -327,6 +332,10 @@ fn convert<'a>(input: Input<'a>, ext: &str, assets: &'a dyn Assets, keep: Keep) 
         "vrm" | "vrma" => vrm::load(input, assets, keep),
         #[cfg(feature = "x3d")]
         "x3d" | "x3dv" | "x3dz" | "wrl" | "wrz" => x3d::load(input, assets, keep),
+        #[cfg(feature = "splat")]
+        "splat" => splat::load(input, keep),
+        #[cfg(feature = "spz")]
+        "spz" => spz::load(input, keep),
         #[cfg(feature = "dxf")]
         "dxf" => dxf::load(input),
         e if EXTENSIONS.contains(&e) => bail!("built without the `{}` feature", feature_for(e)),

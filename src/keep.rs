@@ -76,7 +76,7 @@ pub struct Keep {
     /// Counted apart from triangles. Defaults to [`MAX_POINTS`]; raise it for big scans. Values
     /// past [`TRIANGLE_CEILING`] are clamped to it.
     pub max_points: usize,
-    /// Threads a reader may split its work over, where it can: OBJ text, so far. 1, the
+    /// Threads a reader may split its work over, where it can: OBJ text and SPZ, so far. 1, the
     /// default, reads on the calling thread; 0 takes one per core. The model read is the same
     /// either way. Where threads can't be had (WebAssembly without shared memory, or a
     /// platform that refuses to start one), it reads on the calling thread.
@@ -135,7 +135,10 @@ impl Keep {
 
     /// [`Keep::threads`]: how many to use here, at least 1. WebAssembly without shared memory
     /// has no threads; elsewhere, a reader whose threads can't be started reads on one.
-    #[cfg_attr(not(feature = "obj"), allow(dead_code, reason = "only the OBJ reader takes threads"))]
+    #[cfg_attr(
+        not(any(feature = "obj", feature = "spz")),
+        allow(dead_code, reason = "only the OBJ and SPZ readers take threads")
+    )]
     pub(crate) fn threads(self) -> usize {
         if cfg!(all(target_family = "wasm", not(target_feature = "atomics"))) {
             1
@@ -145,6 +148,25 @@ impl Keep {
             self.threads
         }
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// For tests: thread starts fail, as on a platform without threads.
+    pub(crate) static NO_THREADS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// `f` started on a thread of `s`; false, and `f` dropped, where no thread can be started.
+#[cfg_attr(
+    not(any(feature = "obj", feature = "spz")),
+    allow(dead_code, reason = "only the OBJ and SPZ readers take threads")
+)]
+pub(crate) fn spawn<'s>(s: &'s std::thread::Scope<'s, '_>, f: impl FnOnce() + Send + 's) -> bool {
+    #[cfg(test)]
+    if NO_THREADS.get() {
+        return false;
+    }
+    std::thread::Builder::new().spawn_scoped(s, f).is_ok()
 }
 
 /// Calls `f` on each item of `obj[key]` that's an object.

@@ -1,0 +1,155 @@
+{
+ "asset": {
+  "version": "2.0",
+  "generator": "tools/corpus/splat.py"
+ },
+ "extensionsUsed": [
+  "KHR_gaussian_splatting"
+ ],
+ "scene": 0,
+ "scenes": [
+  {
+   "nodes": [
+    0
+   ]
+  }
+ ],
+ "nodes": [
+  {
+   "mesh": 0
+  }
+ ],
+ "meshes": [
+  {
+   "primitives": [
+    {
+     "mode": 0,
+     "attributes": {
+      "POSITION": 0,
+      "KHR_gaussian_splatting:ROTATION": 1,
+      "KHR_gaussian_splatting:SCALE": 2,
+      "KHR_gaussian_splatting:OPACITY": 3,
+      "KHR_gaussian_splatting:SH_DEGREE_0_COEF_0": 4,
+      "KHR_gaussian_splatting:SH_DEGREE_1_COEF_0": 5,
+      "KHR_gaussian_splatting:SH_DEGREE_1_COEF_1": 6,
+      "KHR_gaussian_splatting:SH_DEGREE_1_COEF_2": 7
+     },
+     "extensions": {
+      "KHR_gaussian_splatting": {
+       "kernel": "ellipse",
+       "colorSpace": "srgb_rec709_display"
+      }
+     }
+    }
+   ]
+  }
+ ],
+ "buffers": [
+  {
+   "byteLength": 276,
+   "uri": "data:application/octet-stream;base64,AAAAAAAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAgD8AAAAAAAAAAAAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAgD8AAAAAAAAAAAAAAAAAAIA/zczMPc3MzD3NzMw9zczMPc3MzD3NzMw9zczMPc3MzD3NzMw9AACAPwAAAD8AAIA+xd/iPwAAAADF3+K/AAAAAMXfYr/F32I/xd/iQMXf4sAAAAAAAAAAAArXIzwK16M8j8L1PArXIz3NzEw9j8J1PSlcjz0K16M9AAAAAArXIzwK16M8j8L1PArXIz3NzEw9j8J1PSlcjz0K16M9AAAAAArXIzwK16M8j8L1PArXIz3NzEw9j8J1PSlcjz0K16M9"
+  }
+ ],
+ "bufferViews": [
+  {
+   "buffer": 0,
+   "byteOffset": 0,
+   "byteLength": 36
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 36,
+   "byteLength": 48
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 84,
+   "byteLength": 36
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 120,
+   "byteLength": 12
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 132,
+   "byteLength": 36
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 168,
+   "byteLength": 36
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 204,
+   "byteLength": 36
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 240,
+   "byteLength": 36
+  }
+ ],
+ "accessors": [
+  {
+   "bufferView": 0,
+   "componentType": 5126,
+   "count": 3,
+   "type": "VEC3",
+   "min": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "max": [
+    1.0,
+    1.0,
+    0.0
+   ]
+  },
+  {
+   "bufferView": 1,
+   "componentType": 5126,
+   "count": 3,
+   "type": "VEC4"
+  },
+  {
+   "bufferView": 2,
+   "componentType": 5126,
+   "count": 3,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 3,
+   "componentType": 5126,
+   "count": 3,
+   "type": "SCALAR"
+  },
+  {
+   "bufferView": 4,
+   "componentType": 5126,
+   "count": 3,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 5,
+   "componentType": 5126,
+   "count": 3,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 6,
+   "componentType": 5126,
+   "count": 3,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 7,
+   "componentType": 5126,
+   "count": 3,
+   "type": "VEC3"
+  }
+ ]
+}

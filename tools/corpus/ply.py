@@ -212,10 +212,40 @@ case(FMT, "point_cloud_empty_faces",
 
 splat = [("float", n) for n in ["x", "y", "z", "nx", "ny", "nz", "f_dc_0", "f_dc_1", "f_dc_2", "opacity",
                                 "scale_0", "scale_1", "scale_2", "rot_0", "rot_1", "rot_2", "rot_3"]]
+KHR = "KHR_gaussian_splatting"
+SPLAT_ATTRIBUTES = ["POSITION", "COLOR_0", f"{KHR}:ROTATION", f"{KHR}:SCALE", f"{KHR}:OPACITY",
+                    f"{KHR}:SH_DEGREE_0_COEF_0"]
 case(FMT, "gaussian_splats", {"splats.ply": ply("binary_little_endian", [("vertex", splat, [v + [0] * 14 for v in QUAD_V])])},
-     {"spec": "PLY as 3D Gaussian splatting writes it: a vertex element of splat parameters", "source": SRC,
-      "triangles": 0, "points": 4, "vertices": 4, "facts": {"points": 4},
-      "document": {"attributes": ["COLOR_0", "_F_DC_0", "_OPACITY", "_SCALE_2", "_ROT_3"]}})
+     {"spec": "PLY as 3D Gaussian splatting writes it: a vertex element of splat parameters, read as "
+              "KHR_gaussian_splatting", "source": SRC,
+      "triangles": 0, "points": 4, "vertices": 4, "facts": {"points": 4, "splats": 4},
+      "document": {"attributes": SPLAT_ATTRIBUTES},
+      "json": {"/extensionsUsed": [KHR], "/meshes/0/primitives/0/attributes/NORMAL": None}})
+
+# Degree 1: nine f_rest values, the red channel's three coefficients first. The axes are right,
+# down, forward; opacity is a logit, scale a logarithm.
+SH_C0 = 0.28209479177387814
+splat1 = splat[:9] + [("float", f"f_rest_{k}") for k in range(9)] + splat[9:]
+rows1 = []
+for i, v in enumerate(QUAD_V):
+    dc = [0.5 * i - 0.8, 0.3, -0.4 * i]
+    rows1.append(v + [0, 0, 0] + dc + [0.01 * k for k in range(9)] + [i - 1.5, -3, -2, -1, 1, 0, 0, 0])
+
+
+def splat_color(row):
+    rgb = [min(max(0.5 + SH_C0 * c, 0.0), 1.0) for c in row[6:9]]
+    return [lin(c) for c in rgb] + [r(1 / (1 + math.exp(-row[18])), 4)]
+
+
+case(FMT, "gaussian_splats_sh_degree_1",
+     {"splats.ply": ply("binary_little_endian", [("vertex", splat1, rows1)])},
+     {"spec": "PLY as 3D Gaussian splatting writes it: spherical harmonics of degree 1, axes flipped to glTF's",
+      "source": SRC, "triangles": 0, "points": 4, "vertices": 4, "colors": True, "tolerance": 1e-3,
+      "facts": {"points": 4, "splats": 4},
+      "positions_include": [[x, -y, -z] for x, y, z in QUAD_V],
+      "colors_include": [splat_color(row) for row in rows1],
+      "document": {"attributes": SPLAT_ATTRIBUTES + [f"{KHR}:SH_DEGREE_1_COEF_{k}" for k in range(3)]},
+      "json": {f"/meshes/0/primitives/0/attributes/{KHR}:SH_DEGREE_2_COEF_0": None}})
 
 cut = ply("binary_little_endian", [CUBE_VERTS, CUBE_FACES])
 case(FMT, "truncated", {"cut.ply": cut[:-10]},

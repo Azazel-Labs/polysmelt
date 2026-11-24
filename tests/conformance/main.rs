@@ -47,6 +47,8 @@ fn enabled(ext: &str) -> bool {
         "off" => cfg!(feature = "off"),
         "x3d" | "x3dv" | "x3dz" | "wrl" | "wrz" => cfg!(feature = "x3d"),
         "dxf" => cfg!(feature = "dxf"),
+        "splat" => cfg!(feature = "splat"),
+        "spz" => cfg!(feature = "spz"),
         _ => false,
     }
 }
@@ -69,7 +71,7 @@ fn has_feature(name: &str) -> bool {
 /// Every model extension a full build reads, so cases are found in builds without some readers.
 const ALL_EXTENSIONS: &[&str] = &[
     "stl", "ply", "vox", "obj", "3ds", "fbx", "3mf", "usd", "usda", "usdc", "usdz", "gltf", "glb", "skp", "bvh", "dae",
-    "zae", "kmz", "off", "vrm", "vrma", "x3d", "x3dv", "x3dz", "wrl", "wrz", "dxf",
+    "zae", "kmz", "off", "vrm", "vrma", "x3d", "x3dv", "x3dz", "wrl", "wrz", "dxf", "splat", "spz",
 ];
 
 fn ext_of(p: &Path) -> String {
@@ -390,7 +392,13 @@ fn rig(e: &Map<String, Value>, doc: &Document<'_>, tol: f32) -> Result<(), Strin
 fn decoded(case: &Case, ext: &str, want: Option<&Mesh>, tol: f32) -> Result<(), String> {
     let mut doc = formats::load(&case.file, ext, &Folder::new(&case.dir), Keep::ALL).map_err(|e| e.to_string())?;
     doc.decode().map_err(|err| format!("doesn't decode: {err}"))?;
-    if let Some(why) = agrees_with_gltf_crate(&doc)? {
+    // The gltf crate refuses attribute names it doesn't know, KHR_gaussian_splatting's among them.
+    let splats = doc
+        .json
+        .get("extensionsUsed")
+        .and_then(Value::as_array)
+        .is_some_and(|used| used.iter().any(|e| e == "KHR_gaussian_splatting"));
+    if !splats && let Some(why) = agrees_with_gltf_crate(&doc)? {
         return Err(format!("decoded, the gltf crate can't read it: {why}"));
     }
     let text = serde_json::to_string(&doc.json).unwrap();
@@ -426,7 +434,9 @@ fn decoded(case: &Case, ext: &str, want: Option<&Mesh>, tol: f32) -> Result<(), 
     let glb = doc
         .to_glb()
         .map_err(|err| format!("decoded, it doesn't write as GLB: {err}"))?;
-    gltf::Gltf::from_slice(&glb).map_err(|err| format!("decoded, the gltf crate rejects it: {err}"))?;
+    if !splats {
+        gltf::Gltf::from_slice(&glb).map_err(|err| format!("decoded, the gltf crate rejects it: {err}"))?;
+    }
     let none = Memory::new();
     let back = formats::load_bytes(&glb, "decoded.glb", "glb", &none, Keep::ALL)
         .map_err(|err| format!("decoded, its GLB doesn't read back: {err}"))?;
@@ -1074,6 +1084,14 @@ fn x3d() {
 #[test]
 fn dxf() {
     check("dxf");
+}
+#[test]
+fn splat() {
+    check("splat");
+}
+#[test]
+fn spz() {
+    check("spz");
 }
 
 /// Every extension `formats::load` takes has cases, and every format a corpus folder.

@@ -4,13 +4,17 @@
 //! texture coordinates under any of their usual names, polygons (triangulated in their plane) and
 //! triangle strips; `MeshLab`'s per-face texture coordinates and `comment TextureFile` (several, a
 //! face picking one by its `texnumber`, a material each); per-face colors. Elements the reader
-//! doesn't use are skipped. Gaussian splats show their color: the zero-order spherical harmonics
-//! (`f_dc_0` to `f_dc_2`) and `opacity` give the vertex colors when the file has no other. A zero
-//! normal (splat files write nothing else) is a placeholder: a mesh's vertex takes a made one, and
-//! a file of nothing but zeros has none. Made normals are smooth across vertices split only by
-//! texture coordinates. Header lines may end in a lone `\r`, and a leading byte order mark is
-//! skipped. Counts the header gives are checked against the bytes left before anything is
-//! allocated for them.
+//! doesn't use are skipped. A point cloud with 3D gaussian splatting's properties (`f_dc_0` to
+//! `f_dc_2`, `opacity`, `scale_0` to `scale_2`, `rot_0` to `rot_3`, and `f_rest_*` up to degree
+//! 3) is read as `KHR_gaussian_splatting`: opacity through the sigmoid, scale out of its
+//! logarithm, rotation normalized, the harmonics in whole degrees, and the axes (right, down,
+//! forward) flipped to glTF's; [`Keep::max_points`] caps the splats. Splat-like files with only
+//! some of those properties show their color: the zero-order spherical harmonics and `opacity`
+//! give the vertex colors when the file has no other. A zero normal (splat files write nothing
+//! else) is a placeholder: a mesh's vertex takes a made one, and a file of nothing but zeros has
+//! none. Made normals are smooth across vertices split only by texture coordinates. Header lines
+//! may end in a lone `\r`, and a leading byte order mark is skipped. Counts the header gives are
+//! checked against the bytes left before anything is allocated for them.
 //!
 //! Nothing the vertices carry is lost: properties beyond those are custom attributes, named as
 //! the file names them in capitals after an underscore (`_CONFIDENCE`, `_F_DC_0`). A file without
@@ -26,6 +30,7 @@ use super::Input;
 use super::stream::{self, Blocks};
 use crate::assets::Assets;
 use crate::document::{Builder, Document, Keep, Part};
+use crate::gaussian::{self, REST, Splats, degree_of, rotation, sigmoid};
 use crate::images::Images;
 use crate::mesh::{FastMap, Material, Mesh, Prim, quad, smooth_normals, srgb_to_linear, triangulate};
 use crate::num::{f32_of, u32_of};
@@ -435,6 +440,12 @@ const DC: [&[&str]; 3] = [&["f_dc_0"], &["f_dc_1"], &["f_dc_2"]];
 const OPACITY: &[&str] = &["opacity"];
 /// The zeroth spherical-harmonic basis function's constant, `1 / (2 sqrt(pi))`.
 const SH_C0: f64 = 0.282_094_791_773_878_14;
+/// The properties that make a point cloud's vertices gaussian splats, as 3D gaussian splatting
+/// training writes them: the base color, opacity (a logit), scale (a logarithm) and rotation
+/// (w, x, y, z). The higher degrees' coefficients are `f_rest_0` on, a color channel at a time.
+const GAUSSIAN: [&str; 11] = [
+    "f_dc_0", "f_dc_1", "f_dc_2", "opacity", "scale_0", "scale_1", "scale_2", "rot_0", "rot_1", "rot_2", "rot_3",
+];
 
 /// A color from its channels' values. `bytes` holds each byte value's channel (made linear) and
 /// alpha, for binary files' `uchar` channels; it's empty otherwise.
@@ -612,6 +623,13 @@ struct Body {
     zero_normals: usize,
     /// The most triangles the file may have.
     limit: usize,
+    /// Whether the file has no faces, so its vertices are a point cloud, and gaussian splats
+    /// when they have the properties.
+    points_only: bool,
+    /// The most splats the file may have.
+    max_splats: usize,
+    /// Whether the vertices are gaussian splats.
+    splats: bool,
     /// The vertex element's other scalar properties' names, for `Vertices::extra`.
     extra_names: Vec<String>,
     /// Elements read past.
@@ -648,6 +666,8 @@ pub(crate) fn ply(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<D
         .any(|e| (e.name == "face" || e.name == "tristrips") && e.count > 0);
     let mut body = Body {
         limit: input.limit,
+        points_only: !has_faces,
+        max_splats: keep.points(),
         ..Body::default()
     };
     // Every item takes at least its smallest record, so counts the file can't hold are refused
@@ -733,7 +753,41 @@ pub(crate) fn ply(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<D
         b.materials(&materials, images.list, &mut json);
     } else {
         facts.insert("points".into(), json!(body.points));
-        if nv > 0 {
+        let splats = if body.splats {
+            splats(&mut body.verts, &names)?
+        } else {
+            None
+        };
+        if let Some(mut splats) = splats {
+            let v = &mut body.verts;
+            // Splats dropped for a broken position take their other properties with them.
+            if let Some(kept) = splats.sanitize() {
+                let n = kept.len();
+                let fits = |len: usize| len == n;
+                if fits(v.nrm.len()) {
+                    gaussian::retain(&mut v.nrm, &kept);
+                }
+                if fits(v.col.len()) {
+                    gaussian::retain(&mut v.col, &kept);
+                }
+                if fits(v.uv.len()) {
+                    gaussian::retain(&mut v.uv, &kept);
+                }
+                for col in v.extra.iter_mut().filter(|c| fits(c.len())) {
+                    gaussian::retain(col, &kept);
+                }
+            }
+            let n = splats.len();
+            if let Some(mut prim) = splats.primitive(&mut b) {
+                let has_normals = v.nrm.iter().any(|&c| !is_zero(c));
+                others(&mut b, &mut prim["attributes"], v, n, has_normals, &names, "COLOR_1");
+                shared = Some(json!({ "POSITION": prim["attributes"]["POSITION"] }));
+                primitives.push(prim);
+                gaussian::use_extension(&mut json);
+            }
+            facts.insert("points".into(), json!(n));
+            facts.insert("splats".into(), json!(n));
+        } else if nv > 0 {
             let attributes = vertex_attributes(&mut b, &mut body.verts, body.zero_normals, &names);
             primitives.push(json!({ "attributes": attributes, "mode": 0 }));
             shared = Some(attributes);
@@ -794,8 +848,24 @@ fn custom(b: &mut Builder, attributes: &mut Value, names: &[String], columns: Ve
 fn vertex_attributes(b: &mut Builder, v: &mut Vertices, zero_normals: usize, names: &[String]) -> Value {
     let n = v.pos.len();
     let mut attributes = json!({ "POSITION": b.positions(std::mem::take(&mut v.pos)) });
+    others(b, &mut attributes, v, n, zero_normals < n, names, "COLOR_0");
+    attributes
+}
+
+/// Adds what `n` points carry beyond their positions to `attributes`: normals (unless
+/// `has_normals` says they're all placeholders), texture coordinates, colors (as `color`) and
+/// the other properties.
+fn others(
+    b: &mut Builder,
+    attributes: &mut Value,
+    v: &mut Vertices,
+    n: usize,
+    has_normals: bool,
+    names: &[String],
+    color: &str,
+) {
     // Normals that are all zero are placeholders; a point without one faces up.
-    if v.nrm.len() == n && zero_normals < n {
+    if v.nrm.len() == n && has_normals {
         for c in &mut v.nrm {
             if is_zero(*c) {
                 *c = [0.0, 1.0, 0.0];
@@ -825,11 +895,53 @@ fn vertex_attributes(b: &mut Builder, v: &mut Vertices, zero_normals: usize, nam
         for c in &mut colors {
             *c = c.clamp(0.0, 1.0);
         }
-        attributes["COLOR_0"] = json!(b.accessor(Part::f32(colors), 5126, n, "VEC4", Some(34962)));
+        attributes[color] = json!(b.accessor(Part::f32(colors), 5126, n, "VEC4", Some(34962)));
     }
     let columns = gather(&mut v.extra, None, n);
-    custom(b, &mut attributes, names, columns);
-    attributes
+    custom(b, attributes, names, columns);
+}
+
+/// The gaussian splats a point cloud's vertices are (see [`GAUSSIAN`]), their properties taken
+/// from `v`, in glTF's axes: the file's are right, down and forward. `None` when they aren't
+/// splats. Coefficients past degree 3, or of an incomplete degree, stay custom attributes.
+fn splats(v: &mut Vertices, names: &[String]) -> Result<Option<Splats>> {
+    let find = |name: &str| names.iter().position(|n| n == name);
+    let n = v.pos.len();
+    let Some(slots) = GAUSSIAN.iter().map(|&p| find(p)).collect::<Option<Vec<usize>>>() else {
+        return Ok(None);
+    };
+    if slots.iter().any(|&k| v.extra[k].len() != n) {
+        return Ok(None);
+    }
+    let rest: Vec<usize> = (0..).map_while(|k| find(&format!("f_rest_{k}"))).collect();
+    let per = if rest.len().is_multiple_of(3) {
+        rest.len() / 3
+    } else {
+        0
+    };
+    let used = if rest.iter().all(|&k| v.extra[k].len() == n) {
+        REST[degree_of(per)]
+    } else {
+        0
+    };
+    let mut s = Splats::with_capacity(n, used)?;
+    let cols: Vec<Vec<f32>> = slots.iter().map(|&k| std::mem::take(&mut v.extra[k])).collect();
+    let [r, g, b, o, s0, s1, s2, w, x, y, z] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(|k| cols[k].as_slice());
+    for i in 0..n {
+        s.dc.push([r[i], g[i], b[i]]);
+        s.opacities.push(sigmoid(o[i]));
+        s.scales.push([s0[i].exp(), s1[i].exp(), s2[i].exp()]);
+        s.rotations.push(rotation(x[i], y[i], z[i], w[i]));
+    }
+    drop(cols);
+    for (j, out) in s.sh.iter_mut().enumerate() {
+        let [r, g, b] = [0, 1, 2].map(|c| std::mem::take(&mut v.extra[rest[c * per + j]]));
+        out.extend(r.iter().zip(&g).zip(&b).map(|((&r, &g), &b)| [r, g, b]));
+    }
+    s.positions.extend_from_slice(&v.pos);
+    v.pos = Vec::new();
+    s.flip([1.0, -1.0, -1.0]);
+    Ok(Some(s))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -873,8 +985,18 @@ fn read_element(blocks: &mut Blocks<'_>, format: Format, el: &Element, body: &mu
             plan.xyz.iter().all(|&s| s != usize::MAX),
             "PLY vertices have no x, y and z"
         );
-        let v = &mut body.verts;
         let n = el.count;
+        body.splats = body.points_only && GAUSSIAN.iter().all(|&p| el.slot(&[p]).is_some());
+        if body.splats {
+            // The splats' colors are worked out with the rest of them.
+            plan.splat = None;
+            ensure!(
+                n <= body.max_splats,
+                "{n} gaussian splats, more than the {} allowed (Keep::max_points)",
+                body.max_splats
+            );
+        }
+        let v = &mut body.verts;
         reserve(&mut v.pos, n)?;
         reserve(&mut v.nrm, if plan.n.is_some() { n } else { 0 })?;
         reserve(
@@ -894,6 +1016,11 @@ fn read_element(blocks: &mut Blocks<'_>, format: Format, el: &Element, body: &mu
             v.extra.push(col);
         }
     }
+    let floats = if kind == Kind::Vertex {
+        Floats::new(format, &plan, body)
+    } else {
+        None
+    };
     // Faces become triangles as they're read when their vertices are known and their corners
     // share the vertices' data.
     let direct = kind == Kind::Face
@@ -920,6 +1047,12 @@ fn read_element(blocks: &mut Blocks<'_>, format: Format, el: &Element, body: &mu
         };
         let mut kept = 0;
         let before = done;
+        if let Some(f) = &floats {
+            let m = f.read(cur.d, el.count - done, body);
+            done += m;
+            kept = m * f.size;
+            cur.pos = kept;
+        }
         while done < el.count {
             let r = match kind {
                 Kind::Vertex => vertex(&mut cur, el, &plan, body),
@@ -967,6 +1100,67 @@ fn read_element(blocks: &mut Blocks<'_>, format: Format, el: &Element, body: &mu
         body.have_verts = true;
     }
     Ok(())
+}
+
+/// Where a gaussian splat vertex's properties are in its record when every property read is a
+/// little-endian `float`, as trainers write them: the record's size and the offsets of the
+/// position, the normal and each custom property. Such vertices are read a column at a time,
+/// without picking each value's type.
+struct Floats {
+    size: usize,
+    xyz: [usize; 3],
+    n: Option<[usize; 3]>,
+    extra: Vec<usize>,
+}
+
+impl Floats {
+    fn new(format: Format, plan: &Plan, body: &Body) -> Option<Floats> {
+        let (size, offsets) = plan.fixed.as_ref()?;
+        let plain = plan.rgb.is_none() && plan.alpha.is_none() && plan.uv.is_none() && plan.splat.is_none();
+        if format != Format::Le || !body.splats || !plain || *size == 0 {
+            return None;
+        }
+        if plan.reads.iter().any(|&(_, _, ty)| ty != Ty::F32) {
+            return None;
+        }
+        let at = |k: usize| offsets.get(k).copied();
+        Some(Floats {
+            size: *size,
+            xyz: [at(plan.xyz[0])?, at(plan.xyz[1])?, at(plan.xyz[2])?],
+            n: match plan.n {
+                Some([a, b, c]) => Some([at(a)?, at(b)?, at(c)?]),
+                None => None,
+            },
+            extra: plan.extra.iter().map(|&k| at(k)).collect::<Option<_>>()?,
+        })
+    }
+
+    /// Reads the whole records at the start of `d`, at most `left` of them, as [`vertex`]
+    /// would; how many it read.
+    fn read(&self, d: &[u8], left: usize, body: &mut Body) -> usize {
+        let m = (d.len() / self.size).min(left);
+        let rows = || d.chunks_exact(self.size).take(m);
+        let f = |r: &[u8], at: usize| {
+            r.get(at..)
+                .and_then(<[u8]>::first_chunk::<4>)
+                .map_or(0.0, |b| f32::from_le_bytes(*b))
+        };
+        let v = &mut body.verts;
+        v.pos.extend(rows().map(|r| self.xyz.map(|at| f(r, at))));
+        if let Some(n) = self.n {
+            for r in rows() {
+                v.nrm.push(unit(n.map(|at| f(r, at))).unwrap_or_else(|| {
+                    body.zero_normals += 1;
+                    [0.0; 3]
+                }));
+            }
+        }
+        for (col, &at) in v.extra.iter_mut().zip(&self.extra) {
+            col.extend(rows().map(|r| f(r, at)));
+        }
+        body.points += m;
+        m
+    }
 }
 
 /// Reads an item's scalar properties into `vals` (those the plan wants) and its lists into
@@ -1504,6 +1698,175 @@ mod tests {
         assert!((c[0] - srgb_to_linear(0.5)).abs() < 1e-6 && (c[3] - 0.5).abs() < 1e-6);
         let c = splat_color(&[1.772_453_9, -1.772_453_9, 0.0, -100.0], [0, 1, 2], Some(3));
         assert!((c[0] - 1.0).abs() < 1e-5 && c[1].abs() < 1e-6 && c[3] < 1e-6, "{c:?}");
+    }
+
+    /// A binary 3D gaussian splatting file of `n` splats with `rest` `f_rest_*` properties: splat
+    /// `i`'s position is (i, 2i, 3i), its `f_rest_k` is `k + 100 i`, its rotation (w first) is a
+    /// quarter turn about x.
+    #[allow(clippy::cast_precision_loss, reason = "test files are small")]
+    fn splat_file(n: usize, rest: usize) -> Vec<u8> {
+        use std::fmt::Write as _;
+        let mut head = String::from("ply\nformat binary_little_endian 1.0\n");
+        writeln!(head, "element vertex {n}").unwrap();
+        let mut names: Vec<String> = ["x", "y", "z", "nx", "ny", "nz", "f_dc_0", "f_dc_1", "f_dc_2"]
+            .map(str::to_owned)
+            .to_vec();
+        names.extend((0..rest).map(|k| format!("f_rest_{k}")));
+        names.extend(
+            [
+                "opacity", "scale_0", "scale_1", "scale_2", "rot_0", "rot_1", "rot_2", "rot_3",
+            ]
+            .map(str::to_owned),
+        );
+        for name in &names {
+            writeln!(head, "property float {name}").unwrap();
+        }
+        head.push_str("end_header\n");
+        let mut out = head.into_bytes();
+        for i in 0..n {
+            let i = i as f32;
+            let mut row = vec![i, 2.0 * i, 3.0 * i, 0.0, 0.0, 0.0, 1.0, 0.0, -1.0];
+            row.extend((0..rest).map(|k| k as f32 + 100.0 * i));
+            row.extend([0.0, -2.0, -3.0, 2.0f32.ln(), 1.0, 1.0, 0.0, 0.0]);
+            out.extend(row.iter().flat_map(|v| v.to_le_bytes()));
+        }
+        out
+    }
+
+    fn floats(doc: &Document<'_>, name: &str) -> Vec<f32> {
+        let a = &doc.json["meshes"][0]["primitives"][0]["attributes"][name];
+        doc.read_floats(usize::try_from(a.as_u64().unwrap()).unwrap())
+            .unwrap()
+            .1
+    }
+
+    #[test]
+    fn gaussian_splats_read_as_khr_gaussian_splatting() {
+        let doc = load(&splat_file(3, 45)).unwrap();
+        assert_eq!(doc.facts["splats"], 3);
+        assert_eq!(doc.json["extensionsUsed"][0], gaussian::EXTENSION);
+        let names = attributes(&doc);
+        assert!(!names.iter().any(|n| n == "NORMAL" || n.starts_with('_')), "{names:?}");
+        assert!(names.iter().any(|n| n.ends_with("SH_DEGREE_3_COEF_6")), "{names:?}");
+        // Right, down, forward to right, up, back.
+        assert_eq!(floats(&doc, "POSITION")[3..6], [1.0, -2.0, -3.0]);
+        let scale = floats(&doc, "KHR_gaussian_splatting:SCALE");
+        assert!((scale[0] - (-2.0f32).exp()).abs() < 1e-6 && (scale[2] - 2.0).abs() < 1e-6);
+        let opacity = floats(&doc, gaussian::OPACITY);
+        assert!((opacity[0] - 0.5).abs() < 1e-6);
+        // A quarter turn about x stays one about x: flipping y and z twice keeps its sense.
+        let q = floats(&doc, "KHR_gaussian_splatting:ROTATION");
+        assert!(
+            (q[0] - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-6 && (q[3] - q[0]).abs() < 1e-6,
+            "{q:?}"
+        );
+        // Channel-major in the file (15 reds, 15 greens, 15 blues); the first degree-1
+        // coefficient runs along y, which flips.
+        let sh = floats(&doc, "KHR_gaussian_splatting:SH_DEGREE_1_COEF_0");
+        assert_eq!(sh[3..6], [-100.0, -115.0, -130.0]);
+        let sh = floats(&doc, "KHR_gaussian_splatting:SH_DEGREE_1_COEF_2");
+        assert_eq!(sh[3..6], [102.0, 117.0, 132.0]);
+        let m = doc.flatten(crate::document::Pose::Rest).unwrap().unwrap();
+        assert_eq!(m.points(), 3);
+        let c = m.prims[0].colors[0];
+        assert!(
+            (c[0] - srgb_to_linear(0.5 + gaussian::SH_C0)).abs() < 1e-3 && (c[3] - 0.5).abs() < 1e-3,
+            "{c:?}"
+        );
+        doc.to_glb().unwrap();
+    }
+
+    #[test]
+    fn spherical_harmonics_short_of_a_degree_keep_the_whole_degrees() {
+        // 30 of degree 3's 45: degree 1 and 2 (24) are kept, the rest dropped.
+        let doc = load(&splat_file(2, 30)).unwrap();
+        let names = attributes(&doc);
+        assert!(names.iter().any(|n| n.ends_with("SH_DEGREE_2_COEF_4")), "{names:?}");
+        assert!(!names.iter().any(|n| n.contains("SH_DEGREE_3")), "{names:?}");
+        // A count that isn't a multiple of three: no harmonics past the base.
+        let doc = load(&splat_file(2, 7)).unwrap();
+        assert!(!attributes(&doc).iter().any(|n| n.contains("SH_DEGREE_1")));
+    }
+
+    #[test]
+    fn gaussian_splats_past_max_points_are_refused() {
+        let keep = Keep {
+            max_points: 2,
+            ..Keep::ALL
+        };
+        let bytes = splat_file(3, 0);
+        let err = ply(Input::memory(&bytes, "t.ply"), &crate::assets::Memory::new(), keep).unwrap_err();
+        assert!(err.to_string().contains("max_points"), "{err}");
+    }
+
+    /// Whole floats read a column at a time give what values read one by one do, records cut by
+    /// the reader's blocks included.
+    #[cfg(feature = "fs")]
+    #[test]
+    fn float_splats_read_by_column_as_by_value() {
+        let le = splat_file(3001, 45);
+        let body = le
+            .windows(11)
+            .position(|w| {
+                w == b"end_header
+"
+            })
+            .unwrap()
+            + 11;
+        let mut be = String::from_utf8(le[..body].to_vec())
+            .unwrap()
+            .replace("binary_little_endian", "binary_big_endian")
+            .into_bytes();
+        be.extend(
+            le[body..]
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .flat_map(|c| [c[3], c[2], c[1], c[0]]),
+        );
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut file, &le).unwrap();
+        let fast = ply(Input::file(file.path()), &crate::assets::Memory::new(), Keep::ALL).unwrap();
+        let slow = load(&be).unwrap();
+        let names = attributes(&fast);
+        assert_eq!(names, attributes(&slow));
+        assert!(names.len() > 20, "{names:?}");
+        for name in &names {
+            assert!(floats(&fast, name) == floats(&slow, name), "{name}");
+        }
+    }
+
+    #[test]
+    #[allow(clippy::cast_possible_truncation, reason = "test files are small")]
+    fn damaged_gaussian_splats_never_panic() {
+        let good = splat_file(40, 9);
+        let body = good.len() - 40 * (17 + 9) * 4;
+        for cut in (0..good.len()).step_by(7) {
+            if let Ok(doc) = load(&good[..cut]) {
+                assert!(cut >= body, "a header cut at {cut} read");
+                let _ = doc.flatten(crate::document::Pose::Rest);
+            }
+        }
+        let mut rng = crate::test_rng::Pcg32::new(17);
+        for _ in 0..300 {
+            let mut bad = good.clone();
+            for _ in 0..4 {
+                let i = body + rng.below((good.len() - body) as u32) as usize;
+                bad[i] ^= 1 << rng.below(8);
+            }
+            let doc = load(&bad).unwrap();
+            doc.to_glb().unwrap();
+            let _ = doc.flatten(crate::document::Pose::Rest);
+        }
+        for _ in 0..300 {
+            let mut bad = good.clone();
+            let i = rng.below(body as u32) as usize;
+            bad[i] = rng.below(256) as u8;
+            if let Ok(doc) = load(&bad) {
+                let _ = doc.to_glb();
+                let _ = doc.flatten(crate::document::Pose::Rest);
+            }
+        }
     }
 
     #[test]

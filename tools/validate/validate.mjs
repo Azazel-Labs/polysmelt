@@ -20,6 +20,14 @@ function allowed(path) {
   return new Set(JSON.parse(readFileSync(expect, "utf8")).validator_errors ?? []);
 }
 
+/**
+ * Whether an error is the validator not knowing KHR_gaussian_splatting (2.0.0-dev.3.10 predates
+ * it): the attribute names that extension defines, which carry its prefix, are all it refuses.
+ */
+function unknownSplatAttribute(m) {
+  return m.code === "MESH_PRIMITIVE_INVALID_ATTRIBUTE" && /\/attributes\/KHR_gaussian_splatting:[A-Z0-9_]+$/.test(m.pointer ?? "");
+}
+
 function* glbs(dir) {
   for (const name of readdirSync(dir).sort()) {
     const p = join(dir, name);
@@ -41,7 +49,9 @@ for (const path of glbs(root)) {
   checked++;
   const issues = report.issues.messages;
   const ok = allowed(path);
-  const errors = issues.filter((m) => m.severity === 0 && m.code !== "IO_ERROR" && !ok.has(m.code));
+  const errors = issues.filter(
+    (m) => m.severity === 0 && m.code !== "IO_ERROR" && !ok.has(m.code) && !unknownSplatAttribute(m),
+  );
   if (issues.some((m) => m.severity === 1)) warned++;
   if (errors.length > 0) {
     failed++;

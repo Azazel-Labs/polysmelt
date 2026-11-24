@@ -430,6 +430,7 @@ fn drawable(extension: &str) -> bool {
         "EXT_mesh_gpu_instancing",
         "KHR_animation_pointer",
         "KHR_node_visibility",
+        "KHR_gaussian_splatting",
     ];
     const LOOKS: &[&str] = &[
         "VRMC_",
@@ -1676,6 +1677,29 @@ impl Reader<'_> {
         }
     }
 
+    /// A gaussian splat primitive's colors when it doesn't give them (`KHR_gaussian_splatting`
+    /// asks for a `COLOR_0`, but doesn't require one): each splat's base color and opacity, as
+    /// the extension works them out. Empty for other primitives.
+    fn splat_colors(&mut self, p: &Value, attrs: &Value) -> Result<Vec<[f32; 4]>> {
+        let Some(ext) = p.pointer("/extensions/KHR_gaussian_splatting") else {
+            return Ok(Vec::new());
+        };
+        let (Some(dc), Some(opacity)) = (
+            index(attrs, crate::gaussian::SH0),
+            index(attrs, crate::gaussian::OPACITY),
+        ) else {
+            return Ok(Vec::new());
+        };
+        let srgb = ext.get("colorSpace").and_then(Value::as_str) != Some("lin_rec709_display");
+        let dc = self.read(dc, [0.0; 3])?;
+        let opacity = self.read(opacity, [1.0])?;
+        if dc.len() != opacity.len() {
+            return Ok(Vec::new());
+        }
+        let fallback = |(&d, &[o]): (&[f32; 3], &[f32; 1])| crate::gaussian::fallback(d, o, srgb);
+        Ok(dc.iter().zip(&opacity).map(fallback).collect())
+    }
+
     fn primitive(&mut self, p: &Value, u: &Use, mesh: &mut Mesh) -> Result<()> {
         let mode = mode(p);
         let attrs = p.get("attributes").cloned().unwrap_or(Value::Null);
@@ -1728,7 +1752,7 @@ impl Reader<'_> {
         };
         let colors = match attr("COLOR_0") {
             Some(a) => self.read(a, [0.0, 0.0, 0.0, 1.0])?,
-            None => Vec::new(),
+            None => self.splat_colors(p, &attrs)?,
         };
         // Attributes that don't match the positions are dropped rather than trusted.
         if normals.len() != n {

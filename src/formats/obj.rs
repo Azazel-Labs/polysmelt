@@ -34,6 +34,7 @@ use crate::Result;
 use crate::assets::Assets;
 use crate::document::{Builder, Document, Keep, Part};
 use crate::images::Images;
+use crate::keep::spawn;
 use crate::material::{self, Alpha, Clearcoat, Factor, Full, Sheen, Specular, Tex, UvTransform};
 use crate::mesh::{Material, Prim, quad, smooth_normals, srgb_to_linear, triangulate};
 use crate::num::u32_of;
@@ -985,21 +986,6 @@ fn read_blocks(mut source: impl Read, block: usize, tx: &mpsc::SyncSender<Text<'
             return;
         }
     }
-}
-
-#[cfg(test)]
-thread_local! {
-    /// For tests: thread starts fail, as on a platform without threads.
-    static NO_THREADS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-/// `f` started on a thread of `s`; false, and `f` dropped, where no thread can be started.
-fn spawn<'s>(s: &'s std::thread::Scope<'s, '_>, f: impl FnOnce() + Send + 's) -> bool {
-    #[cfg(test)]
-    if NO_THREADS.get() {
-        return false;
-    }
-    std::thread::Builder::new().spawn_scoped(s, f).is_ok()
 }
 
 /// `f` called on each of `items`, on `threads` threads (this one among them), each thread with
@@ -3396,7 +3382,7 @@ mod tests {
                 .unwrap()
         };
         let one = glb(1);
-        NO_THREADS.set(true);
+        crate::keep::NO_THREADS.set(true);
         let (two, four) = (glb(2), glb(4));
         let sum = std::sync::atomic::AtomicUsize::new(0);
         each(
@@ -3407,7 +3393,7 @@ mod tests {
                 sum.fetch_add(i, Ordering::Relaxed);
             },
         );
-        NO_THREADS.set(false);
+        crate::keep::NO_THREADS.set(false);
         assert!(two == one && four == one, "a load without threads differs");
         assert_eq!(sum.into_inner(), 5050, "work left undone without threads");
     }

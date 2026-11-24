@@ -44,6 +44,7 @@ pub mod assets;
 pub mod document;
 mod flatten;
 pub mod formats;
+mod gaussian;
 pub mod gltf;
 pub mod images;
 mod keep;

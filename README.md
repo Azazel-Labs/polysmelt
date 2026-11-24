@@ -30,7 +30,10 @@ Early. What exists today:
   OFF (text and binary), X3D and VRML97 (XML and classic, gzipped or not, line and point
   sets, Extrusion, the 2D nodes and PROTO and EXTERNPROTO instances included) and DXF meshes, lines and points (3D faces, polyface and polygon meshes,
   MESH entities, lines, points, 2D and 3D polylines with their arcs, circles, arcs, ellipses
-  and splines, and block inserts, text or binary).
+  and splines, and block inserts, text or binary), and gaussian splats (3D gaussian splatting's
+  PLY files, `.splat` and gzipped `.spz`, versions 1 to 3) as `KHR_gaussian_splatting`, which
+  the glTF reader also reads: `to_glb` keeps every splat's spherical harmonics, scale and
+  rotation, and `flatten` draws the splats as points in their base color.
   `formats::load` reads a file and `formats::load_bytes` a model already in memory; both
   dispatch on the extension and return a `document::Document`.
 - **`document`**: the common form, a glTF 2.0 document (its JSON and its buffers' bytes).
@@ -58,16 +61,18 @@ Early. What exists today:
   `Keep { max_triangles: 12_000_000, ..Keep::ALL }`. Points and lines (point clouds, wireframes,
   curves) are drawn too, up to `Keep::max_points` of them (16 million by default,
   `mesh::MAX_POINTS`); `Keep { lines_and_points: false, ..Keep::ALL }` leaves them out.
-  `Keep::threads` reads large OBJ files on several threads (`0` for one per core), with the
-  same result as one thread; it is `1`, one thread, by default.
-- **Conformance corpus**: 852 cases under `tests/corpus`, each a file and the GLB it must
+  `Keep::threads` reads large OBJ files on several threads (`0` for one per core) and inflates
+  SPZ files on one thread while unpacking them on another, with the same result as one thread;
+  it is `1`, one thread, by default.
+- **Conformance corpus**: 879 cases under `tests/corpus`, each a file and the GLB it must
   become. They cover every format above and the variants exporters really write: OBJ's face
   forms and MTL dialects, both PLY byte orders, every FBX version and axis system, and USD's
   three encodings and its composition, glTF's accessor types, node hierarchy, skins and extensions, BVH's rotation orders and
   damaged motion rows, and files SketchUp itself saved, from SketchUp 3 to 2026. Most are generated against the specifications; the rest
   are Blender 5.2 exports and SketchUp's own files. See [tests/corpus/README.md](tests/corpus/README.md). Every
   GLB the conformance tests write passes the Khronos glTF validator (`tools/validate`), which
-  CI runs.
+  CI runs. The validator predates `KHR_gaussian_splatting` and calls that extension's attribute
+  names invalid; `validate.mjs` lets that one error through and no other.
 - **Benchmarks**: `bench/` races Polysmelt's readers against tobj, stl_io, ply-rs and gltf on load
   time and peak heap. Run it on a clean GitHub runner with `gh workflow run bench.yml` (or
   from the Actions tab); the tables land in the run summary.
@@ -108,7 +113,7 @@ Early. What exists today:
 | Feature | Format | Extra dependencies |
 | --- | --- | --- |
 | `stl` | STL | none |
-| `ply` | PLY | none |
+| `ply` | PLY, 3D gaussian splatting's files included | none |
 | `vox` | MagicaVoxel | none |
 | `obj` | OBJ + MTL | none |
 | `3ds` | 3DS | none |
@@ -116,6 +121,8 @@ Early. What exists today:
 | `bvh` | BVH motion capture | none |
 | `off` | OFF | none |
 | `dxf` | DXF meshes, lines and points | none |
+| `splat` | Gaussian splats in the 32-byte `.splat` layout | none |
+| `spz` | Gaussian splats in SPZ, versions 1 to 3 (gzip) | `flate2` |
 | `fbx` | FBX | `base64`, `flate2` |
 | `3mf` | 3MF | `zip`, `quick-xml` |
 | `usd` | USD | `openusd`, `openusd-schemas`, `zip` |
@@ -133,7 +140,7 @@ Early. What exists today:
 | `fs` | Reading files: `formats::load`, `assets::Folder`, `gltf::files_in` | none |
 
 Every reader is on by default, and so are `fs`, `webp` and the six texture decoders. `minimal`
-is the nine readers with no dependencies, plus `fs`, for
+is the ten readers with no dependencies, plus `fs`, for
 `default-features = false, features = ["minimal"]`. Asking
 `formats::load` for a format whose feature is off returns an error that names the feature.
 

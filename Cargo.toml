@@ -19,9 +19,9 @@ include = ["/src", "/examples", "/README.md", "/LICENSE", "/Cargo.toml"]
 all-features = true
 
 [features]
-default = ["minimal", "fbx", "3mf", "usd", "draco", "webp", "skp", "dae", "x3d", "tga", "bmp", "gif", "tiff", "psd", "dds"]
+default = ["minimal", "fbx", "3mf", "usd", "draco", "webp", "skp", "dae", "x3d", "tga", "bmp", "gif", "tiff", "psd", "dds", "spz"]
 # The readers with no dependencies, and file access: `default-features = false, features = ["minimal"]`.
-minimal = ["fs", "stl", "ply", "vox", "obj", "3ds", "gltf", "bvh", "off", "dxf"]
+minimal = ["fs", "stl", "ply", "vox", "obj", "3ds", "gltf", "bvh", "off", "dxf", "splat"]
 # Reading from the file system: `formats::load`, `assets::Folder` and `gltf::files_in`. Without
 # it (for wasm, say), models load from memory with `formats::load_bytes` and `assets::Memory`.
 fs = []
@@ -37,7 +37,11 @@ bvh = []
 off = []
 # DXF meshes: 3D faces, polyface and polygon meshes, and MESH entities, with blocks.
 dxf = []
-fbx = ["dep:base64", "dep:flate2"]
+# Gaussian splats in the 32-byte `.splat` layout (KHR_gaussian_splatting).
+splat = []
+# Gaussian splats in gzipped `.spz`, versions 1 to 3 (KHR_gaussian_splatting).
+spz = ["dep:flate2"]
+fbx =["dep:base64", "dep:flate2"]
 3mf = ["dep:zip", "dep:quick-xml"]
 # COLLADA `.dae`, and `.zae` and `.kmz` archives holding one.
 dae = ["dep:zip", "dep:quick-xml"]
