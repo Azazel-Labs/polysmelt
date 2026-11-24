@@ -163,6 +163,43 @@ impl Document {
     pub fn triangles(&self) -> usize {
         self.counts().triangles
     }
+
+    /// The box around every vertex the default scene draws while animation `index` plays: the
+    /// [`Document::bounds`] of its poses at `samples` times spread evenly from its first key to
+    /// its last, both included (one sample is the first key alone), together. A pose between
+    /// samples can reach a little past the box. `None` when no pose draws anything.
+    ///
+    /// ```no_run
+    /// let doc = polysmelt::open("walk.fbx")?;
+    /// // Where a camera should stand to frame the character through its whole walk.
+    /// let frame = doc.animation_bounds(0, 30)?;
+    /// # Ok::<(), polysmelt::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// When the document has no animation `index`, and as [`Document::bounds`].
+    #[allow(clippy::cast_precision_loss, reason = "sample numbers are small")]
+    pub fn animation_bounds(&self, index: usize, samples: usize) -> Result<Option<Bounds>> {
+        let (first, last) = Reader::bare(self).span(index)?;
+        let n = samples.max(1);
+        let mut out: Option<Bounds> = None;
+        for k in 0..n {
+            let time = if k == 0 {
+                first
+            } else {
+                first + (last - first) * (k as f32 / (n - 1) as f32)
+            };
+            let Some(b) = self.bounds(Pose::Animation { index, time })? else {
+                continue;
+            };
+            out = Some(out.map_or(b, |o| Bounds {
+                min: std::array::from_fn(|c| o.min[c].min(b.min[c])),
+                max: std::array::from_fn(|c| o.max[c].max(b.max[c])),
+            }));
+        }
+        Ok(out)
+    }
 }
 
 /// See [`Document::counts`]. A document whose default scene doesn't exist counts nothing.
@@ -2973,6 +3010,31 @@ fn mode(p: &Value) -> u64 {
 }
 
 impl Reader<'_> {
+    /// When animation `a`'s first key is, and its last, over the channels that move nodes:
+    /// `(0, 0)` for one without keys.
+    fn span(&mut self, a: usize) -> Result<(f32, f32)> {
+        let anim = self.get("animations", a)?;
+        let samplers = items(anim, "samplers");
+        let (mut first, mut last) = (f32::INFINITY, f32::NEG_INFINITY);
+        for ch in items(anim, "channels") {
+            if ch.get("target").and_then(node_target).is_none() {
+                continue;
+            }
+            let Some(input) = index(ch, "sampler")
+                .and_then(|s| samplers.get(s))
+                .and_then(|s| index(s, "input"))
+            else {
+                continue;
+            };
+            let times = self.read::<1>(input, [0.0])?;
+            if let (Some([a]), Some([b])) = (times.first(), times.last()) {
+                first = first.min(*a);
+                last = last.max(*b);
+            }
+        }
+        Ok(if first <= last { (first, last) } else { (0.0, 0.0) })
+    }
+
     /// Sets each node's animated properties for `pose`.
     fn pose(&mut self, pose: Pose) -> Result<()> {
         let Pose::Animation { index: a, time } = pose else {
@@ -3984,6 +4046,28 @@ mod tests {
                 assert!(want.is_some(), "{case} draws something");
             }
         }
+    }
+
+    #[cfg(all(feature = "gltf", feature = "fs"))]
+    #[test]
+    fn animation_bounds_hold_every_sampled_pose() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/gltf/skin_animated/skin.glb");
+        let doc = crate::open(&path).unwrap();
+        let (first, last) = doc.rig().unwrap().animations[0].span();
+        assert!(first < last);
+        let all = doc.animation_bounds(0, 5).unwrap().unwrap();
+        for k in 0..5u8 {
+            let time = first + (last - first) * f32::from(k) / 4.0;
+            let b = doc.bounds(Pose::Animation { index: 0, time }).unwrap().unwrap();
+            assert!(
+                (0..3).all(|c| all.min[c] <= b.min[c] && b.max[c] <= all.max[c]),
+                "{b:?} in {all:?}"
+            );
+        }
+        let start = doc.bounds(Pose::Animation { index: 0, time: first }).unwrap();
+        assert_eq!(doc.animation_bounds(0, 1).unwrap(), start);
+        assert_eq!(doc.animation_bounds(0, 0).unwrap(), start);
+        assert!(doc.animation_bounds(1, 5).is_err());
     }
 
     #[test]
