@@ -374,7 +374,7 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document<'static>> {
     info.version = get("FileVersion").map(str::to_owned);
     info.unit = units.map(str::to_owned);
     info.meters_per_unit = meters.map_or(Fact::Unknown, Fact::Declared);
-    info.up_axis = match (get("GlobalAxisofGravity"), Axis::parse(gravity)) {
+    info.up_axis = match (get("GlobalAxisofGravity"), gravity.parse().ok()) {
         (Some(_), Some(a)) if up.is_some() => Fact::Declared(a),
         (None, _) => Fact::Assumed(Axis::PosY),
         _ => Fact::Unknown,
