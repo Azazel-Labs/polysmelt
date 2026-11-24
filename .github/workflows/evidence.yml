@@ -18,7 +18,7 @@ on:
         default: "40"
       profile:
         description: Files to profile with perf (paths under the corpora folder, or bare file names), comma-separated; "none" to skip
-        default: "rungholt.obj,khronos/Models/Sponza/glTF/Sponza.gltf,khronos/Models/ABeautifulGame/glTF/ABeautifulGame.gltf,vox/menger.vox"
+        default: "mcguire/bmw/bmw.obj,khronos/Models/Sponza/glTF/Sponza.gltf,khronos/Models/ABeautifulGame/glTF/ABeautifulGame.gltf,vox/menger.vox"
   push:
     branches: ["cloud-bench/**"]
 
@@ -36,7 +36,7 @@ env:
   BLENDER_SHA256: 23432b064977908beb1ab4b7f32f024e7331105c875c187dce002aff84b10c11
   BUDGET: ${{ inputs.budget || '0.25' }}
   FLIPS: ${{ inputs.flips || '40' }}
-  PROFILE: ${{ inputs.profile || 'rungholt.obj,khronos/Models/Sponza/glTF/Sponza.gltf,khronos/Models/ABeautifulGame/glTF/ABeautifulGame.gltf,vox/menger.vox' }}
+  PROFILE: ${{ inputs.profile || 'mcguire/bmw/bmw.obj,khronos/Models/Sponza/glTF/Sponza.gltf,khronos/Models/ABeautifulGame/glTF/ABeautifulGame.gltf,vox/menger.vox' }}
 
 jobs:
   corpora:
@@ -277,7 +277,7 @@ jobs:
             for loader in polysmelt "polysmelt → GLB"; do
               tag=$(echo "$loader" | tr -cd '[:alnum:]')
               perf record -q -F 1999 -g -o perf.data -- bin/profiling/corpus one "$loader" "$p" --repeat 4
-              perf script -i perf.data 2> /dev/null | inferno-collapse-perf > stacks.txt
+              perf script --no-inline -i perf.data 2> /dev/null | inferno-collapse-perf > stacks.txt
               inferno-flamegraph --title "$loader: $(basename "$p")" < stacks.txt > "results/profile/${name}-${tag}.svg"
               gzip -c stacks.txt > "results/profile/${name}-${tag}.folded.gz"
               echo "$loader $(basename "$p"): $(wc -l < stacks.txt) stacks"

@@ -40,6 +40,7 @@ SOFT = ("vertices", "materials", "nodes", "joints", "animations")
 # Competitors whose result is less than what Polysmelt's load makes, so their times aren't like for like.
 PARTIAL = {
     "dot_vox": "only parses the voxels; Polysmelt also meshes them into triangles",
+    "dot_vox + face mesher": "a quad per exposed face, unmerged and unwelded; Polysmelt also merges same-colored faces into rectangles without T-junctions, shares their vertices and builds materials and the scene",
     "fbxcel-dom": "only parses the node tree; Polysmelt also decodes the geometry, materials, skins and animation",
     "bvh_anim": "only parses the joints and frames; Polysmelt also builds the glTF skeleton and animation",
     "ply-rs": "parses into a generic map per element; Polysmelt builds an indexed mesh",

@@ -494,24 +494,42 @@ fn time(opts: &BTreeMap<String, Vec<String>>) {
         // in rotating turns: a loader that crashes when it runs again in one process costs that
         // file's timings, not the run's.
         let names: Vec<&str> = ls.iter().map(|l| l.name).collect();
-        let out = Command::new(std::env::current_exe().unwrap())
-            .arg("time-file")
-            .arg(&path)
-            .args(["--ext", &ext, "--loaders", &names.join(","), "--budget", &budget.as_secs_f64().to_string()])
-            .stderr(Stdio::inherit())
-            .output();
-        let r = match out.as_ref().ok().filter(|o| o.status.success()).and_then(|o| serde_json::from_slice::<Value>(&o.stdout).ok()) {
-            Some(v) => {
+        let run = |names: &[&str]| -> Result<Value, String> {
+            let out = Command::new(std::env::current_exe().unwrap())
+                .arg("time-file")
+                .arg(&path)
+                .args(["--ext", &ext, "--loaders", &names.join(","), "--budget", &budget.as_secs_f64().to_string()])
+                .stderr(Stdio::inherit())
+                .output()
+                .map_err(|e| format!("timing process didn't start: {e}"))?;
+            if !out.status.success() {
+                return Err(format!("timing process failed: {}", out.status));
+            }
+            serde_json::from_slice::<Value>(&out.stdout).map_err(|e| format!("timing process wrote no result: {e}"))
+        };
+        let r = match run(&names) {
+            Ok(v) => {
                 threads = threads.max(v["threads"].as_u64().unwrap_or(0));
                 v["loaders"].clone()
             }
-            None => {
-                let why = match &out {
-                    Ok(o) => format!("timing process failed: {}", o.status),
-                    Err(e) => format!("timing process didn't start: {e}"),
-                };
-                eprintln!("{corpus}/{rel}: {why}");
-                Value::from(names.iter().map(|n| json!({ "loader": n, "error": why })).collect::<Vec<_>>())
+            // Each loader again in a process of its own, to find the one that crashes and keep the
+            // others' timings (no longer interleaved with each other, so a little less even).
+            Err(why) => {
+                eprintln!("{corpus}/{rel}: {why}; timing each loader alone");
+                let mut each = Vec::new();
+                for n in &names {
+                    match run(&[n]) {
+                        Ok(v) => {
+                            threads = threads.max(v["threads"].as_u64().unwrap_or(0));
+                            each.extend(v["loaders"].as_array().cloned().unwrap_or_default());
+                        }
+                        Err(why) => {
+                            eprintln!("{corpus}/{rel}: {n} alone: {why}");
+                            each.push(json!({ "loader": n, "error": why }));
+                        }
+                    }
+                }
+                Value::from(each)
             }
         };
         if (i + 1) % 100 == 0 {

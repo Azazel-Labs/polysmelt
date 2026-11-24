@@ -620,6 +620,66 @@ pub fn dot_vox(src: &Src) -> Out {
     loaded(data, k, vox_stats)
 }
 
+/// `dot_vox` and then the simplest mesher there is, written here: a quad (two triangles, four
+/// vertices of their own) for every face between a filled cell and an empty one. That's the work a
+/// VOX load into triangles does at least, so its time is like for like with Polysmelt's where
+/// `dot_vox` alone is not; it doesn't weld vertices, merge faces, or build materials or a scene.
+#[cfg(feature = "evidence")]
+pub fn dot_vox_meshed(src: &Src) -> Out {
+    const DIRS: [([i32; 3], [[f32; 3]; 4]); 6] = [
+        ([1, 0, 0], [[1., 0., 0.], [1., 1., 0.], [1., 1., 1.], [1., 0., 1.]]),
+        ([-1, 0, 0], [[0., 0., 0.], [0., 0., 1.], [0., 1., 1.], [0., 1., 0.]]),
+        ([0, 1, 0], [[0., 1., 0.], [0., 1., 1.], [1., 1., 1.], [1., 1., 0.]]),
+        ([0, -1, 0], [[0., 0., 0.], [1., 0., 0.], [1., 0., 1.], [0., 0., 1.]]),
+        ([0, 0, 1], [[0., 0., 1.], [1., 0., 1.], [1., 1., 1.], [0., 1., 1.]]),
+        ([0, 0, -1], [[0., 0., 0.], [0., 1., 0.], [1., 1., 0.], [1., 0., 0.]]),
+    ];
+    let bytes = src.bytes()?;
+    let data = dot_vox::load_bytes(&bytes).map_err(e)?;
+    let mut meshes = Vec::with_capacity(data.models.len());
+    for m in &data.models {
+        let (sx, sy, sz) = (m.size.x as i32, m.size.y as i32, m.size.z as i32);
+        let at = |x: i32, y: i32, z: i32| (x + sx * (y + sy * z)) as usize;
+        let mut grid = vec![0u8; (sx * sy * sz).max(0) as usize];
+        for v in &m.voxels {
+            if (v.x as i32) < sx && (v.y as i32) < sy && (v.z as i32) < sz {
+                grid[at(v.x.into(), v.y.into(), v.z.into())] = v.i.wrapping_add(1).max(1);
+            }
+        }
+        let filled = |x: i32, y: i32, z: i32| {
+            x >= 0 && y >= 0 && z >= 0 && x < sx && y < sy && z < sz && grid[at(x, y, z)] != 0
+        };
+        let (mut pos, mut col, mut idx) = (Vec::<[f32; 3]>::new(), Vec::<u8>::new(), Vec::<u32>::new());
+        for v in &m.voxels {
+            let (x, y, z) = (i32::from(v.x), i32::from(v.y), i32::from(v.z));
+            for (d, corners) in &DIRS {
+                if filled(x + d[0], y + d[1], z + d[2]) {
+                    continue;
+                }
+                let base = pos.len() as u32;
+                for c in corners {
+                    pos.push([x as f32 + c[0], y as f32 + c[1], z as f32 + c[2]]);
+                    col.push(v.i);
+                }
+                idx.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+            }
+        }
+        meshes.push((pos, col, idx));
+    }
+    let k = meshes.iter().map(|m| m.2.len() / 3).sum();
+    loaded(meshes, k, vox_meshed_stats)
+}
+
+#[cfg(feature = "evidence")]
+fn vox_meshed_stats(r: &dyn Any) -> Stats {
+    let Some(ms) = r.downcast_ref::<Vec<(Vec<[f32; 3]>, Vec<u8>, Vec<u32>)>>() else { return Stats::new() };
+    Stats::from([
+        ("meshes", n(ms.len())),
+        ("vertices", n(ms.iter().map(|m| m.0.len()).sum())),
+        ("triangles", n(ms.iter().map(|m| m.2.len() / 3).sum())),
+    ])
+}
+
 #[cfg(feature = "evidence")]
 type Collada = (
     Option<collada::ObjSet>,
@@ -884,7 +944,7 @@ pub fn competitors(ext: &str) -> Vec<Loader> {
         #[cfg(feature = "evidence")]
         "3mf" => vec![l("threemf", threemf)],
         #[cfg(feature = "evidence")]
-        "vox" => vec![l("dot_vox", dot_vox)],
+        "vox" => vec![l("dot_vox", dot_vox), l("dot_vox + face mesher", dot_vox_meshed)],
         #[cfg(feature = "evidence")]
         "dae" => vec![l("collada", collada)],
         #[cfg(feature = "evidence")]
