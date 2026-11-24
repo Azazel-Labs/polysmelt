@@ -28,25 +28,29 @@ void set_err(char* err, size_t len, const char* msg) {
 std::string normalized(const char* p) {
     std::string s(p ? p : "");
     for (auto& c : s) {
-        if (c == '\') c = '/';
+        if (c == '\\') c = '/';
     }
     return s;
 }
 
-// The file system, except that the model itself is served from memory.
-class Overlay : public Assimp::DefaultIOSystem {
+// The file system, except that the model itself is served from memory. (DefaultIOSystem is final,
+// so this wraps one rather than deriving from it.)
+class Overlay : public Assimp::IOSystem {
 public:
     Overlay(const char* path, const uint8_t* data, size_t len) : main_(normalized(path)), data_(data), len_(len) {}
     bool Exists(const char* file) const override {
         if (normalized(file) == main_) return true;
-        return Assimp::DefaultIOSystem::Exists(file);
+        return disk_.Exists(file);
     }
+    char getOsSeparator() const override { return disk_.getOsSeparator(); }
     Assimp::IOStream* Open(const char* file, const char* mode) override {
         if (normalized(file) == main_) return new Assimp::MemoryIOStream(data_, len_, false);
-        return Assimp::DefaultIOSystem::Open(file, mode);
+        return disk_.Open(file, mode);
     }
+    void Close(Assimp::IOStream* f) override { delete f; }
 
 private:
+    mutable Assimp::DefaultIOSystem disk_;
     std::string main_;
     const uint8_t* data_;
     size_t len_;
