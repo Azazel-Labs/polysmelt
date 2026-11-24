@@ -89,25 +89,57 @@ pub trait Assets {
 /// the same name in another image format), the one nearest the model. A model naming no color
 /// texture takes one by name from its part of the pack: `Barrel.png` or `Barrel_Albedo.png` for
 /// `Barrel.obj`. Whichever order the folders list their files in, the same file is found.
+///
+/// The tree is listed once, the first time a search needs it, and that listing is kept: a model
+/// with many textures costs one walk of the pack, not one for each. Make a new `Folder` (one
+/// for each model, as a rule) to see files added since.
 #[cfg(feature = "fs")]
 #[derive(Debug, Clone)]
 pub struct Folder {
     /// The top of the tree searched.
     pub root: PathBuf,
+    /// The tree's files, in [`walk_files`] order, with their lowercase names, and whether
+    /// listing them stopped short.
+    files: std::sync::OnceLock<(Vec<(PathBuf, String)>, bool)>,
 }
 
 #[cfg(feature = "fs")]
 impl Folder {
     /// A folder tree rooted at `root`.
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: root.into(),
+            files: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// The files under `under` (the root, or a folder inside it), in [`walk_files`] order, with
+    /// their lowercase names.
+    fn files_under(&self, under: &Path) -> Cow<'_, [(PathBuf, String)]> {
+        let list = |root: &Path| {
+            let mut files = Vec::new();
+            let short = walk_files(root, &mut |p| {
+                let name = p.file_name().unwrap_or_default().to_string_lossy().to_lowercase();
+                files.push((p.to_path_buf(), name));
+            });
+            (files, short)
+        };
+        let (files, short) = self.files.get_or_init(|| list(&self.root));
+        if under == self.root {
+            Cow::Borrowed(files)
+        } else if *short {
+            // The listing of the whole tree may have stopped before reaching `under`.
+            Cow::Owned(list(under).0)
+        } else {
+            Cow::Owned(files.iter().filter(|(p, _)| p.starts_with(under)).cloned().collect())
+        }
     }
 }
 
 #[cfg(feature = "fs")]
 impl Assets for Folder {
     fn find(&self, reference: &str, model_dir: &Path) -> Option<PathBuf> {
-        find_texture(reference, model_dir, &self.root)
+        find_texture(reference, model_dir, &self.root, || self.files_under(&self.root))
     }
 
     fn image_shared(&self, bytes: crate::Bytes, name: &Path) -> Option<Image> {
@@ -131,12 +163,12 @@ impl Assets for Folder {
             .and_then(Path::parent)
             .filter(|h| h.starts_with(&self.root))
             .unwrap_or(&self.root);
-        let mut images = Vec::new();
-        walk_files(home, &mut |p| {
-            if image_stem(p).is_some() {
-                images.push(p.to_path_buf());
-            }
-        });
+        let images = self
+            .files_under(home)
+            .iter()
+            .filter(|(_, name)| image_parts(name).is_some())
+            .map(|(p, _)| p.clone())
+            .collect::<Vec<_>>();
         color_texture_by_name(model, home, images)
     }
 }
@@ -203,12 +235,21 @@ impl Assets for Memory {
             }
         }
         let name = cleaned.rsplit('/').next()?.to_lowercase();
-        let by_name = self
+        let files: Vec<(&Path, String)> = self
             .files
             .keys()
-            .filter(|k| k.rsplit('/').next().is_some_and(|n| n.to_lowercase() == name))
-            .map(PathBuf::from);
-        nearest(model_dir, by_name).or_else(|| same_name_other_format(&name, model_dir, self.images()))
+            .map(|k| {
+                (
+                    Path::new(k.as_str()),
+                    k.rsplit('/').next().unwrap_or_default().to_lowercase(),
+                )
+            })
+            .collect();
+        let by_name = files.iter().filter(|(_, n)| *n == name).map(|(p, _)| p.to_path_buf());
+        nearest(model_dir, by_name).or_else(|| {
+            let files = files.iter().map(|(p, n)| (*p, n.as_str()));
+            same_name_other_format(&name, model_dir, files)
+        })
     }
 
     fn read(&self, path: &Path) -> Option<Cow<'_, [u8]>> {
@@ -331,25 +372,34 @@ fn nearest(dir: &Path, candidates: impl IntoIterator<Item = PathBuf>) -> Option<
 /// An image with the same stem as `name` (lowercase) in another format (`rock.png` for
 /// `rock.tga`, as packs often ship), or in any format when `name` has none (Blender's FBX
 /// exporter names packed images `x.fbm\rock`), preferring PNG and JPEG, then the nearest.
-fn same_name_other_format(name: &str, dir: &Path, images: impl IntoIterator<Item = PathBuf>) -> Option<PathBuf> {
+///
+/// `files` are paths with their lowercase file names.
+fn same_name_other_format<'a>(
+    name: &str,
+    dir: &Path,
+    files: impl IntoIterator<Item = (&'a Path, &'a str)>,
+) -> Option<PathBuf> {
     let stem = match name.rsplit_once('.') {
         Some((stem, ext)) if IMAGE_EXTS.contains(&ext) => stem,
         Some(_) => return None,
         None => name,
     };
-    images
+    files
         .into_iter()
-        .filter(|p| image_stem(p).as_deref() == Some(stem))
-        .map(|p| {
-            let ext = p
-                .extension()
-                .map(|x| x.to_string_lossy().to_lowercase())
-                .unwrap_or_default();
-            let other = !matches!(ext.as_str(), "png" | "jpg" | "jpeg");
-            (other, closeness(dir, &p), p)
+        .filter_map(|(p, n)| {
+            let (s, ext) = image_parts(n)?;
+            let other = !matches!(ext, "png" | "jpg" | "jpeg");
+            (s == stem).then(|| (other, closeness(dir, p), p))
         })
         .min()
-        .map(|(.., p)| p)
+        .map(|(.., p)| p.to_path_buf())
+}
+
+/// A lowercase file name's stem and extension, when the extension is an image's: what
+/// [`image_stem`] reads from a path.
+fn image_parts(name: &str) -> Option<(&str, &str)> {
+    let (stem, ext) = name.rsplit_once('.')?;
+    (!stem.is_empty() && IMAGE_EXTS.contains(&ext)).then_some((stem, ext))
 }
 
 /// An image file's lowercased stem; `None` for a file that isn't an image.
@@ -411,9 +461,10 @@ const IMAGE_EXTS: &[&str] = &[
     "png", "jpg", "jpeg", "tga", "bmp", "webp", "gif", "tif", "tiff", "dds", "psd",
 ];
 
-/// Visit the files under `root` (at most 20 000 entries, each folder's in name order).
+/// Visit the files under `root` (at most 20 000 entries, each folder's in name order). True when
+/// it stopped at that many.
 #[cfg(feature = "fs")]
-fn walk_files(root: &Path, visit: &mut dyn FnMut(&Path)) {
+fn walk_files(root: &Path, visit: &mut dyn FnMut(&Path)) -> bool {
     let mut stack = vec![root.to_path_buf()];
     let mut seen = 0;
     while let Some(dir) = stack.pop() {
@@ -437,7 +488,7 @@ fn walk_files(root: &Path, visit: &mut dyn FnMut(&Path)) {
         for (p, dir) in entries {
             seen += 1;
             if seen > 20_000 {
-                return;
+                return true;
             }
             if dir {
                 dirs.push(p);
@@ -447,6 +498,7 @@ fn walk_files(root: &Path, visit: &mut dyn FnMut(&Path)) {
         }
         stack.extend(dirs.into_iter().rev());
     }
+    false
 }
 
 /// `path` with its `.` and `..` parts worked out.
@@ -471,7 +523,12 @@ fn tidy(path: &Path) -> PathBuf {
 /// `C:\Users\me\tex\rock.tga` survive only as names). Failing that, an image with the same name
 /// in another format.
 #[cfg(feature = "fs")]
-fn find_texture(reference: &str, model_dir: &Path, root: &Path) -> Option<PathBuf> {
+fn find_texture<'a>(
+    reference: &str,
+    model_dir: &Path,
+    root: &Path,
+    files: impl FnOnce() -> Cow<'a, [(PathBuf, String)]>,
+) -> Option<PathBuf> {
     let cleaned = cleaned(reference);
     if cleaned.is_empty() {
         return None;
@@ -485,18 +542,12 @@ fn find_texture(reference: &str, model_dir: &Path, root: &Path) -> Option<PathBu
         }
     }
     let name = cleaned.rsplit('/').next()?.to_lowercase();
-    let mut named = Vec::new();
-    let mut images = Vec::new();
-    walk_files(root, &mut |p| {
-        if p.file_name()
-            .is_some_and(|n| n.to_string_lossy().to_lowercase() == name)
-        {
-            named.push(p.to_path_buf());
-        } else if image_stem(p).is_some() {
-            images.push(p.to_path_buf());
-        }
-    });
-    nearest(model_dir, named).or_else(|| same_name_other_format(&name, model_dir, images))
+    let files = files();
+    let named = files.iter().filter(|(_, n)| *n == name).map(|(p, _)| p.clone());
+    nearest(model_dir, named).or_else(|| {
+        let files = files.iter().map(|(p, n)| (p.as_path(), n.as_str()));
+        same_name_other_format(&name, model_dir, files)
+    })
 }
 
 #[cfg(all(test, feature = "fs"))]
