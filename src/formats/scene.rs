@@ -1018,23 +1018,18 @@ fn write_prim(
     reason = "branchless, so the loop over every vertex vectorizes"
 )]
 fn sparse_vec3(b: &mut Builder, mut v: Vec<[f32; 3]>, n: usize, bounds: bool) -> usize {
-    // Every value as it's written, in one pass: one past the list, or not finite, is zero.
+    // Every value as it's written: one past the list, or not finite, is zero. A value that isn't finite is rare,
+    // so one pass over the bits looks for any first (its exponent bits all set).
     v.resize(n, [0.0; 3]);
-    let (mut min, mut max) = ([f32::MAX; 3], [f32::MIN; 3]);
-    let mut moved = 0;
-    // Without branching per component (`&` and `|`, not `&&` and `||`), so the loop vectorizes.
-    for x in &mut v {
-        if !(x[0].is_finite() & x[1].is_finite() & x[2].is_finite()) {
-            *x = [0.0; 3];
-        }
-        moved += usize::from((x[0] != 0.0) | (x[1] != 0.0) | (x[2] != 0.0));
-        // Finite by now, so a plain comparison does; zero vectors count, as the bounds take in zero
-        // whenever there's one.
-        for k in 0..3 {
-            min[k] = if x[k] < min[k] { x[k] } else { min[k] };
-            max[k] = if x[k] > max[k] { x[k] } else { max[k] };
+    let worst = v.as_flattened().iter().fold(0, |m, x| m.max(x.to_bits() & 0x7fff_ffff));
+    if worst >= 0x7f80_0000 {
+        for x in &mut v {
+            if !(x[0].is_finite() & x[1].is_finite() & x[2].is_finite()) {
+                *x = [0.0; 3];
+            }
         }
     }
+    let (moved, min, max) = survey(&v);
     let a = if moved * 4 < n {
         let mut nonzero: Vec<u32> = Vec::with_capacity(moved.max(1));
         let mut values: Vec<[f32; 3]> = Vec::with_capacity(moved.max(1));
@@ -1073,6 +1068,56 @@ fn sparse_vec3(b: &mut Builder, mut v: Vec<[f32; 3]>, n: usize, bounds: bool) ->
         b.accessors[a]["max"] = json!(max);
     }
     a
+}
+
+/// How many of `v` (all finite) aren't zero, and the least and greatest of each component; zero vectors count, as
+/// the bounds take in zero whenever there's one. A tie between zeros of either sign goes to the first in the list,
+/// as a plain pass over it would have it.
+#[allow(clippy::needless_bitwise_bool, reason = "branchless, so the loop vectorizes")]
+fn survey(v: &[[f32; 3]]) -> (usize, [f32; 3], [f32; 3]) {
+    // Four vectors at a time, each component in a lane of its own, so the loop vectorizes.
+    let flat = v.as_flattened();
+    let (mut lo, mut hi) = ([f32::MAX; 12], [f32::MIN; 12]);
+    let mut moved = 0;
+    let mut chunks = flat.chunks_exact(12);
+    for c in &mut chunks {
+        let mut bits = [0u32; 12];
+        for k in 0..12 {
+            lo[k] = if c[k] < lo[k] { c[k] } else { lo[k] };
+            hi[k] = if c[k] > hi[k] { c[k] } else { hi[k] };
+            // Without the sign bit: zero of either sign is zero.
+            bits[k] = c[k].to_bits() << 1;
+        }
+        for j in 0..4 {
+            moved += usize::from((bits[3 * j] | bits[3 * j + 1] | bits[3 * j + 2]) != 0);
+        }
+    }
+    let (mut min, mut max) = ([f32::MAX; 3], [f32::MIN; 3]);
+    for k in 0..12 {
+        let j = k % 3;
+        min[j] = if lo[k] < min[j] { lo[k] } else { min[j] };
+        max[j] = if hi[k] > max[j] { hi[k] } else { max[j] };
+    }
+    for x in chunks.remainder().chunks_exact(3) {
+        moved += usize::from((x[0] != 0.0) | (x[1] != 0.0) | (x[2] != 0.0));
+        for k in 0..3 {
+            min[k] = if x[k] < min[k] { x[k] } else { min[k] };
+            max[k] = if x[k] > max[k] { x[k] } else { max[k] };
+        }
+    }
+    // Lanes keep their own first zero, not the list's: a zero bound takes the sign of the list's first zero.
+    for k in 0..3 {
+        if min[k] == 0.0 || max[k] == 0.0 {
+            let first = v.iter().map(|x| x[k]).find(|&c| c == 0.0).unwrap_or(0.0);
+            if min[k] == 0.0 {
+                min[k] = first;
+            }
+            if max[k] == 0.0 {
+                max[k] = first;
+            }
+        }
+    }
+    (moved, min, max)
 }
 
 /// Each vertex's joints and weights in sets of four, as glTF wants them: joints in range and merged where
