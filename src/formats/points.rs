@@ -15,6 +15,7 @@ use serde_json::{Map, Value, json};
 
 use crate::Result;
 use crate::document::{Builder, Document, Part};
+use crate::source::SourceInfo;
 
 /// A point cloud on its way to a document. Every array that isn't empty has one entry per
 /// point.
@@ -181,14 +182,23 @@ impl Cloud {
         debug_assert!(self.positions.len() < n);
     }
 
-    /// The document: `source` (the format and what the file says about itself) in the asset's
+    /// The document: `info` written over `source` (the format's own details) in the asset's
     /// extras, `facts` as given with the point count added.
-    pub fn document(mut self, source: Value, mut facts: Map<String, Value>) -> Document<'static> {
+    pub fn document(
+        mut self,
+        info: &SourceInfo,
+        mut source: Map<String, Value>,
+        mut facts: Map<String, Value>,
+    ) -> Document<'static> {
+        info.write(&mut source);
+        let source = Value::Object(source);
         self.drop_broken();
         let n = self.positions.len();
         facts.insert("points".into(), json!(n));
         if n == 0 {
-            return Document::empty(facts);
+            let mut doc = Document::empty(facts);
+            doc.json["asset"]["extras"] = json!({ "source": source });
+            return doc;
         }
         let mut b = Builder::default();
         let mut constant = std::mem::take(&mut self.constant);
@@ -355,7 +365,12 @@ mod tests {
             origin: [10.0, 0.0, 0.0],
             constant: Map::new(),
         };
-        let doc = cloud.document(json!({ "format": "test" }), Map::new());
+        let info = SourceInfo {
+            format: Some("test".into()),
+            ..SourceInfo::default()
+        };
+        let doc = cloud.document(&info, Map::new(), Map::new());
+        assert_eq!(doc.source_info().format.as_deref(), Some("test"));
         assert_eq!(doc.facts["points"], 2);
         let mesh = &doc.json["meshes"][0];
         let attrs = &mesh["primitives"][0]["attributes"];

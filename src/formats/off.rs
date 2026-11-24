@@ -16,14 +16,17 @@
 //! colors become vertex colors, a vertex split where faces of different colors meet; without
 //! normals in the file, smooth ones are made. Colors are taken as sRGB. A file that ends early
 //! draws what it has.
+//!
+//! OFF names no units and no up axis, so both are unknown; geometry is kept as written.
 
-use serde_json::{Map, json};
+use serde_json::{Map, Value, json};
 
 use super::Input;
 use super::stream;
 use crate::document::Document;
 use crate::mesh::{FastMap, GRAY, Material, Prim, smooth_normals, srgb_to_linear, triangulate};
 use crate::num::u32_of;
+use crate::source::SourceInfo;
 use crate::{Context as _, Result};
 
 /// What a file's vertices carry, from its header keyword.
@@ -81,14 +84,20 @@ pub(crate) fn load(input: Input<'_>) -> Result<Document<'static>> {
     }
     ensure!(!m.tris.is_empty(), "OFF has no faces");
     let triangles = m.tris.len();
-    let mut source =
-        json!({ "format": "OFF", "header": keyword, "encoding": if layout.binary { "binary" } else { "ASCII" } });
+    let mut source = Map::new();
+    source.insert("header".into(), json!(keyword));
+    source.insert("encoding".into(), json!(if layout.binary { "binary" } else { "ASCII" }));
     if m.short {
-        source["truncated"] = json!(true);
+        source.insert("truncated".into(), json!(true));
     }
     if m.dropped > 0 {
-        source["droppedFaces"] = json!(m.dropped);
+        source.insert("droppedFaces".into(), json!(m.dropped));
     }
+    let info = SourceInfo {
+        format: Some("OFF".into()),
+        ..SourceInfo::default()
+    };
+    info.write(&mut source);
     let colored = !m.colors.is_empty() || !m.face_colors.is_empty();
     let prim = build(m);
     let material = Material::plain("default", if colored { [1.0; 4] } else { GRAY });
@@ -98,7 +107,7 @@ pub(crate) fn load(input: Input<'_>) -> Result<Document<'static>> {
         vec![(None, vec![prim])],
         &[material],
         Vec::new(),
-        Some(source),
+        Some(Value::Object(source)),
         facts,
         &[],
     ))
@@ -869,5 +878,16 @@ mod tests {
         survives(b"STCN4OFF 3 1 0\r0 0 0 1 0 0 1 9 0 0 1 0 0\r1 0 0 1 0 0 1 0 9 0 1 1 0\r0 1 0 1 0 0 1 0 0 9 1 0 1\r3 0 1 2 1 1 1\r");
         survives(b"nOFF 4 3 1 0\n0 0 0 0\n1 0 0 0\n0 1 0 0\n5 0 1 2 0 1 0.5 0.5 0.5\n");
         survives(&binary_cube(true));
+    }
+
+    #[test]
+    fn units_and_up_axis_are_unknown() {
+        let doc = read_with(CUBE.as_bytes(), usize::MAX).unwrap();
+        let info = doc.source_info();
+        assert_eq!(info.format.as_deref(), Some("OFF"));
+        assert_eq!(info.meters_per_unit, crate::source::Fact::Unknown);
+        assert_eq!(info.up_axis, crate::source::Fact::Unknown);
+        assert_eq!(info.converted, crate::source::Converted::default());
+        assert_eq!(doc.json["asset"]["extras"]["source"]["encoding"], "ASCII");
     }
 }

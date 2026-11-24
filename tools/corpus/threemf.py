@@ -122,20 +122,21 @@ def one_cube(**kw):
 
 case(FMT, "cube", {"cube.3mf": package({"3D/3dmodel.model": one_cube()})},
      {"spec": CORE + ": one mesh object, one build item", "source": SRC, **CUBE,
-      "facts": {"unit": "millimeter", "objects": 1, "triangles": 12}, "material_count": 1,
+      "facts": {"objects": 1, "triangles": 12}, "material_count": 1,
       "document": {"nodes": 2, "meshes": 1, "node_names": ["RootNode"],
-                   "source": {"format": "3MF", "unit": "millimeter", "metersPerUnit": 0.001, "upAxis": "Z"}}})
+                   "source": {"format": "3MF", "unit": "millimeter", "metersPerUnit": 0.001, "upAxis": "+Z",
+                              "handedness": "right"}}})
 
 UNITS = {"micron": 1e-6, "millimeter": 1e-3, "centimeter": 1e-2, "inch": 0.0254, "foot": 0.3048, "meter": 1.0}
 for unit, m in UNITS.items():
     case(FMT, f"unit_{unit}", {"cube.3mf": package({"3D/3dmodel.model": one_cube(unit=unit)})},
          {"spec": CORE + f": unit=\"{unit}\", scaled to metres", "source": SRC, "triangles": 12,
-          "bounds": box((0, 0, 0), (SIZE,) * 3, m), "facts": {"unit": unit}, "tolerance": 1e-5,
+          "bounds": box((0, 0, 0), (SIZE,) * 3, m), "tolerance": 1e-5,
           "document": {"source": {"unit": unit, "metersPerUnit": m}}})
 
 case(FMT, "unit_unsaid", {"cube.3mf": package({"3D/3dmodel.model": one_cube(unit=None)})},
      {"spec": CORE + ": no unit attribute means millimetres", "source": SRC, **CUBE,
-      "facts": {"unit": "millimeter"}})
+      "document": {"source": {"unit": "millimeter", "metersPerUnit": 0.001, "assumed": ["metersPerUnit"]}}})
 
 case(FMT, "unit_unknown", {"cube.3mf": package({"3D/3dmodel.model": one_cube(unit="parsec")})},
      {"spec": CORE + ": a unit the specification doesn't allow", "source": SRC, "error": "unit"})
@@ -179,8 +180,7 @@ case(FMT, "metadata_application",
          metadata='<metadata name="Application">Corpus Generator 1.0</metadata>'
                   '<metadata name="Title">A cube</metadata>\n')})},
      {"spec": CORE + ": the Application metadata", "source": SRC, **CUBE,
-      "facts": {"application": "Corpus Generator 1.0"},
-      "document": {"source": {"metadata": {"Application": "Corpus Generator 1.0", "Title": "A cube"}}}})
+      "document": {"source": {"tool": "Corpus Generator 1.0", "title": "A cube"}}})
 
 case(FMT, "object_names",
      {"cube.3mf": package({"3D/3dmodel.model": model(

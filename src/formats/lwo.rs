@@ -19,6 +19,9 @@
 //!
 //! LightWave is Y up and in meters but left-handed: Z is mirrored, and polygons, clockwise seen from the front, are
 //! turned around. Colors in the classic chunks are sRGB; node values, from LightWave's linear workflow, are linear.
+//!
+//! The source info has the format's meters, Y up and left-handed (declared, as the format fixes them; the handedness
+//! converted), the description chunk (`DESC`) as its description and the comment chunk (`TEXT`) as its comments.
 
 // LightWave is a name, not code.
 #![allow(clippy::doc_markdown, reason = "LightWave is a name")]
@@ -35,6 +38,7 @@ use crate::images::Images;
 use crate::material::{Alpha, CLAMP, Clearcoat, Factor, Full, MIRROR, REPEAT, Tex};
 use crate::mesh::{FastMap, Prim, srgb_to_linear};
 use crate::num::u32_of;
+use crate::source::{Axis, Fact, Handedness, SourceInfo};
 
 const FORM: [u8; 4] = *b"FORM";
 /// The id of the chunk holding an LWO3 form's own data.
@@ -2107,13 +2111,19 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         nodes.push(node);
     }
 
-    let mut source = json!({ "format": m.kind.name(), "upAxis": "Y", "handedness": "left", "unit": "m" });
-    if let Some(d) = &m.description {
-        source["description"] = json!(d);
-    }
-    if let Some(c) = &m.comment {
-        source["comment"] = json!(c);
-    }
+    // The format fixes the units and axes, so they are declared.
+    let mut info = SourceInfo {
+        format: Some(m.kind.name().into()),
+        meters_per_unit: Fact::Declared(1.0),
+        unit: Some("meter".into()),
+        up_axis: Fact::Declared(Axis::PosY),
+        handedness: Fact::Declared(Handedness::Left),
+        description: m.description.clone(),
+        comments: m.comment.iter().cloned().collect(),
+        ..SourceInfo::default()
+    };
+    info.converted.handedness = true;
+    let mut source = json!({});
     for (key, n) in [
         ("subdivisionPatches", m.patches),
         ("droppedCurves", m.curves),
@@ -2130,11 +2140,13 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
     if m.truncated {
         source["truncated"] = json!(true);
     }
+    if let Value::Object(map) = &mut source {
+        info.write(map);
+    }
     let mut facts = Map::new();
     facts.insert("triangles".into(), json!(budget.triangles));
     facts.insert("layers".into(), json!(m.layers.len()));
     facts.insert("surfaces".into(), json!(m.surfs.len()));
-    facts.insert("unit".into(), json!("m"));
 
     let mut json = Map::new();
     json.insert("asset".into(), json!({ "extras": { "source": source } }));
@@ -2403,6 +2415,13 @@ mod tests {
         let source = &doc.json["asset"]["extras"]["source"];
         assert_eq!(source["format"], "LWO2");
         assert_eq!(source["description"], "a box");
+        let info = doc.source_info();
+        assert_eq!(info.meters_per_unit, Fact::Declared(1.0));
+        assert_eq!(info.unit.as_deref(), Some("meter"));
+        assert_eq!(info.up_axis, Fact::Declared(Axis::PosY));
+        assert_eq!(info.handedness, Fact::Declared(Handedness::Left));
+        assert!(info.converted.handedness && !info.converted.units && !info.converted.up_axis);
+        assert_eq!(info.description.as_deref(), Some("a box"));
         assert_eq!(
             doc.json["nodes"][0]["extras"]["vertexMaps"].as_array().unwrap().len(),
             3

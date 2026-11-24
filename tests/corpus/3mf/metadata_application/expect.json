@@ -49,15 +49,10 @@
   ],
   "faces_outward": true,
   "winding_matches_normals": true,
-  "facts": {
-    "application": "Corpus Generator 1.0"
-  },
   "document": {
     "source": {
-      "metadata": {
-        "Application": "Corpus Generator 1.0",
-        "Title": "A cube"
-      }
+      "tool": "Corpus Generator 1.0",
+      "title": "A cube"
     }
   }
 }

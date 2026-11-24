@@ -93,15 +93,17 @@ case(FMT, "cube_millimeters", {"cube.dxf": text(drawing(4, cube_faces("8 Walls",
       "facts": {"triangles": 12}, "material_count": 1,
       "materials": [{"name": "Walls", "color": [1, 1, 1, 1], "double_sided": True}],
       "document": {"node_names": ["RootNode"],
-                   "source": {"format": "DXF", "encoding": "ASCII", "version": "AC1027", "units": "millimeters"}}})
+                   "source": {"format": "DXF", "encoding": "ASCII", "version": "AC1027", "unit": "millimeter",
+                              "metersPerUnit": 0.001, "upAxis": "+Z"}}})
 
 case(FMT, "unitless", {"cube.dxf": text(drawing(0, cube_faces(size=5)))},
      {"spec": SPEC + ": a unitless drawing ($INSUNITS 0) is left at its size", "source": SRC, "triangles": 12,
-      "bounds": y_up((0, 0, 0), (5, 5, 5)), "json": {"/asset/extras/source/units": None, "/nodes/0/scale": None}})
+      "bounds": y_up((0, 0, 0), (5, 5, 5)), "json": {"/asset/extras/source/unit": None,
+               "/asset/extras/source/metersPerUnit": None, "/nodes/0/scale": None}})
 
 case(FMT, "inches", {"cube.dxf": text(drawing(1, cube_faces()))},
      {"spec": SPEC + ": inches ($INSUNITS 1)", "source": SRC, "triangles": 12,
-      "bounds": y_up((0, 0, 0), (1, 1, 1), 0.0254), "document": {"source": {"units": "inches"}}})
+      "bounds": y_up((0, 0, 0), (1, 1, 1), 0.0254), "document": {"source": {"unit": "inch", "metersPerUnit": 0.0254}}})
 
 case(FMT, "three_corner_and_degenerate_faces",
      {"faces.dxf": text(drawing(6, face("8 0", TRI) + face("8 0", [[0, 0, 0], [1, 0, 0], [1, 0, 0], [0, 0, 0]])))},
@@ -335,7 +337,7 @@ case(FMT, "binary", {"cube.dxf": binary(drawing(5, cube_faces("8 A") + "0 INSERT
                                                 TRI_BLOCK))},
      {"spec": SPEC + ": binary DXF, its values typed by their group codes", "source": SRC, "triangles": 13,
       "materials": [{"name": "A", "color": [1, 0, 0, 1]}],
-      "document": {"source": {"encoding": "binary", "units": "centimeters"}}})
+      "document": {"source": {"encoding": "binary", "unit": "centimeter", "metersPerUnit": 0.01}}})
 
 
 # --- what isn't read, damage and errors --------------------------------------------------------

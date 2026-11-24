@@ -119,7 +119,7 @@ for version in (1, 2, 3):
     case(FMT, f"version_{version}", {"scene.spz": spz(version, ss)},
          expect(f"{SPEC}: version {version}", ss,
                 document={"attributes": attributes(0),
-                          "source": {"format": "SPZ", "version": version, "shDegree": 0, "antialiased": False}}))
+                          "source": {"format": "SPZ", "version": str(version), "shDegree": 0, "antialiased": False}}))
 
 for degree in (1, 2, 3):
     ss = splats(3, degree)

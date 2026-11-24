@@ -5,12 +5,15 @@
 //! the same point are shared, and the mesh carries no normals, so glTF clients shade it flat from
 //! the winding, as STL means. Facets with a coordinate that isn't a finite number are dropped.
 //!
-//! Each ASCII `solid` is a node and mesh of its own, named as the file names it; a binary
-//! file's header text, when it is text, is kept in the asset's `extras.source`.
+//! Each ASCII `solid` is a node and mesh of its own, named as the file names it; a file of one named
+//! solid takes its name as its title. A binary file's header text, when it is text, is kept in the
+//! asset's `extras.source` as `header`, and is the title when it reads as words rather than an
+//! exporter's `KEY=value` settings.
 //!
 //! STL is for printing, where Z is up (the build plate is XY), so the solids sit under a
-//! `RootNode` that turns them from Z-up to glTF's Y-up. Units are left as they are: STL has none,
-//! though most files are millimeters.
+//! `RootNode` that turns them from Z-up to glTF's Y-up: the source's up axis is `+Z` by that
+//! convention (assumed, not declared), and converted. Units are left as they are and unknown: STL
+//! has none, though many files are millimeters.
 //!
 //! The file is read a block at a time, never whole.
 
@@ -23,6 +26,7 @@ use super::stream::{self, Blocks};
 use crate::Result;
 use crate::document::Document;
 use crate::mesh::{GRAY, Material, Mesh, Prim, Welder, single, srgb_to_linear};
+use crate::source::{Axis, Fact, SourceInfo};
 
 type Tri = [[f32; 3]; 3];
 
@@ -38,7 +42,13 @@ pub(crate) fn stl(input: Input<'_>) -> Result<Document<'static>> {
             .into_iter()
             .map(|(name, p)| (name, vec![p]))
             .collect();
-        let source = json!({ "format": "STL", "encoding": "ASCII", "upAxis": "Z" });
+        let mut info = info();
+        if let [(Some(name), _)] = solids.as_slice() {
+            info.title = Some(name.clone());
+        }
+        let mut source = Map::new();
+        source.insert("encoding".into(), json!("ASCII"));
+        info.write(&mut source);
         return Ok(document(solids, &single(Prim::default()), source));
     };
     ensure!(
@@ -47,10 +57,14 @@ pub(crate) fn stl(input: Input<'_>) -> Result<Document<'static>> {
         input.limit
     );
     let header: [u8; 80] = head[..80].try_into().unwrap_or([0; 80]);
-    let mut source = json!({ "format": "STL", "encoding": "binary", "upAxis": "Z" });
+    let mut info = info();
+    let mut source = Map::new();
+    source.insert("encoding".into(), json!("binary"));
     if let Some(text) = header_text(&header) {
-        source["header"] = json!(text);
+        info.title = header_title(&text);
+        source.insert("header".into(), json!(text));
     }
+    info.write(&mut source);
     blocks.consume(84);
     let colors = magics(&header);
     let plain = colors.is_none();
@@ -69,13 +83,35 @@ pub(crate) fn stl(input: Input<'_>) -> Result<Document<'static>> {
     Ok(document(vec![(None, prims)], &mesh, source))
 }
 
+/// What every STL says about itself: nothing, but for the Z up of printing, which the reader turns to Y up.
+fn info() -> SourceInfo {
+    let mut info = SourceInfo {
+        format: Some("STL".into()),
+        up_axis: Fact::Assumed(Axis::PosZ),
+        ..SourceInfo::default()
+    };
+    info.converted.up_axis = true;
+    info
+}
+
+/// A binary header's text as a title: when it holds a letter and no `=`, so it reads as words, not an
+/// exporter's settings (`COLOR=... MATERIAL=...`). A leading `solid`, as some tools write, isn't part of it.
+fn header_title(text: &str) -> Option<String> {
+    let t = match text.split_once(' ') {
+        Some((w, rest)) if w.eq_ignore_ascii_case("solid") => rest.trim_start(),
+        _ => text,
+    };
+    (t.chars().any(char::is_alphabetic) && !t.contains('=')).then(|| t.to_owned())
+}
+
 /// The document for `meshes` using `mesh`'s materials, with its triangles counted.
-fn document(meshes: Vec<(Option<String>, Vec<Prim>)>, mesh: &Mesh, source: Value) -> Document<'static> {
+fn document(meshes: Vec<(Option<String>, Vec<Prim>)>, mesh: &Mesh, source: Map<String, Value>) -> Document<'static> {
     let triangles: usize = meshes.iter().flat_map(|(_, p)| p).map(|p| p.indices.len() / 3).sum();
     let mut facts = Map::new();
     facts.insert("triangles".into(), json!(triangles));
     // STL has no textures.
-    let mut doc = Document::from_named(meshes, &mesh.materials, Vec::new(), Some(source), facts, &[]);
+    let source = Some(Value::Object(source));
+    let mut doc = Document::from_named(meshes, &mesh.materials, Vec::new(), source, facts, &[]);
     // Z-up to Y-up: a quarter turn about X.
     let h = std::f32::consts::FRAC_1_SQRT_2;
     let roots = doc.json["scenes"][0]["nodes"].take();
@@ -465,7 +501,12 @@ mod tests {
 facet normal 0 0 1 outer loop vertex 0 0 0 vertex 1 0 0 vertex 0 0 2 endloop endfacet
 ";
         let doc = read(text.as_bytes());
-        assert_eq!(doc.json["asset"]["extras"]["source"]["upAxis"], "Z");
+        let info = doc.source_info();
+        assert_eq!(info.up_axis, Fact::Assumed(Axis::PosZ));
+        assert!(info.converted.up_axis);
+        assert_eq!(info.meters_per_unit, Fact::Unknown, "STL has no units");
+        assert!(info.unit.is_none());
+        assert_eq!(info.title.as_deref(), Some("t"));
         let mesh = doc.flatten(crate::document::Pose::Rest).unwrap().unwrap();
         let top = mesh.prims[0].positions.iter().map(|p| p[1]).fold(f32::MIN, f32::max);
         assert!((top - 2.0).abs() < 1e-5, "{top}");
@@ -490,7 +531,16 @@ facet normal 0 0 1 outer loop vertex 0 0 0 vertex 1 0 0 vertex 0 0 2 endloop end
         let source = &doc.json["asset"]["extras"]["source"];
         assert_eq!(source["encoding"], "binary");
         assert_eq!(source["header"], "made by a tool");
+        assert_eq!(doc.source_info().title.as_deref(), Some("made by a tool"));
+        bytes[..80].copy_from_slice(&[b' '; 80]);
+        bytes[..22].copy_from_slice(b"COLOR=abcd MATERIAL=ab");
+        let doc = read(&bytes);
+        assert!(doc.json["asset"]["extras"]["source"]["header"].is_string());
+        assert!(doc.source_info().title.is_none(), "settings aren't a title");
         bytes[..80].fill(0);
-        assert!(read(&bytes).json["asset"]["extras"]["source"].get("header").is_none());
+        let doc = read(&bytes);
+        assert!(doc.json["asset"]["extras"]["source"].get("header").is_none());
+        assert!(doc.source_info().title.is_none());
+        assert_eq!(doc.source_info().format.as_deref(), Some("STL"));
     }
 }

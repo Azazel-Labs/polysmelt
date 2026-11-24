@@ -12,7 +12,8 @@
 //! folded flags, lights) stays in `extras`.
 //!
 //! AC3D works in OpenGL's space, Y up and right-handed, with polygons counterclockwise from the front, as glTF
-//! does; its units are whatever the model's are, read as meters. Colors are sRGB.
+//! does: the source's up axis is +Y and its handedness right by that convention (assumed: a file doesn't say).
+//! Its units are whatever the model's are, unknown, and lengths are kept as written. Colors are sRGB.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -29,6 +30,7 @@ use crate::images::Images;
 use crate::material::{Alpha, Full, Tex};
 use crate::mesh::{FastMap, Prim, srgb_to_linear};
 use crate::num::u32_of;
+use crate::source::{Axis, Fact, Handedness, SourceInfo};
 
 /// AC3D's crease angle, in degrees, for an object that gives none.
 const DEFAULT_CREASE: f32 = 61.0;
@@ -917,10 +919,16 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
     }
     let roots: Vec<usize> = roots.iter().filter_map(|&r| node_of[r]).collect();
 
-    let mut source = json!({ "format": "AC3D", "upAxis": "Y", "unit": "unspecified" });
-    if let Some(v) = m.version {
-        source["version"] = json!(v.to_string());
-    }
+    let mut source = Map::new();
+    let info = SourceInfo {
+        format: Some("AC3D".into()),
+        version: m.version.map(|v| v.to_string()),
+        up_axis: Fact::Assumed(Axis::PosY),
+        handedness: Fact::Assumed(Handedness::Right),
+        ..SourceInfo::default()
+    };
+    info.write(&mut source);
+    let mut source = Value::Object(source);
     let lights = m.objs.iter().filter(|o| o.kind == "light").count();
     let subdivided = m.objs.iter().filter(|o| o.subdiv.is_some_and(|s| s > 0)).count();
     for (key, n) in [
@@ -1081,6 +1089,13 @@ mod tests {
         // A missing texture is counted, and the material keeps its color.
         let doc = read(&text, &Memory::new()).unwrap();
         assert_eq!(doc.json["asset"]["extras"]["source"]["droppedTextures"], 1);
+        let info = doc.source_info();
+        assert_eq!(info.format.as_deref(), Some("AC3D"));
+        assert_eq!(info.up_axis, Fact::Assumed(Axis::PosY));
+        assert_eq!(info.handedness, Fact::Assumed(Handedness::Right));
+        assert_eq!(info.meters_per_unit, Fact::Unknown);
+        assert!(info.unit.is_none());
+        assert_eq!(info.converted, crate::source::Converted::default());
         assert_eq!(flat(&doc).materials[0].color_image, None);
     }
 

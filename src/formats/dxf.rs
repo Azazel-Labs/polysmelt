@@ -27,8 +27,14 @@
 //! a drawing aren't wound any one way. Layers turned off or frozen and paper space are left out.
 //!
 //! The drawing sits under a `RootNode` that turns it from Z-up to glTF's Y-up and scales it to
-//! meters by `$INSUNITS` (unitless drawings are left as they are). Text, hatches, dimensions
-//! and ACIS solids and surfaces aren't read: the asset's `extras.source.skipped` counts them.
+//! meters by `$INSUNITS` (unitless drawings are left as they are, their units unknown). Text,
+//! hatches, dimensions and ACIS solids and surfaces aren't read: the asset's
+//! `extras.source.skipped` counts them.
+//!
+//! The source info has the drawing's `$ACADVER` as its version, its `$INSUNITS` as declared
+//! units, Z up (assumed) and right-handed, `$LASTSAVEDBY` as its author, and its creation and
+//! update dates (`$TDUCREATE` and `$TDUUPDATE` in UTC, else the local `$TDCREATE` and
+//! `$TDUPDATE`) in ISO 8601. `$MEASUREMENT` is kept as `measurement`, imperial or metric.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::f64::consts::{FRAC_PI_2, TAU};
@@ -36,12 +42,14 @@ use std::f64::consts::{FRAC_PI_2, TAU};
 use serde_json::{Map, Value, json};
 
 use super::Input;
+use super::dates;
 use super::nurbs;
 use super::stream::f64_from;
 use crate::Result;
 use crate::document::{Builder, Document};
 use crate::mesh::{FastMap, Material, Prim, srgb_to_linear, triangulate};
 use crate::num::{f32_of, u32_of};
+use crate::source::{Axis, Fact, Handedness, SourceInfo};
 
 /// What a binary DXF file starts with.
 const SENTINEL: &[u8] = b"AutoCAD Binary DXF\r\n\x1a\0";
@@ -515,6 +523,14 @@ struct Model {
     block_of: HashMap<Vec<u8>, usize>,
     units: i64,
     version: String,
+    /// `$TDCREATE` and `$TDUPDATE` (local Julian dates), and `$TDUCREATE` and `$TDUUPDATE` (UTC).
+    created: Option<f64>,
+    modified: Option<f64>,
+    created_utc: Option<f64>,
+    modified_utc: Option<f64>,
+    last_saved_by: String,
+    /// `$MEASUREMENT`: 0 imperial, 1 metric.
+    measurement: Option<i64>,
     /// Triangles read, each once.
     triangles: usize,
     /// Points arcs added, up to [`MAX_ARC_POINTS`].
@@ -565,9 +581,44 @@ impl Model {
                 9 => var = v.text(),
                 70 if var == b"$INSUNITS" => self.units = v.int(),
                 1 if var == b"$ACADVER" => self.version = String::from_utf8_lossy(v.text()).into_owned(),
+                1 if var == b"$LASTSAVEDBY" => {
+                    String::from_utf8_lossy(v.text())
+                        .trim()
+                        .clone_into(&mut self.last_saved_by);
+                }
+                40 if var == b"$TDCREATE" => self.created = Some(v.real()),
+                40 if var == b"$TDUPDATE" => self.modified = Some(v.real()),
+                40 if var == b"$TDUCREATE" => self.created_utc = Some(v.real()),
+                40 if var == b"$TDUUPDATE" => self.modified_utc = Some(v.real()),
+                70 if var == b"$MEASUREMENT" => self.measurement = Some(v.int()),
                 _ => {}
             }
         }
+    }
+
+    /// What the drawing says of itself: `units` from `$INSUNITS`, and whether a root turns it to
+    /// Y-up (and scales it, unless its unit is the meter).
+    fn info(&self, units: Option<(f64, &'static str)>, rooted: bool) -> SourceInfo {
+        // A UTC date when the drawing has one, else a local one.
+        let date = |utc: Option<f64>, local: Option<f64>| {
+            utc.and_then(|d| dates::julian(d, true))
+                .or_else(|| local.and_then(|d| dates::julian(d, false)))
+        };
+        let mut info = SourceInfo {
+            format: Some("DXF".into()),
+            version: Some(self.version.clone()).filter(|v| !v.is_empty()),
+            meters_per_unit: units.map_or(Fact::Unknown, |(m, _)| Fact::Declared(m)),
+            unit: units.map(|(_, name)| name.to_owned()),
+            up_axis: Fact::Assumed(Axis::PosZ),
+            handedness: Fact::Declared(Handedness::Right),
+            author: Some(self.last_saved_by.clone()).filter(|a| !a.is_empty()),
+            created: date(self.created_utc, self.created),
+            modified: date(self.modified_utc, self.modified),
+            ..SourceInfo::default()
+        };
+        info.converted.up_axis = rooted;
+        info.converted.units = rooted && units.is_some_and(|(m, _)| (m - 1.0).abs() > 1e-12);
+        info
     }
 
     fn tables(&mut self, p: &mut Pairs<'_>) {
@@ -1131,30 +1182,30 @@ impl Model {
 /// The meters in a drawing unit (`$INSUNITS`), and the unit's name.
 fn unit(units: i64) -> Option<(f64, &'static str)> {
     Some(match units {
-        1 => (0.0254, "inches"),
-        2 => (0.3048, "feet"),
-        3 => (1609.344, "miles"),
-        4 => (0.001, "millimeters"),
-        5 => (0.01, "centimeters"),
-        6 => (1.0, "meters"),
-        7 => (1000.0, "kilometers"),
-        8 => (2.54e-8, "microinches"),
-        9 => (2.54e-5, "mils"),
-        10 => (0.9144, "yards"),
-        11 => (1e-10, "angstroms"),
-        12 => (1e-9, "nanometers"),
-        13 => (1e-6, "microns"),
-        14 => (0.1, "decimeters"),
-        15 => (10.0, "decameters"),
-        16 => (100.0, "hectometers"),
-        17 => (1e9, "gigameters"),
-        18 => (1.495_978_707e11, "astronomical units"),
-        19 => (9.460_730_472_580_8e15, "light years"),
-        20 => (3.085_677_581_491_367e16, "parsecs"),
-        21 => (1200.0 / 3937.0, "US survey feet"),
-        22 => (100.0 / 3937.0, "US survey inches"),
-        23 => (3600.0 / 3937.0, "US survey yards"),
-        24 => (6_336_000.0 / 3937.0, "US survey miles"),
+        1 => (0.0254, "inch"),
+        2 => (0.3048, "foot"),
+        3 => (1609.344, "mile"),
+        4 => (0.001, "millimeter"),
+        5 => (0.01, "centimeter"),
+        6 => (1.0, "meter"),
+        7 => (1000.0, "kilometer"),
+        8 => (2.54e-8, "microinch"),
+        9 => (2.54e-5, "mil"),
+        10 => (0.9144, "yard"),
+        11 => (1e-10, "angstrom"),
+        12 => (1e-9, "nanometer"),
+        13 => (1e-6, "micron"),
+        14 => (0.1, "decimeter"),
+        15 => (10.0, "decameter"),
+        16 => (100.0, "hectometer"),
+        17 => (1e9, "gigameter"),
+        18 => (1.495_978_707e11, "astronomical unit"),
+        19 => (9.460_730_472_580_8e15, "light year"),
+        20 => (3.085_677_581_491_367e16, "parsec"),
+        21 => (1200.0 / 3937.0, "US survey foot"),
+        22 => (100.0 / 3937.0, "US survey inch"),
+        23 => (3600.0 / 3937.0, "US survey yard"),
+        24 => (6_336_000.0 / 3937.0, "US survey mile"),
         _ => return None,
     })
 }
@@ -1531,12 +1582,9 @@ impl Build {
             self.nodes.push(root);
             roots.push(self.nodes.len() - 1);
         }
-        let mut source = json!({ "format": "DXF", "encoding": if self.binary { "binary" } else { "ASCII" } });
-        if !self.m.version.is_empty() {
-            source["version"] = json!(self.m.version);
-        }
-        if let Some((_, name)) = units {
-            source["units"] = json!(name);
+        let mut source = json!({ "encoding": if self.binary { "binary" } else { "ASCII" } });
+        if let Some(m) = self.m.measurement.filter(|m| matches!(m, 0 | 1)) {
+            source["measurement"] = json!(if m == 0 { "imperial" } else { "metric" });
         }
         if !self.m.ended {
             source["truncated"] = json!(true);
@@ -1552,6 +1600,9 @@ impl Build {
         }
         if !self.m.notes.is_empty() {
             source["notes"] = json!(self.m.notes);
+        }
+        if let Value::Object(map) = &mut source {
+            self.m.info(units, !roots.is_empty()).write(map);
         }
         let mut json = Map::new();
         json.insert("asset".into(), json!({ "extras": { "source": source } }));

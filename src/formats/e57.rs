@@ -11,10 +11,11 @@
 //! return index and count, time stamps and any other field are float custom attributes, up to
 //! [`COLUMNS`] of them. A file with several scans adds `_SCAN`, the scan's index.
 //!
-//! The file's and each scan's metadata (names, sensor, pose, limits, bounds, acquisition times,
-//! the images' names and projections) are in the asset's extras, and the coordinate system the
-//! file names, if any, under the facts' `georeference`. The images themselves are left in the
-//! file.
+//! The source info has the format's meters (declared), right-handed, Z up (assumed), the library
+//! that wrote the file as its tool, the file's creation time (GPS time) as its creation date in
+//! UTC, and the coordinate system the file names, if any, as its georeference. Each scan's
+//! metadata (names, sensor, pose, limits, bounds, acquisition times) and the images' names and
+//! projections are kept beside them. The images themselves are left in the file.
 
 use std::cell::Cell;
 use std::io::{self, BufReader, Read, Seek, SeekFrom};
@@ -23,10 +24,12 @@ use std::rc::Rc;
 use e57::{E57Reader, PointCloud, Projection, RecordDataType, RecordName, RecordValue, Transform};
 use serde_json::{Map, Value, json};
 
+use super::dates;
 use super::points::{self, Cloud, Column};
 use super::{Input, ReadSeek};
 use crate::document::{Document, Keep};
 use crate::num::f32_of;
+use crate::source::{Axis, Fact, Handedness, SourceInfo};
 use crate::{Context as _, Result};
 
 /// The most custom attributes made from fields that aren't position, normal or color.
@@ -513,20 +516,32 @@ fn document(reader: &Reader<'_>, scans: &[PointCloud], parts: Vec<Part>) -> Resu
     cloud.columns = columns;
 
     let scan_list: Vec<Value> = scans.iter().map(describe).collect();
-    let mut source = json!({
-        "format": "E57",
-        "units": "meters",
-        "axes": "Z-up source turned Y-up: glTF x = x, y = z, z = -y",
-        "scans": scan_list,
-    });
+    let mut source = json!({ "scans": scan_list });
     let h = reader.header();
-    source["version"] = json!(format!("{}.{}", h.major, h.minor));
     source["guid"] = json!(reader.guid());
-    if let Some(v) = reader.library_version().filter(|v| !v.is_empty()) {
-        source["libraryVersion"] = json!(v);
-    }
+    // Meters and right-handed by the standard; Z up by convention.
+    let mut info = SourceInfo {
+        format: Some("E57".into()),
+        version: Some(format!("{}.{}", h.major, h.minor)),
+        meters_per_unit: Fact::Declared(1.0),
+        unit: Some("meter".into()),
+        up_axis: Fact::Assumed(Axis::PosZ),
+        handedness: Fact::Declared(Handedness::Right),
+        tool: reader
+            .library_version()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_owned),
+        ..SourceInfo::default()
+    };
+    info.converted.up_axis = true;
     if let Some(c) = reader.creation() {
-        source["creation"] = json!({ "gpsTime": c.gps_time, "atomicReference": c.atomic_reference });
+        info.created = dates::gps(c.gps_time).filter(|_| c.gps_time > 0.0);
+        if info.created.is_none() {
+            source["creation"] = json!({ "gpsTime": c.gps_time, "atomicReference": c.atomic_reference });
+        } else if c.atomic_reference {
+            source["creationAtomicReference"] = json!(true);
+        }
     }
     let images: Vec<Value> = reader
         .images()
@@ -571,7 +586,7 @@ fn document(reader: &Reader<'_>, scans: &[PointCloud], parts: Vec<Part>) -> Resu
     }
     let mut facts = Map::new();
     if dropped > 0 {
-        facts.insert("droppedPoints".into(), json!(dropped));
+        facts.insert("dropped_points".into(), json!(dropped));
     }
     if let Some(w) = reader.coordinate_metadata().map(str::trim).filter(|w| !w.is_empty()) {
         // glTF's axes back to the file's: x, -z, y.
@@ -591,9 +606,10 @@ fn document(reader: &Reader<'_>, scans: &[PointCloud], parts: Vec<Part>) -> Resu
                 g["verticalEpsg"] = json!(e);
             }
         }
-        facts.insert("georeference".into(), g);
+        info.georeference = Some(g);
     }
-    Ok(cloud.document(source, facts))
+    let Value::Object(source) = source else { unreachable!() };
+    Ok(cloud.document(&info, source, facts))
 }
 
 fn put(v: &mut Value, key: &str, s: Option<&String>) {
@@ -750,6 +766,10 @@ mod tests {
         {
             let mut w = E57Writer::new(&mut out, "file-guid").unwrap();
             w.set_coordinate_metadata(wkt.map(String::from));
+            w.set_creation(Some(e57::DateTime {
+                gps_time: 1_300_000_018.0,
+                atomic_reference: false,
+            }));
             for (k, (n, pose)) in scans.iter().enumerate() {
                 line(&mut w, &format!("g{k}"), *n, pose.clone(), far);
             }
@@ -805,7 +825,15 @@ mod tests {
         assert_eq!(s["format"], "E57");
         assert_eq!(s["scans"][0]["name"], "scan g0");
         assert_eq!(s["scans"][0]["sensor"]["vendor"], "test");
-        assert!(doc.facts.get("georeference").is_none());
+        let info = doc.source_info();
+        assert_eq!(info.version.as_deref(), Some("1.0"));
+        assert_eq!(info.meters_per_unit, Fact::Declared(1.0));
+        assert_eq!(info.up_axis, Fact::Assumed(Axis::PosZ));
+        assert_eq!(info.handedness, Fact::Declared(Handedness::Right));
+        assert!(info.converted.up_axis && !info.converted.units);
+        assert!(info.tool.as_deref().is_some_and(|t| t.starts_with("Rust E57 Library")));
+        assert_eq!(info.created.as_deref(), Some("2021-03-17T07:06:40Z"));
+        assert!(info.georeference.is_none());
         assert!(
             doc.json["meshes"][0]["primitives"][0]["attributes"]
                 .get("_SCAN")
@@ -854,7 +882,8 @@ mod tests {
         let p = floats(&doc, "POSITION");
         // A millimeter apart, half a million meters out.
         assert!((p[3] - p[0] - 0.001).abs() < 1e-6, "{} {}", p[0], p[3]);
-        let g = &doc.facts["georeference"];
+        assert!(doc.facts.get("georeference").is_none());
+        let g = &doc.source_info().georeference.unwrap();
         assert_eq!(g["epsg"], 32617);
         assert_eq!(g["kind"], "projected");
         assert_eq!(g["origin"][0], 500_000.0);
@@ -915,7 +944,7 @@ mod tests {
         }
         let doc = read(out.get_ref(), Keep::ALL).unwrap();
         assert_eq!(doc.facts["points"], 3);
-        assert_eq!(doc.facts["droppedPoints"], 1);
+        assert_eq!(doc.facts["dropped_points"], 1);
         let p = floats(&doc, "POSITION");
         let want = [[2.0, 0.0, 0.0], [0.0, 0.0, -3.0], [0.0, -5.0, 0.0]];
         for (got, want) in p.chunks_exact(3).zip(want) {
@@ -1005,6 +1034,6 @@ mod tests {
         checksum(&mut b);
         let doc = read(&b, Keep::ALL).unwrap();
         assert_eq!(doc.facts["points"], 0);
-        assert_eq!(doc.facts["droppedPoints"], 10);
+        assert_eq!(doc.facts["dropped_points"], 10);
     }
 }

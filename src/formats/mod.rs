@@ -46,6 +46,8 @@ mod c3d;
 mod crease;
 #[cfg(feature = "dae")]
 mod dae;
+#[cfg(any(feature = "dxf", feature = "las", feature = "e57"))]
+mod dates;
 #[cfg(feature = "directx")]
 mod directx;
 #[cfg(feature = "dxf")]

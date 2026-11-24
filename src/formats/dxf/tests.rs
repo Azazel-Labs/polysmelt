@@ -138,8 +138,14 @@ fn faces_turn_y_up_in_meters() {
     assert_eq!(src["format"], "DXF");
     assert_eq!(src["encoding"], "ASCII");
     assert_eq!(src["version"], "AC1027");
-    assert_eq!(src["units"], "millimeters");
+    assert!(src.get("units").is_none());
     assert!(src.get("truncated").is_none());
+    let info = doc.source_info();
+    assert_eq!(info.meters_per_unit, Fact::Declared(0.001));
+    assert_eq!(info.unit.as_deref(), Some("millimeter"));
+    assert_eq!(info.up_axis, Fact::Assumed(Axis::PosZ));
+    assert_eq!(info.handedness, Fact::Declared(Handedness::Right));
+    assert!(info.converted.units && info.converted.up_axis);
     assert_eq!(doc.json["nodes"][0]["name"], "RootNode");
     let m = mesh(&doc);
     assert_eq!(m.triangles(), 12);
@@ -162,9 +168,31 @@ fn a_three_corner_face_and_degenerate_ones() {
     );
     let doc = read(&text(&drawing(0, "", "", &format!("{tri}{line}")), "\n"));
     assert_eq!(triangles(&doc), 1);
-    // A unitless drawing isn't scaled.
-    assert!(source(&doc).get("units").is_none());
+    // A unitless drawing isn't scaled, its units unknown.
+    let info = doc.source_info();
+    assert_eq!(info.meters_per_unit, Fact::Unknown);
+    assert_eq!(info.unit, None);
+    assert!(!info.converted.units && info.converted.up_axis);
     assert!(doc.json["nodes"][0].get("scale").is_none());
+}
+
+#[test]
+fn the_header_dates_author_and_measurement_are_source_info() {
+    let header = "0 SECTION 2 HEADER 9 $ACADVER 1 AC1032 9 $LASTSAVEDBY 1 drafter         9 $TDCREATE 40 2451545.25 9 $TDUCREATE 40 2451545.0 9 $TDUPDATE 40 2460000.25         9 $MEASUREMENT 70 1 0 ENDSEC ";
+    let body = format!("0 SECTION 2 ENTITIES {} 0 ENDSEC 0 EOF", cube_faces("8 0"));
+    let doc = read(&text(
+        &groups(&format!("{header}{body}")),
+        "
+",
+    ));
+    let info = doc.source_info();
+    assert_eq!(info.version.as_deref(), Some("AC1032"));
+    assert_eq!(info.author.as_deref(), Some("drafter"));
+    // The UTC date is taken over the local one; with only a local one, it has no zone.
+    assert_eq!(info.created.as_deref(), Some("2000-01-01T12:00:00Z"));
+    assert_eq!(info.modified.as_deref(), Some("2023-02-24T18:00:00"));
+    assert_eq!(info.meters_per_unit, Fact::Unknown);
+    assert_eq!(source(&doc)["measurement"], "metric");
 }
 
 fn polyface_cube(extra: &str) -> String {
@@ -423,7 +451,7 @@ fn binary_files() {
     assert_eq!(triangles(&doc), 13);
     let src = source(&doc);
     assert_eq!(src["encoding"], "binary");
-    assert_eq!(src["units"], "centimeters");
+    assert_eq!(doc.source_info().unit.as_deref(), Some("centimeter"));
     let ascii = read(&text(&gs, "\n"));
     assert_eq!(mesh(&doc).prims.len(), mesh(&ascii).prims.len());
     assert_eq!(bounds(&mesh(&doc)), bounds(&mesh(&ascii)));

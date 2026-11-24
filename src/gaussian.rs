@@ -12,6 +12,7 @@ use serde_json::{Map, Value, json};
 
 use crate::document::{Builder, Document, Part};
 use crate::mesh::srgb_to_linear;
+use crate::source::SourceInfo;
 use crate::{Context as _, Result};
 
 /// The extension's name, which also prefixes its attributes.
@@ -220,24 +221,29 @@ impl Splats {
     }
 
     /// A document of the splats alone, on one node turned by `rotation` (x, y, z, w) when given.
-    /// `source` goes in the asset's `extras.source`, and the facts get `points` and `splats`,
-    /// the splats drawn. Without splats, the document is empty.
+    /// `info` written over `source` (the format's own details) goes in the asset's
+    /// `extras.source`, and the facts get `points` and `splats`, the splats drawn. Without splats,
+    /// the document is empty but for those.
     #[cfg_attr(
         not(any(feature = "splat", feature = "spz")),
         allow(dead_code, reason = "PLY splats share a document with the file's other elements")
     )]
     pub fn document(
         self,
-        source: Value,
+        info: &SourceInfo,
+        mut source: Map<String, Value>,
         rotation: Option<[f32; 4]>,
         mut facts: Map<String, Value>,
     ) -> Document<'static> {
         let mut b = Builder::default();
         let degree = degree_of(self.sh.len());
+        info.write(&mut source);
         let Some(prim) = self.primitive(&mut b) else {
             facts.insert("points".into(), json!(0));
             facts.insert("splats".into(), json!(0));
-            return Document::empty(facts);
+            let mut doc = Document::empty(facts);
+            doc.json["asset"]["extras"] = json!({ "source": source });
+            return doc;
         };
         let n = prim["attributes"]["POSITION"]
             .as_u64()
@@ -245,8 +251,7 @@ impl Splats {
             .unwrap_or(0);
         facts.insert("points".into(), json!(n));
         facts.insert("splats".into(), json!(n));
-        let mut source = source;
-        source["shDegree"] = json!(degree);
+        source.insert("shDegree".into(), json!(degree));
         let mut node = json!({ "mesh": 0 });
         if let Some(q) = rotation {
             node["rotation"] = json!(q);
