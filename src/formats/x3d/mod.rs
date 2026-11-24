@@ -32,6 +32,13 @@
 //! Scripts, routes, sensors and interpolators are skipped, as is any node not named here
 //! (`Text`, `NurbsPatchSurface`): the asset's `extras.source.skipped` counts them.
 //! Colors are taken as sRGB. `UNIT length` scales the scene.
+//!
+//! The asset's `extras.source` records the encoding, the version and the length unit (meters
+//! unless `UNIT length` names another, a scene in another unit scaled to meters), +Y up as the
+//! convention, the first `WorldInfo`'s title and `info` strings (as comments), and the `META`
+//! statements (`meta` elements): `title`, `creator` or `author`, `generator` as the tool,
+//! `description`, `copyright` or `rights`, `license`, `created`, `modified` and `keywords` by
+//! their meanings, any other under `meta` as written.
 
 mod classic;
 mod geometry;
@@ -52,6 +59,7 @@ use crate::images::Images;
 use crate::material::{Alpha, CLAMP, Full, REPEAT, Tex};
 use crate::mesh::{GRAY, Material, srgb_to_linear};
 use crate::num::f32_of;
+use crate::source::{Axis, Converted, Fact, Handedness, SourceInfo};
 
 /// An absent index.
 pub(super) const NONE: u32 = u32::MAX;
@@ -119,6 +127,10 @@ pub(super) struct Graph {
     pub roots: Vec<usize>,
     /// Meters a length unit is, from `UNIT length`.
     pub unit: Option<f64>,
+    /// The length unit's name, likewise.
+    pub unit_name: Option<String>,
+    /// The file's `META` statements (`meta` elements), each name and content.
+    pub meta: Vec<(String, String)>,
     /// Statements and nodes not read, by kind.
     pub skipped: BTreeMap<String, usize>,
     pub version: String,
@@ -381,6 +393,7 @@ pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
         skipped: BTreeMap::new(),
         notes: BTreeSet::new(),
         title: None,
+        info: Vec::new(),
     };
     c.inline_of.insert(input.path.to_path_buf(), Some(0));
     let mut roots = Vec::new();
@@ -428,6 +441,8 @@ struct Convert<'a> {
     skipped: BTreeMap<String, usize>,
     notes: BTreeSet<&'static str>,
     title: Option<String>,
+    /// The first `WorldInfo`'s `info` strings.
+    info: Vec<String>,
 }
 
 impl Convert<'_> {
@@ -495,6 +510,14 @@ impl Convert<'_> {
             "WorldInfo" => {
                 if self.title.is_none() {
                     self.title = graph.strs(id, "title").first().filter(|t| !t.is_empty()).cloned();
+                }
+                if self.info.is_empty() {
+                    self.info = graph
+                        .strs(id, "info")
+                        .iter()
+                        .filter(|t| !t.is_empty())
+                        .cloned()
+                        .collect();
                 }
                 return Ok(None);
             }
@@ -882,17 +905,84 @@ impl Convert<'_> {
     }
 
     fn finish(mut self, roots: &[usize], info: &Info) -> Document<'static> {
-        let mut source = json!({ "format": info.format, "encoding": info.encoding });
-        let main = &self.graphs[0];
-        if !main.version.is_empty() {
-            source["version"] = json!(main.version);
-        }
+        let mut source = Map::new();
+        source.insert("encoding".into(), json!(info.encoding));
         if info.gzip {
-            source["gzip"] = json!(true);
+            source.insert("gzip".into(), json!(true));
         }
-        if let Some(t) = &self.title {
-            source["title"] = json!(t);
+        let main = &self.graphs[0];
+        let unit = main.unit.filter(|u| u.is_finite() && *u > 0.0);
+        let mut si = SourceInfo {
+            format: Some(info.format.into()),
+            version: (!main.version.is_empty()).then(|| main.version.clone()),
+            // Lengths are meters unless a `UNIT` says otherwise.
+            meters_per_unit: Fact::Declared(unit.unwrap_or(1.0)),
+            unit: Some(
+                main.unit_name
+                    .clone()
+                    .filter(|_| unit.is_some())
+                    .unwrap_or_else(|| "meter".into()),
+            ),
+            // +Y up is the default viewpoint's, a convention; the coordinates are right-handed.
+            up_axis: Fact::Assumed(Axis::PosY),
+            handedness: Fact::Declared(Handedness::Right),
+            converted: Converted {
+                units: unit.is_some_and(|u| (u - 1.0).abs() > 1e-12) && !roots.is_empty(),
+                ..Converted::default()
+            },
+            title: self.title.clone(),
+            comments: std::mem::take(&mut self.info),
+            ..SourceInfo::default()
+        };
+        let mut other = Map::new();
+        for (name, content) in &main.meta {
+            let content = content.trim();
+            if content.is_empty() {
+                continue;
+            }
+            let join = |slot: &mut Option<String>| {
+                *slot = Some(match slot.take() {
+                    Some(old) if old != content => format!("{old}; {content}"),
+                    Some(old) => old,
+                    None => content.to_owned(),
+                });
+            };
+            match name.to_ascii_lowercase().as_str() {
+                "title" => {
+                    if si.title.is_none() {
+                        si.title = Some(content.to_owned());
+                    }
+                }
+                "creator" | "author" => join(&mut si.author),
+                "generator" => join(&mut si.tool),
+                "description" => join(&mut si.description),
+                "copyright" | "rights" => join(&mut si.copyright),
+                "license" => join(&mut si.license),
+                "created" => join(&mut si.created),
+                "modified" => join(&mut si.modified),
+                "keywords" => si.keywords.extend(
+                    content
+                        .split([',', ';'])
+                        .map(str::trim)
+                        .filter(|k| !k.is_empty())
+                        .map(str::to_owned),
+                ),
+                _ => {
+                    // Kept as the file has it; a name given twice keeps each content.
+                    match other.get_mut(name) {
+                        Some(Value::Array(a)) => a.push(json!(content)),
+                        Some(v) => *v = json!([v.take(), content]),
+                        None => {
+                            other.insert(name.clone(), json!(content));
+                        }
+                    }
+                }
+            }
         }
+        if !other.is_empty() {
+            source.insert("meta".into(), Value::Object(other));
+        }
+        si.write(&mut source);
         let mut skipped = std::mem::take(&mut self.skipped);
         for g in &self.graphs {
             for (k, n) in &g.skipped {
@@ -901,10 +991,10 @@ impl Convert<'_> {
             self.notes.extend(&g.notes);
         }
         if !skipped.is_empty() {
-            source["skipped"] = json!(skipped);
+            source.insert("skipped".into(), json!(skipped));
         }
         if !self.notes.is_empty() {
-            source["notes"] = json!(self.notes);
+            source.insert("notes".into(), json!(self.notes));
         }
         let mut json = Map::new();
         json.insert("asset".into(), json!({ "extras": { "source": source } }));

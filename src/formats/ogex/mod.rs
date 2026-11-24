@@ -31,6 +31,11 @@
 //! `OpenGEX` is Z up by default, in its distance metric's units: the scene's root turns it Y up
 //! and scales it to meters. Angles and times are scaled by their metrics, and colors are
 //! converted from the file's primaries to sRGB's. What has no glTF slot stays in `extras`.
+//!
+//! The asset's `extras.source` records the distance metric (a meter, assumed, when there's
+//! none), the up axis (+Z, assumed, likewise) and the forward axis the file gives, what was
+//! converted, the angle and time metrics, primaries other than sRGB's, and counts of what
+//! couldn't be read.
 
 mod anim;
 mod ddl;
@@ -51,6 +56,7 @@ use crate::images::Images;
 use crate::material::Full;
 use crate::mesh::FastMap;
 use crate::num::f32_of;
+use crate::source::{Axis, Converted, Fact, Handedness, SourceInfo};
 use ddl::{ROOT, Tree};
 use math::{
     IDENTITY, M4, is_identity, mul, place, quat_axis, quat_matrix, quat_unit, scaling, set_trs, translation, trs,
@@ -69,11 +75,53 @@ struct Metric {
     time: f64,
     /// Whether +Y is up (else +Z).
     y_up: bool,
-    forward: Option<String>,
+    /// The forward axis, when the file gives one.
+    forward: Option<Axis>,
+    /// Whether the file gives its distance metric, and its up axis.
+    has_distance: bool,
+    has_up: bool,
     /// The file's red, green and blue primaries and white point, when they aren't sRGB's.
     primaries: Option<[[f64; 2]; 4]>,
     /// The file's linear RGB to linear sRGB.
     to_srgb: Option<[[f64; 3]; 3]>,
+}
+
+/// A value the file declares, or else the format's default.
+fn fact<T>(declared: bool, v: T) -> Fact<T> {
+    if declared { Fact::Declared(v) } else { Fact::Assumed(v) }
+}
+
+/// The name of a unit `meters` long, for the common ones.
+fn unit_name(meters: f64) -> Option<&'static str> {
+    [
+        ("millimeter", 0.001),
+        ("centimeter", 0.01),
+        ("decimeter", 0.1),
+        ("meter", 1.0),
+        ("kilometer", 1000.0),
+        ("inch", 0.0254),
+        ("foot", 0.3048),
+        ("yard", 0.9144),
+        ("mile", 1609.344),
+    ]
+    .into_iter()
+    .find(|(_, m)| ((meters - m) / m).abs() < 1e-6)
+    .map(|(name, _)| name)
+}
+
+/// A forward direction as the file writes it: `"x"`, `"-x"`, ... `"-z"`.
+fn forward_axis(s: &str) -> Option<Axis> {
+    let (negative, letter) = s.strip_prefix('-').map_or((false, s), |l| (true, l));
+    let axis = match (letter, negative) {
+        ("x", false) => Axis::PosX,
+        ("x", true) => Axis::NegX,
+        ("y", false) => Axis::PosY,
+        ("y", true) => Axis::NegY,
+        ("z", false) => Axis::PosZ,
+        ("z", true) => Axis::NegZ,
+        _ => return None,
+    };
+    Some(axis)
 }
 
 /// A number stored as a `float` as the decimal it was most likely written as (0.01 rather
@@ -95,6 +143,8 @@ impl Metric {
             time: 1.0,
             y_up: false,
             forward: None,
+            has_distance: false,
+            has_up: false,
             primaries: None,
             to_srgb: None,
         };
@@ -104,11 +154,17 @@ impl Metric {
             let (v, _) = t.values(k);
             let scale = v.first().copied().filter(|x| x.is_finite() && *x > 0.0).map(decimal);
             match t.prop_str(k, "key") {
-                Some("distance") => m.distance = scale.unwrap_or(1.0),
+                Some("distance") => {
+                    m.distance = scale.unwrap_or(1.0);
+                    m.has_distance = scale.is_some();
+                }
                 Some("angle") => m.angle = scale.unwrap_or(1.0),
                 Some("time") => m.time = scale.unwrap_or(1.0),
-                Some("up") => m.y_up = t.string(k) == Some("y"),
-                Some("forward") => m.forward = t.string(k).map(str::to_owned),
+                Some("up") => {
+                    m.y_up = t.string(k) == Some("y");
+                    m.has_up = matches!(t.string(k), Some("y" | "z"));
+                }
+                Some("forward") => m.forward = t.string(k).and_then(forward_axis),
                 Some(key @ ("red" | "green" | "blue" | "white")) => {
                     let at = ["red", "green", "blue", "white"]
                         .iter()
@@ -840,19 +896,31 @@ fn finish(mut c: Ctx<'_>) -> Document<'static> {
         }
     }
     let m = &c.metric;
-    let mut source = json!({
-        "format": "OpenGEX",
-        "metersPerUnit": m.distance,
-        "radiansPerUnit": m.angle,
-        "secondsPerUnit": m.time,
-        "upAxis": if m.y_up { "Y" } else { "Z" },
-    });
-    if let Some(f) = &m.forward {
-        source["forward"] = json!(f);
-    }
+    let mut source = Map::new();
+    source.insert("radiansPerUnit".into(), json!(m.angle));
+    source.insert("secondsPerUnit".into(), json!(m.time));
     if let Some(p) = &m.primaries {
-        source["primaries"] = json!({ "red": p[0], "green": p[1], "blue": p[2], "white": p[3] });
+        source.insert(
+            "primaries".into(),
+            json!({ "red": p[0], "green": p[1], "blue": p[2], "white": p[3] }),
+        );
     }
+    SourceInfo {
+        format: Some("OpenGEX".into()),
+        // A unit is a meter, and +Z is up, unless the file's metrics say otherwise.
+        meters_per_unit: fact(m.has_distance, m.distance),
+        unit: unit_name(m.distance).map(str::to_owned),
+        up_axis: fact(m.has_up, if m.y_up { Axis::PosY } else { Axis::PosZ }),
+        forward_axis: m.forward.map_or(Fact::Unknown, Fact::Declared),
+        handedness: Fact::Declared(Handedness::Right),
+        converted: Converted {
+            units: (m.distance - 1.0).abs() > 0.0,
+            up_axis: !m.y_up,
+            handedness: false,
+        },
+        ..SourceInfo::default()
+    }
+    .write(&mut source);
     let st = &c.stats;
     for (key, n) in [
         ("missingObjects", st.missing_objects),
@@ -879,7 +947,7 @@ fn finish(mut c: Ctx<'_>) -> Document<'static> {
         ("stateIdentifiers", c.t.states),
     ] {
         if n > 0 {
-            source[key] = json!(n);
+            source.insert(key.into(), json!(n));
         }
     }
     let mut facts = Map::new();

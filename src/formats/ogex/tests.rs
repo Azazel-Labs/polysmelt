@@ -92,8 +92,15 @@ fn a_cube_in_centimeters_and_z_up() {
     assert_eq!(doc.facts["triangles"], json!(2));
     let src = source(&doc);
     assert_eq!(src["format"], "OpenGEX");
-    assert_eq!(src["upAxis"], "Z");
+    assert_eq!(src["upAxis"], "+Z");
     assert!((src["metersPerUnit"].as_f64().unwrap() - 0.01).abs() < 1e-12);
+    let info = doc.source_info();
+    assert_eq!(info.meters_per_unit, Fact::Declared(0.01));
+    assert_eq!(info.unit.as_deref(), Some("centimeter"));
+    assert_eq!(info.up_axis, Fact::Declared(Axis::PosZ));
+    assert_eq!(info.forward_axis, Fact::Unknown);
+    assert_eq!(info.handedness, Fact::Declared(Handedness::Right));
+    assert!(info.converted.units && info.converted.up_axis && !info.converted.handedness);
     let m = flat(&doc);
     assert_eq!(m.triangles(), 2);
     let p = &m.prims[0];
@@ -153,7 +160,29 @@ fn strips_fans_lines_points_and_clockwise_faces() {
             assert!(z > 0.0, "{t:?}");
         }
     }
-    assert_eq!(source(&doc)["upAxis"], "Y");
+    let info = doc.source_info();
+    assert_eq!(info.up_axis, Fact::Declared(Axis::PosY));
+    // No distance metric: a meter, by the format's default.
+    assert_eq!(info.meters_per_unit, Fact::Assumed(1.0));
+    assert_eq!(info.converted, Converted::default());
+}
+
+#[test]
+fn the_metrics_say_what_is_assumed() {
+    let doc = read(&format!(
+        r#"Metric (key = "forward") {{ string {{ "-y" }} }}
+        GeometryNode {{ ObjectRef {{ ref {{ $g }} }} }}
+        {}"#,
+        triangle("g", TRI, "")
+    ))
+    .unwrap();
+    let info = doc.source_info();
+    assert_eq!(info.format.as_deref(), Some("OpenGEX"));
+    assert_eq!(info.meters_per_unit, Fact::Assumed(1.0));
+    assert_eq!(info.unit.as_deref(), Some("meter"));
+    assert_eq!(info.up_axis, Fact::Assumed(Axis::PosZ));
+    assert_eq!(info.forward_axis, Fact::Declared(Axis::NegY));
+    assert!(info.converted.up_axis && !info.converted.units);
 }
 
 #[test]

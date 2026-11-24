@@ -25,6 +25,10 @@
 //! `OpenFlight` is Z up, counterclockwise from the front, in the header's units: the scene's root
 //! turns it Y up and scales it to meters. What has no glTF slot (the header's placement on the
 //! earth, ranges, comments, record kinds) stays in `extras`.
+//!
+//! The asset's `extras.source` records the version, the header's units, Z up, what was
+//! converted, the header's date as `created`, and, when the header places the database on the
+//! earth, its origin, corners, projection and ellipsoid as the `georeference`.
 
 mod parse;
 mod sgi;
@@ -43,6 +47,7 @@ use crate::images::{Images, Location};
 use crate::material::{Alpha, Full, Tex};
 use crate::mesh::{FastMap, Image, Prim, srgb_to_linear};
 use crate::num::{f32_of, u32_of};
+use crate::source::{Axis, Converted, Fact, Handedness, SourceInfo};
 use parse::{Db, F_HIDDEN, F_PACKED, Face, Kind, Shape, V_INDEX, V_NORMAL, V_PACKED, V_UV};
 
 /// The most glTF nodes a scene expands to (instances and references multiply them).
@@ -1460,6 +1465,82 @@ fn animation(b: &mut Builder, sequences: &[(parse::Sequence, Vec<usize>)]) -> Op
     (!channels.is_empty()).then(|| json!({ "name": "sequences", "channels": channels, "samplers": samplers }))
 }
 
+/// A date as the header writes it, C's `ctime` form (`"Tue Mar 05 14:30:00 2024"`), in ISO 8601.
+fn ctime_date(s: &str) -> Option<String> {
+    const MONTHS: [&str; 12] = [
+        "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
+    ];
+    let w: Vec<&str> = s.split_whitespace().collect();
+    let [_, month, day, time, year] = w.as_slice() else {
+        return None;
+    };
+    let month = MONTHS.iter().position(|m| month.eq_ignore_ascii_case(m))? + 1;
+    let day: u32 = day.parse().ok().filter(|d| (1..=31).contains(d))?;
+    let year: u32 = year.parse().ok().filter(|y| (1000..=9999).contains(y))?;
+    let hms: Vec<u32> = time.split(':').map(str::parse).collect::<Result<_, _>>().ok()?;
+    let [h, m, sec] = hms.as_slice() else {
+        return None;
+    };
+    (*h < 24 && *m < 60 && *sec < 61).then(|| format!("{year:04}-{month:02}-{day:02}T{h:02}:{m:02}:{sec:02}"))
+}
+
+/// Where the header places the database on the earth: its origin's latitude and longitude, its
+/// corners', the projection and the ellipsoid. `None` when they're all zero, as an unplaced
+/// database leaves them.
+fn georeference(header: &Map<String, Value>) -> Option<Value> {
+    let pair = |k: &str| {
+        let v = header.get(k)?.as_array()?;
+        Some([v.first()?.as_f64()?, v.get(1)?.as_f64()?])
+    };
+    let origin = pair("originLatLong");
+    let sw = pair("southwestLatLong");
+    let ne = pair("northeastLatLong");
+    if [origin, sw, ne].iter().flatten().flatten().all(|&x| x == 0.0) {
+        return None;
+    }
+    let mut g = Map::new();
+    if let Some([lat, lon]) = origin {
+        g.insert("latitude".into(), json!(lat));
+        g.insert("longitude".into(), json!(lon));
+    }
+    if let (Some(sw), Some(ne)) = (sw, ne) {
+        g.insert("southwest".into(), json!(sw));
+        g.insert("northeast".into(), json!(ne));
+    }
+    let code = |k: &str| header.get(k).and_then(Value::as_i64);
+    if let Some(p) = code("projection") {
+        let name = match p {
+            0 => "flat earth",
+            1 => "trapezoidal",
+            2 => "round earth",
+            3 => "Lambert",
+            4 => "UTM",
+            5 => "geodetic",
+            6 => "geocentric",
+            _ => "unknown",
+        };
+        g.insert("projection".into(), json!(name));
+    }
+    if let Some(e) = code("ellipsoid") {
+        let name = match e {
+            0 => "WGS 84",
+            1 => "WGS 72",
+            2 => "Bessel",
+            3 => "Clarke 1866",
+            4 => "NAD 27",
+            -1 => "user defined",
+            _ => "unknown",
+        };
+        g.insert("ellipsoid".into(), json!(name));
+    }
+    if code("projection") == Some(4)
+        && let Some(z) = code("utmZone")
+    {
+        g.insert("utmZone".into(), json!(z));
+    }
+    Some(Value::Object(g))
+}
+
 fn finish(mut c: Ctx<'_>, mut s: Scene) -> Document<'static> {
     for (k, kids) in s.kids.iter().enumerate() {
         if !kids.is_empty() {
@@ -1467,24 +1548,48 @@ fn finish(mut c: Ctx<'_>, mut s: Scene) -> Document<'static> {
         }
     }
     let root = &c.files[0].db;
-    let mut source = json!({
-        "format": "OpenFlight",
-        "version": root.version_name(),
-        "unit": root.unit_name(),
-        "metersPerUnit": root.meters(),
-        "upAxis": "Z",
-    });
+    let mut source = Map::new();
     if !root.id.is_empty() {
-        source["id"] = json!(root.id);
+        source.insert("id".into(), json!(root.id));
     }
     if c.keep.extras {
         for (k, v) in &root.header {
-            source[k] = v.clone();
+            if k != "date" {
+                source.insert(k.clone(), v.clone());
+            }
         }
     }
     if c.files.len() > 1 {
-        source["files"] = json!(c.files.len());
+        source.insert("files".into(), json!(c.files.len()));
     }
+    let meters = root.meters();
+    let unit = root.unit_name();
+    SourceInfo {
+        format: Some("OpenFlight".into()),
+        version: Some(root.version_name()),
+        // A unit code the format doesn't define is read as meters.
+        meters_per_unit: if unit.is_some() {
+            Fact::Declared(meters)
+        } else {
+            Fact::Assumed(meters)
+        },
+        unit: unit.map(str::to_owned),
+        up_axis: Fact::Declared(Axis::PosZ),
+        handedness: Fact::Declared(Handedness::Right),
+        converted: Converted {
+            units: (meters - 1.0).abs() > 0.0,
+            up_axis: true,
+            handedness: false,
+        },
+        created: root
+            .header
+            .get("date")
+            .and_then(Value::as_str)
+            .map(|d| ctime_date(d).unwrap_or_else(|| d.to_owned())),
+        georeference: georeference(&root.header),
+        ..SourceInfo::default()
+    }
+    .write(&mut source);
     let counts = c.files.iter().fold(parse::Counts::default(), |mut a, f| {
         let n = &f.db.counts;
         a.unknown_records += n.unknown_records;
@@ -1514,11 +1619,11 @@ fn finish(mut c: Ctx<'_>, mut s: Scene) -> Document<'static> {
         ("billboards", counts.billboards),
     ] {
         if n > 0 {
-            source[key] = json!(n);
+            source.insert(key.into(), json!(n));
         }
     }
     if c.files.iter().any(|f| f.db.truncated) {
-        source["truncated"] = json!(true);
+        source.insert("truncated".into(), json!(true));
     }
     let mut facts = Map::new();
     facts.insert("triangles".into(), json!(c.triangles));

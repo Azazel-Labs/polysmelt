@@ -1,7 +1,9 @@
 {
   "spec": "SketchUp .skp (closed; as openskp reads it): leader texts with each arrow type, and a font with a two-byte id (SketchUp 2017)",
   "source": "saved by SketchUp, from openskp's test fixtures (packages/cpp/tests/fixtures)",
-  "facts": {
-    "application": "SketchUp 2017"
+  "document": {
+    "source": {
+      "tool": "SketchUp 2017"
+    }
   }
 }

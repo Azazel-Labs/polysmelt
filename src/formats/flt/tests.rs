@@ -247,7 +247,13 @@ fn a_face_in_meters_and_y_up() {
     let src = &doc.json["asset"]["extras"]["source"];
     assert_eq!(src["format"], "OpenFlight");
     assert_eq!(src["version"], "16.4");
-    assert_eq!(src["unit"], "ft");
+    assert_eq!(src["unit"], "foot");
+    let info = doc.source_info();
+    assert_eq!(info.meters_per_unit, Fact::Declared(0.3048));
+    assert_eq!(info.up_axis, Fact::Declared(Axis::PosZ));
+    assert!(info.converted.units && info.converted.up_axis);
+    assert_eq!(info.created, None);
+    assert_eq!(info.georeference, None);
     let nodes = doc.json["nodes"].as_array().unwrap();
     assert_eq!(nodes[0]["name"], "db");
     assert_eq!(nodes[1]["name"], "g1");
@@ -694,4 +700,45 @@ fn hostile_files_never_panic() {
     rep.face("f", &v, |_| {}).pop().pop().pop();
     let doc = read(&rep.bytes(), &assets).unwrap();
     assert!(doc.json["asset"]["extras"]["source"]["droppedNodes"].as_u64().unwrap() > 0);
+}
+
+#[test]
+fn the_header_says_when_and_where() {
+    let mut w = one_square(1640, 0, |_| {});
+    // The header record's body follows its 4 bytes of opcode and length.
+    let body = |at: usize| at - 4;
+    let h = &mut w.b[4..];
+    put(h, body(20), b"Tue Mar 05 14:30:00 2024");
+    put(h, body(92), &4i32.to_be_bytes());
+    put(
+        h,
+        body(188),
+        &[47.0f64.to_be_bytes(), (-123.0f64).to_be_bytes()].concat(),
+    );
+    put(
+        h,
+        body(204),
+        &[48.0f64.to_be_bytes(), (-122.0f64).to_be_bytes()].concat(),
+    );
+    put(
+        h,
+        body(220),
+        &[47.5f64.to_be_bytes(), (-122.5f64).to_be_bytes()].concat(),
+    );
+    put(h, body(276), &10i16.to_be_bytes());
+    let doc = read(&w.bytes(), &Memory::new()).unwrap();
+    let info = doc.source_info();
+    assert_eq!(info.format.as_deref(), Some("OpenFlight"));
+    assert_eq!(info.unit.as_deref(), Some("meter"));
+    assert_eq!(info.meters_per_unit, Fact::Declared(1.0));
+    assert!(!info.converted.units && info.converted.up_axis);
+    assert_eq!(info.created.as_deref(), Some("2024-03-05T14:30:00"));
+    let g = info.georeference.unwrap();
+    assert_eq!(g["latitude"], 47.5);
+    assert_eq!(g["longitude"], -122.5);
+    assert_eq!(g["southwest"], json!([47.0, -123.0]));
+    assert_eq!(g["projection"], "UTM");
+    assert_eq!(g["ellipsoid"], "WGS 84");
+    assert_eq!(g["utmZone"], 10);
+    assert!(doc.json["asset"]["extras"]["source"].get("date").is_none());
 }

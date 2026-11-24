@@ -15,7 +15,7 @@
     ]
   },
   "json": {
-    "/asset/extras/source/upAxis": "X"
+    "/asset/extras/source/upAxis": "+X"
   },
   "faces_outward": true,
   "winding_matches_normals": true

@@ -3,7 +3,8 @@
 //! The visual scene becomes the node hierarchy, each node's transforms (`matrix`, `translate`, `rotate`, `scale`,
 //! `lookat`, `skew`) composed into its local transform; `instance_node` places a copy of a node's subtree (a node
 //! that instances itself is cut off). The document's unit and up axis become a root node that carries the scene to
-//! glTF's Y-up meters, and are recorded in `asset.extras.source`; a node's own `<asset>` changes them below it. A
+//! glTF's Y-up meters, and are recorded in `asset.extras.source` (see [`crate::source`]) with what else the
+//! `<asset>` says: its contributors, title, subject, keywords and dates; a node's own `<asset>` changes them below it. A
 //! document with no scene shows its geometries. URLs into other documents (geometry, nodes, materials, lights and
 //! cameras in other `.dae` files, beside the model or in the archive) are followed, each document read once and
 //! with its own unit, up axis and image folder.
@@ -54,6 +55,7 @@ use crate::document::{Builder, Document, Keep, Part};
 use crate::images::Images;
 use crate::material::Full;
 use crate::num::{f32_of, u32_of};
+use crate::source::{Axis, Fact, Handedness, SourceInfo};
 use crate::{Context as _, Result};
 use xml::Dom;
 
@@ -245,23 +247,14 @@ pub(super) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
     }
     scene_nodes.append(&mut r.skinned_roots);
 
-    let mut source = json!({
-        "format": "COLLADA",
-        "upAxis": match up.as_str() { "Z_UP" => "Z", "X_UP" => "X", _ => "Y" },
-        "meters": meters,
-    });
-    if let Some(v) = dom.attr(root, "version") {
-        source["version"] = json!(v);
+    let source = source_info(&dom, root, asset, meters, &up);
+    let mut asset_json = json!({});
+    if let Some(c) = source.get("copyright") {
+        asset_json["copyright"] = c.clone();
     }
-    if let Some(tool) = asset
-        .and_then(|a| dom.child(a, "contributor"))
-        .and_then(|c| dom.child_string(c, "authoring_tool"))
-        .filter(|t| !t.is_empty())
-    {
-        source["authoringTool"] = json!(tool);
-    }
+    asset_json["extras"] = json!({ "source": source });
     let mut json = Map::new();
-    json.insert("asset".into(), json!({ "extras": { "source": source } }));
+    json.insert("asset".into(), asset_json);
     json.insert("scene".into(), json!(0));
     let mut scene_json = json!({ "nodes": scene_nodes });
     if let Some(name) = scene.and_then(|s| dom.attr(s, "name").or_else(|| dom.attr(s, "id"))) {
@@ -375,6 +368,138 @@ fn read_document(path: &str, archive: Option<&mut Archive<'_>>, assets: &dyn Ass
     }
     let found = assets.find(path, dir)?;
     assets.read(&found).map(Cow::into_owned)
+}
+
+/// What the document's `<asset>` says of it, as `asset.extras.source`: its unit and up axis (COLLADA's meter and
+/// Y up when it doesn't say), every contributor's author, tool, copyright and comments, its title, subject,
+/// keywords, and when it was made and changed. `revision`, a 1.5 document's `geographic_location` (as
+/// `georeference`), and each contributor in full when there are several (`contributors`) are kept too.
+fn source_info(dom: &Dom<'_>, root: usize, asset: Option<usize>, meters: f64, up: &str) -> Map<String, Value> {
+    let text = |e: usize, name: &str| {
+        dom.child(e, name)
+            .map(|c| xml::unescape(dom.text(c)).trim().to_owned())
+            .filter(|s| !s.is_empty())
+    };
+    let declared_unit = asset.and_then(|a| unit(dom, a)).is_some();
+    let up_given = asset.and_then(|a| dom.child_string(a, "up_axis")).is_some();
+    let axis = match up {
+        "Z_UP" => Axis::PosZ,
+        "X_UP" => Axis::PosX,
+        _ => Axis::PosY,
+    };
+    let mut info = SourceInfo {
+        format: Some("COLLADA".into()),
+        version: dom.attr(root, "version").map(str::to_owned),
+        meters_per_unit: if declared_unit {
+            Fact::Declared(meters)
+        } else {
+            Fact::Assumed(meters)
+        },
+        unit: asset
+            .and_then(|a| dom.child(a, "unit"))
+            .filter(|_| declared_unit)
+            .and_then(|u| dom.attr(u, "name"))
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .map(str::to_owned)
+            .or_else(|| ((meters - 1.0).abs() < 1e-12).then(|| "meter".to_owned())),
+        up_axis: if up_given {
+            Fact::Declared(axis)
+        } else {
+            Fact::Assumed(axis)
+        },
+        // The specification fixes it.
+        handedness: Fact::Declared(Handedness::Right),
+        ..SourceInfo::default()
+    };
+    info.converted.units = (meters - 1.0).abs() > 1e-12;
+    info.converted.up_axis = axis != Axis::PosY;
+    let mut details = Map::new();
+    if let Some(a) = asset {
+        let (mut tools, mut authors, mut copyrights, mut contributors) =
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        for c in dom.kids(a, "contributor") {
+            let mut one = Map::new();
+            for field in [
+                "author",
+                "author_email",
+                "author_website",
+                "authoring_tool",
+                "comments",
+                "copyright",
+                "source_data",
+            ] {
+                if let Some(v) = text(c, field) {
+                    match field {
+                        "author" => authors.push(v.clone()),
+                        "authoring_tool" => tools.push(v.clone()),
+                        "copyright" => copyrights.push(v.clone()),
+                        "comments" => info.comments.push(v.clone()),
+                        _ => {}
+                    }
+                    one.insert(field.into(), json!(v));
+                }
+            }
+            if !one.is_empty() {
+                contributors.push(Value::Object(one));
+            }
+        }
+        let joined = |mut v: Vec<String>| {
+            let mut seen = std::collections::HashSet::new();
+            v.retain(|s| seen.insert(s.clone()));
+            (!v.is_empty()).then(|| v.join("; "))
+        };
+        info.tool = joined(tools);
+        info.author = joined(authors);
+        info.copyright = joined(copyrights);
+        if contributors.len() > 1 {
+            details.insert("contributors".into(), Value::Array(contributors));
+        }
+        info.title = text(a, "title");
+        info.description = text(a, "subject");
+        info.created = text(a, "created");
+        info.modified = text(a, "modified");
+        info.keywords = text(a, "keywords")
+            .map(|k| {
+                let list: Vec<String> = if k.contains([',', ';']) {
+                    k.split([',', ';'])
+                        .map(str::trim)
+                        .filter(|k| !k.is_empty())
+                        .map(str::to_owned)
+                        .collect()
+                } else {
+                    k.split_whitespace().map(str::to_owned).collect()
+                };
+                list
+            })
+            .unwrap_or_default();
+        if let Some(r) = text(a, "revision") {
+            details.insert("revision".into(), json!(r));
+        }
+        if let Some(g) = dom.path(a, &["coverage", "geographic_location"]) {
+            let mut geo = Map::new();
+            for k in ["longitude", "latitude"] {
+                if let Some(v) = text(g, k).and_then(|v| v.parse::<f64>().ok()).filter(|v| v.is_finite()) {
+                    geo.insert(k.into(), json!(v));
+                }
+            }
+            if let Some(alt) = dom.child(g, "altitude") {
+                if let Ok(v) = dom.string(alt).parse::<f64>()
+                    && v.is_finite()
+                {
+                    geo.insert("altitude".into(), json!(v));
+                }
+                if let Some(mode) = dom.attr(alt, "mode") {
+                    geo.insert("altitudeMode".into(), json!(mode));
+                }
+            }
+            if !geo.is_empty() {
+                info.georeference = Some(Value::Object(geo));
+            }
+        }
+    }
+    info.write(&mut details);
+    details
 }
 
 /// The meters in the unit an `<asset>` gives.

@@ -1,7 +1,9 @@
 {
   "spec": "SketchUp .skp (closed; as openskp reads it): three scenes with cameras and hidden layers, saved through SketchUp's C API (2019)",
   "source": "saved by SketchUp, from openskp's test fixtures (packages/cpp/tests/fixtures)",
-  "facts": {
-    "application": "SketchUp 2019"
+  "document": {
+    "source": {
+      "tool": "SketchUp 2019"
+    }
   }
 }

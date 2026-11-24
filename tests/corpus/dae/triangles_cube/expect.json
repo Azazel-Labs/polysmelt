@@ -53,8 +53,8 @@
   "faces_outward": true,
   "json": {
     "/asset/extras/source/format": "COLLADA",
-    "/asset/extras/source/upAxis": "Y",
-    "/asset/extras/source/meters": 1,
+    "/asset/extras/source/upAxis": "+Y",
+    "/asset/extras/source/metersPerUnit": 1,
     "/asset/extras/source/version": "1.4.1"
   }
 }

@@ -58,7 +58,7 @@
     ],
     "source": {
       "format": "OpenGEX",
-      "upAxis": "Z",
+      "upAxis": "+Z",
       "metersPerUnit": 1.0
     }
   }

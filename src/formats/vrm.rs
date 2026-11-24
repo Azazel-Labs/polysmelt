@@ -6,15 +6,21 @@
 //! (which VRM never asks for) is read anyway.
 //!
 //! A VRM 0.x avatar faces -Z, where glTF's front (and VRM 1.0's) is +Z, so it is turned half
-//! about Y under a `RootNode` to face the viewer as other models do; the asset's
-//! `extras.source` says which version the file is and whether it was turned.
+//! about Y under a `RootNode` to face the viewer as other models do.
+//!
+//! The asset's `extras.source` says which version the file is and whether it was turned, with
+//! glTF's frame declared (a 0.x avatar's forward is -Z) and the avatar's meta: its name or
+//! title, authors, copyright and license (the license URL in 1.0; in 0.x the license name, or
+//! the other license's URL), with its own version, contact and references kept as details. The
+//! rest of the glTF is passed through as it is.
 
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use super::Input;
 use crate::Result;
 use crate::assets::Assets;
 use crate::document::{Document, Keep};
+use crate::source::{Axis, Fact, Handedness, SourceInfo};
 
 /// Whether an extension is VRM's own.
 fn vrm_extension(name: &str) -> bool {
@@ -35,26 +41,73 @@ pub(crate) fn load<'a>(input: Input<'a>, assets: &'a dyn Assets, keep: Keep) -> 
     let one = ext.and_then(|e| e.get("VRMC_vrm"));
     let zero = ext.and_then(|e| e.get("VRM"));
     let animation = ext.and_then(|e| e.get("VRMC_vrm_animation"));
-    let (version, title, turn) = if let Some(v) = one {
-        let version = text(v.get("specVersion")).unwrap_or_else(|| "1.0".into());
-        (version, text(v.pointer("/meta/name")), false)
-    } else if let Some(v) = zero {
-        let version = text(v.get("specVersion")).unwrap_or_else(|| "0.0".into());
-        (version, text(v.pointer("/meta/title")), true)
-    } else if let Some(v) = animation {
-        (text(v.get("specVersion")).unwrap_or_else(|| "1.0".into()), None, false)
-    } else {
-        (String::new(), None, false)
+    let mut info = SourceInfo {
+        format: Some(if animation.is_some() { "VRMA" } else { "VRM" }.into()),
+        // glTF's frame, which VRM keeps.
+        meters_per_unit: Fact::Declared(1.0),
+        unit: Some("meter".into()),
+        up_axis: Fact::Declared(Axis::PosY),
+        forward_axis: Fact::Declared(Axis::PosZ),
+        handedness: Fact::Declared(Handedness::Right),
+        tool: text(json.get("asset").and_then(|a| a.get("generator"))),
+        ..SourceInfo::default()
     };
-    let mut source = json!({ "format": if animation.is_some() { "VRMA" } else { "VRM" } });
-    if !version.is_empty() {
-        source["version"] = json!(version);
+    let mut source = Map::new();
+    let mut detail = |k: &str, v: Option<String>| {
+        if let Some(v) = v {
+            source.insert(k.into(), json!(v));
+        }
+    };
+    let mut turn = false;
+    if let Some(v) = one {
+        info.version = Some(text(v.get("specVersion")).unwrap_or_else(|| "1.0".into()));
+        let meta = |k: &str| text(v.get("meta").and_then(|m| m.get(k)));
+        info.title = meta("name");
+        let authors: Vec<String> = v
+            .pointer("/meta/authors")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|a| text(Some(a)))
+            .collect();
+        info.author = (!authors.is_empty()).then(|| authors.join("; "));
+        info.copyright = meta("copyrightInformation");
+        info.license = meta("licenseUrl");
+        detail("modelVersion", meta("version"));
+        detail("contactInformation", meta("contactInformation"));
+        detail("otherLicenseUrl", meta("otherLicenseUrl"));
+        if let Some(r) = v
+            .pointer("/meta/references")
+            .filter(|r| r.as_array().is_some_and(|r| !r.is_empty()))
+        {
+            source.insert("references".into(), r.clone());
+        }
+    } else if let Some(v) = zero {
+        info.version = Some(text(v.get("specVersion")).unwrap_or_else(|| "0.0".into()));
+        let meta = |k: &str| text(v.get("meta").and_then(|m| m.get(k)));
+        info.title = meta("title");
+        info.author = meta("author");
+        // 0.x names a license, or says "Other" and points at one.
+        info.license = match (meta("licenseName"), meta("otherLicenseUrl")) {
+            (Some(n), Some(url)) if n == "Other" => Some(url),
+            (Some(n), _) => Some(n),
+            (None, url) => url,
+        };
+        // A 0.x avatar faces -Z.
+        info.forward_axis = Fact::Declared(Axis::NegZ);
+        detail("modelVersion", meta("version"));
+        detail("contactInformation", meta("contactInformation"));
+        detail("reference", meta("reference"));
+        detail(
+            "turned",
+            Some("VRM 0.x faces -Z: turned half about Y to face +Z".into()),
+        );
+        turn = true;
+    } else if let Some(v) = animation {
+        info.version = Some(text(v.get("specVersion")).unwrap_or_else(|| "1.0".into()));
     }
-    if let Some(title) = title {
-        source["title"] = json!(title);
-    }
+    info.write(&mut source);
     if turn {
-        source["turned"] = json!("VRM 0.x faces -Z: turned half about Y to face +Z");
         turn_half(json);
     }
     let asset = json.entry("asset").or_insert_with(|| json!({ "version": "2.0" }));
@@ -62,12 +115,8 @@ pub(crate) fn load<'a>(input: Input<'a>, assets: &'a dyn Assets, keep: Keep) -> 
         asset["extras"] = json!({});
     }
     match asset["extras"].get_mut("source") {
-        Some(Value::Object(old)) => {
-            if let Value::Object(new) = source {
-                old.extend(new);
-            }
-        }
-        _ => asset["extras"]["source"] = source,
+        Some(Value::Object(old)) => old.extend(source),
+        _ => asset["extras"]["source"] = Value::Object(source),
     }
     Ok(doc)
 }
@@ -167,6 +216,7 @@ mod tests {
         assert_eq!(source["format"], "VRM");
         assert_eq!(source["version"], "1.0");
         assert_eq!(source["title"], "Avatar");
+        assert_eq!(doc.source_info().forward_axis, Fact::Declared(Axis::PosZ));
         assert_eq!(doc.facts["triangles"], 1);
         let m = doc.flatten(Pose::Rest).unwrap().unwrap();
         assert!(m.prims[0].positions.iter().all(|p| p[2] > 0.0), "VRM 1.0 isn't turned");
@@ -189,6 +239,49 @@ mod tests {
             m.prims[0].positions
         );
         assert!(doc.to_glb().is_ok());
+    }
+
+    #[test]
+    fn the_avatar_says_who_made_it() {
+        let extra = json!({
+            "extensionsUsed": ["VRMC_vrm"],
+            "extensions": { "VRMC_vrm": { "specVersion": "1.0", "meta": {
+                "name": "Avatar", "version": "3", "authors": ["Ann", "Bo"],
+                "copyrightInformation": "(c) Ann", "licenseUrl": "https://vrm.dev/licenses/1.0/",
+                "references": ["https://example.com/a"],
+            } } }
+        });
+        let doc = read(&glb(1.0, &extra), "vrm");
+        let info = doc.source_info();
+        assert_eq!(info.title.as_deref(), Some("Avatar"));
+        assert_eq!(info.author.as_deref(), Some("Ann; Bo"));
+        assert_eq!(info.copyright.as_deref(), Some("(c) Ann"));
+        assert_eq!(info.license.as_deref(), Some("https://vrm.dev/licenses/1.0/"));
+        assert_eq!(info.meters_per_unit, Fact::Declared(1.0));
+        assert_eq!(info.up_axis, Fact::Declared(Axis::PosY));
+        assert_eq!(info.converted, crate::source::Converted::default());
+        let source = &doc.json["asset"]["extras"]["source"];
+        assert_eq!(source["modelVersion"], "3");
+        assert_eq!(source["references"], json!(["https://example.com/a"]));
+
+        let extra = json!({
+            "extensionsUsed": ["VRM"],
+            "extensions": { "VRM": { "specVersion": "0.0", "meta": {
+                "title": "Old", "author": "Cy", "version": "1.2", "contactInformation": "cy@example.com",
+                "licenseName": "Other", "otherLicenseUrl": "https://example.com/license",
+            } } }
+        });
+        let doc = read(&glb(-1.0, &extra), "vrm");
+        let info = doc.source_info();
+        assert_eq!(info.title.as_deref(), Some("Old"));
+        assert_eq!(info.author.as_deref(), Some("Cy"));
+        assert_eq!(info.license.as_deref(), Some("https://example.com/license"));
+        assert_eq!(info.forward_axis, Fact::Declared(Axis::NegZ));
+        let source = &doc.json["asset"]["extras"]["source"];
+        assert_eq!(source["contactInformation"], "cy@example.com");
+        assert_eq!(source["modelVersion"], "1.2");
+        // The glTF itself is as it was, but for the turn.
+        assert!(doc.json["asset"].get("copyright").is_none());
     }
 
     #[test]

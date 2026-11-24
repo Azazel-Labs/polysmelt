@@ -14,7 +14,9 @@
 //!   transparency, double-sidedness and blending; `CONSTANT` is unlit. Colors are taken as sRGB.
 //!   `KHR_materials_common` lights become `KHR_lights_punctual` ones.
 //! - What 2.0 has no place for (techniques, programs, shaders, texture formats, the material's
-//!   own values, joint names) is kept in `extras.source`.
+//!   own values, joint names) is kept in `extras.source`, beside the normalized source keys:
+//!   the 1.0 version as written, the meter declared, +Y up assumed, the generator as `tool`
+//!   and the copyright.
 
 use std::collections::HashMap;
 
@@ -23,6 +25,7 @@ use serde_json::{Map, Value, json};
 use crate::document::Document;
 use crate::mesh::srgb_to_linear;
 use crate::num::{f32_of, usize_of};
+use crate::source::{Axis, Fact, Handedness, SourceInfo};
 use crate::{Context as _, Result};
 
 /// Whether `json` is glTF 1.0 (or an earlier draft).
@@ -176,15 +179,29 @@ pub(crate) fn upgrade(mut v1: Map<String, Value>) -> Result<(Map<String, Value>,
 
     // What 2.0 drops, kept whole.
     let mut source = Map::new();
-    source.insert("format".into(), json!("glTF"));
     let mut asset = match v1.remove("asset") {
         Some(Value::Object(a)) => a,
         _ => Map::new(),
     };
-    source.insert(
-        "version".into(),
-        asset.remove("version").unwrap_or_else(|| json!("1.0")),
-    );
+    let version = match asset.remove("version") {
+        Some(Value::String(v)) => v,
+        Some(Value::Number(n)) => n.to_string(),
+        _ => "1.0".to_owned(),
+    };
+    let text = |k: &str| asset.get(k).and_then(Value::as_str).map(str::to_owned);
+    SourceInfo {
+        format: Some("glTF".into()),
+        version: Some(version),
+        // 1.0 fixes the meter; +Y up and right-handedness are the convention 2.0 made a rule.
+        meters_per_unit: Fact::Declared(1.0),
+        unit: Some("meter".into()),
+        up_axis: Fact::Assumed(Axis::PosY),
+        handedness: Fact::Assumed(Handedness::Right),
+        tool: text("generator"),
+        copyright: text("copyright"),
+        ..SourceInfo::default()
+    }
+    .write(&mut source);
     for k in ["premultipliedAlpha", "profile"] {
         if let Some(v) = asset.remove(k) {
             source.insert(k.into(), v);
@@ -942,5 +959,25 @@ mod tests {
         assert!(v(json!({ "meshes": {} })));
         assert!(!v(json!({ "asset": { "version": "2.0" } })));
         assert!(!v(json!({ "meshes": [] })));
+    }
+
+    #[test]
+    fn the_source_is_1_0s() {
+        let v1 = json!({
+            "asset": { "version": "1.0.1", "generator": "Exporter 2", "copyright": "Ann" },
+            "meshes": {},
+        });
+        let (out, _) = upgrade(v1.as_object().unwrap().clone()).unwrap();
+        assert_eq!(out["asset"]["version"], "2.0");
+        assert_eq!(out["asset"]["generator"], "Exporter 2");
+        let info = SourceInfo::from_json(out["asset"]["extras"]["source"].as_object().unwrap());
+        assert_eq!(info.format.as_deref(), Some("glTF"));
+        assert_eq!(info.version.as_deref(), Some("1.0.1"));
+        assert_eq!(info.meters_per_unit, Fact::Declared(1.0));
+        assert_eq!(info.unit.as_deref(), Some("meter"));
+        assert_eq!(info.up_axis, Fact::Assumed(Axis::PosY));
+        assert_eq!(info.tool.as_deref(), Some("Exporter 2"));
+        assert_eq!(info.copyright.as_deref(), Some("Ann"));
+        assert_eq!(info.converted, crate::source::Converted::default());
     }
 }

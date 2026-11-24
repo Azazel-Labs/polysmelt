@@ -16,8 +16,8 @@
   },
   "area": 7.0,
   "json": {
-    "/asset/extras/source/upAxis": "Z",
-    "/asset/extras/source/meters": 0.01
+    "/asset/extras/source/upAxis": "+Z",
+    "/asset/extras/source/metersPerUnit": 0.01
   },
   "faces_outward": true,
   "winding_matches_normals": true

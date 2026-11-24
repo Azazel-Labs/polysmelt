@@ -847,3 +847,44 @@ Shape { geometry Polypoint2D { point [ 0 0, 1 1, 2 0 ] } }
     );
     assert!(doc.json["asset"]["extras"]["source"].get("skipped").is_none());
 }
+
+#[test]
+fn what_the_file_says_of_itself() {
+    let text = r#"#X3D V3.3 utf8
+PROFILE Interchange
+UNIT length centimeters 0.01
+META "creator" "Ann"
+META "generator" "Modeler 4"
+META "copyright" "(c) Ann"
+META "keywords" "room, chair"
+META "reference" "https://example.com"
+WorldInfo { title "Room" info [ "first", "second" ] }
+Shape { geometry Box {} }
+"#;
+    let doc = read(text, "a.x3dv");
+    let info = doc.source_info();
+    assert_eq!(info.format.as_deref(), Some("X3D"));
+    assert_eq!(info.version.as_deref(), Some("3.3"));
+    assert_eq!(info.meters_per_unit, Fact::Declared(0.01));
+    assert_eq!(info.unit.as_deref(), Some("centimeters"));
+    assert_eq!(info.up_axis, Fact::Assumed(Axis::PosY));
+    assert!(info.converted.units && !info.converted.up_axis);
+    assert_eq!(info.output_meters_per_unit(), Fact::Declared(1.0));
+    assert_eq!(info.title.as_deref(), Some("Room"));
+    assert_eq!(info.author.as_deref(), Some("Ann"));
+    assert_eq!(info.tool.as_deref(), Some("Modeler 4"));
+    assert_eq!(info.copyright.as_deref(), Some("(c) Ann"));
+    assert_eq!(info.keywords, ["room", "chair"]);
+    assert_eq!(info.comments, ["first", "second"]);
+    assert_eq!(
+        doc.json["asset"]["extras"]["source"]["meta"]["reference"],
+        "https://example.com"
+    );
+
+    let doc = read(CUBE_X3D, "cube.x3d");
+    let info = doc.source_info();
+    assert_eq!(info.title.as_deref(), Some("cube"));
+    assert_eq!(info.meters_per_unit, Fact::Declared(1.0));
+    assert_eq!(info.unit.as_deref(), Some("meter"));
+    assert_eq!(info.converted, Converted::default());
+}

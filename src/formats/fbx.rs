@@ -3,7 +3,11 @@
 //! between instances, materials and their textures (embedded or found in the pack), skins from skin clusters, morph
 //! targets from blend shapes, animation stacks sampled into translation, rotation, scale and weights channels,
 //! cameras, lights, and user properties as node extras. The file's axis system and unit become a root node that
-//! carries them to glTF's Y-up meters, and are recorded in `asset.extras.source`.
+//! carries them to glTF's Y-up meters, and are recorded in `asset.extras.source` (see [`crate::source`]), with its
+//! frame rate (`TimeMode`), the applications that made and last saved it, `SceneInfo`'s title, author, subject,
+//! keywords and comment, and when it was made (`CreationTimeStamp`) and last saved. `coordAxis` (the file's right
+//! axis), `creator` (the SDK that wrote it, when an application is named), `revision`, `originalApplication` and
+//! `originalUnitScaleFactor` are kept as the file gives them.
 //!
 //! `Line` geometry is drawn as line segments, in its model's first material or else unlit in its own color, and so
 //! is `NurbsCurve` geometry: each knot span in up to 32 segments, by how far it turns. NURBS surfaces and patches,
@@ -28,6 +32,7 @@ use crate::images::{Images, Location};
 use crate::material::{self, Alpha, Clearcoat, Factor, Full, Sheen, Tex, UvTransform};
 use crate::mesh::{FastMap, GRAY, Material, Prim, smooth_normals, srgb_to_linear, triangulate};
 use crate::num::f32_of;
+use crate::source::{Axis, Fact, Handedness, SourceInfo};
 
 use super::xform::{IDENTITY, M4, Trs, column_major, decompose, det3, inverse, mul, scale, set_transform, translate};
 
@@ -300,6 +305,162 @@ const MAX_CURVE_POINTS: usize = 1 << 22;
 /// angles, glTF quaternions, so long turns are cut into steps short enough to agree.
 const MAX_STEP_DEGREES: f64 = 10.0;
 
+/// The name of a unit `meters` long, for the units FBX files are written in.
+fn unit_name(meters: f64) -> Option<&'static str> {
+    [
+        ("millimeter", 0.001),
+        ("centimeter", 0.01),
+        ("decimeter", 0.1),
+        ("meter", 1.0),
+        ("kilometer", 1000.0),
+        ("inch", 0.0254),
+        ("foot", 0.3048),
+        ("yard", 0.9144),
+        ("mile", 1609.344),
+    ]
+    .into_iter()
+    .find(|(_, m)| ((meters - m) / m).abs() < 1e-6)
+    .map(|(name, _)| name)
+}
+
+/// The scene's frame rate, from `TimeMode` (the FBX SDK's `EMode`), or `CustomFrameRate` when that's the mode.
+fn frame_rate(settings: &Props<'_>) -> Fact<f64> {
+    const RATES: [f64; 19] = [
+        -1.0,
+        120.0,
+        100.0,
+        60.0,
+        50.0,
+        48.0,
+        30.0,
+        30.0,
+        30.0 / 1.001,
+        30.0 / 1.001,
+        25.0,
+        24.0,
+        1000.0,
+        24.0 / 1.001,
+        -1.0,
+        96.0,
+        72.0,
+        60.0 / 1.001,
+        120.0 / 1.001,
+    ];
+    if scalar(settings, "TimeMode").is_none() {
+        return Fact::Unknown;
+    }
+    let custom = scalar(settings, "CustomFrameRate").filter(|r| *r > 0.0);
+    match usize::try_from(choice(settings, "TimeMode", 0))
+        .ok()
+        .and_then(|m| RATES.get(m))
+    {
+        Some(&r) if r > 0.0 => Fact::Declared(r),
+        Some(_) => custom.map_or(Fact::Unknown, Fact::Declared),
+        None => Fact::Unknown,
+    }
+}
+
+/// An FBX date as ISO 8601: `DD/MM/YYYY HH:MM:SS.mmm` in UTC, as `SceneInfo` writes them. `None` for the epoch,
+/// which exporters write when they don't know.
+fn fbx_date(s: &str) -> Option<String> {
+    let s = s.trim();
+    let parse = || -> Option<String> {
+        let (date, time) = s.split_once(' ')?;
+        let mut d = date.split('/').map(|p| p.parse::<u32>().ok());
+        let (day, month, year) = (d.next()??, d.next()??, d.next()??);
+        let (hms, ms) = time.split_once('.').unwrap_or((time, ""));
+        let mut t = hms.split(':').map(|p| p.parse::<u32>().ok());
+        let (h, mi, sec) = (t.next()??, t.next()??, t.next()??);
+        if !(1..=12).contains(&month) || !(1..=31).contains(&day) || h > 23 || mi > 59 || sec > 60 {
+            return None;
+        }
+        let ms = ms.parse::<u32>().ok().filter(|ms| *ms > 0);
+        Some(match ms {
+            Some(ms) => format!("{year:04}-{month:02}-{day:02}T{h:02}:{mi:02}:{sec:02}.{ms:03}Z"),
+            None => format!("{year:04}-{month:02}-{day:02}T{h:02}:{mi:02}:{sec:02}Z"),
+        })
+    };
+    match parse() {
+        Some(iso) if iso.starts_with("1970-01-01T00:00:00") => None,
+        Some(iso) => Some(iso),
+        None => (!s.is_empty()).then(|| s.to_owned()),
+    }
+}
+
+/// What the file's header says of it: `SceneInfo`'s `MetaData` (title, author, subject, keywords, comment,
+/// revision) and the applications that made and last saved it, and `CreationTimeStamp`.
+fn scene_info(root: NodeHandle<'_>, creator: &str, info: &mut SourceInfo, details: &mut Map<String, Value>) {
+    let header = root.first_child_by_name("FBXHeaderExtension");
+    let scene = header.and_then(|h| h.first_child_by_name("SceneInfo"));
+    let text = |n: Option<NodeHandle<'_>>, name: &str| {
+        n.and_then(|n| child_attr(n, name))
+            .and_then(string)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+    };
+    let meta = scene.and_then(|s| s.first_child_by_name("MetaData"));
+    info.title = text(meta, "Title");
+    info.author = text(meta, "Author");
+    info.description = text(meta, "Subject");
+    info.keywords = text(meta, "Keywords")
+        .map(|k| {
+            k.split([',', ';'])
+                .map(str::trim)
+                .filter(|k| !k.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    info.comments = text(meta, "Comment").into_iter().collect();
+    if let Some(r) = text(meta, "Revision") {
+        details.insert("revision".into(), json!(r));
+    }
+    let props = scene.map(Props::of).unwrap_or_default();
+    let app = |when: &str| {
+        let name = props.text(&format!("{when}|ApplicationName")).map_or("", str::trim);
+        let version = props.text(&format!("{when}|ApplicationVersion")).map_or("", str::trim);
+        (!name.is_empty()).then(|| format!("{name} {version}").trim_end().to_owned())
+    };
+    let saved = app("LastSaved");
+    let original = app("Original");
+    info.tool = saved.clone().or_else(|| original.clone());
+    if saved.is_some() && original.is_some() && original != saved {
+        details.insert("originalApplication".into(), json!(original));
+    }
+    if !creator.is_empty() {
+        if info.tool.is_some() {
+            details.insert("creator".into(), json!(creator));
+        } else {
+            info.tool = Some(creator.to_owned());
+        }
+    }
+    info.modified = props.text("LastSaved|DateTime_GMT").and_then(fbx_date);
+    let stamp = header.and_then(|h| h.first_child_by_name("CreationTimeStamp"));
+    let part = |name: &str| {
+        stamp
+            .and_then(|s| child_attr(s, name))
+            .and_then(num)
+            .filter(|v| v.is_finite() && *v >= 0.0 && *v < 1e5)
+    };
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "small, non-negative numbers"
+    )]
+    let created = match ["Year", "Month", "Day", "Hour", "Minute", "Second"].map(|k| part(k).map(|v| v as u32)) {
+        [Some(y), Some(mo), Some(d), Some(h), Some(mi), Some(s)]
+            if (1..=12).contains(&mo) && (1..=31).contains(&d) && h < 24 && mi < 60 && s <= 60 =>
+        {
+            Some(format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}"))
+        }
+        _ => None,
+    };
+    info.created = created
+        .or_else(|| props.text("Original|DateTime_GMT").and_then(fbx_date))
+        .filter(|c| !c.starts_with("1970-01-01T00:00:00"));
+}
+
 /// Reads an FBX file (binary 7.x, or ASCII) as a glTF document.
 pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document<'static>> {
     // A file read is held as shared bytes, so that a big texture embedded in it can point into
@@ -403,19 +564,56 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
     basis[2][front] = front_s * unit;
     basis[3][3] = 1.0;
     // Degenerate axis settings (two axes the same): fall back to Y-up.
-    if det3(&basis).abs() < 1e-12 {
+    let degenerate = det3(&basis).abs() < 1e-12;
+    if degenerate {
         basis = scale([unit; 3]);
     }
-    let named = |a: usize, s: f64| format!("{}{}", if s < 0.0 { '-' } else { '+' }, ["X", "Y", "Z"][a]);
-    let mut source = json!({
-        "format": "FBX",
-        "version": format!("{}.{}", version.major(), version.minor()),
-        "creator": creator,
-        "unitMeters": unit,
-        "upAxis": named(up, up_s),
-        "frontAxis": named(front, front_s),
-        "coordAxis": named(coord, coord_s),
-    });
+    let signed = |a: usize, s: f64| match (a, s < 0.0) {
+        (0, false) => Axis::PosX,
+        (0, true) => Axis::NegX,
+        (1, false) => Axis::PosY,
+        (1, true) => Axis::NegY,
+        (_, false) => Axis::PosZ,
+        (_, true) => Axis::NegZ,
+    };
+    let declared = |name: &str, a: Axis| {
+        if scalar(&settings, name).is_some() {
+            Fact::Declared(a)
+        } else {
+            Fact::Assumed(a)
+        }
+    };
+    let mut details = Map::new();
+    details.insert("coordAxis".into(), json!(signed(coord, coord_s).as_str()));
+    let mut info = SourceInfo {
+        format: Some("FBX".into()),
+        version: Some(format!("{}.{}", version.major(), version.minor())),
+        meters_per_unit: if scalar(&settings, "UnitScaleFactor").is_some() {
+            Fact::Declared(unit)
+        } else {
+            Fact::Assumed(unit)
+        },
+        unit: unit_name(unit).map(str::to_owned),
+        up_axis: declared("UpAxis", signed(up, up_s)),
+        forward_axis: declared("FrontAxis", signed(front, front_s)),
+        frame_rate: frame_rate(&settings),
+        ..SourceInfo::default()
+    };
+    if !degenerate {
+        let right = det3(&basis) > 0.0;
+        let any = ["UpAxis", "FrontAxis", "CoordAxis"]
+            .iter()
+            .any(|k| scalar(&settings, k).is_some());
+        let h = if right { Handedness::Right } else { Handedness::Left };
+        info.handedness = if any { Fact::Declared(h) } else { Fact::Assumed(h) };
+        info.converted.handedness = !right;
+        info.converted.up_axis = !(up == 1 && up_s > 0.0 && coord == 0 && coord_s > 0.0 && front == 2);
+    }
+    info.converted.units = (unit - 1.0).abs() > 1e-9;
+    if let Some(original) = scalar(&settings, "OriginalUnitScaleFactor").filter(|o| (o - unit_cm).abs() > 1e-9) {
+        details.insert("originalUnitScaleFactor".into(), json!(original));
+    }
+    scene_info(rootnode, &creator, &mut info, &mut details);
 
     let mut r = Reader {
         objs: &objs,
@@ -522,7 +720,7 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         roots.push(r.nodes.len() - 1);
     }
     if !skipped.is_empty() {
-        source["skipped"] = json!(skipped);
+        details.insert("skipped".into(), json!(skipped));
     }
     let animations = if keep.animations { r.animations() } else { Vec::new() };
     let mut scene_nodes = roots;
@@ -550,7 +748,8 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
     }
 
     let mut json = Map::new();
-    json.insert("asset".into(), json!({ "extras": { "source": source } }));
+    info.write(&mut details);
+    json.insert("asset".into(), json!({ "extras": { "source": details } }));
     json.insert("scene".into(), json!(0));
     json.insert("scenes".into(), json!([{ "nodes": scene_nodes }]));
     json.insert("nodes".into(), Value::Array(std::mem::take(&mut r.nodes)));
@@ -5283,6 +5482,111 @@ Connections:  {{
             );
             assert_eq!(doc.flatten(Pose::Rest).unwrap().unwrap().lines(), 3);
         }
+    }
+
+    #[test]
+    fn what_the_file_says_of_itself_reads_from_ascii_and_binary() {
+        use crate::source::{Axis, Fact, Handedness};
+        let header = r#"FBXHeaderExtension:  {
+	FBXHeaderVersion: 1003
+	FBXVersion: 7400
+	CreationTimeStamp:  {
+		Version: 1000
+		Year: 2024
+		Month: 3
+		Day: 9
+		Hour: 14
+		Minute: 5
+		Second: 7
+		Millisecond: 0
+	}
+	Creator: "FBX SDK/FBX Plugins version 2020.3"
+	SceneInfo: "SceneInfo::GlobalInfo", "UserData" {
+		Type: "UserData"
+		Version: 100
+		MetaData:  {
+			Version: 100
+			Title: "Crate"
+			Subject: "A wooden crate"
+			Author: "Someone"
+			Keywords: "prop, wood"
+			Revision: "rev. 2"
+			Comment: "first pass"
+		}
+		Properties70:  {
+			P: "Original|ApplicationName", "KString", "", "", "Maya"
+			P: "Original|ApplicationVersion", "KString", "", "", "2020"
+			P: "Original|DateTime_GMT", "DateTime", "", "", "09/03/2024 14:05:07.000"
+			P: "LastSaved|ApplicationName", "KString", "", "", "Maya"
+			P: "LastSaved|ApplicationVersion", "KString", "", "", "2022"
+			P: "LastSaved|DateTime_GMT", "DateTime", "", "", "10/03/2024 08:00:00.250"
+		}
+	}
+}
+GlobalSettings:  {
+	Version: 1000
+	Properties70:  {
+		P: "UpAxis", "int", "Integer", "",2
+		P: "UpAxisSign", "int", "Integer", "",1
+		P: "FrontAxis", "int", "Integer", "",1
+		P: "FrontAxisSign", "int", "Integer", "",-1
+		P: "CoordAxis", "int", "Integer", "",0
+		P: "CoordAxisSign", "int", "Integer", "",1
+		P: "UnitScaleFactor", "double", "Number", "",2.54
+		P: "TimeMode", "enum", "", "",11
+	}
+}
+"#;
+        let text = ascii(
+            &[quad(""), model(20, "Box", "")].concat(),
+            &links(&[(10, 20), (20, 0)], &[]),
+        );
+        let start = text.find("Objects:").unwrap();
+        let text = format!("; FBX 7.4.0 project file\n{header}{}", &text[start..]);
+        let binary = crate::formats::fbx_ascii::to_binary(text.as_bytes()).unwrap();
+        let memory = crate::assets::Memory::new();
+        for data in [text.as_bytes(), &binary] {
+            let doc = crate::formats::load_bytes(data, "t.fbx", "fbx", &memory, Keep::ALL).unwrap();
+            let info = doc.source_info();
+            assert_eq!(info.format.as_deref(), Some("FBX"));
+            assert_eq!(info.meters_per_unit, Fact::Declared(0.0254));
+            assert_eq!(info.unit.as_deref(), Some("inch"));
+            assert_eq!(info.up_axis, Fact::Declared(Axis::PosZ));
+            assert_eq!(info.forward_axis, Fact::Declared(Axis::NegY));
+            assert_eq!(info.handedness, Fact::Declared(Handedness::Right));
+            assert_eq!(info.frame_rate, Fact::Declared(24.0));
+            assert!(info.converted.units && info.converted.up_axis && !info.converted.handedness);
+            assert_eq!(info.tool.as_deref(), Some("Maya 2022"));
+            assert_eq!(info.title.as_deref(), Some("Crate"));
+            assert_eq!(info.author.as_deref(), Some("Someone"));
+            assert_eq!(info.description.as_deref(), Some("A wooden crate"));
+            assert_eq!(info.keywords, ["prop", "wood"]);
+            assert_eq!(info.comments, ["first pass"]);
+            assert_eq!(info.created.as_deref(), Some("2024-03-09T14:05:07"));
+            assert_eq!(info.modified.as_deref(), Some("2024-03-10T08:00:00.250Z"));
+            let source = &doc.json["asset"]["extras"]["source"];
+            assert_eq!(source["creator"], "FBX SDK/FBX Plugins version 2020.3");
+            assert_eq!(source["originalApplication"], "Maya 2020");
+            assert_eq!(source["revision"], "rev. 2");
+            assert_eq!(source["coordAxis"], "+X");
+        }
+
+        // Settings that say nothing: FBX's centimeters and Y up, assumed; the creator is the tool.
+        let doc = read(
+            &ascii(
+                &[quad(""), model(20, "Box", "")].concat(),
+                &links(&[(10, 20), (20, 0)], &[]),
+            )
+            .replace("\t\tP: \"UnitScaleFactor\", \"double\", \"Number\", \"\",100\n", ""),
+        );
+        let info = doc.source_info();
+        assert_eq!(info.meters_per_unit, Fact::Assumed(0.01));
+        assert_eq!(info.unit.as_deref(), Some("centimeter"));
+        assert_eq!(info.up_axis, Fact::Assumed(Axis::PosY));
+        assert_eq!(info.handedness, Fact::Assumed(Handedness::Right));
+        assert_eq!(info.frame_rate, Fact::Unknown);
+        assert!(info.converted.units && !info.converted.up_axis);
+        assert_eq!(info.tool, None);
     }
 
     #[test]
