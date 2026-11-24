@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1600" height="560" viewBox="0 0 1600 560">
+  <defs>
+    <linearGradient id="melt" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffd36b"/><stop offset="0.45" stop-color="#ff8a3d"/><stop offset="1" stop-color="#ff4d1f"/>
+    </linearGradient>
+    <linearGradient id="pour" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffd36b"/><stop offset="1" stop-color="#ff5a1f"/>
+    </linearGradient>
+    <linearGradient id="shade" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#0b0b0f" stop-opacity="0.94"/>
+      <stop offset="0.38" stop-color="#0b0b0f" stop-opacity="0.72"/>
+      <stop offset="0.62" stop-color="#0b0b0f" stop-opacity="0"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#ff6a2b" stop-opacity="0.35"/><stop offset="1" stop-color="#ff6a2b" stop-opacity="0"/>
+    </radialGradient>
+    <style>
+      .word { font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif; font-weight: 700; letter-spacing: -0.03em; }
+      .text { font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif; }
+      .mono { font-family: Consolas, "SF Mono", Menlo, monospace; }
+    </style>
+  </defs>
+  <image width="1600" height="560" xlink:href="stage-hero.png"/>
+  <rect width="1600" height="560" fill="url(#shade)"/>
+  <ellipse cx="134.4" cy="178.2" rx="161.3" ry="110.9" fill="url(#glow)"/>
+  <g transform="translate(84,127.3) scale(3.1500)">
+    <path d="M5 9h22l-3 15a4 4 0 0 1-4 3h-8a4 4 0 0 1-4-3z" fill="#2a2a34"/>
+    <path d="M7.5 13h17l-1.6 9.5a3 3 0 0 1-3 2.5h-7.8a3 3 0 0 1-3-2.5z" fill="url(#pour)"/>
+  </g>
+  <text x="196.9" y="214.0" class="word" font-size="112" fill="#ecebf0">poly<tspan fill="url(#melt)">smelt</tspan></text>
+  <text x="84" y="294.6" class="text" font-size="38" font-weight="600" fill="#ecebf0">60+ 3D formats in. Clean glTF out.</text>
+  <text x="84" y="349.7" class="text" font-size="25" fill="#9d9aab">Read what other tools write. A Rust crate, live in WebAssembly.</text>
+  <rect x="84.0" y="388" width="75.6" height="38.0" rx="19.0" fill="#1b1b23" fill-opacity="0.85" stroke="#3a3440"/><text x="121.8" y="413.1" text-anchor="middle" class="mono" font-size="20" fill="#d9d5e0">.fbx</text>
+  <rect x="168.6" y="388" width="75.6" height="38.0" rx="19.0" fill="#1b1b23" fill-opacity="0.85" stroke="#3a3440"/><text x="206.4" y="413.1" text-anchor="middle" class="mono" font-size="20" fill="#d9d5e0">.obj</text>
+  <rect x="253.2" y="388" width="75.6" height="38.0" rx="19.0" fill="#1b1b23" fill-opacity="0.85" stroke="#3a3440"/><text x="291.0" y="413.1" text-anchor="middle" class="mono" font-size="20" fill="#d9d5e0">.dae</text>
+  <rect x="337.8" y="388" width="75.6" height="38.0" rx="19.0" fill="#1b1b23" fill-opacity="0.85" stroke="#3a3440"/><text x="375.6" y="413.1" text-anchor="middle" class="mono" font-size="20" fill="#d9d5e0">.stl</text>
+  <rect x="422.4" y="388" width="75.6" height="38.0" rx="19.0" fill="#1b1b23" fill-opacity="0.85" stroke="#3a3440"/><text x="460.2" y="413.1" text-anchor="middle" class="mono" font-size="20" fill="#d9d5e0">.ply</text>
+  <rect x="507.0" y="388" width="75.6" height="38.0" rx="19.0" fill="#1b1b23" fill-opacity="0.85" stroke="#3a3440"/><text x="544.8" y="413.1" text-anchor="middle" class="mono" font-size="20" fill="#d9d5e0">.3ds</text>
+  <rect x="591.6" y="388" width="75.6" height="38.0" rx="19.0" fill="#1b1b23" fill-opacity="0.85" stroke="#3a3440"/><text x="629.4" y="413.1" text-anchor="middle" class="mono" font-size="20" fill="#d9d5e0">.bvh</text>
+  <rect x="676.2" y="388" width="75.6" height="38.0" rx="19.0" fill="#1b1b23" fill-opacity="0.85" stroke="#3a3440"/><text x="714.0" y="413.1" text-anchor="middle" class="mono" font-size="20" fill="#d9d5e0">.las</text>
+  <rect x="760.8" y="388" width="75.6" height="38.0" rx="19.0" fill="#1b1b23" fill-opacity="0.85" stroke="#3a3440"/><text x="798.6" y="413.1" text-anchor="middle" class="mono" font-size="20" fill="#d9d5e0">.md2</text>
+  <path d="M851.4 407.0h26.0m-12.0 -11.0 12.0 11.0 -12.0 11.0" fill="none" stroke="#ff8a3d" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="898.4" y="388" width="75.6" height="38.0" rx="19.0" fill="url(#melt)"/><text x="936.2" y="413.1" text-anchor="middle" class="mono" font-size="20" font-weight="700" fill="#1a0d05">.glb</text>
+</svg>
