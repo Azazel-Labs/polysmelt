@@ -84,6 +84,8 @@ pub(crate) struct Primitive {
     pub positions: Vec<[f32; 3]>,
     /// Empty, or one per vertex; zero or broken normals are replaced by their faces' normal.
     pub normals: Vec<[f32; 3]>,
+    /// Empty, or one per vertex: `[x, y, z, w]` with `w` the bitangent's sign. Written only beside normals.
+    pub tangents: Vec<[f32; 4]>,
     /// Texture coordinate sets, glTF convention (origin top-left), each empty or one per vertex.
     pub uvs: Vec<Vec<[f32; 2]>>,
     /// Vertex color sets, linear RGBA, each empty or one per vertex.
@@ -95,9 +97,11 @@ pub(crate) struct Primitive {
     pub influences: usize,
     /// The joint a vertex no joint moves is bound to.
     pub rest_joint: u32,
-    /// Triangles, three indices each (or points, one each, when `points` is set).
+    /// Triangles, three indices each (or points, one each, when `points` is set, or line segments, two each,
+    /// when `lines` is set).
     pub indices: Vec<u32>,
     pub points: bool,
+    pub lines: bool,
     pub material: Option<usize>,
     pub targets: Vec<Target>,
 }
@@ -253,11 +257,15 @@ impl Scene {
             for p in &mut m.prims {
                 p.positions.iter_mut().for_each(v);
                 p.normals.iter_mut().for_each(v);
+                for t in &mut p.tangents {
+                    t[2] = -t[2];
+                    t[3] = -t[3];
+                }
                 for t in &mut p.targets {
                     t.positions.iter_mut().for_each(v);
                     t.normals.iter_mut().for_each(v);
                 }
-                if !p.points {
+                if !p.points && !p.lines {
                     for t in p.indices.chunks_exact_mut(3) {
                         t.swap(1, 2);
                     }
@@ -357,7 +365,7 @@ impl Scene {
         self.meshes
             .iter()
             .flat_map(|m| &m.prims)
-            .filter(|p| !p.points)
+            .filter(|p| !p.points && !p.lines)
             .map(|p| p.indices.len() / 3)
             .sum()
     }
@@ -817,7 +825,13 @@ fn write_prim(
         return None;
     }
     if p.indices.iter().any(|&i| i as usize >= n) {
-        let width = if p.points { 1 } else { 3 };
+        let width = if p.points {
+            1
+        } else if p.lines {
+            2
+        } else {
+            3
+        };
         let idx: Vec<u32> = p
             .indices
             .chunks_exact(width)
@@ -836,7 +850,7 @@ fn write_prim(
         }
     }
     let mut attributes = Map::new();
-    if p.normals.len() == n && !p.points {
+    if p.normals.len() == n && !p.points && !p.lines {
         fix_normals(&mut p.normals, &p.positions, &p.indices);
         let a = b.accessor(
             Part::f32(std::mem::take(&mut p.normals).into_flattened()),
@@ -866,6 +880,24 @@ fn write_prim(
             );
             attributes.insert("NORMAL".into(), json!(a));
         }
+    }
+    // glTF wants tangents only beside normals, unit length with a w of ±1.
+    if attributes.contains_key("NORMAL") && p.tangents.len() == n {
+        let t: Vec<f32> = p
+            .tangents
+            .iter()
+            .flat_map(|t| {
+                let len = (t[0] * t[0] + t[1] * t[1] + t[2] * t[2]).sqrt();
+                let w = if t[3] < 0.0 { -1.0 } else { 1.0 };
+                if len > 0.0 && len.is_finite() {
+                    [t[0] / len, t[1] / len, t[2] / len, w]
+                } else {
+                    [1.0, 0.0, 0.0, w]
+                }
+            })
+            .collect();
+        let a = b.accessor(Part::f32(t), 5126, n, "VEC4", Some(34962));
+        attributes.insert("TANGENT".into(), json!(a));
     }
     let pos = b.positions(std::mem::take(&mut p.positions));
     attributes.insert("POSITION".into(), json!(pos));
@@ -934,6 +966,8 @@ fn write_prim(
     let mut prim = json!({ "attributes": attributes, "indices": indices });
     if p.points {
         prim["mode"] = json!(0);
+    } else if p.lines {
+        prim["mode"] = json!(1);
     }
     if let Some(m) = p.material
         && materials > 0

@@ -67,6 +67,7 @@ cases.
 | AMF | 23 | 21 | none |
 | LightWave (`lwo/`) | 18 | 15 | none |
 | AC3D (`ac/`) | 15 | 11 | none |
+| OGRE | 30 | 30 | none |
 
 - **Generated** cases are written byte by byte by `tools/corpus/<format>.py` (3DS is
   `tds.py`, 3MF is `threemf.py`, COLLADA is `dae.py`, PMX, PMD and VMD are `mmd.py`, DirectX
@@ -344,6 +345,15 @@ python tools/corpus/obj.py
   transparency), two-sided surfaces, `loc` and `rot` in nested objects, textures with `texrep`
   and `texoff`, closed and open lines, triangle strips and concave polygons. Errors: files
   that aren't AC3D or have no geometry; four real assimp models.
+- **OGRE**: binary meshes of every serializer version (v1.10 to v1.100) in both byte orders,
+  each version's own geometry, level of detail and edge list layouts, vertex elements of every
+  type (half floats, doubles, packed colors, normalized and 10-10-10-2 integers), all six
+  operations, poses and pose and morph animations, a skinned mesh with its binary skeleton, a
+  skeleton alone, an XML mesh and skeleton linking to a binary one, a binary and XML twin with
+  the same expectations, and material scripts (imports, inheritance, blending, alpha
+  rejection, normal maps, texture aliases, schemes). Poses are worked out in `ogre.py` with
+  plain matrices. Errors: versions, the later v2 layout, unknown element and track types,
+  buffers and offsets out of range, huge counts, broken XML and truncation.
 
 ## `expect.json`
 

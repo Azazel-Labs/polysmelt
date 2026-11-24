@@ -82,7 +82,17 @@ pub trait Assets {
         let _ = model;
         None
     }
+
+    /// The files directly in `dir` whose names end with `suffix` (any case), in name order, for a model whose
+    /// side files aren't named by the model itself (OGRE material scripts). Empty by default.
+    fn files_with_suffix(&self, dir: &Path, suffix: &str) -> Vec<PathBuf> {
+        let _ = (dir, suffix);
+        Vec::new()
+    }
 }
+
+/// The most files [`Assets::files_with_suffix`] lists.
+const SUFFIX_LIMIT: usize = 256;
 
 /// Assets in a folder tree laid out like the pack a model came in: references are tried relative
 /// to the model (`../Textures/x.png` too, inside `root`), then found under `root` by file name (or
@@ -170,6 +180,27 @@ impl Assets for Folder {
             .map(|(p, _)| p.clone())
             .collect::<Vec<_>>();
         color_texture_by_name(model, home, images)
+    }
+
+    fn files_with_suffix(&self, dir: &Path, suffix: &str) -> Vec<PathBuf> {
+        let suffix = suffix.to_lowercase();
+        let dir = if dir.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            dir
+        };
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return Vec::new();
+        };
+        let mut out: Vec<PathBuf> = entries
+            .filter_map(std::result::Result::ok)
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+            .filter(|e| e.file_name().to_string_lossy().to_lowercase().ends_with(&suffix))
+            .map(|e| e.path())
+            .collect();
+        out.sort();
+        out.truncate(SUFFIX_LIMIT);
+        out
     }
 }
 
@@ -264,6 +295,20 @@ impl Assets for Memory {
         let home = Path::new(key.rsplitn(3, '/').nth(2).unwrap_or_default());
         let images = self.images().filter(|p| p.starts_with(home));
         color_texture_by_name(Path::new(&key), home, images)
+    }
+
+    fn files_with_suffix(&self, dir: &Path, suffix: &str) -> Vec<PathBuf> {
+        let dir = memory_key(&dir.to_string_lossy());
+        let suffix = suffix.to_lowercase();
+        self.files
+            .keys()
+            .filter(|k| {
+                let (parent, name) = k.rsplit_once('/').unwrap_or(("", k.as_str()));
+                parent == dir && name.to_lowercase().ends_with(&suffix)
+            })
+            .take(SUFFIX_LIMIT)
+            .map(PathBuf::from)
+            .collect()
     }
 }
 

@@ -1,0 +1,30 @@
+material Twin/Body
+{
+    technique
+    {
+        pass
+        {
+            diffuse 1 1 1
+            texture_unit
+            {
+                texture body.png
+            }
+        }
+    }
+}
+
+material Twin/Lid
+{
+    technique
+    {
+        pass
+        {
+            texture_unit
+            {
+                texture_alias Decal
+                texture missing.png
+            }
+        }
+    }
+}
+

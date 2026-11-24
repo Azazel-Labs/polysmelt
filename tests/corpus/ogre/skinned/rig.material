@@ -1,0 +1,11 @@
+material Rig/Skin
+{
+    technique
+    {
+        pass
+        {
+            diffuse 0.2 0.4 0.6
+        }
+    }
+}
+

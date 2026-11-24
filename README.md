@@ -48,7 +48,8 @@ Early. What exists today:
   compressed, with frames, skins and animation sets), Quake II `.md2` and Quake III `.md3`
   (frames as morph targets, MD3 tags as nodes), Doom 3 `.md5mesh` and `.md5anim`, Inter-Quake
   Model `.iqm`, Valve `.smd` and `.vta`, MilkShape 3D `.ms3d` and Blitz3D `.b3d` (skinned and
-  animated), and motion capture: Acclaim `.asf` skeletons with `.amc` motions, HTR, and C3D
+  animated), OGRE `.mesh` and `.skeleton` (binary in either byte order and XML, with poses and
+  morphs as morph targets and `.material` scripts as materials), and motion capture: Acclaim `.asf` skeletons with `.amc` motions, HTR, and C3D
   and TRC marker tracks (each marker an animated node). Left-handed and Z-up sources are turned
   to glTF's axes, and keys are kept as the file gives them.
   `formats::load` reads a file and `formats::load_bytes` a model already in memory; both
@@ -180,6 +181,7 @@ Early. What exists today:
 | `amf` | AMF, plain or zipped | `quick-xml`, `zip`, `base64`, `flate2` |
 | `lwo` | LightWave objects (`.lwo`) | none |
 | `ac3d` | AC3D (`.ac`) | none |
+| `ogre` | OGRE `.mesh` and `.skeleton`, binary (v1.10 to v1.100) and XML, with `.material` scripts | none |
 | `fs` | Reading files: `formats::load`, `assets::Folder`, `gltf::files_in` | none |
 
 Every reader is on by default, and so are `fs`, `webp` and the six texture decoders. `minimal`

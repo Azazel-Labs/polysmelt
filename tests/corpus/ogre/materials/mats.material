@@ -1,0 +1,96 @@
+import * from "lib/base.material"
+
+material Glass
+{
+    technique
+    {
+        pass
+        {
+            diffuse 0.5 0.5 1 0.5
+            scene_blend alpha_blend
+            depth_write off
+        }
+    }
+}
+
+material Leaves : BaseLeaf
+{
+    technique
+    {
+        pass
+        {
+            diffuse 0.2 0.6 0.2
+        }
+    }
+}
+
+material Bumpy
+{
+    technique
+    {
+        pass
+        {
+            specular 1 1 1 1 48
+            texture_unit
+            {
+                texture bumpy.png
+            }
+            texture_unit normals
+            {
+                texture bumpy_n.png
+                tex_coord_set 1
+            }
+        }
+    }
+}
+
+material Aliased
+{
+    technique
+    {
+        pass
+        {
+            texture_unit
+            {
+                texture_alias DiffuseMap
+                texture default.png
+            }
+        }
+    }
+}
+
+material Unlit
+{
+    technique
+    {
+        scheme Shadow
+        pass
+        {
+            diffuse 0 0 1
+        }
+    }
+    technique
+    {
+        pass
+        {
+            lighting off
+            diffuse 1 0 0
+            emissive 0 0.5 0
+        }
+    }
+}
+
+material Gone
+{
+    technique
+    {
+        pass
+        {
+            texture_unit
+            {
+                texture gone.png
+            }
+        }
+    }
+}
+
