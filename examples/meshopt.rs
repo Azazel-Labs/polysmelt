@@ -41,6 +41,7 @@ fn sample() -> polysmelt::Result<Vec<u8>> {
         prims: vec![prim],
         materials: vec![Material::plain("grid", [0.8, 0.6, 0.3, 1.0])],
         images: Vec::new(),
+        skeleton: Vec::new(),
     };
     gltf::compress(&to_glb(&mesh)?)
 }

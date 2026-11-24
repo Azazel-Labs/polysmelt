@@ -240,6 +240,49 @@ fn write_glb(t: &Torus, path: &Path) -> std::io::Result<()> {
         prims: vec![prim],
         materials: vec![polysmelt::mesh::Material::plain("Torus", [0.8, 0.8, 0.8, 1.0])],
         images: Vec::new(),
+        skeleton: Vec::new(),
+    };
+    std::fs::write(path, polysmelt::mesh::to_glb(&mesh).map_err(std::io::Error::other)?)
+}
+
+/// The torus skinned to a ring of 32 bones, each vertex weighted between the two nearest: what
+/// a character's GLB asks of a loader, posed.
+fn write_glb_skinned(t: &Torus, path: &Path) -> std::io::Result<()> {
+    const BONES: usize = 32;
+    let mut prim = polysmelt::mesh::Prim::default();
+    for (i, (p, n, uv)) in (0..=t.rows)
+        .flat_map(|i| (0..=t.cols).map(move |_| i))
+        .zip(t.vertices())
+    {
+        prim.positions.push(p);
+        prim.normals.push(n);
+        prim.uvs.push(uv);
+        let at = i as f32 / t.rows as f32 * BONES as f32;
+        let k = (at.floor() as usize).min(BONES - 1);
+        let w = at - k as f32;
+        prim.skin_joints.push([k as u32, ((k + 1) % BONES) as u32, 0, 0]);
+        prim.skin_weights.push([1.0 - w, w, 0.0, 0.0]);
+    }
+    for [a, b, c, d] in t.quads() {
+        prim.indices.extend([a, b, c, a, c, d].map(|i| i as u32));
+    }
+    let skeleton = (0..BONES)
+        .map(|k| {
+            let a = k as f32 / BONES as f32 * std::f32::consts::TAU;
+            let (s, c) = a.sin_cos();
+            polysmelt::mesh::Bone {
+                name: Some(format!("bone{k}")),
+                parent: (k > 0).then_some(0),
+                node: k,
+                matrix: [c, s, 0.0, 0.0, -s, c, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, c, s, 0.0, 1.0],
+            }
+        })
+        .collect();
+    let mesh = polysmelt::mesh::Mesh {
+        prims: vec![prim],
+        materials: vec![polysmelt::mesh::Material::plain("Torus", [0.8, 0.8, 0.8, 1.0])],
+        images: Vec::new(),
+        skeleton,
     };
     std::fs::write(path, polysmelt::mesh::to_glb(&mesh).map_err(std::io::Error::other)?)
 }
@@ -263,13 +306,14 @@ fn inputs(dir: &Path, sizes: &[String]) -> Vec<Input> {
             other => panic!("unknown size {other:?}: small, medium or large"),
         };
         type Writer = fn(&Torus, &Path) -> std::io::Result<()>;
-        let kinds: [(&str, &str, Writer); 6] = [
+        let kinds: [(&str, &str, Writer); 7] = [
             ("obj", "obj", write_obj),
             ("stl binary", "stl", write_stl_binary),
             ("stl ascii", "stl", write_stl_ascii),
             ("ply binary", "ply", |t, p| write_ply(t, p, true)),
             ("ply ascii", "ply", |t, p| write_ply(t, p, false)),
             ("glb", "glb", write_glb),
+            ("glb skinned", "glb", write_glb_skinned),
         ];
         for (kind, ext, write) in kinds {
             let path = dir.join(format!("{size}_{}.{ext}", kind.replace(' ', "_")));
@@ -296,9 +340,10 @@ type Load = fn(&Input) -> (Box<dyn std::any::Any>, usize);
 fn polysmelt(input: &Input) -> (Box<dyn std::any::Any>, usize) {
     use polysmelt::document::{Keep, Pose};
     let dir = input.path.parent().unwrap();
-    let doc = polysmelt::formats::load(&input.path, input.ext, &polysmelt::assets::Folder::new(dir), Keep::ALL).unwrap();
-    // A GLB is already the document, its arrays left in the file: the triangles drawn, decoded,
-    // are the like-for-like result (the gltf crate decodes them). The other formats' document
+    let doc =
+        polysmelt::formats::load(&input.path, input.ext, &polysmelt::assets::Folder::new(dir), Keep::ALL).unwrap();
+    // A GLB is already the document, its arrays left in the file: the triangles drawn, decoded
+    // (and skinned), are the like-for-like result (the gltf crate decodes them, unposed). The other formats' document
     // holds their arrays, as their competitors' results do.
     if input.ext == "glb" {
         let mesh = doc.flatten(Pose::Rest).unwrap().unwrap();
@@ -309,16 +354,33 @@ fn polysmelt(input: &Input) -> (Box<dyn std::any::Any>, usize) {
     (Box::new(doc), n)
 }
 
+/// Polysmelt's skinned meshes left in their bind pose (`Pose::Bind`): their vertices as stored,
+/// unposed, as the gltf crate gives them.
+fn polysmelt_bind(input: &Input) -> (Box<dyn std::any::Any>, usize) {
+    use polysmelt::document::{Keep, Pose};
+    let dir = input.path.parent().unwrap();
+    let doc =
+        polysmelt::formats::load(&input.path, input.ext, &polysmelt::assets::Folder::new(dir), Keep::ALL).unwrap();
+    let mesh = doc.flatten(Pose::Bind).unwrap().unwrap();
+    let n = mesh.triangles();
+    (Box::new((doc, mesh)), n)
+}
+
 /// The name the baseline commit's Polysmelt goes by in the tables.
+#[cfg(feature = "baseline")]
 const BASELINE: &str = "polysmelt @ base";
 
 #[cfg(all(feature = "baseline", feature = "base-document"))]
 fn polysmelt_base(input: &Input) -> (Box<dyn std::any::Any>, usize) {
     use polysmelt_base::document::{Keep, Pose};
     let dir = input.path.parent().unwrap();
-    let doc =
-        polysmelt_base::formats::load(&input.path, input.ext, &polysmelt_base::assets::Folder::new(dir), Keep::ALL)
-            .unwrap();
+    let doc = polysmelt_base::formats::load(
+        &input.path,
+        input.ext,
+        &polysmelt_base::assets::Folder::new(dir),
+        Keep::ALL,
+    )
+    .unwrap();
     if input.ext == "glb" {
         let mesh = doc.flatten(Pose::Rest).unwrap().unwrap();
         let n = mesh.triangles();
@@ -444,6 +506,8 @@ fn gltf_import(input: &Input) -> (Box<dyn std::any::Any>, usize) {
         normals: Vec<[f32; 3]>,
         uvs: Vec<[f32; 2]>,
         indices: Vec<u32>,
+        joints: Vec<[u16; 4]>,
+        weights: Vec<[f32; 4]>,
     }
     let (doc, buffers, images) = gltf::import(&input.path).unwrap();
     let mut prims = Vec::new();
@@ -455,15 +519,30 @@ fn gltf_import(input: &Input) -> (Box<dyn std::any::Any>, usize) {
                 normals: r.read_normals().map(Iterator::collect).unwrap_or_default(),
                 uvs: r.read_tex_coords(0).map(|t| t.into_f32().collect()).unwrap_or_default(),
                 indices: r.read_indices().map(|i| i.into_u32().collect()).unwrap_or_default(),
+                joints: r.read_joints(0).map(|j| j.into_u16().collect()).unwrap_or_default(),
+                weights: r.read_weights(0).map(|w| w.into_f32().collect()).unwrap_or_default(),
             });
         }
     }
+    let ibms: Vec<Vec<[[f32; 4]; 4]>> = doc
+        .skins()
+        .map(|s| {
+            s.reader(|b| Some(&buffers[b.index()]))
+                .read_inverse_bind_matrices()
+                .map(Iterator::collect)
+                .unwrap_or_default()
+        })
+        .collect();
     let n = prims.iter().map(|p| p.indices.len() / 3).sum();
-    (Box::new((doc, buffers, images, prims)), n)
+    (Box::new((doc, buffers, images, prims, ibms)), n)
 }
 
-fn competitors(ext: &str) -> Vec<(&'static str, Load)> {
+fn competitors(input: &Input) -> Vec<(&'static str, Load)> {
     let mut out: Vec<(&'static str, Load)> = vec![("polysmelt", polysmelt)];
+    if input.name.contains("skinned") {
+        out.push(("polysmelt (bind pose)", polysmelt_bind));
+    }
+    let ext = input.ext;
     #[cfg(feature = "baseline")]
     out.push((BASELINE, polysmelt_base));
     match ext {
@@ -509,7 +588,7 @@ struct Row {
 }
 
 fn run(input: &Input, budget: Duration) -> Vec<Row> {
-    let loaders = competitors(input.ext);
+    let loaders = competitors(input);
     // A warm-up round, which also gives the memory figures (identical every round).
     let first: Vec<Sample> = loaders.iter().map(|(_, l)| measure(*l, input)).collect();
     let mut times: Vec<Vec<Duration>> = loaders.iter().map(|_| Vec::new()).collect();
@@ -586,7 +665,8 @@ fn main() {
         );
         let rows = run(input, budget);
         let me = &rows[0];
-        let others = || rows[1..].iter().filter(|r| r.loader != BASELINE);
+        // Only other libraries count: the baseline and Polysmelt's own variants (bind pose) are not competitors.
+        let others = || rows[1..].iter().filter(|r| !r.loader.starts_with("polysmelt"));
         if others().all(|r| me.median <= r.median) {
             fastest += 1;
         }
@@ -605,7 +685,11 @@ fn main() {
             writeln!(
                 md,
                 "| {} | {:.2} | {:.2} | {:.0} | {:.2} | {:.1} | {:.2} | {:.1} | {} |",
-                if r.loader == "polysmelt" { "**polysmelt**" } else { r.loader },
+                if r.loader == "polysmelt" {
+                    "**polysmelt**"
+                } else {
+                    r.loader
+                },
                 ms(r.median),
                 ms(r.best),
                 mb(input.bytes as usize) / r.median.as_secs_f64(),

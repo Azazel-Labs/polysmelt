@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<X3D profile="Interchange" version="3.3">
+<head></head>
+<Scene>
+<ExternProtoDeclare name='Pillar' url='"lib.x3d#Pillar"'><field name='size' type='SFVec3f' accessType='initializeOnly'/></ExternProtoDeclare>
+<ProtoDeclare name='Crate'><ProtoInterface><field name='size' type='SFVec3f' accessType='initializeOnly' value='1 1 1'/><field name='look' type='SFNode' accessType='initializeOnly'><Appearance><Material DEF='Green' diffuseColor='0 1 0'/></Appearance></field><field name='hit' type='SFTime' accessType='outputOnly'/></ProtoInterface><ProtoBody><Shape><IS><connect nodeField='appearance' protoField='look'/></IS><Box><IS><connect nodeField='size' protoField='size'/></IS></Box></Shape></ProtoBody></ProtoDeclare>
+<ProtoInstance name='Crate' DEF='Big'><fieldValue name='size' value='2 2 2'/></ProtoInstance>
+<Transform translation='5 0 0'><ProtoInstance name='Crate'><fieldValue name='look'><Appearance><Material DEF='Yellow' diffuseColor='1 1 0'/></Appearance></fieldValue></ProtoInstance></Transform>
+<Transform translation='0 0 5'><ProtoInstance name='Pillar'><fieldValue name='size' value='1 4 1'/></ProtoInstance></Transform>
+</Scene>
+</X3D>

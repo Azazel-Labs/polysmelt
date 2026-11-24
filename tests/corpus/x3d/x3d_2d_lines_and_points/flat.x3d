@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<X3D profile="Interchange" version="3.3">
+<head></head>
+<Scene>
+<Shape><Circle2D radius='2'/></Shape><Shape><Arc2D radius='1' startAngle='0' endAngle='-1.5708'/></Shape><Shape><Polyline2D lineSegments='0 0 3 3 4 0'/></Shape><Shape><Polypoint2D point='5 5 6 6 7 5'/></Shape>
+</Scene>
+</X3D>

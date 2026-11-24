@@ -15,7 +15,7 @@ const corpus = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "tests"
 
 /** The error codes a case's expect.json allows, for the GLB written from it. */
 function allowed(path) {
-  const expect = join(corpus, relative(root, path).replace(/\.glb$/, ""), "expect.json");
+  const expect = join(corpus, relative(root, path).replace(/(\.mesh)?\.glb$/, ""), "expect.json");
   if (!existsSync(expect)) return new Set();
   return new Set(JSON.parse(readFileSync(expect, "utf8")).validator_errors ?? []);
 }

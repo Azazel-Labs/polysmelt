@@ -33,7 +33,8 @@ FIXTURES = [
     "legacy_annotations", "legacy_empty_2020", "legacy_text_arrows_2017", "legacy_textured_colorize_2017",
     "legacy_v2020_textured", "legacy_v3_textured", "legacy_v4_textured", "legacy_v5_textured", "nesting_2013",
     "nesting_2017", "nesting_2020", "nesting_2021", "nesting_v6", "sdk_saved_2019", "single_material_v17",
-    "zero_material_custom_layer_v18",
+    "zero_material_custom_layer_v18", "sdk_saved_tag_line_styles_2019", "sdk_saved_tag_line_styles_2020",
+    "sdk_saved_tag_line_styles_materials_2020",
 ]
 
 
@@ -55,7 +56,7 @@ def application(data):
 
 
 def gltf(p):
-    """SketchUp's inches, Z up, as glTF's metres, Y up."""
+    """SketchUp's inches, Z up, as glTF's meters, Y up."""
     x, y, z = p
     return [x * INCH, z * INCH, -y * INCH]
 
@@ -72,7 +73,7 @@ def polygon(cx, r, sides, sweep):
 
 
 def area(points):
-    """A flat polygon's area, in square metres."""
+    """A flat polygon's area, in square meters."""
     s = sum(points[i][0] * points[(i + 1) % len(points)][1] - points[(i + 1) % len(points)][0] * points[i][1]
             for i in range(len(points)))
     return abs(s) / 2 * INCH * INCH
@@ -127,6 +128,16 @@ for name, version in [("legacy_v4_textured", "SketchUp 4"), ("legacy_v5_textured
                       ("legacy_v2020_textured", "SketchUp 2020, with no component definitions")]:
     fixture(name, "one face painted with a textured material (" + version + ")",
             triangles=2, uvs=True, image_count=1, materials=[{"textured": True}])
+
+# Tags with line styles ("Dash", "Dot"), one triangle on each tag: six tags (two plain) and no
+# materials, saved as 2020 and as 2019 (which writes each style's preamble twice), and five tags
+# with three unused materials. The style is written where a tag first uses it and referred to by
+# later tags. openskp's legacy_tag_line_styles_test.
+for name, tags, spec in [("sdk_saved_tag_line_styles_2020", 6, "six tags, four with a line style (SketchUp 2020)"),
+                         ("sdk_saved_tag_line_styles_2019", 6, "six tags, four with a line style (SketchUp 2019)"),
+                         ("sdk_saved_tag_line_styles_materials_2020", 5,
+                          "five tags, four with a line style, and three materials (SketchUp 2020)")]:
+    fixture(name, "a triangle on each tag, the tags carrying line styles: " + spec, triangles=tags)
 
 # --- nothing to draw ----------------------------------------------------------------------------
 

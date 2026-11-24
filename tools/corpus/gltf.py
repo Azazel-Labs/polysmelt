@@ -235,6 +235,16 @@ case(FMT, "gltf_data_uri", {"cube.gltf": cube_doc().embedded()},
 case(FMT, "gltf_bom", {"cube.gltf": "﻿" + cube_doc().embedded()},
      {"spec": SPEC + ": JSON with a UTF-8 byte order mark", "source": SRC, **CUBE})
 
+# A GLB whose JSON chunk starts with a byte order mark, which the spec forbids (4.4.3.2) but
+# writers emit; read past it.
+glb = cube_doc().glb()
+n = struct.unpack_from("<I", glb, 12)[0]
+text = bytes([0xEF, 0xBB, 0xBF]) + glb[20:20 + n].rstrip(b" ")
+text += b" " * (-len(text) % 4)
+body = struct.pack("<I4s", len(text), b"JSON") + text + glb[20 + n:]
+case(FMT, "glb_bom", {"cube.glb": b"glTF" + struct.pack("<II", 2, 12 + len(body)) + body},
+     {"spec": SPEC + ": a GLB JSON chunk with a UTF-8 byte order mark", "source": SRC, **CUBE})
+
 # --- indices and attributes -------------------------------------------------------------------
 
 for name, t in (("u8", U8), ("u32", U32)):
@@ -330,7 +340,8 @@ g.node(mesh=g.mesh([{"attributes": {"POSITION": pts}, "mode": 0}]))
 g.node(mesh=g.mesh([{"attributes": {"POSITION": pts}, "mode": 1}]))
 case(FMT, "points_and_lines", {"pts.glb": g.glb()},
      {"spec": SPEC + ": POINTS and LINES primitives, nothing to draw as triangles", "source": SRC,
-      "no_mesh": True, "facts": {"points": 4, "lines": 2}})
+      "triangles": 0, "points": 4, "lines": 2, "vertices": 8, "primitives": 2,
+      "facts": {"points": 4, "lines": 2}})
 
 # Attributes the reader doesn't use, and one primitive per material.
 g = G()
@@ -452,6 +463,75 @@ skin_m = mat_mul(trs((0, 2, 0), quat([0, 0, 1], 90)), trs((0, -2, 0)))
 case(FMT, "skin_rest_pose", {"skin.glb": g.glb()},
      {"spec": SPEC + ": a skinned mesh posed by its joints (3.7.3), its node transform ignored", "source": SRC,
       **measure([placed_cube(skin_m)]), "winding_matches_normals": True, "normals_in": AXES})
+
+
+def skinned_cube(g, sets):
+    """A cube whose every vertex has the influences `sets`: [(joints, weights)], one per set."""
+    pos, nrm, uv, idx = flat_cube()
+    attrs = {"POSITION": g.acc(pos, minmax=True), "NORMAL": g.acc(nrm)}
+    for n, (js, ws) in enumerate(sets):
+        attrs[f"JOINTS_{n}"] = g.acc([js] * 24, U8, "VEC4")
+        attrs[f"WEIGHTS_{n}"] = g.acc([ws] * 24, typ="VEC4")
+    return {"attributes": attrs, "indices": g.acc(idx, U16, "SCALAR", target=34963)}
+
+
+# Eight influences across two sets, all counted: the last four joints carry a quarter of the
+# weight and sit 8 along x, so the cube moves 2 (3.7.3.1).
+g = G()
+root = g.node()
+bones = [g.node(root=False, translation=[0 if j < 4 else 8, 0, 0]) for j in range(8)]
+g.j["nodes"][root]["children"] = bones
+g.add("skins", {"joints": bones + [root], "skeleton": root})
+w = [0.3, 0.2, 0.15, 0.1, 0.1, 0.05, 0.05, 0.05]
+g.node(mesh=g.mesh([skinned_cube(g, [([0, 1, 2, 3], w[:4]), ([4, 5, 6, 7], w[4:])])]), skin=0)
+case(FMT, "skin_eight_influences", {"skin.glb": g.glb()},
+     {"spec": SPEC + ": JOINTS_1/WEIGHTS_1 add four more influences to each vertex (3.7.3.1)", "source": SRC,
+      **measure([placed_cube(trs((2, 0, 0)))]), "winding_matches_normals": True, "normals_in": AXES,
+      "document": {"skins": 1, "joints": 9}})
+
+# Every weight in the second set; the first names joints with no weight.
+g = G()
+root = g.node()
+bones = [g.node(root=False), g.node(root=False, translation=[0, 5, 0])]
+g.j["nodes"][root]["children"] = bones
+g.add("skins", {"joints": bones + [root]})
+g.node(mesh=g.mesh([skinned_cube(g, [([0, 0, 0, 0], [0, 0, 0, 0]), ([1, 0, 0, 0], [1, 0, 0, 0])])]), skin=0)
+case(FMT, "skin_weights_in_set_1", {"skin.glb": g.glb()},
+     {"spec": SPEC + ": a vertex's weight all in WEIGHTS_1 (3.7.3.1)", "source": SRC,
+      **measure([placed_cube(trs((0, 5, 0)))]), "winding_matches_normals": True, "normals_in": AXES})
+
+# A skin animated: the arm joint turns 90 degrees about z over a second, the cube with it.
+g = G()
+root = g.node()
+arm = g.node(root=False, translation=[0, 2, 0])
+g.j["nodes"][root]["children"] = [arm]
+ibm = g.acc([IDENT, trs((0, -2, 0))], typ="MAT4", target=None)
+g.add("skins", {"joints": [root, arm], "inverseBindMatrices": ibm})
+g.node(mesh=g.mesh([skinned_cube(g, [([1, 0, 0, 0], [1, 0, 0, 0])])]), skin=0)
+keys = g.acc([0.0, 1.0], typ="SCALAR", target=None, minmax=True)
+turns = g.acc([[0, 0, 0, 1], quat([0, 0, 1], 90)], typ="VEC4", target=None)
+g.add("animations", {"samplers": [{"input": keys, "output": turns}],
+                     "channels": [{"sampler": 0, "target": {"node": arm, "path": "rotation"}}]})
+turned = lambda deg: measure([placed_cube(mat_mul(trs((0, 2, 0), quat([0, 0, 1], deg)), trs((0, -2, 0))))])["bounds"]
+case(FMT, "skin_animated", {"skin.glb": g.glb()},
+     {"spec": SPEC + ": a skinned mesh posed by an animated joint (3.7.3, 3.11)", "source": SRC, **CUBE,
+      "poses": [{"animation": 0, "time": t, "bounds": turned(d)} for t, d in ((0, 0), (0.5, 45), (1, 90), (3, 90))]})
+
+# A sampler with fewer outputs than keys is skipped; the other channel still moves its node.
+g = G()
+cube = g.mesh([cube_prim(g)])
+short = g.node(mesh=cube)
+moved = g.node(mesh=cube, translation=[3, 0, 0])
+k3 = g.acc([0.0, 1.0, 2.0], typ="SCALAR", target=None, minmax=True)
+k2 = g.acc([0.0, 2.0], typ="SCALAR", target=None, minmax=True)
+g.add("animations", {"samplers": [{"input": k3, "output": g.acc([[5, 0, 0], [10, 0, 0]], target=None)},
+                                  {"input": k2, "output": g.acc([[3, 0, 0], [3, 4, 0]], target=None)}],
+                     "channels": [{"sampler": 0, "target": {"node": short, "path": "translation"}},
+                                  {"sampler": 1, "target": {"node": moved, "path": "translation"}}]})
+case(FMT, "animation_short_sampler", {"anim.glb": g.glb()},
+     {"spec": SPEC + ": a sampler's output must hold one value per key (3.11); one that doesn't is skipped",
+      "source": SRC, "validator_errors": ["ANIMATION_SAMPLER_OUTPUT_ACCESSOR_INVALID_COUNT"],
+      "poses": [{"animation": 0, "time": 1, "bounds": measure([placed_cube(IDENT), placed_cube(trs((3, 2, 0)))])["bounds"]}]})
 
 # Morph targets at the mesh's default weights.
 g = G()

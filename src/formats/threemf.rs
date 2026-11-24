@@ -1,14 +1,18 @@
 //! 3MF, the 3D-printing format: a zip of XML models. Read here: meshes, components (in the same model or another
-//! part of the zip) and the build's placed items, in the model's unit (scaled to glTF's metres); the 3MF materials
-//! extension's base materials, color groups (per triangle or blended across one) and 2D textures; and what slicers
+//! part of the zip) and the build's placed items, in the model's unit (scaled to glTF's meters); the 3MF materials
+//! extension's base materials, color groups (per triangle or blended across one), 2D textures, composite materials
+//! (mixed into a color) and multiproperties (layered into a color, or a texture's coordinates); and what slicers
 //! keep beside them: the filaments' colors, which filament each object and part prints in (Bambu Studio,
-//! `OrcaSlicer`, `PrusaSlicer`), and the filaments painted onto triangles.
+//! `OrcaSlicer`, `PrusaSlicer`), the filaments painted onto triangles, and which parts and volumes aren't printed
+//! but change how the rest prints (modifiers, negative volumes, support blockers and enforcers).
 //!
 //! The build is a node per item and component, each with its 3MF transform, under a root node that
-//! turns the model's Z-up millimetres (or its unit) into glTF's Y-up metres; an object's triangles
-//! are a mesh in its own space, shared wherever it's placed in the same filament. Object names,
-//! types and part numbers, the model's metadata, its unit and the slicer's filament colors go in
-//! extras.
+//! turns the model's Z-up millimeters (or its unit) into glTF's Y-up meters; an object's triangles
+//! are a mesh in its own space, shared wherever it's placed in the same filament, its corners
+//! sharing vertices as the object's triangles do. A part or volume that isn't printed is a hidden
+//! node (`KHR_node_visibility`) named for what it is. A component that leads back to an object it's
+//! inside is left out. Object names, types and part numbers, the model's metadata, its unit and the
+//! slicer's filament colors go in extras.
 
 use std::collections::{HashMap, HashSet};
 use std::io::{BufReader, Read};
@@ -24,7 +28,7 @@ use zip::ZipArchive;
 type Zip<'a> = ZipArchive<Box<dyn super::ReadSeek + 'a>>;
 
 use crate::material::{self, Factor, Full, Specular, Tex, Volume};
-use crate::mesh::{GRAY, Image, MAX_TRIANGLES, Material, Prim, face_normal, srgb_to_linear};
+use crate::mesh::{GRAY, Image, Material, Prim, srgb_to_linear};
 
 /// A 3MF transform: the first three columns of a 4x4 matrix, row by row (points are row vectors).
 type Mat = [f32; 12];
@@ -81,6 +85,23 @@ enum Group {
     Colors(Vec<(Option<[u8; 4]>, Option<String>)>),
     /// A 2D texture's coordinates (origin bottom-left).
     Coords { texture: u32, uvs: Vec<[f32; 2]> },
+    /// Composite materials, until mixed into colors: each entry's proportions (from `starts[entry]` in `values`)
+    /// of the base materials `indices` of group `base`.
+    Composite {
+        base: u32,
+        indices: Vec<u32>,
+        values: Vec<f32>,
+        starts: Vec<usize>,
+    },
+    /// Multiproperties, until layered into colors or texture coordinates: each entry's index (from
+    /// `starts[entry]` in `indices`) into each of the groups `pids`, every layer after the first multiplied or,
+    /// by default, mixed over the ones below.
+    Multi {
+        pids: Vec<u32>,
+        multiply: Vec<bool>,
+        indices: Vec<u32>,
+        starts: Vec<usize>,
+    },
 }
 
 /// How a base material or color looks beyond its color, from the materials extension's display properties
@@ -180,8 +201,8 @@ struct Part {
     unit: Option<String>,
 }
 
-/// Metres per unit, for the units the core specification allows (millimetres when unsaid).
-fn metres(unit: Option<&str>) -> Option<f64> {
+/// Meters per unit, for the units the core specification allows (millimeters when unsaid).
+fn meters(unit: Option<&str>) -> Option<f64> {
     Some(match unit.unwrap_or("millimeter") {
         "micron" => 1e-6,
         "millimeter" => 1e-3,
@@ -194,13 +215,15 @@ fn metres(unit: Option<&str>) -> Option<f64> {
 }
 
 /// What a slicer project says about filaments: their colors, and which one each object, part (Bambu Studio,
-/// `OrcaSlicer`) or range of triangles (`PrusaSlicer`'s volumes) prints in. Filaments count from 1.
+/// `OrcaSlicer`) or range of triangles (`PrusaSlicer`'s volumes) prints in, what each part or volume is for, and
+/// its name. Filaments count from 1.
 #[derive(Default)]
 struct Slicer {
     filaments: Vec<[u8; 3]>,
     objects: HashMap<u32, usize>,
-    parts: HashMap<(u32, u32), usize>,
-    volumes: HashMap<u32, Vec<(u32, u32, usize)>>,
+    parts: HashMap<(u32, u32), Assigned>,
+    /// Each object's volumes, in order of their first triangle.
+    volumes: HashMap<u32, Vec<SlicerVolume>>,
 }
 
 impl Slicer {
@@ -210,7 +233,88 @@ impl Slicer {
     }
 }
 
-/// Load a 3MF: the build as nodes, an object's triangles as a mesh with a primitive per look, and
+/// What a slicer's part or volume is for: printed, or one of the shapes that only change how the rest prints.
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
+enum Role {
+    #[default]
+    Normal,
+    /// Different settings inside it.
+    Modifier,
+    /// Cut out of the parts.
+    Negative,
+    /// No supports inside it.
+    Blocker,
+    /// Supports inside it.
+    Enforcer,
+}
+
+impl Role {
+    /// Bambu Studio's and `OrcaSlicer`'s `subtype` (`modifier_part`, `negative_part`, `support_blocker`, ...) or
+    /// `PrusaSlicer`'s `volume_type` (`ParameterModifier`, `NegativeVolume`, `SupportBlocker`, ...).
+    fn parse(s: &str) -> Option<Role> {
+        let s = s.trim().to_ascii_lowercase();
+        Some(if s.contains("modifier") {
+            Role::Modifier
+        } else if s.contains("negative") {
+            Role::Negative
+        } else if s.contains("blocker") {
+            Role::Blocker
+        } else if s.contains("enforcer") {
+            Role::Enforcer
+        } else if s.contains("normal") || s.contains("model") {
+            Role::Normal
+        } else {
+            return None;
+        })
+    }
+
+    /// As a node's name says it.
+    fn label(self) -> &'static str {
+        match self {
+            Role::Normal => "part",
+            Role::Modifier => "modifier",
+            Role::Negative => "negative volume",
+            Role::Blocker => "support blocker",
+            Role::Enforcer => "support enforcer",
+        }
+    }
+
+    /// As a node's `extras.volumeType` says it.
+    fn key(self) -> &'static str {
+        match self {
+            Role::Normal => "part",
+            Role::Modifier => "modifier",
+            Role::Negative => "negative_volume",
+            Role::Blocker => "support_blocker",
+            Role::Enforcer => "support_enforcer",
+        }
+    }
+}
+
+/// A slicer's settings for a part or volume.
+#[derive(Default, Clone)]
+struct Assigned {
+    extruder: Option<usize>,
+    role: Role,
+    name: Option<String>,
+}
+
+/// `PrusaSlicer`'s volume: an object's triangles `first..=last`.
+struct SlicerVolume {
+    first: u32,
+    last: u32,
+    a: Assigned,
+}
+
+/// The volume triangle `i` is in, of `volumes` in order of their first triangle.
+fn volume_of(volumes: &[SlicerVolume], i: u32) -> Option<&SlicerVolume> {
+    let k = volumes.partition_point(|v| v.first <= i);
+    volumes[..k].last().filter(|v| i <= v.last)
+}
+
+type Fast = std::hash::BuildHasherDefault<crate::mesh::FxHasher>;
+
+// Load a 3MF: the build as nodes, an object's triangles as a mesh with a primitive per look, and
 /// the facts worth keeping.
 pub(crate) fn load(input: super::Input<'_>, keep: Keep) -> Result<Document<'static>> {
     let mut zip: Zip<'_> = ZipArchive::new(input.seekable()?).context("not a 3MF file (it isn't a zip)")?;
@@ -237,7 +341,7 @@ pub(crate) fn load(input: super::Input<'_>, keep: Keep) -> Result<Document<'stat
             continue;
         };
         let reader = zip.by_name(real)?.take(MAX_PART);
-        let part = parse_part(reader, &mut triangles).with_context(|| format!("reading {real}"))?;
+        let part = parse_part(reader, &mut triangles, input.limit).with_context(|| format!("reading {real}"))?;
         for o in part.objects.values() {
             todo.extend(o.components.iter().filter_map(|c| c.path.as_deref()).map(norm));
         }
@@ -248,7 +352,7 @@ pub(crate) fn load(input: super::Input<'_>, keep: Keep) -> Result<Document<'stat
     let main = &parts[&root];
     ensure!(!main.build.is_empty(), "this 3MF builds nothing");
     let unit = main.unit.clone().unwrap_or_else(|| "millimeter".to_owned());
-    let Some(scale) = metres(Some(&unit)) else {
+    let Some(scale) = meters(Some(&unit)) else {
         bail!("unknown 3MF unit {unit:?}")
     };
 
@@ -265,14 +369,25 @@ pub(crate) fn load(input: super::Input<'_>, keep: Keep) -> Result<Document<'stat
         mesh_triangles: Vec::new(),
         mesh_of: HashMap::new(),
         nodes: Vec::new(),
+        path: Vec::new(),
+        visits: 0,
+        dropped: 0,
+        hidden: false,
         triangles: 0,
         built: 0,
+        limit: input.limit,
     };
     let mut items = Vec::new();
     for item in &main.build {
         let key = item.path.as_deref().map_or_else(|| root.clone(), norm);
         let filament = slicer.objects.get(&item.id).copied();
-        if let Some(n) = out.node(&key, item.id, &item.transform, item.id, filament, 0)? {
+        let at = At {
+            item: item.id,
+            filament,
+            depth: 0,
+            visible: true,
+        };
+        if let Some(n) = out.node(&key, item.id, &item.transform, at)? {
             if let Some(pn) = &item.partnumber {
                 out.nodes[n]["extras"]["itemPartnumber"] = json!(pn);
             }
@@ -294,17 +409,13 @@ pub(crate) fn load(input: super::Input<'_>, keep: Keep) -> Result<Document<'stat
 
     let mut images = Images::new(!keep.image_bytes, std::path::Path::new(""));
     let mut image_of: HashMap<usize, Option<usize>> = HashMap::new();
-    let lin = |c: [u8; 4]| {
-        let [r, g, b] = [c[0], c[1], c[2]].map(|v| srgb_to_linear(f32::from(v) / 255.0));
-        [r, g, b, f32::from(c[3]) / 255.0]
-    };
     let mut materials: Vec<Full> = Vec::new();
     for (i, look) in out.order.iter().enumerate() {
         let named = |fallback: String| out.names.get(look).cloned().unwrap_or(fallback);
         let material = match *look {
             Look::Plain => Material::plain("default", GRAY).into(),
             Look::Color(c, finish) => {
-                let m = Full::from(Material::plain(&named(format!("color_{i}")), lin(c)));
+                let m = Full::from(Material::plain(&named(format!("color_{i}")), linear(c)));
                 match finish {
                     Some(f) => f.full(m),
                     None => m,
@@ -351,13 +462,17 @@ pub(crate) fn load(input: super::Input<'_>, keep: Keep) -> Result<Document<'stat
             .collect();
         source["filaments"] = json!(hex);
     }
+    if out.dropped > 0 {
+        source["droppedComponents"] = json!(out.dropped);
+    }
     let Emit {
         mut b,
         meshes,
         mut nodes,
+        hidden,
         ..
     } = out;
-    // Z-up to Y-up (a quarter turn about X), and the unit to metres.
+    // Z-up to Y-up (a quarter turn about X), and the unit to meters.
     let h = std::f32::consts::FRAC_1_SQRT_2;
     nodes.push(
         json!({ "name": "RootNode", "children": items, "rotation": [-h, 0.0, 0.0, h], "scale": [scale, scale, scale] }),
@@ -368,6 +483,9 @@ pub(crate) fn load(input: super::Input<'_>, keep: Keep) -> Result<Document<'stat
     json.insert("scenes".into(), json!([{ "nodes": [nodes.len() - 1] }]));
     json.insert("nodes".into(), Value::Array(nodes));
     json.insert("meshes".into(), Value::Array(meshes));
+    if hidden {
+        json.insert("extensionsUsed".into(), json!(["KHR_node_visibility"]));
+    }
     b.materials(&materials, images.list, &mut json);
     Ok(b.finish(json, facts))
 }
@@ -399,30 +517,68 @@ struct Emit<'a> {
     b: Builder,
     meshes: Vec<Value>,
     mesh_triangles: Vec<usize>,
-    /// The mesh of an object (model file, id) in a filament, at the top of an item or not.
-    mesh_of: HashMap<(String, u32, Option<usize>, bool), Option<usize>>,
+    /// The mesh of an object (model file, id) in a filament, at the top of an item or not, and for one slicer
+    /// volume's triangles only or not.
+    mesh_of: HashMap<MeshKey, Option<usize>>,
     nodes: Vec<Value>,
-    /// Triangles drawn, every placement counted.
+    /// The objects being placed, outermost first, so a component that leads back to one is dropped.
+    path: Vec<(String, u32)>,
+    /// Objects visited, against a build that fans out without end.
+    visits: usize,
+    /// Components and slicer volumes left out: cyclic, nested too deep, or past the most nodes or volumes.
+    dropped: usize,
+    /// Whether any node is hidden (a slicer's modifier, negative volume or support part).
+    hidden: bool,
+    /// Triangles drawn, every visible placement counted.
     triangles: usize,
     /// Triangles in meshes.
     built: usize,
+    /// The most triangles the meshes may have.
+    limit: usize,
+}
+
+/// An object's mesh as [`Emit::mesh_of_object`] is asked for it: model file, object id, filament, whether at the
+/// top of an item, and the slicer volume's triangles.
+type MeshKey = (String, u32, Option<usize>, bool, Option<(u32, u32)>);
+
+/// How deep components may nest.
+const MAX_DEPTH: u32 = 16;
+/// The most nodes a build may place.
+const MAX_NODES: usize = 1 << 20;
+/// The most volumes of an object kept as nodes of their own: each is a pass over the object's vertices.
+const MAX_VOLUMES: usize = 4096;
+/// The most objects a build may visit, placed or not.
+const MAX_VISITS: usize = 1 << 24;
+
+/// Where a node is placed: inside the build item for object `item` (the one slicers' settings are kept against),
+/// printing in `filament` unless its parts or triangles say otherwise, `depth` components down, and whether it's
+/// shown (a slicer's modifier, negative volume or support part, and everything in it, isn't).
+#[derive(Clone, Copy)]
+struct At {
+    item: u32,
+    filament: Option<usize>,
+    depth: u32,
+    visible: bool,
+}
+
+/// A vertex of an object as first used in a mesh: its primitive (`u32::MAX`: not yet), its index there, and the
+/// texture coordinates or color it was used with.
+#[derive(Clone, Copy)]
+struct Slot {
+    prim: u32,
+    index: u32,
+    attr: u64,
 }
 
 impl Emit<'_> {
-    /// The node for object `id` of model `key` placed by `m`, inside the build item for object `item` (the one
-    /// slicers' settings are kept against), printing in `filament` unless its parts or triangles say otherwise;
-    /// `None` when the object isn't there.
-    fn node(
-        &mut self,
-        key: &str,
-        id: u32,
-        m: &Mat,
-        item: u32,
-        filament: Option<usize>,
-        depth: u32,
-    ) -> Result<Option<usize>> {
-        ensure!(depth < 16, "this 3MF's components nest too deep");
-        ensure!(self.nodes.len() < 1 << 20, "this 3MF places too many components");
+    /// The node for object `id` of model `key` placed by `m`; `None` when the object isn't there, or when placing
+    /// it would nest too deep or make too many nodes, which leaves it out rather than failing the load.
+    fn node(&mut self, key: &str, id: u32, m: &Mat, at: At) -> Result<Option<usize>> {
+        self.visits += 1;
+        if at.depth >= MAX_DEPTH || self.nodes.len() >= MAX_NODES || self.visits > MAX_VISITS {
+            self.dropped += 1;
+            return Ok(None);
+        }
         let parts = self.parts;
         let Some(o) = parts.get(key).and_then(|p| p.objects.get(&id)) else {
             return Ok(None);
@@ -448,50 +604,157 @@ impl Emit<'_> {
         }
         node.insert("extras".into(), extras);
         let mut children = Vec::new();
+        self.path.push((key.to_owned(), id));
         for c in &o.components {
             let sub = c.path.as_deref().map_or_else(|| key.to_owned(), norm);
-            let f = self.slicer.parts.get(&(item, c.id)).copied().or(filament);
-            children.extend(self.node(&sub, c.id, &c.transform, item, f, depth + 1)?);
+            if self.path.iter().any(|(k, i)| *i == c.id && *k == sub) {
+                self.dropped += 1;
+                continue;
+            }
+            let assigned = self.slicer.parts.get(&(at.item, c.id));
+            let role = assigned.map_or(Role::Normal, |a| a.role);
+            let inner = At {
+                filament: assigned.and_then(|a| a.extruder).or(at.filament),
+                depth: at.depth + 1,
+                visible: at.visible && role == Role::Normal,
+                ..at
+            };
+            if let Some(n) = self.node(&sub, c.id, &c.transform, inner)? {
+                if let Some(a) = assigned {
+                    self.name_part(n, a);
+                }
+                children.push(n);
+            }
+        }
+        self.path.pop();
+        if !o.tris.is_empty() {
+            let top = at.depth == 0;
+            if let Some(mesh) = self.mesh_of_object(key, o, id, at.filament, top, None)? {
+                node.insert("mesh".into(), json!(mesh));
+                if at.visible {
+                    self.triangles += self.mesh_triangles[mesh];
+                }
+            }
+            // A slicer's modifiers, negative volumes and support parts that are ranges of the object's triangles:
+            // each a hidden node of its own.
+            let volumes = if top { self.slicer.volumes.get(&id) } else { None };
+            let unprinted = volumes.into_iter().flatten().filter(|v| v.a.role != Role::Normal);
+            for (k, v) in unprinted.enumerate() {
+                if self.nodes.len() >= MAX_NODES || k >= MAX_VOLUMES {
+                    self.dropped += 1;
+                    break;
+                }
+                let Some(mesh) = self.mesh_of_object(key, o, id, at.filament, top, Some((v.first, v.last)))? else {
+                    continue;
+                };
+                let name = v.a.name.as_deref().or(o.name.as_deref()).unwrap_or("volume");
+                self.nodes.push(json!({
+                    "name": format!("{name} ({})", v.a.role.label()),
+                    "mesh": mesh,
+                    "extensions": { "KHR_node_visibility": { "visible": false } },
+                    "extras": { "volumeType": v.a.role.key(), "triangles": [v.first, v.last] },
+                }));
+                self.hidden = true;
+                children.push(self.nodes.len() - 1);
+            }
         }
         if !children.is_empty() {
             node.insert("children".into(), json!(children));
-        }
-        if !o.tris.is_empty() {
-            let at = (key.to_owned(), id, filament, depth == 0);
-            let mesh = if let Some(&mesh) = self.mesh_of.get(&at) {
-                mesh
-            } else {
-                let mesh = self.mesh(parts.get(key).context("model file")?, o, id, filament, depth == 0)?;
-                self.mesh_of.insert(at, mesh);
-                mesh
-            };
-            if let Some(mesh) = mesh {
-                node.insert("mesh".into(), json!(mesh));
-                self.triangles += self.mesh_triangles[mesh];
-            }
         }
         self.nodes.push(Value::Object(node));
         Ok(Some(self.nodes.len() - 1))
     }
 
+    /// Names node `n`, a part, as its slicer's settings do; one that isn't printed (a modifier, negative volume or
+    /// support part) is hidden, and its name says what it is.
+    fn name_part(&mut self, n: usize, a: &Assigned) {
+        let node = &mut self.nodes[n];
+        let name = a
+            .name
+            .clone()
+            .or_else(|| node.get("name").and_then(Value::as_str).map(str::to_owned));
+        if a.role == Role::Normal {
+            if let Some(name) = name {
+                node["name"] = json!(name);
+            }
+            return;
+        }
+        node["name"] = json!(format!("{} ({})", name.as_deref().unwrap_or("part"), a.role.label()));
+        node["extensions"] = json!({ "KHR_node_visibility": { "visible": false } });
+        node["extras"]["volumeType"] = json!(a.role.key());
+        self.hidden = true;
+    }
+
+    /// [`Emit::mesh`], made once for each way it's asked for.
+    fn mesh_of_object(
+        &mut self,
+        key: &str,
+        o: &Object,
+        id: u32,
+        filament: Option<usize>,
+        top: bool,
+        range: Option<(u32, u32)>,
+    ) -> Result<Option<usize>> {
+        let at = (key.to_owned(), id, filament, top, range);
+        if let Some(&mesh) = self.mesh_of.get(&at) {
+            return Ok(mesh);
+        }
+        let part = self.parts.get(key).context("model file")?;
+        let mesh = self.mesh(part, o, id, filament, top, range)?;
+        self.mesh_of.insert(at, mesh);
+        Ok(mesh)
+    }
+
     /// Object `id`'s triangles, in its own space, as a mesh with a primitive per look; `top` when it is a build
-    /// item's own object, which slicers' volumes divide.
-    fn mesh(&mut self, part: &Part, o: &Object, id: u32, filament: Option<usize>, top: bool) -> Result<Option<usize>> {
-        let volumes = if top { self.slicer.volumes.get(&id) } else { None };
+    /// item's own object, which slicers' volumes divide. With `range`, only those triangles (a volume that isn't
+    /// printed); without, every triangle but those of such volumes.
+    ///
+    /// Corners share a vertex wherever the object's triangles do, unless their texture coordinates or colors
+    /// differ. There are no normals: printed models are faceted, which glTF clients shade flat.
+    fn mesh(
+        &mut self,
+        part: &Part,
+        o: &Object,
+        id: u32,
+        filament: Option<usize>,
+        top: bool,
+        range: Option<(u32, u32)>,
+    ) -> Result<Option<usize>> {
+        let volumes = if top { self.slicer.volumes.get(&id) } else { None }.map_or(&[][..], Vec::as_slice);
         let mut prims: Vec<Prim> = Vec::new();
-        let mut prim_of: HashMap<usize, usize> = HashMap::new();
+        // Each material's primitive.
+        let mut prim_of: Vec<u32> = Vec::new();
+        let mut slots = vec![
+            Slot {
+                prim: u32::MAX,
+                index: 0,
+                attr: 0
+            };
+            o.verts.len()
+        ];
+        // A vertex used again in another primitive, or with other texture coordinates or colors.
+        let mut more: HashMap<(u64, u64), u32, Fast> = HashMap::default();
+        let (first, last) = range.map_or((0, o.tris.len()), |(a, b)| {
+            (a as usize, (b as usize).saturating_add(1).min(o.tris.len()))
+        });
         let mut count = 0;
-        for (i, t) in o.tris.iter().enumerate() {
-            ensure!(self.built < MAX_TRIANGLES, "too many triangles to convert");
+        for (i, t) in o.tris.iter().enumerate().take(last).skip(first) {
+            ensure!(
+                self.built < self.limit,
+                "too many triangles to convert (more than {})",
+                self.limit
+            );
             let [Some(a), Some(b), Some(c)] = t.v.map(|k| o.verts.get(k as usize)) else {
                 continue;
             };
-            let i = u32::try_from(i).unwrap_or(u32::MAX);
-            let volume = volumes.and_then(|vs| vs.iter().find(|v| (v.0..=v.1).contains(&i)).map(|v| v.2));
+            let volume = volume_of(volumes, u32::try_from(i).unwrap_or(u32::MAX));
+            if range.is_none() && volume.is_some_and(|v| v.a.role != Role::Normal) {
+                continue;
+            }
             let filament = if t.paint > 0 {
                 Some(usize::from(t.paint))
             } else {
-                volume.or(filament)
+                volume.and_then(|v| v.a.extruder).or(filament)
             };
             let (look, uvs, colors) = match filament {
                 Some(n) => {
@@ -515,28 +778,53 @@ impl Emit<'_> {
                 self.order.push(look);
                 self.order.len() - 1
             });
-            let pi = *prim_of.entry(material).or_insert_with(|| {
+            if prim_of.len() <= material {
+                prim_of.resize(material + 1, u32::MAX);
+            }
+            if prim_of[material] == u32::MAX {
+                prim_of[material] = u32::try_from(prims.len())?;
                 prims.push(Prim {
                     material,
                     ..Prim::default()
                 });
-                prims.len() - 1
-            });
-            let p = &mut prims[pi];
+            }
+            let pi = prim_of[material];
+            let p = &mut prims[pi as usize];
             let pos = [*a, *b, *c];
-            let n = face_normal(pos[0], pos[1], pos[2]);
             for k in 0..3 {
-                p.indices.push(u32::try_from(p.positions.len()).unwrap_or(u32::MAX));
-                p.positions.push(pos[k]);
-                p.normals.push(n);
-                if let Some(uv) = &uvs {
-                    p.uvs.push([uv[k][0], 1.0 - uv[k][1]]);
-                }
-                if let Some(cs) = &colors {
-                    let c = cs[k];
-                    let [r, g, b] = [c[0], c[1], c[2]].map(|v| srgb_to_linear(f32::from(v) / 255.0));
-                    p.colors.push([r, g, b, f32::from(c[3]) / 255.0]);
-                }
+                let attr = match (&uvs, &colors) {
+                    (Some(uv), _) => u64::from(uv[k][0].to_bits()) | u64::from(uv[k][1].to_bits()) << 32,
+                    (_, Some(cs)) => u64::from(u32::from_le_bytes(cs[k])),
+                    _ => 0,
+                };
+                let v = t.v[k] as usize;
+                let slot = slots[v];
+                let found = if slot.prim == pi && slot.attr == attr {
+                    Some(slot.index)
+                } else if slot.prim == u32::MAX {
+                    None
+                } else {
+                    more.get(&((v as u64) << 32 | u64::from(pi), attr)).copied()
+                };
+                let index = if let Some(index) = found {
+                    index
+                } else {
+                    let index = u32::try_from(p.positions.len())?;
+                    p.positions.push(pos[k]);
+                    if let Some(uv) = &uvs {
+                        p.uvs.push([uv[k][0], 1.0 - uv[k][1]]);
+                    }
+                    if let Some(cs) = &colors {
+                        p.colors.push(linear(cs[k]));
+                    }
+                    if slot.prim == u32::MAX {
+                        slots[v] = Slot { prim: pi, index, attr };
+                    } else {
+                        more.insert(((v as u64) << 32 | u64::from(pi), attr), index);
+                    }
+                    index
+                };
+                p.indices.push(index);
             }
             count += 1;
             self.built += 1;
@@ -589,6 +877,8 @@ impl Emit<'_> {
                     (Look::Vertex, None, Some(c.map(|c| c.unwrap_or(gray))))
                 }
             }
+            // Mixed or layered into the others when read.
+            Group::Composite { .. } | Group::Multi { .. } => plain,
             Group::Coords { texture, uvs } => {
                 let (Some(path), [Some(a), Some(b), Some(c)]) =
                     (part.textures.get(texture), at.map(|i| uvs.get(i).copied()))
@@ -683,7 +973,7 @@ fn root_target(rels: &str) -> Option<String> {
     }
 }
 
-fn parse_part(r: impl Read, triangles: &mut usize) -> Result<Part> {
+fn parse_part(r: impl Read, triangles: &mut usize, limit: usize) -> Result<Part> {
     let mut reader = quick_xml::Reader::from_reader(BufReader::new(r));
     let mut buf = Vec::new();
     let mut part = Part::default();
@@ -716,7 +1006,13 @@ fn parse_part(r: impl Read, triangles: &mut usize) -> Result<Part> {
                             part.objects.insert(id, o);
                         }
                     }
-                    b"basematerials" | b"colorgroup" | b"texture2dgroup" => group = None,
+                    b"basematerials"
+                    | b"colorgroup"
+                    | b"texture2dgroup"
+                    | b"compositematerials"
+                    | b"multiproperties" => {
+                        group = None;
+                    }
                     b"pbmetallicdisplayproperties"
                     | b"pbspeculardisplayproperties"
                     | b"translucentdisplayproperties" => {
@@ -788,7 +1084,7 @@ fn parse_part(r: impl Read, triangles: &mut usize) -> Result<Part> {
                         _ => {}
                     });
                     *triangles += 1;
-                    ensure!(*triangles <= MAX_TRIANGLES, "too many triangles to preview");
+                    ensure!(*triangles <= limit, "too many triangles to preview (more than {limit})");
                     o.tris.push(t);
                 }
             }
@@ -827,6 +1123,57 @@ fn parse_part(r: impl Read, triangles: &mut usize) -> Result<Part> {
                 }
                 if empty {
                     group = None;
+                }
+            }
+            kind @ (b"compositematerials" | b"multiproperties") => {
+                group = attr(&e, b"id").and_then(|v| v.parse().ok());
+                let list = |k: &[u8]| attr(&e, k).unwrap_or_default();
+                let ids = |k: &[u8]| {
+                    list(k)
+                        .split_whitespace()
+                        .map(|w| w.parse().unwrap_or(u32::MAX))
+                        .collect()
+                };
+                if let Some(g) = group {
+                    let new = if kind == b"compositematerials" {
+                        if let Some(d) = attr(&e, b"displaypropertiesid").and_then(|v| v.parse().ok()) {
+                            part.group_display.insert(g, d);
+                        }
+                        Group::Composite {
+                            base: attr(&e, b"matid").and_then(|v| v.parse().ok()).unwrap_or(u32::MAX),
+                            indices: ids(b"matindices"),
+                            values: Vec::new(),
+                            starts: Vec::new(),
+                        }
+                    } else {
+                        Group::Multi {
+                            pids: ids(b"pids"),
+                            multiply: list(b"blendmethods")
+                                .split_whitespace()
+                                .map(|w| w == "multiply")
+                                .collect(),
+                            indices: Vec::new(),
+                            starts: Vec::new(),
+                        }
+                    };
+                    part.groups.insert(g, new);
+                }
+                if empty {
+                    group = None;
+                }
+            }
+            b"composite" => {
+                if let Some(Group::Composite { values, starts, .. }) = group.and_then(|g| part.groups.get_mut(&g)) {
+                    starts.push(values.len());
+                    let v = attr(&e, b"values").unwrap_or_default();
+                    values.extend(v.split_whitespace().map(|w| w.parse::<f32>().unwrap_or(0.0)));
+                }
+            }
+            b"multi" => {
+                if let Some(Group::Multi { indices, starts, .. }) = group.and_then(|g| part.groups.get_mut(&g)) {
+                    starts.push(indices.len());
+                    let v = attr(&e, b"pindices").unwrap_or_default();
+                    indices.extend(v.split_whitespace().map(|w| w.parse::<u32>().unwrap_or(0)));
                 }
             }
             name @ (b"base" | b"color") => {
@@ -921,21 +1268,167 @@ fn parse_part(r: impl Read, triangles: &mut usize) -> Result<Part> {
     if let Some((id, o)) = object {
         part.objects.insert(id, o);
     }
+    resolve(&mut part.groups);
     Ok(part)
+}
+
+/// Linear RGBA of an sRGB color.
+fn linear(c: [u8; 4]) -> [f32; 4] {
+    let [r, g, b] = [c[0], c[1], c[2]].map(|v| srgb_to_linear(f32::from(v) / 255.0));
+    [r, g, b, f32::from(c[3]) / 255.0]
+}
+
+/// An sRGB color of linear RGBA.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "clamped to 0..=1 first, so in 0..=255"
+)]
+fn srgb(c: [f32; 4]) -> [u8; 4] {
+    let encode = |v: f32| {
+        let v = if v.is_nan() { 0.0 } else { v.clamp(0.0, 1.0) };
+        if v <= 0.003_130_8 {
+            v * 12.92
+        } else {
+            1.055 * v.powf(1.0 / 2.4) - 0.055
+        }
+    };
+    let alpha = if c[3].is_nan() { 1.0 } else { c[3].clamp(0.0, 1.0) };
+    [encode(c[0]), encode(c[1]), encode(c[2]), alpha].map(|v| (v * 255.0).round() as u8)
+}
+
+/// Mixes composite materials into colors, then layers multiproperties into colors or, with a texture among their
+/// layers, into that texture's coordinates (the colors over it are lost).
+fn resolve(groups: &mut HashMap<u32, Group>) {
+    // Layers read of a multiproperties group: the materials extension expects a handful, and every entry is
+    // layered from all of them.
+    const MAX_LAYERS: usize = 16;
+    let composites: Vec<u32> = groups
+        .iter()
+        .filter(|(_, g)| matches!(g, Group::Composite { .. }))
+        .map(|(id, _)| *id)
+        .collect();
+    for id in composites {
+        let Some(Group::Composite {
+            base,
+            indices,
+            values,
+            starts,
+        }) = groups.remove(&id)
+        else {
+            continue;
+        };
+        let colors = match groups.get(&base) {
+            Some(Group::Colors(cs)) => cs.as_slice(),
+            _ => &[],
+        };
+        // Each composite: its base materials' linear colors, weighted by its proportions.
+        let mixed = (0..starts.len())
+            .map(|k| {
+                let end = starts.get(k + 1).copied().unwrap_or(values.len());
+                let (mut sum, mut total) = ([0.0f32; 4], 0.0f32);
+                for (j, &w) in values.get(starts[k]..end).unwrap_or_default().iter().enumerate() {
+                    let c = indices.get(j).and_then(|&i| colors.get(i as usize)).and_then(|e| e.0);
+                    let (Some(c), true) = (c, w.is_finite() && w > 0.0) else {
+                        continue;
+                    };
+                    for (s, l) in sum.iter_mut().zip(linear(c)) {
+                        *s += l * w;
+                    }
+                    total += w;
+                }
+                ((total > 0.0).then(|| srgb(sum.map(|s| s / total))), None)
+            })
+            .collect();
+        groups.insert(id, Group::Colors(mixed));
+    }
+
+    let multis: Vec<u32> = groups
+        .iter()
+        .filter(|(_, g)| matches!(g, Group::Multi { .. }))
+        .map(|(id, _)| *id)
+        .collect();
+    for id in multis {
+        let Some(Group::Multi {
+            mut pids,
+            multiply,
+            indices,
+            starts,
+        }) = groups.remove(&id)
+        else {
+            continue;
+        };
+        pids.truncate(MAX_LAYERS);
+        // Entry `k`'s index into layer `j`; 0 when it lists too few.
+        let index = |k: usize, j: usize| {
+            let end = starts.get(k + 1).copied().unwrap_or(indices.len());
+            let at = starts[k].saturating_add(j);
+            if at < end {
+                indices.get(at).map_or(0, |&i| i as usize)
+            } else {
+                0
+            }
+        };
+        let texture = pids.iter().enumerate().find_map(|(j, p)| match groups.get(p) {
+            Some(Group::Coords { texture, uvs }) => Some((j, *texture, uvs)),
+            _ => None,
+        });
+        let resolved = if let Some((j, texture, uvs)) = texture {
+            let uvs = (0..starts.len())
+                .map(|k| uvs.get(index(k, j)).copied().unwrap_or([0.0; 2]))
+                .collect();
+            Group::Coords { texture, uvs }
+        } else {
+            let colors = (0..starts.len())
+                .map(|k| {
+                    let mut out: Option<[f32; 4]> = None;
+                    for (j, p) in pids.iter().enumerate() {
+                        let Some(Group::Colors(cs)) = groups.get(p) else {
+                            continue;
+                        };
+                        let Some(c) = cs.get(index(k, j)).and_then(|e| e.0).map(linear) else {
+                            continue;
+                        };
+                        let times = j.checked_sub(1).and_then(|b| multiply.get(b)).copied().unwrap_or(false);
+                        out = Some(match out {
+                            None => c,
+                            Some(o) if times => [o[0] * c[0], o[1] * c[1], o[2] * c[2], o[3] * c[3]],
+                            // Mixed by the upper layer's alpha.
+                            Some(o) => {
+                                let a = c[3];
+                                [
+                                    o[0] * (1.0 - a) + c[0] * a,
+                                    o[1] * (1.0 - a) + c[1] * a,
+                                    o[2] * (1.0 - a) + c[2] * a,
+                                    a + o[3] * (1.0 - a),
+                                ]
+                            }
+                        });
+                    }
+                    (out.map(srgb), None)
+                })
+                .collect();
+            Group::Colors(colors)
+        };
+        groups.insert(id, resolved);
+    }
 }
 
 /// The filament most of a painted triangle prints in (0: the part's own). Slicers store the painting as a tree of
 /// subdivisions in hex, its nibbles read from the end: the low two bits of a node say how many sides it splits (none:
 /// a leaf; else into that many plus one), the high two a leaf's filament (3: the next nibble plus 3).
 fn paint_state(code: &[u8]) -> u8 {
-    fn walk(n: &[u8], pos: &mut usize, w: f32, area: &mut [f32; 19], depth: u32) -> Option<()> {
-        let code = *n.get(*pos)?;
+    fn hex(c: u8) -> Option<u8> {
+        char::from(c).to_digit(16).and_then(|d| u8::try_from(d).ok())
+    }
+    fn walk(n: &impl Fn(usize) -> Option<u8>, pos: &mut usize, w: f32, area: &mut [f32; 19], depth: u32) -> Option<()> {
+        let code = n(*pos)?;
         *pos += 1;
         let sides = code & 0b11;
         if sides == 0 {
             let state = if code >> 2 == 3 {
                 *pos += 1;
-                n.get(*pos - 1)? + 3
+                n(*pos - 1)? + 3
             } else {
                 code >> 2
             };
@@ -951,14 +1444,20 @@ fn paint_state(code: &[u8]) -> u8 {
         }
         Some(())
     }
-    let nibbles: Vec<u8> = code
-        .iter()
-        .rev()
-        .filter_map(|&c| char::from(c).to_digit(16))
-        .filter_map(|d| u8::try_from(d).ok())
-        .collect();
     let mut area = [0.0f32; 19];
-    walk(&nibbles, &mut 0, 1.0, &mut area, 0);
+    if code.iter().all(|&c| hex(c).is_some()) {
+        // Read in place, the usual case.
+        walk(
+            &|i| code.len().checked_sub(i + 1).and_then(|k| hex(code[k])),
+            &mut 0,
+            1.0,
+            &mut area,
+            0,
+        );
+    } else {
+        let nibbles: Vec<u8> = code.iter().rev().filter_map(|&c| hex(c)).collect();
+        walk(&|i| nibbles.get(i).copied(), &mut 0, 1.0, &mut area, 0);
+    }
     let mut best = 0;
     for (i, a) in area.iter().enumerate() {
         if *a > area[best] {
@@ -1010,14 +1509,19 @@ fn read_slicer(zip: &mut Zip<'_>, names: &HashMap<String, String>) -> Slicer {
             read_assignments(&xml, &mut s);
         }
     }
+    for list in s.volumes.values_mut() {
+        list.sort_by_key(|v| v.first);
+    }
     s
 }
 
-/// `<object id>` with `<metadata key="extruder" value>`, inside it Bambu's `<part id>` and Prusa's
-/// `<volume firstid lastid>`, each of which may name its own.
+/// `<object id>` with `<metadata key="extruder" value>`, inside it Bambu's `<part id subtype>` and Prusa's
+/// `<volume firstid lastid>`, each of which may name its own extruder, what it's for (`volume_type`, or the older
+/// `modifier`) and its name.
 fn read_assignments(xml: &str, s: &mut Slicer) {
     let mut reader = quick_xml::Reader::from_str(xml);
-    let (mut object, mut part, mut volume) = (None::<u32>, None::<u32>, None::<(u32, u32)>);
+    // The object, and the part (its id) or volume (its place in the object's list) being read.
+    let (mut object, mut part, mut volume) = (None::<u32>, None::<u32>, None::<usize>);
     loop {
         let (e, empty) = match reader.read_event() {
             Ok(Event::Start(e)) => (e, false),
@@ -1037,21 +1541,65 @@ fn read_assignments(xml: &str, s: &mut Slicer) {
         let id = |k: &[u8]| attr(&e, k).and_then(|v| v.parse::<u32>().ok());
         match e.local_name().as_ref() {
             b"object" if !empty => object = id(b"id"),
-            b"part" if !empty => part = id(b"id"),
-            b"volume" if !empty => volume = id(b"firstid").zip(id(b"lastid")),
-            b"metadata" if attr(&e, b"key").as_deref() == Some("extruder") => {
-                let (Some(o), Some(n)) = (object, attr(&e, b"value").and_then(|v| v.parse::<usize>().ok())) else {
+            b"part" => {
+                let (Some(o), Some(p)) = (object, id(b"id")) else {
                     continue;
                 };
-                if n == 0 {
-                    continue;
+                let a = s.parts.entry((o, p)).or_default();
+                if let Some(role) = attr(&e, b"subtype")
+                    .or_else(|| attr(&e, b"type"))
+                    .and_then(|v| Role::parse(&v))
+                {
+                    a.role = role;
                 }
-                if let Some(p) = part {
-                    s.parts.insert((o, p), n);
-                } else if let Some((a, b)) = volume {
-                    s.volumes.entry(o).or_default().push((a, b, n));
-                } else {
-                    s.objects.insert(o, n);
+                part = (!empty).then_some(p);
+            }
+            b"volume" => {
+                let (Some(o), Some((first, last))) = (object, id(b"firstid").zip(id(b"lastid"))) else {
+                    continue;
+                };
+                let list = s.volumes.entry(o).or_default();
+                list.push(SlicerVolume {
+                    first,
+                    last,
+                    a: Assigned::default(),
+                });
+                volume = (!empty).then_some(list.len() - 1);
+            }
+            b"metadata" => {
+                let (Some(o), Some(key), Some(value)) = (object, attr(&e, b"key"), attr(&e, b"value")) else {
+                    continue;
+                };
+                let a = match (part, volume) {
+                    (Some(p), _) => s.parts.get_mut(&(o, p)),
+                    (None, Some(v)) => s.volumes.get_mut(&o).and_then(|l| l.get_mut(v)).map(|v| &mut v.a),
+                    (None, None) => {
+                        if key == "extruder"
+                            && let Some(n) = value.trim().parse::<usize>().ok().filter(|&n| n > 0)
+                        {
+                            s.objects.insert(o, n);
+                        }
+                        continue;
+                    }
+                };
+                let Some(a) = a else {
+                    continue;
+                };
+                match key.as_str() {
+                    "extruder" => {
+                        if let Some(n) = value.trim().parse::<usize>().ok().filter(|&n| n > 0) {
+                            a.extruder = Some(n);
+                        }
+                    }
+                    "volume_type" | "subtype" => {
+                        if let Some(role) = Role::parse(&value) {
+                            a.role = role;
+                        }
+                    }
+                    // Older projects only mark modifiers.
+                    "modifier" if value.trim() == "1" && a.role == Role::Normal => a.role = Role::Modifier,
+                    "name" if !value.is_empty() => a.name = Some(value),
+                    _ => {}
                 }
             }
             _ => {}
@@ -1105,6 +1653,8 @@ mod tests {
         // Split on three sides into four: filament 1 twice, 2 once, unpainted once.
         assert_eq!(paint_state(b"08443"), 1);
         assert_eq!(paint_state(b""), 0);
+        // Anything but hex digits is skipped.
+        assert_eq!(paint_state(b"0 C"), 3);
     }
 
     #[test]
@@ -1126,6 +1676,32 @@ mod tests {
         assert_eq!(colors(&mesh), [[255, 0, 0], [0, 0, 255]]);
         // The first item moved 100 mm along x.
         assert!(mesh.prims[0].positions.iter().any(|p| p[0] >= 0.1));
+    }
+
+    #[test]
+    fn the_triangle_limit_refuses_bigger_models() {
+        let model = format!(
+            r#"<?xml version="1.0"?><model unit="millimeter" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">
+            <resources><object id="2" type="model"><mesh>{QUAD}<triangles><triangle v1="0" v2="1" v3="2"/><triangle v1="0" v2="2" v3="3"/></triangles></mesh></object></resources>
+            <build><item objectid="2"/><item objectid="2" transform="1 0 0 0 1 0 0 0 1 100 0 0"/></build></model>"#
+        );
+        let f = zip_of(&[("_rels/.rels", RELS), ("3D/3dmodel.model", &model)]);
+        let bytes = std::fs::read(f.path()).unwrap();
+        let assets = crate::assets::Memory::new();
+        let read = |max_triangles| {
+            let keep = Keep {
+                max_triangles,
+                ..Keep::ALL
+            };
+            crate::formats::load_bytes(&bytes, "q.3mf", "3mf", &assets, keep)
+        };
+        // The file's two triangles are refused as they're parsed, under a limit of two.
+        let err = read(1).unwrap_err();
+        assert!(format!("{err:#}").contains("too many triangles"), "{err:#}");
+        // Drawn twice, they're four: the flat mesh refuses them under a limit of four.
+        let doc = read(2).unwrap();
+        assert!(doc.flatten(crate::document::Pose::Rest).is_err());
+        assert_eq!(flat(&read(4).unwrap()).triangles(), 4);
     }
 
     #[test]
@@ -1178,5 +1754,206 @@ mod tests {
         let doc = load(crate::formats::Input::file(f.path()), Keep::ALL).unwrap();
         // Volume 0 in extruder 2 (no color of its own: its filament's yellow); volume 1 in the object's extruder 1.
         assert_eq!(colors(&flat(&doc)), [[255, 255, 0], [0, 0, 255]]);
+    }
+
+    const CORE: &str = r#"<?xml version="1.0"?><model unit="millimeter" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02""#;
+
+    fn load_zip(files: &[(&str, &str)]) -> Document<'static> {
+        let f = zip_of(files);
+        load(crate::formats::Input::file(f.path()), Keep::ALL).unwrap()
+    }
+
+    /// The hidden nodes' names and `extras.volumeType`.
+    fn hidden(doc: &Document<'_>) -> Vec<(String, String)> {
+        let nodes = doc.json["nodes"].as_array().unwrap();
+        let mut out: Vec<(String, String)> = nodes
+            .iter()
+            .filter(|n| n["extensions"]["KHR_node_visibility"]["visible"] == false)
+            .map(|n| {
+                let s = |v: &Value| v.as_str().unwrap_or_default().to_owned();
+                (s(&n["name"]), s(&n["extras"]["volumeType"]))
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn slicer_parts_that_are_not_printed_are_hidden() {
+        let root = format!(
+            r#"{CORE} xmlns:p="http://schemas.microsoft.com/3dmanufacturing/production/2015/06"><resources><object id="9" type="model"><components>
+              <component p:path="/3D/Objects/object_1.model" objectid="1"/><component p:path="/3D/Objects/object_1.model" objectid="2"/>
+              <component p:path="/3D/Objects/object_1.model" objectid="3"/><component p:path="/3D/Objects/object_1.model" objectid="4"/>
+              <component p:path="/3D/Objects/object_1.model" objectid="5"/>
+            </components></object></resources><build><item objectid="9"/></build></model>"#
+        );
+        let one = format!(
+            r#"type="model"><mesh>{QUAD}<triangles><triangle v1="0" v2="1" v3="2"/></triangles></mesh></object>"#
+        );
+        let parts = format!(
+            r#"{CORE}><resources><object id="1" name="Body" {one}<object id="2" name="Cube" {one}<object id="3" {one}<object id="4" {one}<object id="5" {one}</resources></model>"#
+        );
+        let settings = r#"<?xml version="1.0"?><config><object id="9"><metadata key="name" value="Thing"/>
+            <part id="1" subtype="normal_part"><metadata key="name" value="Body"/></part>
+            <part id="2" subtype="modifier_part"><metadata key="name" value="Infill"/><metadata key="extruder" value="2"/></part>
+            <part id="3" subtype="negative_part"/>
+            <part id="4" subtype="support_blocker"><metadata key="name" value="No supports"/></part>
+            <part id="5" subtype="support_enforcer"/></object></config>"#;
+        let doc = load_zip(&[
+            ("_rels/.rels", RELS),
+            ("3D/3dmodel.model", &root),
+            ("3D/Objects/object_1.model", &parts),
+            ("Metadata/model_settings.config", settings),
+        ]);
+        // Only the printed part is drawn and counted.
+        assert_eq!(doc.facts["triangles"], 1);
+        assert_eq!(flat(&doc).triangles(), 1);
+        let want = [
+            ("Infill (modifier)", "modifier"),
+            ("No supports (support blocker)", "support_blocker"),
+            ("part (negative volume)", "negative_volume"),
+            ("part (support enforcer)", "support_enforcer"),
+        ];
+        assert_eq!(hidden(&doc), want.map(|(a, b)| (a.to_owned(), b.to_owned())));
+        assert!(
+            doc.json["extensionsUsed"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("KHR_node_visibility"))
+        );
+    }
+
+    #[test]
+    fn prusa_volume_types() {
+        let model = format!(
+            r#"{CORE}><resources><object id="1" name="Box" type="model"><mesh>{QUAD}<triangles>
+            <triangle v1="0" v2="1" v3="2"/><triangle v1="0" v2="2" v3="3"/><triangle v1="0" v2="1" v3="3"/><triangle v1="1" v2="2" v3="3"/>
+            </triangles></mesh></object></resources><build><item objectid="1"/></build></model>"#
+        );
+        let cfg = r#"<?xml version="1.0"?><config><object id="1" instances_count="1"><metadata type="object" key="name" value="Box"/>
+            <volume firstid="3" lastid="3"><metadata type="volume" key="modifier" value="1"/></volume>
+            <volume firstid="0" lastid="1"><metadata type="volume" key="volume_type" value="ModelPart"/></volume>
+            <volume firstid="2" lastid="2"><metadata type="volume" key="name" value="Hole"/><metadata type="volume" key="volume_type" value="NegativeVolume"/></volume>
+            </object></config>"#;
+        let doc = load_zip(&[("3D/3dmodel.model", &model), ("Metadata/Slic3r_PE_model.config", cfg)]);
+        assert_eq!(doc.facts["triangles"], 2);
+        assert_eq!(flat(&doc).triangles(), 2);
+        let want = [
+            ("Box (modifier)", "modifier"),
+            ("Hole (negative volume)", "negative_volume"),
+        ];
+        assert_eq!(hidden(&doc), want.map(|(a, b)| (a.to_owned(), b.to_owned())));
+    }
+
+    #[test]
+    fn composites_and_multiproperties_become_colors() {
+        let model = format!(
+            r##"{CORE}><resources>
+            <basematerials id="1"><base name="Red" displaycolor="#FF0000"/><base name="Blue" displaycolor="#0000FF"/></basematerials>
+            <compositematerials id="2" matid="1" matindices="0 1"><composite values="0.5 0.5"/><composite values="0 1"/></compositematerials>
+            <colorgroup id="3"><color color="#808080"/><color color="#00FF0080"/></colorgroup>
+            <multiproperties id="4" pids="1 3" blendmethods="multiply"><multi pindices="0 0"/></multiproperties>
+            <multiproperties id="5" pids="1 3"><multi pindices="0 1"/></multiproperties>
+            <object id="6" type="model"><mesh>{QUAD}<triangles>
+            <triangle v1="0" v2="1" v3="2" pid="2" p1="0"/><triangle v1="0" v2="2" v3="3" pid="2" p1="1"/>
+            <triangle v1="0" v2="1" v3="3" pid="4" p1="0"/><triangle v1="1" v2="2" v3="3" pid="5" p1="0"/>
+            </triangles></mesh></object></resources><build><item objectid="6"/></build></model>"##
+        );
+        let doc = load_zip(&[("3D/3dmodel.model", &model)]);
+        let got = colors(&flat(&doc));
+        // Half red and half blue mixed in linear light; all blue; red times mid gray; half-transparent green over red.
+        let want = [[188, 0, 188], [0, 0, 255], [128, 0, 0], [188, 188, 0]];
+        assert_eq!(got.len(), want.len(), "{got:?}");
+        for (g, w) in got.iter().zip(want) {
+            assert!(g.iter().zip(w).all(|(&g, w)| g.abs_diff(w) <= 3), "{got:?}");
+        }
+    }
+
+    #[test]
+    fn component_cycles_are_dropped() {
+        let model = format!(
+            r#"{CORE}><resources><object id="1" type="model"><mesh>{QUAD}<triangles><triangle v1="0" v2="1" v3="2"/></triangles></mesh></object>
+            <object id="2" type="model"><components><component objectid="1"/><component objectid="3"/><component objectid="2"/></components></object>
+            <object id="3" type="model"><components><component objectid="2"/><component objectid="1"/></components></object>
+            </resources><build><item objectid="2"/></build></model>"#
+        );
+        let doc = load_zip(&[("3D/3dmodel.model", &model)]);
+        // Object 1 under 2, and under 3 under 2; 2 inside itself and inside 3 left out.
+        assert_eq!(doc.facts["triangles"], 2);
+        assert_eq!(doc.json["asset"]["extras"]["source"]["droppedComponents"], 2);
+    }
+
+    /// Corners share a vertex unless their colors differ.
+    #[test]
+    fn vertices_are_shared() {
+        let model = format!(
+            r##"{CORE}><resources><colorgroup id="1"><color color="#FF0000"/><color color="#0000FF"/></colorgroup>
+            <object id="2" type="model"><mesh>{QUAD}<triangles><triangle v1="0" v2="1" v3="2"/><triangle v1="0" v2="2" v3="3"/>
+            <triangle v1="0" v2="1" v3="2" pid="1" p1="0" p2="0" p3="1"/><triangle v1="0" v2="2" v3="3" pid="1" p1="1" p2="0" p3="0"/>
+            </triangles></mesh></object></resources><build><item objectid="2"/></build></model>"##
+        );
+        let doc = load_zip(&[("3D/3dmodel.model", &model)]);
+        let mesh = flat(&doc);
+        let verts: Vec<usize> = mesh.prims.iter().map(|p| p.positions.len()).collect();
+        // A plain quad on four corners; a blended one whose corners 0 and 2 change color between its triangles.
+        assert_eq!(verts, [4, 6]);
+    }
+
+    /// A 3MF of `files`, in memory.
+    fn zip_bytes(files: &[(&str, &str)]) -> Vec<u8> {
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for (name, body) in files {
+            let stored = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+            zip.start_file(*name, stored).unwrap();
+            zip.write_all(body.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap().into_inner()
+    }
+
+    /// Run with `cargo test --release -- --ignored --nocapture measure_sharing`.
+    #[test]
+    #[ignore = "a measurement, not a check"]
+    #[allow(clippy::cast_precision_loss, reason = "small coordinates")]
+    fn measure_sharing() {
+        use std::fmt::Write as _;
+        let (w, h) = (1000u32, 500u32);
+        let mut model = String::from(
+            r##"<?xml version="1.0"?><model unit="millimeter" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"><resources><basematerials id="1"><base name="A" displaycolor="#FF0000"/><base name="B" displaycolor="#00FF00"/></basematerials><object id="2" type="model" pid="1" pindex="0"><mesh><vertices>"##,
+        );
+        for y in 0..=h {
+            for x in 0..=w {
+                let z = (x as f32 / 40.0).sin() * (y as f32 / 30.0).cos() * 5.0;
+                write!(model, r#"<vertex x="{x}" y="{y}" z="{z}"/>"#).unwrap();
+            }
+        }
+        model.push_str("</vertices><triangles>");
+        for y in 0..h {
+            for x in 0..w {
+                let a = y * (w + 1) + x;
+                let (b, c, d) = (a + 1, a + w + 2, a + w + 1);
+                // Bands of the second color, every 50 rows.
+                let p = if (y / 50) % 2 == 1 { r#" pid="1" p1="1""# } else { "" };
+                write!(
+                    model,
+                    r#"<triangle v1="{a}" v2="{b}" v3="{c}"{p}/><triangle v1="{a}" v2="{c}" v3="{d}"{p}/>"#
+                )
+                .unwrap();
+            }
+        }
+        model.push_str("</triangles></mesh></object></resources><build><item objectid=\"2\"/></build></model>");
+        let bytes = zip_bytes(&[("_rels/.rels", RELS), ("3D/3dmodel.model", &model)]);
+        let assets = crate::assets::Memory::new();
+        for _ in 0..3 {
+            let start = std::time::Instant::now();
+            let doc = crate::formats::load_bytes(&bytes, "q.3mf", "3mf", &assets, Keep::ALL).unwrap();
+            let load = start.elapsed();
+            let mesh = flat(&doc);
+            let verts: usize = mesh.prims.iter().map(|p| p.positions.len()).sum();
+            println!(
+                "{} triangles, {verts} vertices, load {load:?}, {} buffer bytes",
+                mesh.triangles(),
+                doc.buffer(0).map_or(0, |b| b.len())
+            );
+        }
     }
 }

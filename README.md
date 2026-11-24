@@ -20,17 +20,29 @@ Early. What exists today:
   GLB, with `files_in` as a fetch that stays inside the model's folder.
   `cargo run --example meshopt -- sample out.glb` writes a small test file.
 - **`formats`**: readers for STL (binary and ASCII), PLY, MagicaVoxel `.vox`, OBJ with MTL
-  materials and textures, FBX (binary and ASCII), 3DS, 3MF, USD (`.usda`, `.usdc`,
-  `.usdz`), SketchUp `.skp` (SketchUp 3 to the latest, without the SketchUp SDK) and glTF 2.0
+  materials and textures, FBX (binary and ASCII, line geometry drawn as lines), 3DS, 3MF, USD (`.usda`, `.usdc`,
+  `.usdz`, with basis, NURBS and Hermite curves and points), SketchUp `.skp` (SketchUp 3 to the latest, without the SketchUp SDK) and glTF 2.0
   (`.gltf`, `.glb`, meshopt- or Draco-compressed or not), and glTF 1.0 (with
-  `KHR_binary_glTF` and `KHR_materials_common`), upgraded to 2.0 as it's read.
+  `KHR_binary_glTF` and `KHR_materials_common`), upgraded to 2.0 as it's read, BVH
+  motion capture (the skeleton as nodes, the motion as one animation, no mesh), COLLADA
+  (`.dae`, and the `.zae` and `.kmz` archives that hold one, lines and line strips
+  included), VRM avatars and `.vrma` animations (VRM 0.x and 1.0, through the glTF reader),
+  OFF (text and binary), X3D and VRML97 (XML and classic, gzipped or not, line and point
+  sets, Extrusion, the 2D nodes and PROTO and EXTERNPROTO instances included) and DXF meshes, lines and points (3D faces, polyface and polygon meshes,
+  MESH entities, lines, points, 2D and 3D polylines with their arcs, circles, arcs, ellipses
+  and splines, and block inserts, text or binary).
   `formats::load` reads a file and `formats::load_bytes` a model already in memory; both
   dispatch on the extension and return a `document::Document`.
 - **`document`**: the common form, a glTF 2.0 document (its JSON and its buffers' bytes).
   glTF passes through untouched: nothing is decoded, and `Document::to_glb` writes the
   buffers back as they are, compression included, with images embedded. The other formats
   are converted into it. `Document::flatten(Pose)` derives a flat, posed triangle
-  `mesh::Mesh` (transforms, instances, skins and morphs baked in), and `Document::counts`
+  `mesh::Mesh` (transforms, instances, skins and morphs baked in). Skinned vertices are
+  skinned by default (`Pose::Rest`, or `Pose::Animation` at a time), blending every
+  `JOINTS_n`/`WEIGHTS_n` set; `Pose::Bind` leaves them as the file stores them, for a
+  renderer that skins on the GPU, and is quicker. `Document::read_floats` and
+  `Document::read_indices` read any accessor as floats or exact integers (sparse,
+  normalized, interleaved or meshopt-compressed alike), and `Document::counts`
   counts triangles, points and lines from the JSON alone. `Document::decode` rewrites it
   as plain glTF any reader takes: meshopt views and Draco primitives decoded, quantized
   attributes turned into floats, the scene graph, animation and materials untouched. A
@@ -39,12 +51,20 @@ Early. What exists today:
   With `Keep::image_bytes` off (as in `Keep::LIGHT`), textures are found but not read:
   `Document::images` gives a handle on each image that says where it is (a file, an archive
   entry, inside the model) and loads it on request, and `Document::embed_images` reads
-  them all.
-- **Conformance corpus**: 586 cases under `tests/corpus`, each a file and the GLB it must
+  them all (a 3DS bump map's image is read regardless, to tell a normal map from a height
+  map). Against hostile or runaway files, a load refuses a model of more than
+  `Keep::max_triangles` triangles (4 million by default, `mesh::MAX_TRIANGLES`), and
+  `Document::flatten` draws no more; raise it for big scans, as in
+  `Keep { max_triangles: 12_000_000, ..Keep::ALL }`. Points and lines (point clouds, wireframes,
+  curves) are drawn too, up to `Keep::max_points` of them (16 million by default,
+  `mesh::MAX_POINTS`); `Keep { lines_and_points: false, ..Keep::ALL }` leaves them out.
+  `Keep::threads` reads large OBJ files on several threads (`0` for one per core), with the
+  same result as one thread; it is `1`, one thread, by default.
+- **Conformance corpus**: 852 cases under `tests/corpus`, each a file and the GLB it must
   become. They cover every format above and the variants exporters really write: OBJ's face
   forms and MTL dialects, both PLY byte orders, every FBX version and axis system, and USD's
-  three encodings and its composition, glTF's accessor types, node hierarchy, skins and extensions, and files SketchUp itself
-  saved, from SketchUp 3 to 2026. Most are generated against the specifications; the rest
+  three encodings and its composition, glTF's accessor types, node hierarchy, skins and extensions, BVH's rotation orders and
+  damaged motion rows, and files SketchUp itself saved, from SketchUp 3 to 2026. Most are generated against the specifications; the rest
   are Blender 5.2 exports and SketchUp's own files. See [tests/corpus/README.md](tests/corpus/README.md). Every
   GLB the conformance tests write passes the Khronos glTF validator (`tools/validate`), which
   CI runs.
@@ -60,14 +80,28 @@ Early. What exists today:
   them. An FBX armature, a `UsdSkel` skeleton and a glTF skin all come out the same way.
   `Document::flatten_nodes` draws the mesh in a pose handed in (one `Trs` per node, from a
   retarget, say) rather than one played from the file.
-- **`mesh`**: the flat triangle-list model `flatten` produces (primitives, materials,
-  images), written out as a plain GLB by `mesh::to_glb`. A skinned primitive keeps each
-  vertex's most-weighted joint (`Prim::joints`), so the skin can be bound back to its bones.
+- **`mesh`**: the flat model `flatten` produces (primitives, materials, images), written out
+  as a plain GLB by `mesh::to_glb`. A primitive has triangles (`Prim::indices`), line
+  segments (`Prim::lines`, strips and loops opened into pairs) and points (`Prim::points`)
+  over one set of vertices, which carry positions,
+  normals, tangents (`Prim::tangents`, xyz and the bitangent sign), the UVs its color texture
+  reads (`Prim::uvs`, with `KHR_texture_transform` applied) and every other UV set the file
+  has (`Prim::uv_sets`, by `TEXCOORD` number, for lightmaps, masks and decals), and vertex
+  colors likewise (`Prim::colors` and `Prim::color_sets`); `to_glb` writes them all back. A
+  `Material` has base color, metallic-roughness, normal, occlusion and emissive textures and
+  factors, double-sidedness, alpha (blend from the color's alpha, or cut out at
+  `alpha_cutoff`) and `unlit`. Every texture reads `Prim::uvs`; one mapped through a different
+  UV set or transform than the color texture is left off rather than drawn wrong. A skinned
+  primitive keeps each
+  vertex's most-weighted joint (`Prim::joints`) and its four strongest joints and weights
+  (`Prim::skin_joints`, `Prim::skin_weights`), over the mesh's `skeleton` of bones; `to_glb`
+  writes them back as a glTF skin, so a skinned model survives the round trip.
 - **`assets`**: the `Assets` trait readers use to find and read referenced files (MTL
   libraries, textures, glTF buffers, USD layers) and turn texture bytes into embeddable
   images. `Folder` searches a pack's folder tree; `Memory` holds files by path, for models
-  loaded from memory. By default only PNG and JPEG embed; override `Assets::image` to convert
-  TGA, DDS, PSD and others.
+  loaded from memory. PNG and JPEG embed as they are; WebP, TGA, BMP, GIF, TIFF, PSD and DDS
+  textures are re-encoded as PNG, each behind its feature. Override `Assets::image` to convert
+  other formats.
 
 ### Cargo features
 
@@ -78,17 +112,29 @@ Early. What exists today:
 | `vox` | MagicaVoxel | none |
 | `obj` | OBJ + MTL | none |
 | `3ds` | 3DS | none |
-| `gltf` | glTF 2.0 + GLB, and glTF 1.0 | none |
-| `fbx` | FBX | `fbxcel`, `base64` |
+| `gltf` | glTF 2.0 + GLB, glTF 1.0, and VRM `.vrm`/`.vrma` | none |
+| `bvh` | BVH motion capture | none |
+| `off` | OFF | none |
+| `dxf` | DXF meshes, lines and points | none |
+| `fbx` | FBX | `base64`, `flate2` |
 | `3mf` | 3MF | `zip`, `quick-xml` |
 | `usd` | USD | `openusd`, `openusd-schemas`, `zip` |
+| `dae` | COLLADA `.dae`, `.zae` and `.kmz` | `zip`, `quick-xml` |
+| `x3d` | X3D and VRML97 (`.x3d`, `.x3dv`, `.wrl`, gzipped `.x3dz`, `.wrz`) | `quick-xml`, `flate2` |
 | `skp` | SketchUp `.skp` (through glTF, so it turns on `gltf`) | `flate2` |
 | `draco` | Draco-compressed glTF (KHR_draco_mesh_compression) | `draco-core` |
 | `webp` | WebP textures (EXT_texture_webp, `.webp` files), re-encoded as PNG for the flat mesh | `image-webp`, `flate2` |
+| `tga` | TGA textures (color-mapped, true-color and gray, raw or run-length), re-encoded as PNG | `flate2` |
+| `bmp` | BMP textures (1 to 32 bits, RLE4 and RLE8, bit-field masks), re-encoded as PNG | `flate2` |
+| `gif` | GIF textures (the first frame), re-encoded as PNG | `flate2` |
+| `tiff` | TIFF textures (strips or tiles; uncompressed, LZW, Deflate or PackBits; 1 to 16 bits), re-encoded as PNG | `flate2` |
+| `psd` | Photoshop `.psd` and `.psb` textures (the merged image, raw or RLE), re-encoded as PNG | `flate2` |
+| `dds` | DDS textures (BC1 to BC5 and uncompressed), re-encoded as PNG | `flate2` |
 | `fs` | Reading files: `formats::load`, `assets::Folder`, `gltf::files_in` | none |
 
-Every reader is on by default, and so are `fs` and `webp`. `minimal` is the six readers with no
-dependencies, plus `fs`, for `default-features = false, features = ["minimal"]`. Asking
+Every reader is on by default, and so are `fs`, `webp` and the six texture decoders. `minimal`
+is the nine readers with no dependencies, plus `fs`, for
+`default-features = false, features = ["minimal"]`. Asking
 `formats::load` for a format whose feature is off returns an error that names the feature.
 
 Without `fs` the file APIs don't exist, so a build that has no file system (such as

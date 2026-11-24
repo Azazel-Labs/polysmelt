@@ -17,7 +17,7 @@
   },
   "document": {
     "cameras": 2,
-    "lights": 3,
+    "lights": 4,
     "node_names": [
       "Persp",
       "Ortho",

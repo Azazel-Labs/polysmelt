@@ -1,0 +1,134 @@
+  0
+SECTION
+  2
+HEADER
+  9
+$ACADVER
+  1
+AC1027
+  9
+$INSUNITS
+ 70
+0
+  0
+ENDSEC
+  0
+SECTION
+  2
+BLOCKS
+  0
+BLOCK
+  8
+0
+  2
+Tri
+ 70
+0
+ 10
+1
+ 20
+0
+ 30
+0
+  3
+Tri
+  0
+3DFACE
+  8
+0
+ 10
+1
+ 20
+0
+ 30
+0
+ 11
+2
+ 21
+0
+ 31
+0
+ 12
+1
+ 22
+1
+ 32
+0
+  0
+ENDBLK
+  8
+0
+  0
+BLOCK
+  2
+Outer
+ 10
+0
+ 20
+0
+ 30
+0
+  0
+INSERT
+  2
+Tri
+ 10
+0
+ 20
+0
+ 30
+5
+  0
+INSERT
+  2
+Tri
+ 10
+0
+ 20
+0
+ 30
+9
+  0
+ENDBLK
+  0
+BLOCK
+  2
+Loop
+ 10
+0
+ 20
+0
+ 30
+0
+  0
+INSERT
+  2
+Tri
+  0
+INSERT
+  2
+Loop
+  0
+ENDBLK
+  0
+ENDSEC
+  0
+SECTION
+  2
+ENTITIES
+  0
+INSERT
+  2
+Outer
+  0
+INSERT
+  2
+Loop
+  0
+INSERT
+  2
+Missing
+  0
+ENDSEC
+  0
+EOF

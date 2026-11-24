@@ -1,7 +1,9 @@
 //! The typed rig views over real exporter output: Blender's two-bone armature as FBX and USD.
 #![cfg(feature = "fs")]
 
+#[cfg(any(feature = "fbx", feature = "usd", feature = "gltf"))]
 use polysmelt::document::Keep;
+#[cfg(any(feature = "fbx", feature = "usd", feature = "gltf"))]
 use polysmelt::formats;
 
 /// Blender's armature, the same from either exporter.
@@ -226,4 +228,86 @@ fn accessor_offset_to_the_buffer_end() {
         .rig()
         .unwrap();
     assert_eq!(rig.pose(Some(0), 1.0)[0].translation, [4.0, 5.0, 6.0]);
+}
+
+/// `Pose::Bind` gives a skinned mesh's vertices as stored and its skeleton as bound, which
+/// `Pose::Rest` matches while the nodes stand as they were bound; saved again, it reloads the
+/// same.
+#[test]
+#[cfg(feature = "gltf")]
+fn bind_pose_keeps_stored_vertices() {
+    use polysmelt::document::Pose;
+    use polysmelt::mesh::{Bone, Material, Mesh, Prim, to_glb};
+    let mut p = Prim::default();
+    for i in 0..6u8 {
+        let x = f32::from(i) * 0.5;
+        p.positions.extend([[x, 0.0, 0.0], [x, 1.0, 0.0], [x, 0.0, 1.0]]);
+        p.normals.extend([[0.0, 0.0, 1.0]; 3]);
+        let w = f32::from(i) / 5.0;
+        p.skin_joints.extend([[0, 1, 0, 0]; 3]);
+        p.skin_weights.extend([[1.0 - w, w, 0.0, 0.0]; 3]);
+    }
+    p.indices = (0..18).collect();
+    // A root bone turned a quarter about Z and moved, and a child along X from it.
+    let skeleton = vec![
+        Bone {
+            name: Some("root".into()),
+            parent: None,
+            node: 0,
+            matrix: [
+                0.0, 1.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 2.0, 3.0, 0.0, 1.0,
+            ],
+        },
+        Bone {
+            name: Some("tip".into()),
+            parent: Some(0),
+            node: 1,
+            matrix: [
+                0.0, 1.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 2.0, 5.5, 0.0, 1.0,
+            ],
+        },
+    ];
+    let mesh = Mesh {
+        prims: vec![p.clone()],
+        materials: vec![Material::plain("m", [1.0; 4])],
+        images: Vec::new(),
+        skeleton: skeleton.clone(),
+    };
+    let assets = polysmelt::assets::Memory::new();
+    let flat = |glb: &[u8], pose| {
+        let doc = formats::load_bytes(glb, "s.glb", "glb", &assets, Keep::ALL).unwrap();
+        doc.flatten(pose).unwrap().unwrap()
+    };
+    let glb = to_glb(&mesh).unwrap();
+    let bind = flat(&glb, Pose::Bind);
+    assert_eq!(bind.prims[0].positions, p.positions, "bind moves no vertex");
+    assert_eq!(bind.prims[0].normals, p.normals);
+    assert_eq!(bind.skeleton.len(), 2);
+    for (got, want) in bind.skeleton.iter().zip(&skeleton) {
+        for (g, w) in got.matrix.iter().zip(&want.matrix) {
+            assert!(
+                (g - w).abs() < 1e-6,
+                "bone {:?}: {:?} vs {:?}",
+                got.name,
+                got.matrix,
+                want.matrix
+            );
+        }
+    }
+    let rest = flat(&glb, Pose::Rest);
+    for (r, b) in rest.prims[0].positions.iter().zip(&bind.prims[0].positions) {
+        assert!(
+            r.iter().zip(b).all(|(r, b)| (r - b).abs() < 1e-5),
+            "rest {r:?} vs bind {b:?}"
+        );
+    }
+    assert_eq!(rest.prims[0].skin_joints, bind.prims[0].skin_joints);
+    assert_eq!(rest.prims[0].skin_weights, bind.prims[0].skin_weights);
+    let again = flat(&to_glb(&bind).unwrap(), Pose::Bind);
+    assert_eq!(again.prims[0].positions, p.positions);
+    for (got, want) in again.skeleton.iter().zip(&skeleton) {
+        for (g, w) in got.matrix.iter().zip(&want.matrix) {
+            assert!((g - w).abs() < 1e-5);
+        }
+    }
 }

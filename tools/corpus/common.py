@@ -69,6 +69,26 @@ def webp(rgb, size=2):
     return out.getvalue()
 
 
+def pil_image(rgb, fmt, size=2, mode="RGB", **options):
+    """A solid-color image in a format Pillow writes (TGA, BMP, GIF, TIFF, DDS), with its save options."""
+    import io
+
+    from PIL import Image
+    out = io.BytesIO()
+    image = Image.new("RGB", (size, size), tuple(rgb))
+    image = image.convert(mode) if mode != "RGB" else image
+    image.save(out, fmt, **options)
+    return out.getvalue()
+
+
+def psd(rgb, size=2):
+    """A solid-color RGB Photoshop document: its merged image as raw planes, no layers."""
+    head = b"8BPS" + struct.pack(">H6xHIIHH", 1, 3, size, size, 8, 3)
+    sections = struct.pack(">III", 0, 0, 0)
+    planes = b"".join(bytes([c]) * (size * size) for c in rgb)
+    return head + sections + struct.pack(">H", 0) + planes
+
+
 def srgb_to_linear(c):
     return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
 

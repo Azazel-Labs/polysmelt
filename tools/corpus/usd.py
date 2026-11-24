@@ -641,7 +641,125 @@ write("points_and_curves_only", layer(prim("Xform", "Root", prim("Points", "Clou
                                            prim("BasisCurves", "Hair", "int[] curveVertexCounts = [4]",
                                                 f"point3f[] points = {v(cube_points()[:4])}",
                                                 'uniform token type = "linear"'))),
-      "points and curves, nothing a mesh reader draws", {"no_mesh": True}, measured=False)
+      "points and a linear curve, drawn as points and the curve's segments",
+      {"triangles": 0, "points": 8, "lines": 3, "bounds": {"min": [0, 0, 0], "max": [1, 1, 1]}}, measured=False)
+
+# Curves are drawn as lines and points as points; their expectations are worked out here, as pxr draws neither.
+write("curves_linear_periodic_colored", layer(prim("Xform", "Root", prim(
+    "BasisCurves", "Loops", "int[] curveVertexCounts = [3, 2]",
+    f"point3f[] points = {v([(0, 0, 0), (1, 0, 0), (1, 1, 0), (2, 0, 0), (2, 1, 0)])}",
+    'uniform token type = "linear"', 'uniform token wrap = "periodic"',
+    'color3f[] primvars:displayColor = [(1, 0, 0), (0, 0, 1)] (\n    interpolation = "uniform"\n)'))),
+      "periodic linear curves close (a curve of two points is one segment), colored per curve",
+      {"triangles": 0, "lines": 4, "vertices": 5, "colors": True, "colors_include": [[1, 0, 0, 1], [0, 0, 1, 1]],
+       "materials": [{"color": [1, 1, 1, 1]}]}, measured=False)
+
+# A uniform cubic B-spline of five points is two segments, each sampled at eight steps: it starts at
+# (P0 + 4 P1 + P2) / 6 and ends at (P2 + 4 P3 + P4) / 6, its x linear in t, its y between 1/3 and 2/3.
+# Varying colors are one per segment end, three here.
+write("curves_cubic_bspline_varying_colors", layer(prim("Xform", "Root", prim(
+    "BasisCurves", "Wave", "int[] curveVertexCounts = [5]",
+    f"point3f[] points = {v([(0, 0, 0), (1, 1, 0), (2, 0, 0), (3, 1, 0), (4, 0, 0)])}",
+    'uniform token type = "cubic"', 'uniform token basis = "bspline"',
+    'float[] widths = [0.1] (\n    interpolation = "constant"\n)',
+    'color3f[] primvars:displayColor = [(1, 0, 0), (0, 1, 0), (0, 0, 1)] (\n    interpolation = "varying"\n)'))),
+      "a cubic B-spline drawn where it lies, sampled at eight steps a segment, with varying colors",
+      {"triangles": 0, "lines": 16, "vertices": 17,
+       "bounds": {"min": [1, r(1 / 3), 0], "max": [3, r(2 / 3), 0]},
+       "positions_include": [[1, r(2 / 3), 0], [2, r(1 / 3), 0], [3, r(2 / 3), 0]],
+       "colors": True, "colors_include": [[1, 0, 0, 1], [0, 1, 0, 1], [0, 0, 1, 1]]}, measured=False)
+
+# A cubic Bezier segment: its middle is (P0 + 3 P1 + 3 P2 + P3) / 8. A pinned Catmull-Rom curve of three
+# evenly spaced points on a line runs from its first point to its last: two segments.
+write("curves_cubic_bezier_and_pinned_catmull_rom", layer(prim("Xform", "Root", prim(
+    "BasisCurves", "Arch", "int[] curveVertexCounts = [4]",
+    f"point3f[] points = {v([(0, 0, 0), (0, 1, 0), (1, 1, 0), (1, 0, 0)])}",
+    'uniform token type = "cubic"', 'uniform token basis = "bezier"',
+    'color3f[] primvars:displayColor = [(0, 1, 0)]'), prim(
+    "BasisCurves", "Rail", "int[] curveVertexCounts = [3]",
+    f"point3f[] points = {v([(0, 0, 1), (1, 0, 1), (2, 0, 1)])}",
+    'uniform token type = "cubic"', 'uniform token basis = "catmullRom"', 'uniform token wrap = "pinned"'))),
+      "a cubic Bezier curve and a pinned Catmull-Rom curve, sampled at eight steps a segment",
+      {"triangles": 0, "lines": 24, "primitives": 2, "colors": False,
+       "bounds": {"min": [0, 0, 0], "max": [2, 0.75, 1]},
+       "positions_include": [[0.5, 0.75, 0], [0, 0, 1], [1, 0, 1], [2, 0, 1]],
+       "materials": [{"color": [0, 1, 0, 1]}]}, measured=False)
+
+write("points_colored_hidden_curves", layer(prim("Xform", "Root", prim(
+    "Points", "Cloud", f"point3f[] points = {v([(0, 0, 0), (1, 0, 0), (0, 2, 0)])}",
+    'color3f[] primvars:displayColor = [(1, 0, 0), (0, 1, 0), (0, 0, 1)] (\n    interpolation = "vertex"\n)'),
+    prim("Points", "Guide", f"point3f[] points = {v([(9, 9, 9)])}", 'uniform token purpose = "guide"'),
+    prim("BasisCurves", "Hidden", "int[] curveVertexCounts = [2]", f"point3f[] points = {v([(0, 0, 0), (9, 0, 0)])}",
+         'uniform token type = "linear"', 'token visibility = "invisible"'))),
+      "points colored per point; a guide's points and an invisible curve aren't drawn",
+      {"triangles": 0, "points": 3, "lines": 0, "bounds": {"min": [0, 0, 0], "max": [1, 2, 0]}, "colors": True,
+       "colors_include": [[1, 0, 0, 1], [0, 1, 0, 1], [0, 0, 1, 1]]}, measured=False)
+
+
+def hermite(points, tangents, steps=8):
+    """A Hermite curve's points at `steps` a segment, each segment from a point to the next, leaving each along
+    its tangent."""
+    out = []
+    for seg in range(len(points) - 1):
+        for j in range(steps + 1 if seg == len(points) - 2 else steps):
+            t = j / steps
+            h = (2 * t ** 3 - 3 * t ** 2 + 1, t ** 3 - 2 * t ** 2 + t, -2 * t ** 3 + 3 * t ** 2, t ** 3 - t ** 2)
+            ends = (points[seg], tangents[seg], points[seg + 1], tangents[seg + 1])
+            out.append([sum(w * e[k] for w, e in zip(h, ends)) for k in range(3)])
+    return out
+
+
+# A quarter of the unit circle as a rational quadratic, its middle control point weighted by cos 45 degrees,
+# halfway at 45 degrees; and a polyline of order two whose range draws from 0.5 to 2.5 of its three knot spans,
+# each sampled at eight steps. Written as a crate, for its double-precision knots and ranges.
+S2 = math.sqrt(0.5)
+write("curves_nurbs_rational_and_ranged", layer(prim("Xform", "Root", prim(
+    "NurbsCurves", "Arc", "int[] curveVertexCounts = [3]",
+    f"point3f[] points = {v([(1, 0, 0), (1, 1, 0), (0, 1, 0)])}", "int[] order = [3]",
+    "double[] knots = [0, 0, 0, 1, 1, 1]", f"double[] pointWeights = [1, {S2!r}, 1]",
+    'color3f[] primvars:displayColor = [(1, 0, 0)]'), prim(
+    "NurbsCurves", "Rail", "int[] curveVertexCounts = [4]",
+    f"point3f[] points = {v([(0, 0, 1), (1, 0, 1), (2, 0, 1), (3, 0, 1)])}", "int[] order = [2]",
+    "double[] knots = [0, 0, 1, 2, 3, 3]", "double2[] ranges = [(0.5, 2.5)]"))),
+      "NURBS curves sampled at eight steps a knot span: rational by their point weights, cut to their range",
+      {"triangles": 0, "lines": 32, "vertices": 34, "primitives": 2,
+       "bounds": {"min": [0, 0, 0], "max": [2.5, 1, 1]},
+       "positions_include": [[1, 0, 0], [r(S2), r(S2), 0], [0, 1, 0], [0.5, 0, 1], [1.5, 0, 1], [2.5, 0, 1]],
+       "materials": [{"color": [1, 0, 0, 1]}]}, enc="usdc", measured=False)
+
+# Two Hermite curves: three points rising and falling between them, and two along their chord, which is
+# straight. Colors per point run between the points'.
+WAVE = [(0, 0, 0), (1, 0, 0), (2, 0, 0)]
+WAVE_T = [(0, 4, 0), (0, 0, 0), (0, -4, 0)]
+CHORD = [(0, 0, 1), (1, 0, 1)]
+CHORD_T = [(1, 0, 0), (1, 0, 0)]
+drawn = hermite(WAVE, WAVE_T) + hermite(CHORD, CHORD_T)
+write("curves_hermite_vertex_colors", layer(prim("Xform", "Root", prim(
+    "HermiteCurves", "Waves", "int[] curveVertexCounts = [3, 2]", f"point3f[] points = {v(WAVE + CHORD)}",
+    f"vector3f[] tangents = {v(WAVE_T + CHORD_T)}",
+    'color3f[] primvars:displayColor = [(1, 0, 0), (0, 1, 0), (0, 0, 1), (1, 1, 0), (0, 1, 1)] '
+    '(\n    interpolation = "vertex"\n)'))),
+      "Hermite curves sampled at eight steps a segment, leaving each point along its tangent, colored per point",
+      {"triangles": 0, "lines": 24, "vertices": 26,
+       "bounds": {"min": [r(min(p[k] for p in drawn)) for k in range(3)],
+                  "max": [r(max(p[k] for p in drawn)) for k in range(3)]},
+       "positions_include": [[r(c) for c in drawn[i]] for i in (0, 2, 4, 8, 12, 16, 21)],
+       "colors": True, "colors_include": [[1, 0, 0, 1], [0, 1, 0, 1], [0, 0, 1, 1], [1, 1, 0, 1], [0, 1, 1, 1]]},
+      measured=False)
+
+# Knots that aren't as many as the points and the order, and tangents that aren't one a point: each curve is
+# drawn through its control points.
+write("curves_nurbs_hermite_through_points", layer(prim("Xform", "Root", prim(
+    "NurbsCurves", "Short", "int[] curveVertexCounts = [4]",
+    f"point3f[] points = {v([(0, 0, 0), (1, 1, 0), (2, 0, 0), (3, 1, 0)])}", "int[] order = [4]",
+    "double[] knots = [0, 0, 0, 0, 1, 1, 1]"), prim(
+    "HermiteCurves", "Bare", "int[] curveVertexCounts = [3]",
+    f"point3f[] points = {v([(0, 0, 2), (1, 0, 2), (1, 1, 2)])}", f"vector3f[] tangents = {v([(1, 0, 0)])}"))),
+      "a NURBS curve whose knots don't fit it and a Hermite curve short of tangents, drawn through their points",
+      {"triangles": 0, "lines": 5, "vertices": 7, "bounds": {"min": [0, 0, 0], "max": [3, 1, 2]},
+       "positions_include": [[0, 0, 0], [1, 1, 0], [2, 0, 0], [3, 1, 0], [0, 0, 2], [1, 0, 2], [1, 1, 2]]},
+      measured=False)
+
 write("empty_stage", layer(prim("Xform", "Root")), "an Xform and nothing else", {"no_mesh": True}, measured=False)
 write("material_library", layer(prim("Scope", "Root", preview_material("Mat", "color3f inputs:diffuseColor = (1, 0, 0)"))),
       "a layer holding only a material", {"no_mesh": True}, measured=False)

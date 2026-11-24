@@ -1,0 +1,15 @@
+HIERARCHY
+ROOT Hips
+{
+  OFFSET 3 90 -2
+  CHANNELS 2 Yposition Yrotation
+  End Site
+  {
+    OFFSET 0 10 0
+  }
+}
+MOTION
+Frames: 2
+Frame Time: 0.04
+88 0
+92.5 90

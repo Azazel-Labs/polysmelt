@@ -29,7 +29,7 @@ use serde_json::{Map, Value, json};
 use crate::gltf as container;
 use crate::images::{Refs, Source};
 use crate::material::{Full, Writer};
-use crate::mesh::{Image, Material, Mesh, Prim};
+use crate::mesh::{Bone, Image, MAX_POINTS, MAX_TRIANGLES, Material, Mesh, Prim, TRIANGLE_CEILING};
 use crate::num::usize_of;
 use crate::{Context as _, Result};
 
@@ -43,10 +43,19 @@ pub struct Document<'a> {
     /// Buffer `i`'s bytes, for each of the JSON's buffers.
     pub(crate) buffers: Vec<Blob<'a>>,
     /// Facts worth recording about the source: `triangles`, and per format `points`, `lines`,
-    /// `vertices`, `voxels`, `voxel_size`, `models`, `objects`, `colors`, `application`.
+    /// `vertices`, `voxels`, `voxel_size`, `models`, `objects`, `colors`, `application`, and for
+    /// motion capture `joints`, `channels`, `frames`, `frame_time` and `dropped_frames`.
     pub facts: Map<String, Value>,
     /// The images named but not read, by image index (see [`Document::images`]).
     pub(crate) refs: Refs,
+    /// The most triangles [`Document::flatten`] draws (see [`Document::set_max_triangles`]).
+    pub(crate) max_triangles: usize,
+    /// Whether [`Document::flatten`] draws points and lines (see
+    /// [`Document::set_lines_and_points`]).
+    pub(crate) lines_and_points: bool,
+    /// The most points and line segments [`Document::flatten`] draws (see
+    /// [`Document::set_max_points`]).
+    pub(crate) max_points: usize,
 }
 
 impl fmt::Debug for Document<'_> {
@@ -68,6 +77,11 @@ pub enum Pose {
     /// Animation `index` at `time` seconds: the channels it has override the rest pose; before
     /// its first key or after its last, the first or last value holds.
     Animation { index: usize, time: f32 },
+    /// As `Rest`, but skinned meshes as their files store them: in the pose they were bound in,
+    /// their vertices not moved by their joints, and the skeleton where the inverse bind matrices
+    /// put it. Joints and weights still come with them, to pose with your own skinning. Quicker
+    /// than `Rest` on skinned meshes, and the same wherever the nodes stand as they were bound.
+    Bind,
 }
 
 /// What a document's default scene draws, every instance counted, as the JSON declares it:
@@ -87,6 +101,7 @@ pub(crate) enum Blob<'a> {
     Bytes(Cow<'a, [u8]>),
     /// A stretch of a file, read as needed.
     #[cfg(feature = "fs")]
+    #[cfg_attr(not(feature = "gltf"), allow(dead_code, reason = "only the glTF reader makes one"))]
     File(FileSpan),
     /// Typed arrays a reader built, laid end to end.
     Parts(Parts),
@@ -123,6 +138,7 @@ const AHEAD: usize = 64 * 1024;
 #[cfg(feature = "fs")]
 impl FileSpan {
     /// `len` bytes of `file` from `base`; its cursor is at `base + at`.
+    #[cfg_attr(not(feature = "gltf"), allow(dead_code, reason = "only the glTF reader makes one"))]
     pub(crate) fn new(file: File, base: u64, len: u64, at: u64) -> Self {
         Self {
             file: Mutex::new(Cursor {
@@ -389,6 +405,9 @@ impl<'a> Document<'a> {
             buffers: Vec::new(),
             facts,
             refs: Refs::new(),
+            max_triangles: MAX_TRIANGLES,
+            lines_and_points: true,
+            max_points: MAX_POINTS,
         }
     }
 
@@ -400,7 +419,49 @@ impl<'a> Document<'a> {
             buffers: self.buffers.into_iter().map(Blob::into_owned).collect(),
             facts: self.facts,
             refs: self.refs,
+            max_triangles: self.max_triangles,
+            lines_and_points: self.lines_and_points,
+            max_points: self.max_points,
         }
+    }
+
+    /// The most triangles [`Document::flatten`] draws before it refuses: the load's
+    /// [`Keep::max_triangles`], or [`MAX_TRIANGLES`] for a document built otherwise.
+    #[must_use]
+    pub fn max_triangles(&self) -> usize {
+        self.max_triangles
+    }
+
+    /// Sets the most triangles [`Document::flatten`] draws before it refuses, as
+    /// [`Keep::max_triangles`] does for a load: values past [`TRIANGLE_CEILING`] are clamped.
+    pub fn set_max_triangles(&mut self, n: usize) {
+        self.max_triangles = n.min(TRIANGLE_CEILING);
+    }
+
+    /// Whether [`Document::flatten`] draws points and lines: the load's
+    /// [`Keep::lines_and_points`], or `true` for a document built otherwise.
+    #[must_use]
+    pub fn lines_and_points(&self) -> bool {
+        self.lines_and_points
+    }
+
+    /// Sets whether [`Document::flatten`] draws points and lines, as [`Keep::lines_and_points`]
+    /// does for a load.
+    pub fn set_lines_and_points(&mut self, on: bool) {
+        self.lines_and_points = on;
+    }
+
+    /// The most points and line segments [`Document::flatten`] draws before it refuses: the
+    /// load's [`Keep::max_points`], or [`MAX_POINTS`] for a document built otherwise.
+    #[must_use]
+    pub fn max_points(&self) -> usize {
+        self.max_points
+    }
+
+    /// Sets the most points and line segments [`Document::flatten`] draws before it refuses, as
+    /// [`Keep::max_points`] does for a load: values past [`TRIANGLE_CEILING`] are clamped.
+    pub fn set_max_points(&mut self, n: usize) {
+        self.max_points = n.min(TRIANGLE_CEILING);
     }
 
     /// Buffer `i`'s bytes, whole (borrowed when they are in memory in one piece).
@@ -600,32 +661,53 @@ impl<'a> Document<'a> {
         Ok((json, layout, Some(bin_len)))
     }
 
-    /// The document for a triangle mesh: one node drawing one mesh, a primitive per material,
-    /// its arrays moved into the document's buffer without a copy.
+    /// The document for a mesh: one node drawing one mesh, a primitive per material (and one for
+    /// the lines and one for the points of each, sharing its vertices),
+    /// its arrays moved into the document's buffer without a copy. Skinned primitives, when the
+    /// mesh has a skeleton, are a second mesh on a node with a skin: a node per bone, and
+    /// inverse bind matrices that bind the vertices where they are, so the document draws as the
+    /// mesh does and moves with its bones.
     #[must_use]
     pub fn from_mesh(mesh: Mesh, facts: Map<String, Value>) -> Document<'static> {
         let Mesh {
             prims,
             materials,
             images,
+            skeleton,
         } = mesh;
         let images = images.into_iter().map(Source::Image).collect();
-        Self::from_named(vec![(None, prims)], &materials, images, None, facts)
+        let (skinned, rigid): (Vec<Prim>, Vec<Prim>) = if skeleton.is_empty() {
+            (Vec::new(), prims)
+        } else {
+            prims.into_iter().partition(Prim::skinned)
+        };
+        let mut meshes = vec![(None, rigid)];
+        if !skinned.is_empty() {
+            meshes.push((None, skinned));
+        }
+        Self::from_named(meshes, &materials, images, None, facts, &skeleton)
     }
 
-    /// The document for named triangle meshes sharing `materials` and `images`: a node drawing
-    /// each, in order, skipping those with no triangles; `source` becomes the asset's
-    /// `extras.source`.
+    /// The document for named meshes sharing `materials` and `images`: a node drawing each, in
+    /// order, skipping those that draw nothing; `source` becomes the asset's
+    /// `extras.source`. A mesh whose primitives are all skinned is bound to `skeleton`, when
+    /// there is one.
     pub(crate) fn from_named(
         meshes: Vec<(Option<String>, Vec<Prim>)>,
         materials: &[Material],
         images: Vec<Source>,
         source: Option<Value>,
         facts: Map<String, Value>,
+        skeleton: &[Bone],
     ) -> Document<'static> {
         let mut b = Builder::default();
+        let rig = (!skeleton.is_empty() && meshes.iter().any(|(_, p)| !p.is_empty() && p.iter().all(Prim::skinned)))
+            .then(|| Rigging::new(skeleton, meshes.iter().flat_map(|(_, p)| p)));
         let (mut nodes, mut out) = (Vec::new(), Vec::new());
+        let mut skinned_node = None;
         for (name, prims) in meshes {
+            let skinned = !prims.is_empty() && prims.iter().all(Prim::skinned);
+            b.joints = rig.as_ref().filter(|_| skinned).map(|r| (r.offset, r.joints.len()));
             let Some(mut mesh) = b.mesh(prims, materials.len()) else {
                 continue;
             };
@@ -634,9 +716,14 @@ impl<'a> Document<'a> {
                 mesh["name"] = json!(name);
                 node["name"] = json!(name);
             }
+            if b.joints.is_some() {
+                node["skin"] = json!(0);
+                skinned_node = Some(nodes.len());
+            }
             out.push(mesh);
             nodes.push(node);
         }
+        b.joints = None;
         if out.is_empty() {
             return Document::empty(facts);
         }
@@ -644,16 +731,162 @@ impl<'a> Document<'a> {
         if let Some(source) = source {
             json.insert("asset".into(), json!({ "extras": { "source": source } }));
         }
+        let mut scene: Vec<usize> = (0..nodes.len()).collect();
+        if let (Some(rig), Some(_)) = (&rig, skinned_node) {
+            scene.extend(rig.write(&mut b, &mut nodes, &mut json));
+        }
         json.insert("scene".into(), json!(0));
-        json.insert(
-            "scenes".into(),
-            json!([{ "nodes": (0..nodes.len()).collect::<Vec<_>>() }]),
-        );
+        json.insert("scenes".into(), json!([{ "nodes": scene }]));
         json.insert("nodes".into(), Value::Array(nodes));
         json.insert("meshes".into(), Value::Array(out));
         b.materials(materials, images, &mut json);
         b.finish(json, facts)
     }
+}
+
+/// A skeleton as a skin's joints: the bones, after a root above them all when they have
+/// several roots or some vertex is bound to none (glTF wants a skin's joints to share a root,
+/// and every skinned vertex weighted).
+struct Rigging<'s> {
+    skeleton: &'s [Bone],
+    /// 1 when a root comes first, 0 otherwise: what's added to a bone's index for its joint.
+    offset: u32,
+    /// Each joint's world transform, as written: decomposed into TRS and composed back, so the
+    /// inverse bind matrices match what a reader composes, whatever shear was dropped.
+    joints: Vec<crate::flatten::M4>,
+    /// Each joint's local TRS.
+    locals: Vec<([f64; 3], [f64; 4], [f64; 3])>,
+}
+
+impl<'s> Rigging<'s> {
+    fn new<'p>(skeleton: &'s [Bone], prims: impl Iterator<Item = &'p Prim>) -> Self {
+        use crate::flatten::{IDENTITY, affine_inverse, decompose, mul, trs};
+        let roots = skeleton.iter().filter(|b| b.parent.is_none()).count();
+        let unbound = || {
+            prims.filter(|p| p.skinned()).any(|p| {
+                p.skin_weights
+                    .iter()
+                    .any(|w| w.iter().sum::<f32>().partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater))
+            })
+        };
+        let offset = u32::from(roots > 1 || unbound());
+        let world = |b: &Bone| b.matrix.map(f64::from);
+        let mut joints = Vec::with_capacity(skeleton.len() + 1);
+        let mut locals = Vec::with_capacity(skeleton.len() + 1);
+        if offset == 1 {
+            joints.push(IDENTITY);
+            locals.push(([0.0; 3], [0.0, 0.0, 0.0, 1.0], [1.0; 3]));
+        }
+        for (i, b) in skeleton.iter().enumerate() {
+            // A bone's parent comes before it; one that doesn't is taken as a root.
+            let parent = b.parent.filter(|&p| p < i);
+            let local = match parent {
+                Some(p) => affine_inverse(&world(&skeleton[p])).map_or_else(|| world(b), |inv| mul(&inv, &world(b))),
+                None => world(b),
+            };
+            let (t, q, s) = decompose(&local);
+            let above = match parent {
+                Some(p) => joints[p + offset as usize],
+                None => IDENTITY,
+            };
+            joints.push(mul(&above, &trs(t, q, s)));
+            locals.push((t, q, s));
+        }
+        Self {
+            skeleton,
+            offset,
+            joints,
+            locals,
+        }
+    }
+
+    /// Adds a node per joint after `nodes`, the skin, and its inverse bind matrices; gives the
+    /// root joints' nodes, for the scene.
+    fn write(&self, b: &mut Builder, nodes: &mut Vec<Value>, json: &mut Map<String, Value>) -> Vec<usize> {
+        use crate::flatten::{IDENTITY, affine_inverse};
+        let first = nodes.len();
+        let offset = self.offset as usize;
+        let mut roots = Vec::new();
+        let mut children = vec![Vec::new(); self.joints.len()];
+        for (i, bone) in self.skeleton.iter().enumerate() {
+            match bone.parent.filter(|&p| p < i) {
+                Some(p) => children[p + offset].push(first + i + offset),
+                None if offset == 1 => children[0].push(first + i + offset),
+                None => roots.push(first + i),
+            }
+        }
+        if offset == 1 {
+            roots.push(first);
+        }
+        for (j, ((t, q, s), kids)) in self.locals.iter().zip(&children).enumerate() {
+            let mut node = Map::new();
+            let name = match j.checked_sub(offset) {
+                Some(i) => self.skeleton[i].name.clone(),
+                None => Some("Skeleton".to_owned()),
+            };
+            if let Some(name) = name {
+                node.insert("name".into(), json!(name));
+            }
+            if !kids.is_empty() {
+                node.insert("children".into(), json!(kids));
+            }
+            let f = |v: &[f64]| v.iter().map(|&x| crate::num::f32_of(x)).collect::<Vec<f32>>();
+            if t.iter().any(|&x| x != 0.0) {
+                node.insert("translation".into(), json!(f(t)));
+            }
+            if q[..3].iter().any(|&x| x != 0.0) {
+                node.insert("rotation".into(), json!(f(q)));
+            }
+            // Written as f32, a scale that rounds to 1 is the default.
+            if f(s) != [1.0; 3] {
+                node.insert("scale".into(), json!(f(s)));
+            }
+            nodes.push(Value::Object(node));
+        }
+        let ibm: Vec<f32> = self
+            .joints
+            .iter()
+            .flat_map(|m| affine_inverse(m).unwrap_or(IDENTITY).map(crate::num::f32_of))
+            .collect();
+        let n = self.joints.len();
+        let ibm = b.accessor(Part::f32(ibm), 5126, n, "MAT4", None);
+        json.insert(
+            "skins".into(),
+            json!([{ "joints": (first..first + n).collect::<Vec<_>>(), "inverseBindMatrices": ibm }]),
+        );
+        roots
+    }
+}
+
+/// A skinned primitive's `JOINTS_0` and `WEIGHTS_0`, flattened: each bone index moved up by
+/// `offset` (past the root a skin may have first), weights summing to 1 in single precision,
+/// and a vertex no bone moves bound to the root, joint 0. A slot with no weight names joint 0,
+/// as glTF's validator wants.
+fn skin_attributes(joints: &[[u32; 4]], weights: &[[f32; 4]], offset: u32, count: usize) -> (Vec<u32>, Vec<f32>) {
+    let mut js = Vec::with_capacity(joints.len() * 4);
+    let mut ws = Vec::with_capacity(weights.len() * 4);
+    let last = u32::try_from(count.saturating_sub(1)).unwrap_or(u32::MAX);
+    for (j, w) in joints.iter().zip(weights) {
+        let mut w = w.map(|x| if x > 0.0 && x.is_finite() { x } else { 0.0 });
+        let mut j = j.map(|x| x.saturating_add(offset).min(last));
+        let sum: f32 = w.iter().sum();
+        if sum > 0.0 {
+            w = w.map(|x| x / sum);
+            // What rounding left over goes to the strongest.
+            let top = (0..4).fold(0, |a, k| if w[k] > w[a] { k } else { a });
+            w[top] += 1.0 - w.iter().sum::<f32>();
+        } else {
+            (j, w) = ([0; 4], [1.0, 0.0, 0.0, 0.0]);
+        }
+        for k in 0..4 {
+            if w[k] == 0.0 {
+                j[k] = 0;
+            }
+        }
+        js.extend_from_slice(&j);
+        ws.extend_from_slice(&w);
+    }
+    (js, ws)
 }
 
 /// Builds a document's one buffer from typed arrays, with a view and an accessor for each.
@@ -664,53 +897,150 @@ pub(crate) struct Builder {
     pub accessors: Vec<Value>,
     /// The images named but not read, by image index.
     pub refs: Refs,
+    /// While writing skinned primitives: what's added to a bone's index for its joint, and how
+    /// many joints the skin has.
+    pub joints: Option<(u32, usize)>,
 }
 
 impl Builder {
-    /// A primitive's JSON (attributes and indices, no material), its arrays moved into the
-    /// buffer; `None` when it has no triangles.
-    pub(crate) fn primitive(&mut self, p: Prim) -> Option<Value> {
+    /// A primitive's JSON (attributes and indices, no material) for its triangles, its arrays
+    /// moved into the buffer; `None` when it has no triangles. Its lines and points are left
+    /// out: [`Builder::primitives`] writes them too.
+    #[cfg_attr(
+        not(any(feature = "fbx", feature = "obj", feature = "ply", feature = "usd")),
+        allow(dead_code, reason = "only readers that build primitives one at a time use it")
+    )]
+    pub(crate) fn primitive(&mut self, mut p: Prim) -> Option<Value> {
         if p.indices.is_empty() {
             return None;
         }
+        p.lines = Vec::new();
+        p.points = Vec::new();
+        self.primitives(p).pop()
+    }
+
+    /// The JSON of a primitive's triangles, lines (mode 1) and points (mode 0), those it has, in
+    /// that order, on one set of vertex attributes they share, and no material: its arrays moved
+    /// into the buffer. Empty when it draws nothing.
+    pub(crate) fn primitives(&mut self, mut p: Prim) -> Vec<Value> {
+        if p.is_empty() {
+            return Vec::new();
+        }
         let n = p.positions.len();
+        let draws: [(u64, Vec<u32>); 3] = [
+            (4, std::mem::take(&mut p.indices)),
+            (1, std::mem::take(&mut p.lines)),
+            (0, std::mem::take(&mut p.points)),
+        ];
         let pos = self.positions(p.positions);
         let mut attributes = json!({ "POSITION": pos });
         // Without normals, glTF clients shade flat.
-        if p.normals.len() == n {
+        let has_normals = p.normals.len() == n;
+        if has_normals {
             let a = self.accessor(Part::f32(p.normals.into_flattened()), 5126, n, "VEC3", Some(34962));
             attributes["NORMAL"] = json!(a);
         }
-        let count = p.indices.len();
-        let indices = self.accessor(Part::u32(p.indices), 5125, count, "SCALAR", Some(34963));
-        if p.uvs.len() == n {
-            let a = self.accessor(Part::f32(p.uvs.into_flattened()), 5126, n, "VEC2", Some(34962));
-            attributes["TEXCOORD_0"] = json!(a);
+        // The index accessors next, as the buffer has always had them: (mode, accessor), an
+        // accessor for all but points on every vertex in order (a point cloud), which need none.
+        let draws: Vec<(u64, Option<usize>)> = draws
+            .into_iter()
+            .filter(|(_, idx)| !idx.is_empty())
+            .map(|(mode, idx)| {
+                let all = mode == 0 && idx.len() == n && idx.iter().enumerate().all(|(k, &i)| i as usize == k);
+                (mode, (!all).then(|| self.indices(idx, n)))
+            })
+            .collect();
+        // glTF wants tangents only beside normals, and unit length with a w of ±1.
+        if has_normals && p.tangents.len() == n {
+            let t: Vec<f32> = p
+                .tangents
+                .iter()
+                .flat_map(|t| {
+                    let len = (t[0] * t[0] + t[1] * t[1] + t[2] * t[2]).sqrt();
+                    let w = if t[3] < 0.0 { -1.0 } else { 1.0 };
+                    if len > 0.0 && len.is_finite() {
+                        [t[0] / len, t[1] / len, t[2] / len, w]
+                    } else {
+                        [1.0, 0.0, 0.0, w]
+                    }
+                })
+                .collect();
+            let a = self.accessor(Part::f32(t), 5126, n, "VEC4", Some(34962));
+            attributes["TANGENT"] = json!(a);
         }
-        if p.colors.len() == n {
-            let mut colors = p.colors.into_flattened();
+        // Sets are numbered from 0 with no gaps, as glTF requires: the color texture's
+        // coordinates first, which is the set the materials written here read, then the others
+        // in order.
+        let uvs = std::iter::once(p.uvs).chain(p.uv_sets).filter(|s| s.len() == n);
+        for (k, set) in uvs.enumerate() {
+            let a = self.accessor(Part::f32(set.into_flattened()), 5126, n, "VEC2", Some(34962));
+            attributes[format!("TEXCOORD_{k}")] = json!(a);
+        }
+        let colors = std::iter::once(p.colors).chain(p.color_sets).filter(|s| s.len() == n);
+        for (k, set) in colors.enumerate() {
+            let mut colors = set.into_flattened();
             for c in &mut colors {
                 *c = c.clamp(0.0, 1.0);
             }
             let a = self.accessor(Part::f32(colors), 5126, n, "VEC4", Some(34962));
-            attributes["COLOR_0"] = json!(a);
+            attributes[format!("COLOR_{k}")] = json!(a);
         }
-        Some(json!({ "attributes": attributes, "indices": indices }))
+        if let Some((offset, count)) = self.joints
+            && p.skin_joints.len() == n
+            && p.skin_weights.len() == n
+        {
+            let (joints, weights) = skin_attributes(&p.skin_joints, &p.skin_weights, offset, count);
+            let j = if count <= 256 {
+                let b = joints.iter().map(|&j| u8::try_from(j).unwrap_or(0)).collect();
+                self.accessor(Part::bytes(b), 5121, n, "VEC4", Some(34962))
+            } else {
+                let b = joints.iter().map(|&j| u16::try_from(j).unwrap_or(0)).collect();
+                self.accessor(Part::u16(b), 5123, n, "VEC4", Some(34962))
+            };
+            let w = self.accessor(Part::f32(weights), 5126, n, "VEC4", Some(34962));
+            attributes["JOINTS_0"] = json!(j);
+            attributes["WEIGHTS_0"] = json!(w);
+        }
+        let mut out = Vec::new();
+        for (mode, indices) in draws {
+            let mut prim = json!({ "attributes": attributes.clone() });
+            if let Some(i) = indices {
+                prim["indices"] = json!(i);
+            }
+            if mode != 4 {
+                prim["mode"] = json!(mode);
+            }
+            out.push(prim);
+        }
+        out
     }
 
-    /// A mesh of `prims`, each using its material (the last of `materials` when out of range);
-    /// `None` when none has triangles.
+    /// An index accessor for `idx`, on `n` vertices.
+    fn indices(&mut self, idx: Vec<u32>, n: usize) -> usize {
+        let count = idx.len();
+        // Two bytes an index when they'll do: under 65535 vertices, as glTF keeps the largest
+        // value of each type for restarting strips.
+        let narrow = (n < usize::from(u16::MAX))
+            .then(|| idx.iter().map(|&i| u16::try_from(i).ok()).collect::<Option<Vec<u16>>>())
+            .flatten();
+        match narrow {
+            Some(v) => self.accessor(Part::u16(v), 5123, count, "SCALAR", Some(34963)),
+            None => self.accessor(Part::u32(idx), 5125, count, "SCALAR", Some(34963)),
+        }
+    }
+
+    /// A mesh of `prims` (their triangles, lines and points), each using its material (the last
+    /// of `materials` when out of range); `None` when none draws anything.
     pub(crate) fn mesh(&mut self, prims: Vec<Prim>, materials: usize) -> Option<Value> {
         let last = materials.saturating_sub(1);
-        let primitives: Vec<Value> = prims
-            .into_iter()
-            .filter_map(|p| {
-                let material = p.material.min(last);
-                let mut prim = self.primitive(p)?;
+        let mut primitives = Vec::new();
+        for p in prims {
+            let material = p.material.min(last);
+            for mut prim in self.primitives(p) {
                 prim["material"] = json!(material);
-                Some(prim)
-            })
-            .collect();
+                primitives.push(prim);
+            }
+        }
         (!primitives.is_empty()).then(|| json!({ "primitives": primitives }))
     }
 
@@ -736,7 +1066,14 @@ impl Builder {
 
     /// A float accessor of `kind` (`SCALAR`, `VEC3`, `VEC4`, `MAT4`) with no target, for skins
     /// and animations; `bounds` adds the `min` and `max` an animation's times need.
-    #[cfg(any(feature = "fbx", feature = "usd", feature = "vox", feature = "3ds"))]
+    #[cfg(any(
+        feature = "fbx",
+        feature = "usd",
+        feature = "vox",
+        feature = "3ds",
+        feature = "bvh",
+        feature = "dae"
+    ))]
     pub(crate) fn floats(&mut self, v: Vec<f32>, kind: &str, bounds: bool) -> usize {
         let width = match kind {
             "VEC2" => 2,
@@ -831,6 +1168,9 @@ impl Builder {
             buffers,
             facts,
             refs: self.refs,
+            max_triangles: MAX_TRIANGLES,
+            lines_and_points: true,
+            max_points: MAX_POINTS,
         }
     }
 

@@ -143,7 +143,7 @@ impl<'a> Blocks<'a> {
 }
 
 /// Text up to and including the last line break.
-#[cfg(all(test, feature = "fs"))]
+#[cfg(any(feature = "bvh", all(test, feature = "fs")))]
 pub(crate) fn lines(data: &[u8]) -> Option<usize> {
     data.iter().rposition(|&b| b == b'\n').map(|i| i + 1)
 }
@@ -164,6 +164,97 @@ pub(crate) fn space(b: u8) -> bool {
 /// than a `u64` holds.
 #[inline]
 fn decimal(s: &[u8]) -> Option<(bool, u64, i32)> {
+    let (neg, m, e, len) = decimal_lead(s)?;
+    (len == s.len()).then_some((neg, m, e))
+}
+
+/// The run of decimal digits `s` starts with: its value (meaningless past 19 digits) and its
+/// length. Eight bytes are read at once where there are eight.
+#[inline]
+fn leading_digits(s: &[u8]) -> (u64, usize) {
+    let (mut v, mut n) = s.first_chunk::<8>().map_or((0, 0), |w| eight_digits(*w));
+    if n < 8 && s.len() >= 8 {
+        return (v, n);
+    }
+    while let Some(&c) = s.get(n) {
+        let d = c.wrapping_sub(b'0');
+        if d > 9 {
+            break;
+        }
+        v = v.wrapping_mul(10).wrapping_add(u64::from(d));
+        n += 1;
+    }
+    (v, n)
+}
+
+/// The run of decimal digits `s` starts with, a digit at a time: quicker for runs of a few, like
+/// a number's whole part or a face's index.
+#[inline]
+pub(crate) fn few_digits(s: &[u8]) -> (u64, usize) {
+    let mut v = 0u64;
+    let mut n = 0;
+    while let Some(&c) = s.get(n) {
+        let d = c.wrapping_sub(b'0');
+        if d > 9 {
+            break;
+        }
+        v = v.wrapping_mul(10).wrapping_add(u64::from(d));
+        n += 1;
+    }
+    (v, n)
+}
+
+/// The value of the digits that start `w` and how many there are, from all eight bytes at once:
+/// each byte's distance from `'0'` marks the first that isn't a digit, and three multiplies sum
+/// the digits before it.
+#[inline]
+fn eight_digits(w: [u8; 8]) -> (u64, usize) {
+    const LOW: u64 = 0x7F7F_7F7F_7F7F_7F7F;
+    const HIGH: u64 = 0x8080_8080_8080_8080;
+    let a = u64::from_le_bytes(w) ^ 0x3030_3030_3030_3030;
+    // A byte's top bit is set unless it was a digit: 10 or more (or top bit already set).
+    let over = (((a & LOW) + 0x7676_7676_7676_7676) | a) & HIGH;
+    let n = (over.trailing_zeros() / 8) as usize;
+    if n == 0 {
+        return (0, 0);
+    }
+    // The digits to the top, after zeros as leading digits; then pairs, fours and all eight.
+    let v = a << (8 * (8 - n));
+    let v = v.wrapping_mul(10).wrapping_add(v >> 8);
+    let pairs = 0x0000_00FF_0000_00FF;
+    let v = (v & pairs)
+        .wrapping_mul(100 + (1_000_000 << 32))
+        .wrapping_add(((v >> 16) & pairs).wrapping_mul(1 + (10_000 << 32)))
+        >> 32;
+    (v, n)
+}
+
+const POW10_U64: [u64; 20] = [
+    1,
+    10,
+    100,
+    1_000,
+    10_000,
+    100_000,
+    1_000_000,
+    10_000_000,
+    100_000_000,
+    1_000_000_000,
+    10_000_000_000,
+    100_000_000_000,
+    1_000_000_000_000,
+    10_000_000_000_000,
+    100_000_000_000_000,
+    1_000_000_000_000_000,
+    10_000_000_000_000_000,
+    100_000_000_000_000_000,
+    1_000_000_000_000_000_000,
+    10_000_000_000_000_000_000,
+];
+
+/// The plain decimal number `s` starts with, like [`decimal`], and how many bytes it takes.
+#[inline]
+fn decimal_lead(s: &[u8]) -> Option<(bool, u64, i32, usize)> {
     let mut i = 0;
     let neg = match s.first() {
         Some(b'-') => {
@@ -176,32 +267,25 @@ fn decimal(s: &[u8]) -> Option<(bool, u64, i32)> {
         }
         _ => false,
     };
-    let mut m: u64 = 0;
-    let mut digits = 0;
+    // Nineteen digits always fit in a u64; more are left to the standard parser. The whole part
+    // is usually short and the fraction long.
+    let (mut m, mut digits) = few_digits(&s[i..]);
+    i += digits;
     let mut exp: i32 = 0;
-    while let Some(&c) = s.get(i) {
-        let d = c.wrapping_sub(b'0');
-        if d > 9 {
-            break;
-        }
-        m = m.checked_mul(10)?.checked_add(u64::from(d))?;
-        digits += 1;
-        i += 1;
-    }
     if s.get(i) == Some(&b'.') {
         i += 1;
-        while let Some(&c) = s.get(i) {
-            let d = c.wrapping_sub(b'0');
-            if d > 9 {
-                break;
+        let (f, n) = leading_digits(&s[i..]);
+        if n > 0 {
+            if digits + n > 19 {
+                return None;
             }
-            m = m.checked_mul(10)?.checked_add(u64::from(d))?;
-            digits += 1;
-            exp -= 1;
-            i += 1;
+            m = m * POW10_U64[n] + f;
+            digits += n;
+            i += n;
+            exp = -i32::try_from(n).ok()?;
         }
     }
-    if digits == 0 {
+    if digits == 0 || digits > 19 {
         return None;
     }
     if let Some(b'e' | b'E') = s.get(i) {
@@ -232,7 +316,7 @@ fn decimal(s: &[u8]) -> Option<(bool, u64, i32)> {
         }
         exp += if eneg { -e } else { e };
     }
-    (i == s.len()).then_some((neg, m, exp))
+    Some((neg, m, exp, i))
 }
 
 const POW10_F32: [f32; 11] = [1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10];
@@ -241,23 +325,62 @@ const POW10_F64: [f64; 23] = [
     1e21, 1e22,
 ];
 
-/// `s` as an `f32`, rounded exactly as `str::parse` rounds it. Short decimals (up to seven
-/// digits or so, what exporters write) take a fast path; everything else goes to the standard
+/// A decimal's value as an `f32`, when it can be had exactly rounded without the standard
 /// parser.
 #[inline]
-pub(crate) fn f32_from(s: &[u8]) -> Option<f32> {
-    if let Some((neg, m, e)) = decimal(s) {
-        // Both the digits and the power of ten are exact in an f32, so one multiply or divide
-        // rounds correctly (Clinger's fast path).
-        if m <= 1 << 24 && (-10..=10).contains(&e) {
-            #[allow(clippy::cast_precision_loss, reason = "checked to be at most 2^24, exact in an f32")]
-            let v = m as f32;
-            let p = POW10_F32[e.unsigned_abs() as usize];
-            let v = if e < 0 { v / p } else { v * p };
+fn f32_quick(neg: bool, m: u64, e: i32) -> Option<f32> {
+    // Both the digits and the power of ten are exact in an f32, so one multiply or divide
+    // rounds correctly (Clinger's fast path).
+    if m <= 1 << 24 && (-10..=10).contains(&e) {
+        #[allow(clippy::cast_precision_loss, reason = "checked to be at most 2^24, exact in an f32")]
+        let v = m as f32;
+        let p = POW10_F32[e.unsigned_abs() as usize];
+        let v = if e < 0 { v / p } else { v * p };
+        return Some(if neg { -v } else { v });
+    }
+    // Longer digits (nine, as `%.9g` writes): the same in an f64, then rounded to an f32. That
+    // second rounding goes the same way as rounding the exact value, since every point halfway
+    // between two f32s is an f64 too, unless the f64 landed on one; those go to the standard
+    // parser. The values here (1e-22 to 1e38) are all normal f32s.
+    if m <= 1 << 53 && (-22..=22).contains(&e) {
+        #[allow(clippy::cast_precision_loss, reason = "checked to be at most 2^53, exact in an f64")]
+        let v = m as f64;
+        let p = POW10_F64[e.unsigned_abs() as usize];
+        let v = if e < 0 { v / p } else { v * p };
+        if v.to_bits() & 0x1FFF_FFFF != 0x1000_0000 {
+            #[allow(clippy::cast_possible_truncation, reason = "rounded to the nearest f32 on purpose")]
+            let v = v as f32;
             return Some(if neg { -v } else { v });
         }
     }
+    None
+}
+
+/// `s` as an `f32`, rounded exactly as `str::parse` rounds it. Decimals of up to 15 digits or so
+/// with small exponents (what exporters write) take a fast path; everything else goes to the
+/// standard parser.
+#[inline]
+pub(crate) fn f32_from(s: &[u8]) -> Option<f32> {
+    if let Some((neg, m, e)) = decimal(s)
+        && let Some(v) = f32_quick(neg, m, e)
+    {
+        return Some(v);
+    }
     std::str::from_utf8(s).ok()?.parse().ok()
+}
+
+/// The number `s` starts with, as an `f32` like [`f32_from`], and how many bytes it takes; `None`
+/// unless it ends at a space, a control character or the end of `s`.
+#[inline]
+pub(crate) fn f32_lead(s: &[u8]) -> Option<(f32, usize)> {
+    let (neg, m, e, len) = decimal_lead(s)?;
+    if s.get(len).is_some_and(|&b| !space(b)) {
+        return None;
+    }
+    if let Some(v) = f32_quick(neg, m, e) {
+        return Some((v, len));
+    }
+    Some((std::str::from_utf8(&s[..len]).ok()?.parse().ok()?, len))
 }
 
 /// `s` as an `f64`, like [`f32_from`].
@@ -352,6 +475,105 @@ mod tests {
                 s.parse::<f32>().ok().map(f32::to_bits),
                 "{s}"
             );
+        }
+    }
+
+    #[test]
+    fn digit_runs_read_eight_at_a_time_like_one_at_a_time() {
+        let slow = |s: &[u8]| {
+            let n = s.iter().take_while(|c| c.is_ascii_digit()).count();
+            let v = s[..n]
+                .iter()
+                .fold(0u64, |v, &c| v.wrapping_mul(10).wrapping_add(u64::from(c - b'0')));
+            (v, n)
+        };
+        let mut rng = crate::test_rng::Pcg32::new(11);
+        let stops = b" /\t\n\r.e-+:\x00\xff\x2f\x3a";
+        for _ in 0..200_000 {
+            let len = rng.below(26) as usize;
+            let mut s: Vec<u8> = (0..len).map(|_| b"0123456789"[rng.below(10) as usize]).collect();
+            if rng.below(4) > 0 {
+                s.push(stops[rng.below(u32::try_from(stops.len()).unwrap()) as usize]);
+            }
+            s.extend(b"123456789");
+            let cut = rng.below(u32::try_from(s.len()).unwrap() + 1) as usize;
+            for t in [&s[..], &s[..cut]] {
+                let (v, n) = leading_digits(t);
+                let (w, m) = slow(t);
+                assert_eq!(n, m, "{:?}", String::from_utf8_lossy(t));
+                if n <= 19 {
+                    assert_eq!(v, w, "{:?}", String::from_utf8_lossy(t));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn long_decimals_round_like_the_standard_parser() {
+        let check = |s: &str| {
+            let want = s.parse::<f32>().ok().map(f32::to_bits);
+            assert_eq!(f32_from(s.as_bytes()).map(f32::to_bits), want, "{s}");
+            // Read from the front of a line, ended by a space, a line break or nothing; anything
+            // but a plain decimal (`inf`, more digits than a u64 holds) is left to the line's own
+            // reader.
+            let plain = decimal(s.as_bytes()).is_some();
+            for end in ["", " ", "\t", "\r\n", "\n"] {
+                let t = format!("{s}{end}");
+                let got = f32_lead(t.as_bytes());
+                if !plain && got.is_none() {
+                    continue;
+                }
+                assert_eq!(got.map(|g| g.0.to_bits()), want, "{t:?}");
+                if let Some((_, len)) = got {
+                    assert_eq!(len, s.len(), "{t:?}");
+                }
+            }
+        };
+        for s in [
+            "-2.19910035e-10",
+            "1.23456789",
+            "-0",
+            "-0.0e5",
+            "0e-30",
+            // Exactly halfway between two f32s: ties go to even.
+            "16777217",
+            "16777219",
+            "33554434",
+            "0.5000000298023223876953125",
+            "1.00000005960464477539062500",
+            "3.40282356779733661637539395458142568448e38",
+            "3.4028236e38",
+            "1e22",
+            "1e-22",
+            "123456789012345e-22",
+            "9007199254740993",
+            "9007199254740992e22",
+            "1e38",
+            "1e39",
+            "1e-38",
+            "1e-46",
+            "inf",
+            "-nan",
+            "1.5x",
+        ] {
+            check(s);
+        }
+        // Nine and more significant digits over the exponents the fast path takes, and past it.
+        let mut x: u64 = 7;
+        for _ in 0..300_000 {
+            x = x
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let digits = 1 + (x >> 60) as u32;
+            let m = (x >> 8) % 10u64.pow(digits.min(16));
+            let e = i64::from(((x >> 3) % 60) as u32) - 34;
+            check(&format!("{m}e{e}"));
+            let m = (x >> 20) % 1_000_000_000;
+            check(&format!("-{}.{:08}e{}", m / 100_000_000, m % 100_000_000, e / 3));
+        }
+        // Lines the line reader shouldn't take a number from.
+        for s in ["1.5\\", "2#", "nan", "", "-", "1e", "1.5/2"] {
+            assert!(f32_lead(s.as_bytes()).is_none(), "{s:?}");
         }
     }
 

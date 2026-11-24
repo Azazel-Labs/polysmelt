@@ -27,12 +27,31 @@ pub trait Assets {
     #[cfg(not(feature = "fs"))]
     fn read(&self, path: &Path) -> Option<Cow<'_, [u8]>>;
 
-    /// Texture bytes as an embeddable image; `name` is the file's name or path, for its format.
-    /// By default PNG and JPEG pass, and WebP is re-encoded as PNG with the `webp` feature.
-    /// Override to convert others (TGA, BMP, DDS, PSD, ...).
+    /// Texture bytes as an embeddable image; `name` is the file's name or path, for its format
+    /// (TGA has no signature). By default PNG and JPEG pass, and WebP, TGA, BMP, GIF, TIFF, PSD
+    /// and DDS are re-encoded as PNG, each with the feature of its name. Override to convert
+    /// others.
     fn image(&self, bytes: &[u8], name: &Path) -> Option<Image> {
+        let image = Image::png_or_jpeg(bytes).or_else(|| Image::webp(bytes));
+        #[cfg(any(
+            feature = "tga",
+            feature = "bmp",
+            feature = "gif",
+            feature = "tiff",
+            feature = "psd",
+            feature = "dds"
+        ))]
+        let image = image.or_else(|| crate::raster::decode(bytes, name));
+        #[cfg(not(any(
+            feature = "tga",
+            feature = "bmp",
+            feature = "gif",
+            feature = "tiff",
+            feature = "psd",
+            feature = "dds"
+        )))]
         let _ = name;
-        Image::png_or_jpeg(bytes).or_else(|| Image::webp(bytes))
+        image
     }
 
     /// A texture file read as an embeddable image.
@@ -145,7 +164,7 @@ impl Memory {
 
 impl Assets for Memory {
     fn find(&self, reference: &str, model_dir: &Path) -> Option<PathBuf> {
-        let cleaned = reference.trim().replace('\\', "/");
+        let cleaned = cleaned(reference);
         if cleaned.is_empty() {
             return None;
         }
@@ -177,6 +196,17 @@ impl Assets for Memory {
         let images = self.images().filter(|p| p.starts_with(home));
         color_texture_by_name(Path::new(&key), home, images)
     }
+}
+
+/// A model's reference to a file, trimmed, out of the quotes some writers put around a path with spaces, with `/`
+/// between its parts.
+fn cleaned(reference: &str) -> String {
+    let r = reference.trim();
+    let r = ['"', '\'']
+        .iter()
+        .find_map(|&q| r.strip_prefix(q)?.strip_suffix(q))
+        .map_or(r, str::trim);
+    r.replace('\\', "/")
 }
 
 /// A path as a [`Memory`] keys it: `/`-separated, without empty or `.` parts, and `..` stepping
@@ -403,7 +433,7 @@ fn tidy(path: &Path) -> PathBuf {
 /// in another format.
 #[cfg(feature = "fs")]
 fn find_texture(reference: &str, model_dir: &Path, root: &Path) -> Option<PathBuf> {
-    let cleaned = reference.trim().replace('\\', "/");
+    let cleaned = cleaned(reference);
     if cleaned.is_empty() {
         return None;
     }
@@ -440,6 +470,20 @@ mod tests {
         assert_eq!(texture_role("barrel_d"), Some(Role::Color));
         assert_eq!(texture_role("barrel_albedo"), Some(Role::Color));
         assert_eq!(texture_role("barrel"), None);
+    }
+
+    #[test]
+    fn quoted_references_are_found_without_their_quotes() {
+        let m = Memory::new().with("Models/my tex.png", "png");
+        let found = |r: &str| m.find(r, Path::new("Models")).map(|p| p.to_string_lossy().into_owned());
+        for r in ["\"my tex.png\"", " 'my tex.png' ", "\"C:\\art\\my tex.png\""] {
+            assert_eq!(found(r).as_deref(), Some("Models/my tex.png"), "{r}");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("my tex.png"), "png").unwrap();
+        let folder = Folder::new(dir.path());
+        assert!(folder.find("\"my tex.png\"", dir.path()).is_some());
+        assert_eq!(cleaned("\""), "\"");
     }
 
     #[test]

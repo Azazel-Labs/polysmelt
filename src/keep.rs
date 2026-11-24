@@ -5,9 +5,12 @@ use std::collections::BTreeSet;
 use serde_json::{Map, Value};
 
 use crate::document::Document;
+use crate::mesh::{MAX_POINTS, MAX_TRIANGLES, TRIANGLE_CEILING};
 
 /// Which parts of a model a load keeps. Meshes and the node hierarchy are always kept; each
 /// switch here drops one kind of data on top of that. [`Keep::default`] keeps everything.
+/// [`Keep::max_triangles`] caps how big a model a load takes at all, and [`Keep::max_points`]
+/// how many points and lines [`Document::flatten`] draws.
 ///
 /// Readers skip reading what isn't kept, so a narrow `Keep` also makes a load faster: no
 /// texture files, embedded images or (without materials) material libraries and shaders are
@@ -23,6 +26,12 @@ use crate::document::Document;
 /// // Static meshes for an engine that animates nothing, but still skins them.
 /// let keep = Keep { animations: false, ..Keep::ALL };
 /// # assert!(keep.skins);
+/// // A 10-million-triangle scan, past the default limit.
+/// let keep = Keep { max_triangles: 12_000_000, ..Keep::ALL };
+/// // A 40-million-point lidar scan, drawn as points.
+/// let keep = Keep { max_points: 40_000_000, ..Keep::ALL };
+/// // Only the surfaces: no points or lines in the flattened mesh.
+/// let keep = Keep { lines_and_points: false, ..Keep::ALL };
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[allow(clippy::struct_excessive_bools, reason = "independent switches")]
@@ -52,6 +61,26 @@ pub struct Keep {
     /// `extras` everywhere: custom properties and source metadata. The document's facts
     /// stay either way.
     pub extras: bool,
+    /// The most triangles a load accepts, against hostile or runaway files: a model that draws
+    /// more is refused (and [`Document::flatten`] refuses to draw more). Defaults to
+    /// [`MAX_TRIANGLES`]; raise it for big scans. Values past [`TRIANGLE_CEILING`] are clamped
+    /// to it.
+    pub max_triangles: usize,
+    /// Points and lines (glTF's `POINTS`, `LINES`, `LINE_LOOP` and `LINE_STRIP` primitives) in
+    /// what [`Document::flatten`] draws: point clouds, wireframes, curves. Without them it draws
+    /// only triangles, and a model of points and lines alone flattens to nothing. The document
+    /// keeps them either way.
+    pub lines_and_points: bool,
+    /// The most points and line segments [`Document::flatten`] draws, against huge point clouds:
+    /// a model that draws more is refused (unless [`Keep::lines_and_points`] leaves them out).
+    /// Counted apart from triangles. Defaults to [`MAX_POINTS`]; raise it for big scans. Values
+    /// past [`TRIANGLE_CEILING`] are clamped to it.
+    pub max_points: usize,
+    /// Threads a reader may split its work over, where it can: OBJ text, so far. 1, the
+    /// default, reads on the calling thread; 0 takes one per core. The model read is the same
+    /// either way. Where threads can't be had (WebAssembly without shared memory, or a
+    /// platform that refuses to start one), it reads on the calling thread.
+    pub threads: usize,
 }
 
 impl Default for Keep {
@@ -72,6 +101,10 @@ impl Keep {
         cameras: true,
         lights: true,
         extras: true,
+        max_triangles: MAX_TRIANGLES,
+        lines_and_points: true,
+        max_points: MAX_POINTS,
+        threads: 1,
     };
 
     /// The meshes and what shapes or shades them (skins, morph targets, materials, textures,
@@ -89,6 +122,29 @@ impl Keep {
         image_bytes: false,
         ..Keep::MESHES
     };
+
+    /// [`Keep::max_triangles`], clamped to [`TRIANGLE_CEILING`].
+    pub(crate) fn triangles(self) -> usize {
+        self.max_triangles.min(TRIANGLE_CEILING)
+    }
+
+    /// [`Keep::max_points`], clamped to [`TRIANGLE_CEILING`].
+    pub(crate) fn points(self) -> usize {
+        self.max_points.min(TRIANGLE_CEILING)
+    }
+
+    /// [`Keep::threads`]: how many to use here, at least 1. WebAssembly without shared memory
+    /// has no threads; elsewhere, a reader whose threads can't be started reads on one.
+    #[cfg_attr(not(feature = "obj"), allow(dead_code, reason = "only the OBJ reader takes threads"))]
+    pub(crate) fn threads(self) -> usize {
+        if cfg!(all(target_family = "wasm", not(target_feature = "atomics"))) {
+            1
+        } else if self.threads == 0 {
+            std::thread::available_parallelism().map_or(1, std::num::NonZero::get)
+        } else {
+            self.threads
+        }
+    }
 }
 
 /// Calls `f` on each item of `obj[key]` that's an object.
@@ -167,9 +223,19 @@ impl Document<'_> {
     /// Drops what `keep` doesn't keep. The JSON stays valid glTF: references to what went are
     /// removed with it, and extensions no longer used are unlisted. Extensions Polysmelt doesn't
     /// know that refer to dropped materials, textures or cameras may be left pointing at them.
+    /// [`Keep::max_triangles`] and [`Keep::threads`] play no part here. Points and lines stay in
+    /// the JSON: [`Keep::lines_and_points`] and [`Keep::max_points`] are recorded for
+    /// [`Document::flatten`] (see [`Document::set_lines_and_points`] and
+    /// [`Document::set_max_points`]).
     pub fn prune(&mut self, keep: Keep) {
+        self.lines_and_points = keep.lines_and_points;
+        self.max_points = keep.points();
         if (Keep {
             image_bytes: true,
+            max_triangles: Keep::ALL.max_triangles,
+            lines_and_points: true,
+            max_points: Keep::ALL.max_points,
+            threads: Keep::ALL.threads,
             ..keep
         }) == Keep::ALL
         {
@@ -327,6 +393,54 @@ mod tests {
         let mut d = doc(v.clone());
         d.prune(Keep::default());
         assert_eq!(Value::Object(d.json), v);
+    }
+
+    #[test]
+    fn a_triangle_limit_alone_prunes_nothing() {
+        // Pruning drops animations without channels, whatever it keeps: a limit alone mustn't start it.
+        let v = json!({ "asset": { "version": "2.0" }, "animations": [{ "channels": [] }] });
+        let mut d = doc(v.clone());
+        d.prune(Keep {
+            max_triangles: 10,
+            image_bytes: false,
+            ..Keep::ALL
+        });
+        assert_eq!(Value::Object(d.json), v);
+        let mut d = doc(v);
+        d.prune(Keep {
+            extras: false,
+            ..Keep::ALL
+        });
+        assert!(!d.json.contains_key("animations"));
+    }
+
+    #[test]
+    fn point_settings_prune_nothing_but_reach_flatten() {
+        let v = json!({ "asset": { "version": "2.0" }, "animations": [{ "channels": [] }] });
+        let mut d = doc(v.clone());
+        d.prune(Keep {
+            lines_and_points: false,
+            max_points: usize::MAX,
+            ..Keep::ALL
+        });
+        assert_eq!(Value::Object(d.json.clone()), v);
+        assert!(!d.lines_and_points());
+        assert_eq!(d.max_points(), TRIANGLE_CEILING);
+        d.prune(Keep::LIGHT);
+        assert!(d.lines_and_points());
+        assert_eq!(d.max_points(), MAX_POINTS);
+    }
+
+    #[test]
+    fn the_triangle_limit_is_clamped() {
+        assert_eq!(Keep::ALL.triangles(), MAX_TRIANGLES);
+        assert_eq!(Keep::LIGHT.max_triangles, MAX_TRIANGLES);
+        let keep = |max_triangles| Keep {
+            max_triangles,
+            ..Keep::ALL
+        };
+        assert_eq!(keep(12_000_000).triangles(), 12_000_000);
+        assert_eq!(keep(usize::MAX).triangles(), TRIANGLE_CEILING);
     }
 
     #[test]

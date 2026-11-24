@@ -1,0 +1,22 @@
+#usda 1.0
+(
+    upAxis = "Y"
+    metersPerUnit = 1.0
+)
+
+def Xform "Root"
+{
+    def BasisCurves "Wave"
+    {
+        int[] curveVertexCounts = [5]
+        point3f[] points = [(0, 0, 0), (1, 1, 0), (2, 0, 0), (3, 1, 0), (4, 0, 0)]
+        uniform token type = "cubic"
+        uniform token basis = "bspline"
+        float[] widths = [0.1] (
+            interpolation = "constant"
+        )
+        color3f[] primvars:displayColor = [(1, 0, 0), (0, 1, 0), (0, 0, 1)] (
+            interpolation = "varying"
+        )
+    }
+}

@@ -1,0 +1,16 @@
+HIERARCHY
+ROOT Bone
+{
+  OFFSET 0 0 0
+  CHANNELS 3 Xrotation Yrotation Zrotation
+  End Site
+  {
+    OFFSET 0 1 0
+  }
+}
+MOTION
+Frames: 3
+Frame Time: 0.04
+0 0 0
+30 45 60
+-60 -90 -120

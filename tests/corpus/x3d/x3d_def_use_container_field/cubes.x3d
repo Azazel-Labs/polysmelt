@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<X3D profile="Interchange" version="3.3">
+<head></head>
+<Scene>
+<Group><Shape DEF='C'><Appearance><Material diffuseColor='1 0 0'/></Appearance><IndexedFaceSet coordIndex="0 2 3 1 -1 4 5 7 6 -1 0 1 5 4 -1 2 6 7 3 -1 0 4 6 2 -1 1 3 7 5 -1"><Coordinate point="0 0 0, 1 0 0, 0 1 0, 1 1 0, 0 0 1, 1 0 1, 0 1 1, 1 1 1"/></IndexedFaceSet></Shape><Transform translation='0 2 0'><Shape USE='C'/></Transform></Group><Switch whichChoice='0'><Shape containerField='children'><Box size='1 1 1' containerField='geometry'/></Shape></Switch>
+</Scene>
+</X3D>

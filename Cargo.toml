@@ -19,9 +19,9 @@ include = ["/src", "/examples", "/README.md", "/LICENSE", "/Cargo.toml"]
 all-features = true
 
 [features]
-default = ["minimal", "fbx", "3mf", "usd", "draco", "webp", "skp"]
+default = ["minimal", "fbx", "3mf", "usd", "draco", "webp", "skp", "dae", "x3d", "tga", "bmp", "gif", "tiff", "psd", "dds"]
 # The readers with no dependencies, and file access: `default-features = false, features = ["minimal"]`.
-minimal = ["fs", "stl", "ply", "vox", "obj", "3ds", "gltf"]
+minimal = ["fs", "stl", "ply", "vox", "obj", "3ds", "gltf", "bvh", "off", "dxf"]
 # Reading from the file system: `formats::load`, `assets::Folder` and `gltf::files_in`. Without
 # it (for wasm, say), models load from memory with `formats::load_bytes` and `assets::Memory`.
 fs = []
@@ -31,39 +31,59 @@ vox = []
 obj = []
 3ds = []
 gltf = []
-fbx = ["dep:fbxcel", "dep:base64", "dep:flate2"]
+# BVH motion capture: a skeleton and its motion, no mesh.
+bvh = []
+# OFF (Object File Format), ASCII and binary.
+off = []
+# DXF meshes: 3D faces, polyface and polygon meshes, and MESH entities, with blocks.
+dxf = []
+fbx = ["dep:base64", "dep:flate2"]
 3mf = ["dep:zip", "dep:quick-xml"]
+# COLLADA `.dae`, and `.zae` and `.kmz` archives holding one.
+dae = ["dep:zip", "dep:quick-xml"]
 usd = ["dep:openusd", "dep:openusd-schemas", "dep:zip"]
 # Draco-compressed glTF meshes (KHR_draco_mesh_compression).
 draco = ["gltf", "dep:draco-core"]
 # WebP textures (`EXT_texture_webp`, or a `.webp` file a model names) re-encoded as PNG for
 # the flat mesh, which embeds only PNG and JPEG.
 webp = ["dep:image-webp", "dep:flate2"]
+# Texture formats glTF can't embed, decoded and re-encoded as PNG the same way: TGA, BMP, a GIF's
+# first frame, TIFF, a PSD's merged image, and DDS (BC1 to BC5, or uncompressed).
+tga = ["dep:flate2"]
+bmp = ["dep:flate2"]
+gif = ["dep:flate2"]
+tiff = ["dep:flate2"]
+psd = ["dep:flate2"]
+dds = ["dep:flate2"]
 # SketchUp `.skp`, from SketchUp 3 to the latest, converted through glTF.
 skp = ["gltf", "dep:flate2"]
+# X3D and VRML97 meshes: classic (`.wrl`, `.x3dv`), XML (`.x3d`) and gzipped (`.wrz`, `.x3dz`).
+x3d = ["dep:quick-xml", "dep:flate2"]
 
 [dependencies]
 serde_json = "1"
 # Typed vertex data viewed as the bytes a GLB stores, without copying (unsafe is forbidden here).
 bytemuck = "1"
 thiserror = "2"
-fbxcel = { version = "0.9", features = ["tree", "writer"], optional = true }
 base64 = { version = "0.22", optional = true }
 zip = { version = "9", default-features = false, features = ["deflate"], optional = true }
 quick-xml = { version = "0.41", optional = true }
 openusd = { version = "0.8", optional = true }
 openusd-schemas = { version = "0.8", features = ["geom", "shade"], optional = true }
 image-webp = { version = "0.2", optional = true }
-# zip already brings flate2 on the zlib-rs backend; the PNG writer shares it.
-flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"], optional = true }
+# zip already brings flate2 on the zlib-rs backend; the PNG writer shares it. Runtime detection lets inflate use
+# the CPU's wider instructions (FBX arrays are mostly zlib).
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs", "runtime_detection"], optional = true }
 draco-core = { version = "2.3", default-features = false, features = ["decoder", "edgebreaker_valence_decode", "legacy_bitstream_decode"], optional = true }
 
 [dev-dependencies]
+# The FBX reader's tests check its tree against this independent reader, and write FBX with it.
+fbxcel = { version = "0.9", features = ["tree", "writer"] }
 tempfile = "3"
 image = { version = "0.25", default-features = false, features = ["png"] }
 # The glTF reader downstream tools render with: decompressed and decoded output must load in it
 # (`extras` for custom `_ATTRIBUTES`, as Farthing reads them).
-gltf = { version = "1.4", default-features = false, features = ["extras"] }
+gltf = { version = "1.4", default-features = false, features = ["allow_empty_texture", "extras", "utils"] }
 
 [[example]]
 name = "meshopt"

@@ -201,19 +201,21 @@ case(FMT, "index_out_of_range",
 # --- point clouds and errors ------------------------------------------------------------------
 
 case(FMT, "point_cloud", {"points.ply": ply("binary_little_endian", [("vertex", XYZ + RGB_U8, [v + [1, 2, 3] for v in QUAD_V])])},
-     {"spec": SPEC + ": vertices only, drawn as points", "source": SRC, "no_mesh": True, "facts": {"points": 4},
+     {"spec": SPEC + ": vertices only, drawn as points", "source": SRC, "triangles": 0, "points": 4, "vertices": 4,
+      "facts": {"points": 4},
       "document": {"nodes": 1, "attributes": ["POSITION", "COLOR_0"]}})
 
 case(FMT, "point_cloud_empty_faces",
      {"points.ply": ply("ascii", [("vertex", XYZ, QUAD_V), ("face", FACE, [])])},
-     {"spec": SPEC + ": a face element with no faces", "source": SRC, "no_mesh": True, "facts": {"points": 4}})
+     {"spec": SPEC + ": a face element with no faces", "source": SRC, "triangles": 0, "points": 4, "vertices": 4,
+      "facts": {"points": 4}})
 
 splat = [("float", n) for n in ["x", "y", "z", "nx", "ny", "nz", "f_dc_0", "f_dc_1", "f_dc_2", "opacity",
                                 "scale_0", "scale_1", "scale_2", "rot_0", "rot_1", "rot_2", "rot_3"]]
 case(FMT, "gaussian_splats", {"splats.ply": ply("binary_little_endian", [("vertex", splat, [v + [0] * 14 for v in QUAD_V])])},
      {"spec": "PLY as 3D Gaussian splatting writes it: a vertex element of splat parameters", "source": SRC,
-      "no_mesh": True, "facts": {"points": 4},
-      "document": {"attributes": ["NORMAL", "_F_DC_0", "_OPACITY", "_SCALE_2", "_ROT_3"]}})
+      "triangles": 0, "points": 4, "vertices": 4, "facts": {"points": 4},
+      "document": {"attributes": ["COLOR_0", "_F_DC_0", "_OPACITY", "_SCALE_2", "_ROT_3"]}})
 
 cut = ply("binary_little_endian", [CUBE_VERTS, CUBE_FACES])
 case(FMT, "truncated", {"cut.ply": cut[:-10]},

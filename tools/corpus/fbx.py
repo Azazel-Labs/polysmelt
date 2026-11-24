@@ -4,8 +4,8 @@ reference: the node tree and its binary encoding (32-bit headers up to 7.4, 64-b
 zlib-compressed arrays), the global axis system and unit, the model transform with its pre- and
 post-rotation, pivots, offsets and rotation order, geometric transforms, the hierarchy, instancing,
 the layer elements and their mapping and reference modes, materials by connection order, textures
-embedded or found by name, and the objects a mesh reader should pass over (cameras, lights,
-skeletons, blend shapes, curves).
+embedded or found by name, line geometry drawn as segments, and the objects a mesh reader should
+pass over (cameras, lights, skeletons, blend shapes, NURBS curves and surfaces).
 
 Every case is a small scene built here; the expectations are computed from it in Python (the
 transform order, the axis basis) and are in glTF's Y-up metres.
@@ -346,6 +346,7 @@ class Scene:
         self.axes = dict(up=up, front=front, coord=coord, unit=unit)
         self.settings = settings
         self.models, self.geoms, self.extra, self.conns = [], [], [], []
+        self.templates = []  # Definitions' ObjectType nodes
 
     def model(self, *a, **kw):
         m = Model(*a, **kw)
@@ -380,7 +381,8 @@ class Scene:
                 P("UnitScaleFactor", "double", "Number", "", a["unit"]),
                 P("OriginalUnitScaleFactor", "double", "Number", "", a["unit"]))]))
         out.append(Node("Documents", children=[Node("Count", I(1))]))
-        out.append(Node("Definitions", children=[Node("Version", I(100)), Node("Count", I(len(self.models)))]))
+        out.append(Node("Definitions", children=[Node("Version", I(100)), Node("Count", I(len(self.models))),
+                                                 *self.templates]))
         objects = [g.node() for g in self.geoms] + [m.node() for m in self.models] + self.extra
         out.append(Node("Objects", children=objects))
         out.append(Node("Connections", children=[
@@ -780,6 +782,103 @@ tex_case("bump_as_normal_map", "a texture in the Bump slot", "skin.png",
          {"skin.png": RED, "skin_n.png": png((128, 128, 255), 4)}, second=("skin_n.png", "Bump"),
          expect={"materials": [{"name": "Skin", "textured": True, "normal_map": True}]})
 
+# --- lines ----------------------------------------------------------------------------------
+
+def line_geometry(id, name, points, polylines=(), color=None, index=None):
+    """A `Line` geometry as the FBX SDK writes one: its points (x, y, z each), and `PointsIndex` running
+    through each polyline with its last point written negative (~i), unless `index` is given."""
+    if index is None:
+        index = []
+        for pl in polylines:
+            index += list(pl[:-1]) + [~pl[-1]]
+    ch = [props70(P("Color", "ColorRGB", "Color", "", *color))] if color else []
+    ch += [Node("GeometryVersion", I(124)), Node("Type", S("Line")), Node("LineVersion", I(100)),
+           Node("Points", AD([c for pt in points for c in pt])), Node("PointsIndex", AI(index))]
+    return Node("Geometry", L(id), ON("Geometry", name), S("Line"), children=ch)
+
+
+def placed(s, mid, points):
+    """`points` where model `mid` (0 for none) puts them, in glTF space."""
+    full = basis(**s.axes)
+    if mid:
+        m = next(x for x in s.models if x.id == mid)
+        full = chain(full, s.world(mid), m.geometric())
+    return [[r(c) for c in apply(full, pt)] for pt in points]
+
+
+def box(ps):
+    return {"min": [r(min(p[k] for p in ps)) for k in range(3)], "max": [r(max(p[k] for p in ps)) for k in range(3)]}
+
+
+# A square (closed by returning to its first point) and an open polyline of two segments, the
+# eighth point unused; the model turned and moved, the line offset by a geometric translation.
+# Its color is sRGB, as the FBX SDK writes colors.
+WIRE = [(0, 0, 0), (100, 0, 0), (100, 100, 0), (0, 100, 0), (0, 0, 50), (50, 0, 50), (50, 50, 50), (9, 9, 9)]
+WIRE_COLOR = (0.2, 0.6, 0.9)
+for enc, what in [("bin7500", "binary 7.5"), ("ascii7500", "ASCII 7.5, its index typed by its name")]:
+    s = Scene(up=(2, 1), front=(1, -1), coord=(0, 1))
+    s.model(10, "Wire", kind="Line", T=(10, 20, 30), R=(0, 0, 90), GT=(0, 0, 5))
+    s.obj(line_geometry(1, "Wire", WIRE, [(0, 1, 2, 3, 0), (4, 5, 6)], WIRE_COLOR), ("OO", 1, 10))
+    pts = placed(s, 10, WIRE[:7])
+    write(f"line_{enc}", s,
+          f"Line geometry as segments: PointsIndex runs through each polyline to an index written negative "
+          f"(~i), on the model's transform and geometric translation, unlit in its sRGB Color; {what}",
+          {"triangles": 0, "lines": 6, "vertices": 7, "bounds": box(pts), "positions_include": pts,
+           "materials": [{"color": [*(srgb_to_linear(c) for c in WIRE_COLOR), 1]}],
+           "json": {"/materials/0/extensions/KHR_materials_unlit": {}, "/meshes/0/primitives/0/mode": 1,
+                    "/meshes/0/name": "Wire"}},
+          enc, extra_stats=False)
+
+# Indexes that aren't points break the polyline there: 9 is past the points, so 0-1 and then 2-3;
+# -100 (~99) ends a polyline at no point; a point repeated draws no segment.
+s = Scene()
+s.model(10, "Wire", kind="Line")
+s.obj(line_geometry(1, "Wire", WIRE, index=[0, 1, 9, 2, 3, -100, 4, 4, 5, ~6, 7]), ("OO", 1, 10))
+pts = placed(s, 10, WIRE[:7])
+write("line_bad_indices", s,
+      "Line geometry whose PointsIndex names points it doesn't have: the polyline breaks there",
+      {"triangles": 0, "lines": 4, "vertices": 7, "bounds": box(pts), "positions_include": pts},
+      extra_stats=False)
+
+# A line on a model with materials is drawn in the first, not in its Color.
+s = Scene()
+s.model(10, "Wire", kind="Line")
+s.obj(line_geometry(1, "Wire", WIRE, [(0, 1, 2)], (1, 0, 0)), ("OO", 1, 10))
+s.obj(material_node(20, "Blue", DiffuseColor=(0, 0, 1)), ("OO", 20, 10))
+s.obj(material_node(21, "Green", DiffuseColor=(0, 1, 0)), ("OO", 21, 10))
+write("line_model_material", s, "Line geometry on a model with materials, drawn in its first",
+      {"triangles": 0, "lines": 2, "vertices": 3, "materials": [{"name": "Blue", "color": [0, 0, 1, 1]}],
+       "json": {"/meshes/0/primitives/0/material": 0, "/materials/0/extensions": None}},
+      extra_stats=False)
+
+# A line no model holds is drawn where it is; without a Color of its own it takes its template's
+# (FbxLine's, not FbxMesh's).
+s = Scene()
+s.templates.append(Node("ObjectType", S("Geometry"), children=[Node("Count", I(1)), *[
+    Node("PropertyTemplate", S(t), children=[props70(P("Color", "ColorRGB", "Color", "", *c))])
+    for t, c in [("FbxMesh", (0.8, 0.8, 0.8)), ("FbxLine", (1, 0.5, 0))]]]))
+s.obj(line_geometry(1, "Loose", WIRE, [(4, 5, 6, 4)]))
+pts = placed(s, 0, WIRE[4:7])
+write("line_no_model_template_color", s,
+      "Line geometry no model holds, drawn where it is in its template's Color",
+      {"triangles": 0, "lines": 3, "vertices": 3, "bounds": box(pts), "positions_include": pts,
+       "materials": [{"color": [1, srgb_to_linear(0.5), 0, 1]}]},
+      extra_stats=False)
+
+# NURBS curves and surfaces aren't read, and are counted; the cube beside them is drawn.
+s = cube_scene()
+s.model(11, "Path", kind="NurbsCurve")
+s.model(12, "Patch", kind="NurbsSurface")
+s.obj(Node("Geometry", L(3), ON("Geometry", "Path"), S("NurbsCurve"), children=[
+    Node("Type", S("NurbsCurve")), Node("Order", I(4)), Node("Dimension", I(3)), Node("Form", S("Open")),
+    Node("Points", AD([0, 0, 0, 1, 100, 0, 0, 1, 100, 100, 0, 1, 0, 100, 0, 1])),
+    Node("KnotVector", AD([0, 0, 0, 0, 1, 1, 1, 1]))]), ("OO", 3, 11))
+s.obj(Node("Geometry", L(4), ON("Geometry", "Patch"), S("NurbsSurface"), children=[
+    Node("Type", S("NurbsSurface"))]), ("OO", 4, 12))
+write("nurbs_curves_skipped", s, "NURBS curve and surface geometry isn't read, and is counted by kind",
+      {"faces_outward": True, "json": {"/asset/extras/source/skipped": {"NurbsCurve": 1, "NurbsSurface": 1}}})
+
+
 # --- what a mesh reader passes over --------------------------------------------------------
 
 s = Scene()
@@ -1067,7 +1166,7 @@ for aid, mid, kind in [(52, 15, 0), (53, 16, 1), (54, 17, 2), (55, 18, 3)]:
         P("LightType", "enum", "", "", kind), P("Color", "Color", "", "A", 1, 0.5, 0.25),
         P("Intensity", "Number", "", "A", 200), P("OuterAngle", "Number", "", "A", 60))]), ("OO", aid, mid))
 write("cameras_and_lights", s, "a perspective and an orthographic camera; point, directional, spot and area lights",
-      {"document": {"cameras": 2, "lights": 3, "node_names": ["Persp", "Ortho", "Bulb", "Sun", "Spot", "Area"]}})
+      {"document": {"cameras": 2, "lights": 4, "node_names": ["Persp", "Ortho", "Bulb", "Sun", "Spot", "Area"]}})
 
 # --- files that aren't readable ------------------------------------------------------------
 

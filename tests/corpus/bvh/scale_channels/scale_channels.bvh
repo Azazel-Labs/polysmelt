@@ -1,0 +1,21 @@
+HIERARCHY
+ROOT Hips
+{
+  OFFSET 0 90 0
+  CHANNELS 9 Xposition Yposition Zposition Zrotation Xrotation Yrotation Xscale Yscale Zscale
+  JOINT Spine
+  {
+    OFFSET 0 10 0
+    CHANNELS 4 Yscale Zrotation Xrotation Yrotation
+    End Site
+    {
+      OFFSET 0 15 0
+    }
+  }
+}
+MOTION
+Frames: 3
+Frame Time: 0.04
+0 90 0 0 0 0 1 1 1 1 0 0 0
+1 91 2 10 20 30 2 0.5 1.5 3 5 -10 15
+2 90 4 -45 0 90 1 1 -1 0.25 40 10 -20

@@ -1,6 +1,8 @@
 //! Model formats read natively: STL (binary and ASCII), PLY (ASCII and binary), `MagicaVoxel`
 //! `.vox`, OBJ (with its MTL materials and textures), FBX (binary and ASCII), 3DS, 3MF, USD,
-//! glTF (`.gltf` and `.glb`) and `SketchUp` (`.skp`).
+//! glTF (`.gltf` and `.glb`), `SketchUp` (`.skp`), BVH motion capture, COLLADA (`.dae`, and
+//! the `.zae` and `.kmz` archives that hold one), VRM (`.vrm`, `.vrma`), OFF, X3D and VRML97
+//! (`.x3d`, `.x3dv`, `.wrl`, and gzipped `.x3dz`, `.wrz`) and DXF meshes.
 //! Each becomes a [`Document`]: glTF as it is, the others converted; textures are embedded so the
 //! document stands on its own. Each format is behind a cargo feature of its name (`3ds` and
 //! `3mf` for those two). A [`Keep`] says what to keep; by default, everything.
@@ -18,28 +20,45 @@ use serde_json::json;
 use crate::Result;
 use crate::assets::Assets;
 use crate::document::{Document, Keep};
+use crate::mesh::MAX_TRIANGLES;
 
+#[cfg(feature = "bvh")]
+mod bvh;
+#[cfg(feature = "dae")]
+mod dae;
+#[cfg(feature = "dxf")]
+mod dxf;
 #[cfg(feature = "fbx")]
 mod fbx;
 #[cfg(feature = "fbx")]
 pub mod fbx_ascii;
 #[cfg(feature = "fbx")]
-mod fbx_inflate;
+mod fbx_tree;
 #[cfg(feature = "gltf")]
 mod gltf;
 #[cfg(feature = "gltf")]
 mod gltf1;
 #[cfg(feature = "obj")]
 mod obj;
+#[cfg(feature = "off")]
+mod off;
 #[cfg(feature = "ply")]
 mod ply;
 #[cfg(feature = "skp")]
 mod skp;
 #[cfg(feature = "stl")]
 mod stl;
-#[cfg(any(feature = "stl", feature = "ply", feature = "obj"))]
+#[cfg(any(
+    feature = "stl",
+    feature = "ply",
+    feature = "obj",
+    feature = "bvh",
+    feature = "off",
+    feature = "x3d",
+    feature = "dxf"
+))]
 #[cfg_attr(
-    not(all(feature = "obj", feature = "ply", feature = "stl")),
+    not(all(feature = "obj", feature = "ply", feature = "stl", feature = "bvh")),
     allow(dead_code, reason = "each text reader uses its own part")
 )]
 mod stream;
@@ -51,12 +70,17 @@ mod threemf;
 mod usd;
 #[cfg(feature = "vox")]
 mod vox;
-#[cfg(any(feature = "fbx", feature = "usd", feature = "3ds"))]
+#[cfg(feature = "gltf")]
+mod vrm;
+#[cfg(feature = "x3d")]
+mod x3d;
+#[cfg(any(feature = "fbx", feature = "usd", feature = "3ds", feature = "dae"))]
 mod xform;
 
 /// The extensions [`load`] handles, whether or not this build has their feature.
 pub const EXTENSIONS: &[&str] = &[
-    "stl", "ply", "vox", "obj", "fbx", "3ds", "3mf", "usd", "usda", "usdc", "usdz", "gltf", "glb", "skp",
+    "stl", "ply", "vox", "obj", "fbx", "3ds", "3mf", "usd", "usda", "usdc", "usdz", "gltf", "glb", "skp", "bvh", "dae",
+    "zae", "kmz", "off", "vrm", "vrma", "x3d", "x3dv", "x3dz", "wrl", "wrz", "dxf",
 ];
 
 /// Reads the model at `path`, whose format is named by `ext` (lowercase, without the dot),
@@ -91,12 +115,32 @@ pub fn load_bytes<'a>(
     read(Input::memory(bytes, name), ext, assets, keep)
 }
 
-/// A model to read: its path (or, in memory, its name), and where its bytes are.
+/// A model to read: its path (or, in memory, its name), where its bytes are, and the most
+/// triangles to take from it.
 #[derive(Clone, Copy)]
 pub(crate) struct Input<'a> {
     /// The model's path or name: references are resolved from its folder.
     pub path: &'a Path,
     data: Data<'a>,
+    /// The most triangles the reader accepts ([`Keep::max_triangles`], clamped).
+    #[cfg_attr(
+        not(any(
+            feature = "stl",
+            feature = "ply",
+            feature = "obj",
+            feature = "fbx",
+            feature = "3ds",
+            feature = "3mf",
+            feature = "usd",
+            feature = "skp",
+            feature = "dae",
+            feature = "off",
+            feature = "x3d",
+            feature = "dxf"
+        )),
+        allow(dead_code, reason = "only readers that build triangles check it")
+    )]
+    pub limit: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -120,7 +164,11 @@ impl<'a> Input<'a> {
     /// The model in the file at `path`.
     #[cfg(feature = "fs")]
     pub fn file(path: &'a Path) -> Self {
-        Self { path, data: Data::File }
+        Self {
+            path,
+            data: Data::File,
+            limit: MAX_TRIANGLES,
+        }
     }
 
     /// A model in memory, named `name`.
@@ -128,6 +176,7 @@ impl<'a> Input<'a> {
         Self {
             path: Path::new(name),
             data: Data::Bytes(bytes),
+            limit: MAX_TRIANGLES,
         }
     }
 
@@ -181,7 +230,7 @@ impl<'a> Input<'a> {
     }
 
     /// The model a block at a time (in memory, in place).
-    #[cfg(any(feature = "stl", feature = "ply", feature = "obj"))]
+    #[cfg(any(feature = "stl", feature = "ply", feature = "obj", feature = "bvh"))]
     #[cfg_attr(
         not(feature = "fs"),
         allow(clippy::unnecessary_wraps, reason = "only reading a file fails")
@@ -214,11 +263,26 @@ impl<'a> Input<'a> {
 }
 
 fn read<'a>(input: Input<'a>, ext: &str, assets: &'a dyn Assets, keep: Keep) -> Result<Document<'a>> {
-    let mut doc = convert(input, ext, assets, keep)?;
+    let limit = keep.triangles();
+    let mut doc = convert(Input { limit, ..input }, ext, assets, keep)?;
+    doc.max_triangles = limit;
     doc.prune(keep);
     if matches!(
         ext,
-        "gltf" | "glb" | "fbx" | "3ds" | "usd" | "usda" | "usdc" | "usdz" | "skp"
+        "gltf"
+            | "glb"
+            | "fbx"
+            | "3ds"
+            | "usd"
+            | "usda"
+            | "usdc"
+            | "usdz"
+            | "skp"
+            | "dae"
+            | "zae"
+            | "kmz"
+            | "vrm"
+            | "vrma"
     ) {
         let c = doc.counts();
         for (key, n) in [("triangles", c.triangles), ("points", c.points), ("lines", c.lines)] {
@@ -253,6 +317,18 @@ fn convert<'a>(input: Input<'a>, ext: &str, assets: &'a dyn Assets, keep: Keep) 
         "gltf" | "glb" => gltf::load(input, assets, keep),
         #[cfg(feature = "skp")]
         "skp" => skp::load(input, keep),
+        #[cfg(feature = "bvh")]
+        "bvh" => bvh::load(input, keep),
+        #[cfg(feature = "dae")]
+        "dae" | "zae" | "kmz" => dae::load(input, assets, keep),
+        #[cfg(feature = "off")]
+        "off" => off::load(input),
+        #[cfg(feature = "gltf")]
+        "vrm" | "vrma" => vrm::load(input, assets, keep),
+        #[cfg(feature = "x3d")]
+        "x3d" | "x3dv" | "x3dz" | "wrl" | "wrz" => x3d::load(input, assets, keep),
+        #[cfg(feature = "dxf")]
+        "dxf" => dxf::load(input),
         e if EXTENSIONS.contains(&e) => bail!("built without the `{}` feature", feature_for(e)),
         _ => bail!("not a model format handled here: .{ext}"),
     }
@@ -262,7 +338,9 @@ fn convert<'a>(input: Input<'a>, ext: &str, assets: &'a dyn Assets, keep: Keep) 
 fn feature_for(ext: &str) -> &str {
     match ext {
         "usda" | "usdc" | "usdz" => "usd",
-        "glb" => "gltf",
+        "zae" | "kmz" => "dae",
+        "glb" | "vrm" | "vrma" => "gltf",
+        "x3dv" | "x3dz" | "wrl" | "wrz" => "x3d",
         e => e,
     }
 }
@@ -422,7 +500,7 @@ vt 0 1
                 .unwrap_err()
                 .to_string()
         };
-        assert!(err("dae").contains("not a model format"));
+        assert!(err("blend").contains("not a model format"));
         #[cfg(not(feature = "usd"))]
         assert!(err("usdz").contains("without the `usd` feature"));
         #[cfg(not(feature = "gltf"))]
@@ -496,7 +574,7 @@ vt 0 1
             bin.extend_from_slice(&v.to_le_bytes());
         }
         let (m, f) = load_bytes("p.ply", &bin);
-        assert!(m.is_none());
+        assert_eq!(m.unwrap().points(), 2, "a point cloud draws its points");
         assert_eq!(f["points"], 2);
     }
 
@@ -855,6 +933,199 @@ f 1/1 3/3 4/4
         assert!(plain_colors([GRAY, white, GRAY]));
         assert!(!plain_colors([[0.8, 0.4, 0.1, 1.0]]));
         assert!(!plain_colors([[0.2, 0.2, 0.2, 1.0], [0.6, 0.6, 0.6, 1.0]]));
+    }
+
+    /// Reads `bytes` as model `name` from memory, taking at most `max` triangles.
+    #[allow(dead_code)]
+    fn limited<'a>(name: &'a str, bytes: &'a [u8], max: usize) -> crate::Result<Document<'a>> {
+        static EMPTY: std::sync::LazyLock<Memory> = std::sync::LazyLock::new(Memory::new);
+        let keep = Keep {
+            max_triangles: max,
+            ..Keep::ALL
+        };
+        super::load_bytes(bytes, name, name.rsplit('.').next().unwrap(), &*EMPTY, keep)
+    }
+
+    /// Model `name`, of `triangles` triangles, is refused by its reader one triangle under its
+    /// count, and read and drawn whole at it and above.
+    #[allow(dead_code)]
+    fn refused_under(name: &str, bytes: &[u8], triangles: usize) {
+        let err = limited(name, bytes, triangles - 1).unwrap_err();
+        assert!(format!("{err:#}").contains("triangles"), "{name}: {err:#}");
+        for max in [triangles, triangles + 1, usize::MAX] {
+            let doc = limited(name, bytes, max).unwrap();
+            assert_eq!(doc.max_triangles(), max.min(crate::mesh::TRIANGLE_CEILING));
+            let mesh = doc.flatten(crate::document::Pose::Rest).unwrap().unwrap();
+            assert_eq!(mesh.triangles(), triangles, "{name}");
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "stl")]
+    fn the_triangle_limit_refuses_bigger_stl() {
+        let mut bin = vec![0u8; 80];
+        bin.extend_from_slice(&2u32.to_le_bytes());
+        for tri in [
+            [0f32, 0., 0., 1., 0., 0., 0., 1., 0.],
+            [1., 0., 0., 1., 1., 0., 0., 1., 0.],
+        ] {
+            bin.extend_from_slice(&[0; 12]);
+            for v in tri {
+                bin.extend_from_slice(&v.to_le_bytes());
+            }
+            bin.extend_from_slice(&[0, 0]);
+        }
+        refused_under("b.stl", &bin, 2);
+        let facet = |a: &str, b: &str, c: &str| {
+            format!("facet normal 0 0 1\nouter loop\nvertex {a}\nvertex {b}\nvertex {c}\nendloop\nendfacet\n")
+        };
+        let ascii = format!(
+            "solid t\n{}{}endsolid t\n",
+            facet("0 0 0", "1 0 0", "0 1 0"),
+            facet("1 0 0", "1 1 0", "0 1 0")
+        );
+        refused_under("a.stl", ascii.as_bytes(), 2);
+    }
+
+    #[test]
+    #[cfg(feature = "obj")]
+    fn the_triangle_limit_refuses_bigger_obj() {
+        refused_under("q.obj", format!("{QUAD}f 1 2 3 4\nf 1 2 3\n").as_bytes(), 3);
+    }
+
+    #[test]
+    #[cfg(feature = "ply")]
+    fn the_triangle_limit_refuses_bigger_ply() {
+        // Faces after the vertices become triangles as they're read; faces before them are kept for later.
+        let after = "ply\nformat ascii 1.0\nelement vertex 4\nproperty float x\nproperty float y\nproperty float z\n\
+                     element face 2\nproperty list uchar int vertex_indices\nend_header\n\
+                     0 0 0\n1 0 0\n1 1 0\n0 1 0\n4 0 1 2 3\n3 0 1 2\n";
+        refused_under("a.ply", after.as_bytes(), 3);
+        let before = "ply\nformat ascii 1.0\nelement face 2\nproperty list uchar int vertex_indices\n\
+                      element vertex 4\nproperty float x\nproperty float y\nproperty float z\nend_header\n\
+                      4 0 1 2 3\n3 0 1 2\n0 0 0\n1 0 0\n1 1 0\n0 1 0\n";
+        refused_under("b.ply", before.as_bytes(), 3);
+    }
+
+    #[test]
+    #[cfg(feature = "fbx")]
+    fn the_triangle_limit_refuses_bigger_fbx() {
+        let fbx = "; FBX 7.3.0 project file\nFBXHeaderExtension:  {\n\tFBXVersion: 7300\n}\nObjects:  {\n\
+                   \tGeometry: 2, \"Geometry::Quad\", \"Mesh\" {\n\t\tVertices: *12 {\n\
+                   \t\t\ta: 0,0,0,1,0,0,1,1,0,0,1,0\n\t\t}\n\
+                   \t\tPolygonVertexIndex: *4 {\n\t\t\ta: 0,1,2,-4\n\t\t}\n\t}\n\
+                   \tModel: 20, \"Model::Quad\", \"Mesh\" {\n\t}\n}\nConnections:  {\n\tC: \"OO\",2,20\n\tC: \"OO\",20,0\n}\n";
+        refused_under("q.fbx", fbx.as_bytes(), 2);
+    }
+
+    #[test]
+    #[cfg(feature = "usd")]
+    fn the_triangle_limit_refuses_bigger_usd() {
+        let usda = "#usda 1.0\ndef Mesh \"Quad\"\n{\n    point3f[] points = [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)]\n\
+                    int[] faceVertexCounts = [4]\n    int[] faceVertexIndices = [0, 1, 2, 3]\n}\n";
+        refused_under("q.usda", usda.as_bytes(), 2);
+    }
+
+    /// A glTF document drawing a quad, `instances` times (`EXT_mesh_gpu_instancing`) or, for 0,
+    /// once without instancing.
+    #[allow(dead_code)]
+    fn quad_gltf(instances: usize) -> String {
+        let mut bin = Vec::new();
+        for v in [0f32, 0., 0., 1., 0., 0., 1., 1., 0., 0., 1., 0.] {
+            bin.extend_from_slice(&v.to_le_bytes());
+        }
+        for i in [0u16, 1, 2, 0, 2, 3] {
+            bin.extend_from_slice(&i.to_le_bytes());
+        }
+        let at = bin.len();
+        bin.resize(at + 12 * instances.max(1), 0);
+        let digit = |n: u8| char::from_digit(u32::from(n), 16).unwrap();
+        let hex: String = bin.iter().flat_map(|&b| ['%', digit(b >> 4), digit(b & 15)]).collect();
+        let mut node = json!({ "mesh": 0 });
+        if instances > 0 {
+            node["extensions"] = json!({ "EXT_mesh_gpu_instancing": { "attributes": { "TRANSLATION": 2 } } });
+        }
+        json!({
+            "asset": { "version": "2.0" },
+            "extensionsUsed": ["EXT_mesh_gpu_instancing"],
+            "scene": 0,
+            "scenes": [{ "nodes": [0] }],
+            "nodes": [node],
+            "meshes": [{ "primitives": [{ "attributes": { "POSITION": 0 }, "indices": 1 }] }],
+            "accessors": [
+                { "bufferView": 0, "componentType": 5126, "count": 4, "type": "VEC3", "min": [0, 0, 0], "max": [1, 1, 0] },
+                { "bufferView": 1, "componentType": 5123, "count": 6, "type": "SCALAR" },
+                { "bufferView": 2, "componentType": 5126, "count": instances.max(1), "type": "VEC3" },
+            ],
+            "bufferViews": [
+                { "buffer": 0, "byteLength": 48 },
+                { "buffer": 0, "byteOffset": 48, "byteLength": 12 },
+                { "buffer": 0, "byteOffset": at, "byteLength": 12 * instances.max(1) },
+            ],
+            "buffers": [{ "byteLength": bin.len(), "uri": format!("data:application/octet-stream,{hex}") }],
+        })
+        .to_string()
+    }
+
+    #[test]
+    #[cfg(feature = "gltf")]
+    fn the_triangle_limit_refuses_to_flatten_bigger_gltf() {
+        use crate::document::Pose;
+        let flat = |gltf: &str, max| {
+            limited("m.gltf", gltf.as_bytes(), max)
+                .unwrap()
+                .flatten(Pose::Rest)
+                .map(|m| m.unwrap().triangles())
+        };
+        let gltf = quad_gltf(0);
+        let err = flat(&gltf, 1).unwrap_err();
+        assert!(format!("{err:#}").contains("too many triangles"), "{err:#}");
+        assert_eq!(flat(&gltf, 2).unwrap(), 2);
+        // Three instances of two triangles draw six.
+        let gltf = quad_gltf(3);
+        assert!(flat(&gltf, 2).is_err());
+        assert!(flat(&gltf, 5).is_err());
+        assert_eq!(flat(&gltf, 6).unwrap(), 6);
+
+        // A document's limit can be changed after the load.
+        let gltf = quad_gltf(0);
+        let mut doc = limited("m.gltf", gltf.as_bytes(), 1).unwrap();
+        assert_eq!(doc.max_triangles(), 1);
+        assert!(doc.flatten(Pose::Rest).is_err());
+        doc.set_max_triangles(2);
+        assert_eq!(doc.flatten(Pose::Rest).unwrap().unwrap().triangles(), 2);
+        doc.set_max_triangles(usize::MAX);
+        assert_eq!(doc.max_triangles(), crate::mesh::TRIANGLE_CEILING);
+    }
+
+    #[test]
+    #[cfg(feature = "gltf")]
+    fn a_triangle_limit_past_the_default_is_honored() {
+        use crate::mesh::MAX_TRIANGLES;
+        // Positions for one triangle more than the default allows, in a buffer holding one vertex. The count is
+        // checked before any vertex is read: the default refuses the model for its size, while a higher limit gets
+        // as far as finding the buffer short.
+        let gltf = json!({
+            "asset": { "version": "2.0" },
+            "scene": 0,
+            "scenes": [{ "nodes": [0] }],
+            "nodes": [{ "mesh": 0 }],
+            "meshes": [{ "primitives": [{ "attributes": { "POSITION": 0 } }] }],
+            "accessors": [{ "bufferView": 0, "componentType": 5126, "count": 3 * MAX_TRIANGLES + 3, "type": "VEC3" }],
+            "bufferViews": [{ "buffer": 0, "byteLength": 12 }],
+            "buffers": [{ "byteLength": 12, "uri": "data:application/octet-stream;base64,AAAAAAAAAAAAAAAA" }],
+        })
+        .to_string();
+        let err = |max| {
+            let doc = limited("big.gltf", gltf.as_bytes(), max).unwrap();
+            format!("{:#}", doc.flatten(crate::document::Pose::Rest).unwrap_err())
+        };
+        let default = err(MAX_TRIANGLES);
+        assert!(default.contains("too many triangles"), "{default}");
+        let past = err(MAX_TRIANGLES + 1);
+        assert!(!past.contains("too many triangles") && past.contains("past"), "{past}");
+        let doc = limited("big.gltf", gltf.as_bytes(), 12_000_000).unwrap();
+        assert_eq!(doc.max_triangles(), 12_000_000);
     }
 
     #[test]

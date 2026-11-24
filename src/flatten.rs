@@ -1,5 +1,5 @@
-//! The flat view of a [`Document`]: the triangles its default scene draws, posed, as a
-//! [`Mesh`], and how many triangles, points and lines that is, counted from the JSON alone.
+//! The flat view of a [`Document`]: the triangles, lines and points its default scene draws,
+//! posed, as a [`Mesh`], and how many of each that is, counted from the JSON alone.
 //!
 //! - The default scene is drawn (else scene 0; with no scenes, every root node; with no nodes,
 //!   every mesh). Node transforms are baked into the vertices; a mirroring transform flips the
@@ -10,7 +10,10 @@
 //!   cubic-spline interpolation.
 //! - Skinned meshes take the pose their joints are in (linear blend skinning); morph targets
 //!   take the node's or mesh's weights.
-//! - Triangles, strips and fans; points and lines are counted, not drawn.
+//! - Triangles, strips and fans; lines, line strips and loops (as segments) and points, unless
+//!   [`Keep::lines_and_points`] leaves them out. A primitive drawn on the same vertices as the
+//!   one before it, as Polysmelt writes a primitive's lines and points, joins it rather than
+//!   repeat them. Draco-compressed points and lines aren't drawn.
 //! - `POSITION`, `NORMAL`, the color texture's `TEXCOORD_n` (its `KHR_texture_transform`
 //!   baked in) and `COLOR_0`, in any component type `KHR_mesh_quantization` allows, sparse
 //!   accessors included. Without `NORMAL` a primitive keeps no normals: glTF shades it flat.
@@ -34,34 +37,36 @@ use std::sync::Arc;
 
 use serde_json::{Map, Value};
 
+#[cfg(doc)]
+use crate::document::Keep;
 use crate::document::{Counts, Document, Pose};
 use crate::gltf as container;
-use crate::mesh::{Image, MAX_TRIANGLES, Material, Mesh, Prim};
+use crate::mesh::{Image, Material, Mesh, Prim};
 use crate::num::{f32_of, u32_of, usize_of};
 use crate::{Context as _, Result};
 
 /// How much of a buffer is read at once.
 const BLOCK: usize = 256 * 1024;
 
-/// The most vertices an accessor without data (all zeros) may claim.
-const MAX_VERTICES: usize = 3 * MAX_TRIANGLES;
-
 impl Document<'_> {
-    /// The triangles the default scene draws in `pose`, as one mesh with every transform,
-    /// instance, morph and skin baked in; `None` when it draws no triangles.
+    /// The triangles, lines and points the default scene draws in `pose`, as one mesh with every
+    /// transform, instance, morph and skin baked in; `None` when it draws nothing. Lines and
+    /// points are left out when [`Document::lines_and_points`] says so.
     ///
     /// # Errors
     ///
     /// When the document is malformed (an accessor out of range, a scene that doesn't exist),
     /// `pose` names an animation that doesn't exist, it uses Draco without the `draco`
-    /// feature, or it draws more than [`MAX_TRIANGLES`].
+    /// feature, or it draws more than [`Document::max_triangles`] triangles or
+    /// [`Document::max_points`] points and line segments.
     pub fn flatten(&self, pose: Pose) -> Result<Option<Mesh>> {
         let mut r = Reader::new(self)?;
+        r.bind = pose == Pose::Bind;
         r.pose(pose)?;
         r.mesh()
     }
 
-    /// The triangles the default scene draws with each node in the transform `nodes` gives it,
+    /// What the default scene draws with each node in the transform `nodes` gives it,
     /// as [`Document::flatten`] does: for a pose worked out elsewhere, such as one retargeted
     /// from another rig, blended, or solved by IK. `nodes` is indexed as [`Rig::nodes`] (as
     /// [`Rig::pose_into`] fills it); nodes past its end keep their own transforms, and morph
@@ -82,6 +87,40 @@ impl Document<'_> {
             p.given = true;
         }
         r.mesh()
+    }
+
+    /// Accessor `accessor`'s elements as floats, `width` to an element (a matrix's columns in
+    /// order, without padding), as a renderer reads them: meshopt-compressed views decoded,
+    /// sparse substitutions applied, normalized integers mapped to [0, 1] or [-1, 1] and other
+    /// integers as they are (exact below 2^24). An accessor without a buffer view reads as
+    /// zeros under its sparse values: Draco-compressed data needs [`Document::decode`] first.
+    ///
+    /// # Errors
+    ///
+    /// When the accessor doesn't exist, is malformed or runs past its buffer, or its
+    /// compressed view doesn't decode.
+    pub fn read_floats(&self, accessor: usize) -> Result<(usize, Vec<f32>)> {
+        let mut r = Reader::bare(self);
+        let a = r.acc(accessor)?;
+        let values = match a.n {
+            1 => r.read_acc(&a, [0.0])?.into_flattened(),
+            2 => r.read_acc(&a, [0.0; 2])?.into_flattened(),
+            3 => r.read_acc(&a, [0.0; 3])?.into_flattened(),
+            4 => r.read_acc(&a, [0.0; 4])?.into_flattened(),
+            9 => r.read_acc(&a, [0.0; 9])?.into_flattened(),
+            _ => r.read_acc(&a, [0.0; 16])?.into_flattened(),
+        };
+        Ok((a.n, values))
+    }
+
+    /// Accessor `accessor`'s unsigned integer scalars (indices, or anything else stored so),
+    /// exactly, read as [`Document::read_floats`] reads.
+    ///
+    /// # Errors
+    ///
+    /// As [`Document::read_floats`], and when the accessor isn't unsigned integer scalars.
+    pub fn read_indices(&self, accessor: usize) -> Result<Vec<u32>> {
+        Reader::bare(self).read_indices(accessor)
     }
 
     /// How many triangles, points and line segments the default scene draws (every instance
@@ -214,11 +253,18 @@ fn scene_order(json: &Map<String, Value>) -> Result<Option<Vec<usize>>> {
         }
         seen[i] = true;
         // KHR_node_visibility: a hidden node hides everything under it.
-        if nodes[i].pointer("/extensions/KHR_node_visibility/visible") == Some(&Value::Bool(false)) {
+        // (Looked up key by key: `Value::pointer` allocates for each step, on every node.)
+        let visible = nodes[i]
+            .get("extensions")
+            .and_then(|e| e.get("KHR_node_visibility"))
+            .and_then(|v| v.get("visible"));
+        if visible == Some(&Value::Bool(false)) {
             continue;
         }
         order.push(i);
-        stack.extend(list_of(&nodes[i], "children").into_iter().rev());
+        if let Some(kids) = nodes[i].get("children").and_then(Value::as_array) {
+            stack.extend(kids.iter().rev().filter_map(Value::as_u64).map(usize_of));
+        }
     }
     Ok(Some(order))
 }
@@ -232,6 +278,8 @@ struct Acc {
     ctype: u64,
     /// Components per element.
     n: usize,
+    /// Components per column: a matrix's height, `n` for a scalar or vector.
+    rows: usize,
     normalized: bool,
     sparse: Option<Value>,
     /// Elements decoded from Draco, tightly packed, in place of a buffer view.
@@ -247,15 +295,50 @@ impl Acc {
         }
     }
 
+    /// Bytes from one column to the next: a matrix's columns start 4-byte aligned (3.6.2.4).
+    fn column(&self) -> usize {
+        (self.rows * self.csize()).next_multiple_of(if self.rows < self.n { 4 } else { 1 })
+    }
+
     fn esize(&self) -> usize {
-        self.csize() * self.n
+        self.column() * (self.n / self.rows.max(1))
+    }
+
+    /// Whether a matrix's columns are padded, so components aren't `csize` apart.
+    fn padded(&self) -> bool {
+        self.esize() != self.csize() * self.n
+    }
+
+    /// Component `c`'s byte offset in an element.
+    fn at(&self, c: usize) -> usize {
+        (c / self.rows) * self.column() + (c % self.rows) * self.csize()
+    }
+}
+
+/// One component as a float: normalized integers mapped to [0, 1] or [-1, 1].
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "past 2^24 an f32 attribute rounds, as in any viewer"
+)]
+fn component(ctype: u64, normalized: bool, b: &[u8]) -> f32 {
+    match (ctype, normalized) {
+        (5126, _) => f32::from_le_bytes([b[0], b[1], b[2], b[3]]),
+        (5121, true) => f32::from(b[0]) / 255.0,
+        (5121, false) => f32::from(b[0]),
+        (5120, true) => (f32::from(b[0].cast_signed()) / 127.0).max(-1.0),
+        (5120, false) => f32::from(b[0].cast_signed()),
+        (5123, true) => f32::from(u16::from_le_bytes([b[0], b[1]])) / 65535.0,
+        (5123, false) => f32::from(u16::from_le_bytes([b[0], b[1]])),
+        (5122, true) => (f32::from(i16::from_le_bytes([b[0], b[1]])) / 32767.0).max(-1.0),
+        (5122, false) => f32::from(i16::from_le_bytes([b[0], b[1]])),
+        _ => u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f32,
     }
 }
 
 /// A 4x4 matrix, column-major as glTF writes it.
-type M4 = [f64; 16];
+pub(crate) type M4 = [f64; 16];
 
-const IDENTITY: M4 = [
+pub(crate) const IDENTITY: M4 = [
     1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
 ];
 
@@ -284,8 +367,18 @@ struct Reader<'d> {
     world: Vec<M4>,
     /// Each node's animated properties, in the pose asked for.
     posed: Vec<Posed>,
+    /// Skinned meshes are left in their bind pose ([`Pose::Bind`]).
+    bind: bool,
+    /// For [`Pose::Bind`], each joint's transform in its bind pose (its inverse bind matrix's
+    /// inverse), from the first skin to list it.
+    bound: Vec<Option<M4>>,
     /// Triangles still allowed.
     budget: usize,
+    /// Points and line segments still allowed.
+    point_budget: usize,
+    /// The most vertices an accessor without data (all zeros) may claim: three to each
+    /// triangle the document allows, or one to each point.
+    max_vertices: usize,
     /// The current primitive's Draco-decoded accessors: (accessor, elements, component type,
     /// components).
     draco: Vec<(usize, Arc<[u8]>, u64, usize)>,
@@ -339,13 +432,22 @@ fn drawable(extension: &str) -> bool {
         "KHR_node_visibility",
     ];
     const LOOKS: &[&str] = &[
+        "VRMC_",
         "KHR_materials_",
         "KHR_texture_",
         "EXT_texture_",
         "KHR_lights_",
         "KHR_xmp",
+        "EXT_materials_",
+        "EXT_lights_",
+        "MSFT_texture_",
+        "MSFT_packing_",
+        "ADOBE_materials_",
     ];
-    DECODED.contains(&extension) || LOOKS.iter().any(|p| extension.starts_with(p))
+    // Levels of detail: the node itself is the finest, which is what's drawn.
+    // VRM 0.x names its extension plainly, without a vendor prefix.
+    const ALSO: &[&str] = &["MSFT_lod", "VRM"];
+    DECODED.contains(&extension) || ALSO.contains(&extension) || LOOKS.iter().any(|p| extension.starts_with(p))
 }
 
 fn f32s<const N: usize>(v: Option<&Value>, default: [f32; N]) -> [f32; N] {
@@ -387,7 +489,15 @@ impl<'d> Reader<'d> {
             images: vec![None; n("images")],
             world: Vec::new(),
             posed: vec![Posed::default(); n("nodes")],
-            budget: MAX_TRIANGLES,
+            bind: false,
+            bound: Vec::new(),
+            budget: doc.max_triangles,
+            point_budget: doc.max_points,
+            max_vertices: doc.max_triangles.saturating_mul(3).max(if doc.lines_and_points {
+                doc.max_points
+            } else {
+                0
+            }),
             draco: Vec::new(),
         }
     }
@@ -492,6 +602,7 @@ impl<'d> Reader<'d> {
                 count,
                 ctype: *ctype,
                 n: *n,
+                rows: *n,
                 normalized: false,
                 sparse: None,
                 decoded: Some(bytes.clone()),
@@ -503,12 +614,14 @@ impl<'d> Reader<'d> {
             matches!(ctype, 5120..=5123 | 5125 | 5126),
             "glTF accessor {i} has component type {ctype}"
         );
-        let n = match a.get("type").and_then(Value::as_str) {
-            Some("SCALAR") => 1,
-            Some("VEC2") => 2,
-            Some("VEC3") => 3,
-            Some("VEC4") => 4,
-            Some("MAT4") => 16,
+        let (n, rows) = match a.get("type").and_then(Value::as_str) {
+            Some("SCALAR") => (1, 1),
+            Some("VEC2") => (2, 2),
+            Some("VEC3") => (3, 3),
+            Some("VEC4") => (4, 4),
+            Some("MAT2") => (4, 2),
+            Some("MAT3") => (9, 3),
+            Some("MAT4") => (16, 4),
             t => bail!("glTF accessor {i} has type {t:?}, not one read here"),
         };
         Ok(Acc {
@@ -517,6 +630,7 @@ impl<'d> Reader<'d> {
             count: index(a, "count").context("glTF accessor has no count")?,
             ctype,
             n,
+            rows,
             normalized: a.get("normalized").and_then(Value::as_bool).unwrap_or(false),
             sparse: a.get("sparse").cloned(),
             decoded: None,
@@ -531,7 +645,11 @@ impl<'d> Reader<'d> {
             return Ok(());
         }
         let Some(view) = a.view else {
-            ensure!(a.count <= MAX_VERTICES, "glTF accessor counts {} elements", a.count);
+            ensure!(
+                a.count <= self.max_vertices,
+                "glTF accessor counts {} elements",
+                a.count
+            );
             return Ok(());
         };
         if a.count == 0 {
@@ -604,55 +722,81 @@ impl<'d> Reader<'d> {
             *z = 0.0;
         }
         if a.view.is_none() {
-            ensure!(a.count <= MAX_VERTICES, "glTF accessor counts {} elements", a.count);
+            ensure!(
+                a.count <= self.max_vertices,
+                "glTF accessor counts {} elements",
+                a.count
+            );
         }
+        let count = a.count;
         let mut out = Vec::new();
-        out.try_reserve_exact(a.count)
-            .map_err(|_| invalid!("glTF accessor counts {} elements", a.count))?;
-        out.resize(a.count, zero);
+        out.try_reserve_exact(count)
+            .map_err(|_| invalid!("glTF accessor counts {count} elements"))?;
         let m = a.n.min(N);
         let cs = a.csize();
         let (ctype, normalized) = (a.ctype, a.normalized);
+        let offsets: Option<Vec<usize>> = a.padded().then(|| (0..m).map(|c| a.at(c)).collect());
+        // Elements are appended as the blocks come, in order, rather than written over zeros
+        // laid down first: that filling cost as much as the reading. Elements the data doesn't
+        // reach (no view, a short decoded stream) are `zero`, filled in after.
         self.blocks(a, |first, bytes, stride| {
-            let out = &mut out[first..];
-            if ctype == 5126 && m == N && stride == 4 * N {
-                // Tightly packed floats (what nearly every exporter writes): one flat loop.
-                for (o, b) in out.as_flattened_mut().iter_mut().zip(bytes.chunks_exact(4)) {
-                    *o = f32::from_le_bytes([b[0], b[1], b[2], b[3]]);
-                }
+            if out.len() < first {
+                out.resize(first.min(count), zero);
+            }
+            // Never past the accessor's count, whatever a decoded stream holds.
+            let room = count - out.len();
+            let bytes = &bytes[..bytes.len().min(room.saturating_mul(stride))];
+            if let Some(offsets) = &offsets {
+                // A small matrix's padded columns: rare, so one general loop.
+                out.extend(bytes.chunks(stride).map(|e| {
+                    let mut o = zero;
+                    for (x, &at) in o.iter_mut().zip(offsets) {
+                        *x = component(ctype, normalized, &e[at..]);
+                    }
+                    o
+                }));
                 return;
             }
+            if ctype == 5126 && m == N && stride == 4 * N {
+                // Tightly packed floats (what nearly every exporter writes): one flat loop.
+                out.extend(bytes.chunks_exact(4 * N).map(|e| {
+                    std::array::from_fn(|c| f32::from_le_bytes([e[4 * c], e[4 * c + 1], e[4 * c + 2], e[4 * c + 3]]))
+                }));
+                return;
+            }
+            let o = &mut out;
             match (ctype, normalized) {
-                (5126, _) => put(out, bytes, stride, cs, m, |b| {
+                (5126, _) => put(o, bytes, stride, cs, m, zero, |b| {
                     f32::from_le_bytes([b[0], b[1], b[2], b[3]])
                 }),
-                (5121, true) => put(out, bytes, stride, cs, m, |b| f32::from(b[0]) / 255.0),
-                (5121, false) => put(out, bytes, stride, cs, m, |b| f32::from(b[0])),
-                (5120, true) => put(out, bytes, stride, cs, m, |b| {
+                (5121, true) => put(o, bytes, stride, cs, m, zero, |b| f32::from(b[0]) / 255.0),
+                (5121, false) => put(o, bytes, stride, cs, m, zero, |b| f32::from(b[0])),
+                (5120, true) => put(o, bytes, stride, cs, m, zero, |b| {
                     (f32::from(b[0].cast_signed()) / 127.0).max(-1.0)
                 }),
-                (5120, false) => put(out, bytes, stride, cs, m, |b| f32::from(b[0].cast_signed())),
-                (5123, true) => put(out, bytes, stride, cs, m, |b| {
+                (5120, false) => put(o, bytes, stride, cs, m, zero, |b| f32::from(b[0].cast_signed())),
+                (5123, true) => put(o, bytes, stride, cs, m, zero, |b| {
                     f32::from(u16::from_le_bytes([b[0], b[1]])) / 65535.0
                 }),
-                (5123, false) => put(out, bytes, stride, cs, m, |b| {
+                (5123, false) => put(o, bytes, stride, cs, m, zero, |b| {
                     f32::from(u16::from_le_bytes([b[0], b[1]]))
                 }),
-                (5122, true) => put(out, bytes, stride, cs, m, |b| {
+                (5122, true) => put(o, bytes, stride, cs, m, zero, |b| {
                     (f32::from(i16::from_le_bytes([b[0], b[1]])) / 32767.0).max(-1.0)
                 }),
-                (5122, false) => put(out, bytes, stride, cs, m, |b| {
+                (5122, false) => put(o, bytes, stride, cs, m, zero, |b| {
                     f32::from(i16::from_le_bytes([b[0], b[1]]))
                 }),
                 #[allow(
                     clippy::cast_precision_loss,
                     reason = "past 2^24 an f32 attribute rounds, as in any viewer"
                 )]
-                _ => put(out, bytes, stride, cs, m, |b| {
+                _ => put(o, bytes, stride, cs, m, zero, |b| {
                     u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f32
                 }),
             }
         })?;
+        out.resize(count, zero);
         if let Some(s) = a.sparse.clone() {
             let (at, values) = self.sparse(a, &s)?;
             let values = self.read_acc(&values, fill)?;
@@ -676,41 +820,51 @@ impl<'d> Reader<'d> {
     }
 
     fn read_u32s(&mut self, a: &Acc) -> Result<Vec<u32>> {
+        let count = a.count;
         let mut out = Vec::new();
-        out.try_reserve_exact(a.count)
-            .map_err(|_| invalid!("glTF accessor counts {} elements", a.count))?;
-        out.resize(a.count, 0u32);
+        out.try_reserve_exact(count)
+            .map_err(|_| invalid!("glTF accessor counts {count} elements"))?;
         let ctype = a.ctype;
+        // Appended in order, as `read_acc` does; what the data doesn't reach is 0.
         self.blocks(a, |first, bytes, stride| {
-            let out = &mut out[first..];
+            if out.len() < first {
+                out.resize(first.min(count), 0);
+            }
+            let room = count - out.len();
+            let bytes = &bytes[..bytes.len().min(room.saturating_mul(stride))];
+            let need = match ctype {
+                5121 => 1,
+                5123 => 2,
+                _ => 4,
+            };
+            let whole = |e: &&[u8]| e.len() >= need;
             match ctype {
-                5121 => {
-                    for (o, e) in out.iter_mut().zip(bytes.chunks(stride)) {
-                        *o = u32::from(e[0]);
-                    }
-                }
-                5123 if stride == 2 => {
-                    for (o, e) in out.iter_mut().zip(bytes.chunks_exact(2)) {
-                        *o = u32::from(u16::from_le_bytes([e[0], e[1]]));
-                    }
-                }
-                5125 if stride == 4 => {
-                    for (o, e) in out.iter_mut().zip(bytes.chunks_exact(4)) {
-                        *o = u32::from_le_bytes([e[0], e[1], e[2], e[3]]);
-                    }
-                }
-                5123 => {
-                    for (o, e) in out.iter_mut().zip(bytes.chunks(stride)) {
-                        *o = u32::from(u16::from_le_bytes([e[0], e[1]]));
-                    }
-                }
-                _ => {
-                    for (o, e) in out.iter_mut().zip(bytes.chunks(stride)) {
-                        *o = u32::from_le_bytes([e[0], e[1], e[2], e[3]]);
-                    }
-                }
+                5121 => out.extend(bytes.chunks(stride).map(|e| u32::from(e[0]))),
+                5123 if stride == 2 => out.extend(
+                    bytes
+                        .chunks_exact(2)
+                        .map(|e| u32::from(u16::from_le_bytes([e[0], e[1]]))),
+                ),
+                5125 if stride == 4 => out.extend(
+                    bytes
+                        .chunks_exact(4)
+                        .map(|e| u32::from_le_bytes([e[0], e[1], e[2], e[3]])),
+                ),
+                5123 => out.extend(
+                    bytes
+                        .chunks(stride)
+                        .filter(whole)
+                        .map(|e| u32::from(u16::from_le_bytes([e[0], e[1]]))),
+                ),
+                _ => out.extend(
+                    bytes
+                        .chunks(stride)
+                        .filter(whole)
+                        .map(|e| u32::from_le_bytes([e[0], e[1], e[2], e[3]])),
+                ),
             }
         })?;
+        out.resize(count, 0);
         if let Some(s) = a.sparse.clone() {
             let (at, values) = self.sparse(a, &s)?;
             let values = self.read_u32s(&values)?;
@@ -751,6 +905,7 @@ impl<'d> Reader<'d> {
             count,
             ctype: ictype,
             n: 1,
+            rows: 1,
             normalized: false,
             sparse: None,
             decoded: None,
@@ -859,7 +1014,7 @@ impl<'d> Reader<'d> {
         .flatten()
         .min()
         .unwrap_or(0);
-        ensure!(count <= MAX_TRIANGLES, "glTF node has {count} instances");
+        ensure!(count <= self.doc.max_triangles, "glTF node has {count} instances");
         Ok((0..count)
             .map(|k| {
                 let t = t.as_ref().map_or([0.0; 3], |v| v[k].map(f64::from));
@@ -879,33 +1034,41 @@ fn list_of(v: &Value, key: &str) -> Vec<usize> {
         .unwrap_or_default()
 }
 
-/// Writes `m` components of each element in `bytes` into `out`.
+/// Appends each element in `bytes` to `out`: its first `m` components converted, the rest
+/// (and the whole of an element cut short) from `zero`.
 #[inline]
 fn put<const N: usize>(
-    out: &mut [[f32; N]],
+    out: &mut Vec<[f32; N]>,
     bytes: &[u8],
     stride: usize,
     csize: usize,
     m: usize,
+    zero: [f32; N],
     conv: impl Fn(&[u8]) -> f32,
 ) {
     if m == N {
         // Every component given (the usual case): a loop the compiler unrolls.
-        for (o, e) in out.iter_mut().zip(bytes.chunks(stride)) {
+        out.extend(bytes.chunks(stride).map(|e| {
             if e.len() >= N * csize {
-                *o = std::array::from_fn(|c| conv(&e[c * csize..]));
+                std::array::from_fn(|c| conv(&e[c * csize..]))
+            } else {
+                zero
             }
-        }
+        }));
         return;
     }
-    for (o, e) in out.iter_mut().zip(bytes.chunks(stride)) {
-        for (c, x) in o.iter_mut().enumerate().take(m) {
-            *x = conv(&e[c * csize..]);
+    out.extend(bytes.chunks(stride).map(|e| {
+        let mut o = zero;
+        if e.len() >= m * csize {
+            for (c, x) in o.iter_mut().enumerate().take(m) {
+                *x = conv(&e[c * csize..]);
+            }
         }
-    }
+        o
+    }));
 }
 
-fn mul(a: &M4, b: &M4) -> M4 {
+pub(crate) fn mul(a: &M4, b: &M4) -> M4 {
     let mut r = [0.0; 16];
     for c in 0..4 {
         for row in 0..4 {
@@ -916,7 +1079,7 @@ fn mul(a: &M4, b: &M4) -> M4 {
 }
 
 /// Translation, rotation (a quaternion x y z w) and scale as one matrix.
-fn trs(t: [f64; 3], q: [f64; 4], s: [f64; 3]) -> M4 {
+pub(crate) fn trs(t: [f64; 3], q: [f64; 4], s: [f64; 3]) -> M4 {
     let len = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]).sqrt();
     let [x, y, z, w] = if len > 0.0 {
         q.map(|c| c / len)
@@ -950,6 +1113,87 @@ fn trs(t: [f64; 3], q: [f64; 4], s: [f64; 3]) -> M4 {
     m
 }
 
+/// The inverse of an affine matrix (last row 0 0 0 1), `None` when its 3x3 part is singular.
+pub(crate) fn affine_inverse(m: &M4) -> Option<M4> {
+    let det = det3(m);
+    if !(det.abs() > 1e-30 && det.is_finite()) {
+        return None;
+    }
+    // The 3x3's inverse is its cofactors, transposed, over the determinant.
+    let a = |r: usize, c: usize| m[c * 4 + r];
+    let mut out = IDENTITY;
+    for r in 0..3 {
+        for c in 0..3 {
+            let (r1, r2) = ((r + 1) % 3, (r + 2) % 3);
+            let (c1, c2) = ((c + 1) % 3, (c + 2) % 3);
+            // Cofactor (r, c) goes to (c, r).
+            out[r * 4 + c] = (a(r1, c1) * a(r2, c2) - a(r1, c2) * a(r2, c1)) / det;
+        }
+    }
+    for r in 0..3 {
+        out[12 + r] = -(0..3).map(|k| out[k * 4 + r] * m[12 + k]).sum::<f64>();
+    }
+    Some(out)
+}
+
+/// An affine matrix as translation, rotation (a unit quaternion x y z w) and scale, a mirror
+/// taken as a negative X scale. Shear, which glTF's TRS can't hold, is dropped.
+pub(crate) fn decompose(m: &M4) -> ([f64; 3], [f64; 4], [f64; 3]) {
+    let t = [m[12], m[13], m[14]];
+    let col = |c: usize| [m[c * 4], m[c * 4 + 1], m[c * 4 + 2]];
+    let len = |v: [f64; 3]| (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    let mut s = [len(col(0)), len(col(1)), len(col(2))];
+    if det3(m) < 0.0 {
+        s[0] = -s[0];
+    }
+    if s.iter().any(|&x| !(x.abs() > 1e-30 && x.is_finite())) {
+        return (t, [0.0, 0.0, 0.0, 1.0], s.map(|x| if x.is_finite() { x } else { 0.0 }));
+    }
+    // The rotation's rows and columns: each column over its scale.
+    let r = |row: usize, c: usize| m[c * 4 + row] / s[c];
+    let trace = r(0, 0) + r(1, 1) + r(2, 2);
+    let q = if trace > 0.0 {
+        let k = 0.5 / (trace + 1.0).sqrt();
+        [
+            (r(2, 1) - r(1, 2)) * k,
+            (r(0, 2) - r(2, 0)) * k,
+            (r(1, 0) - r(0, 1)) * k,
+            0.25 / k,
+        ]
+    } else if r(0, 0) > r(1, 1) && r(0, 0) > r(2, 2) {
+        let k = 2.0 * (1.0 + r(0, 0) - r(1, 1) - r(2, 2)).max(0.0).sqrt();
+        [
+            0.25 * k,
+            (r(0, 1) + r(1, 0)) / k,
+            (r(0, 2) + r(2, 0)) / k,
+            (r(2, 1) - r(1, 2)) / k,
+        ]
+    } else if r(1, 1) > r(2, 2) {
+        let k = 2.0 * (1.0 + r(1, 1) - r(0, 0) - r(2, 2)).max(0.0).sqrt();
+        [
+            (r(0, 1) + r(1, 0)) / k,
+            0.25 * k,
+            (r(1, 2) + r(2, 1)) / k,
+            (r(0, 2) - r(2, 0)) / k,
+        ]
+    } else {
+        let k = 2.0 * (1.0 + r(2, 2) - r(0, 0) - r(1, 1)).max(0.0).sqrt();
+        [
+            (r(0, 2) + r(2, 0)) / k,
+            (r(1, 2) + r(2, 1)) / k,
+            0.25 * k,
+            (r(1, 0) - r(0, 1)) / k,
+        ]
+    };
+    let n = q.iter().map(|c| c * c).sum::<f64>().sqrt();
+    let q = if n > 0.0 && n.is_finite() {
+        q.map(|c| c / n)
+    } else {
+        [0.0, 0.0, 0.0, 1.0]
+    };
+    (t, q, s)
+}
+
 /// The upper 3x3's determinant.
 fn det3(m: &M4) -> f64 {
     m[0] * (m[5] * m[10] - m[9] * m[6]) - m[4] * (m[1] * m[10] - m[9] * m[2]) + m[8] * (m[1] * m[6] - m[5] * m[2])
@@ -971,19 +1215,116 @@ fn normal_matrix(m: &M4) -> [[f64; 3]; 3] {
     n
 }
 
+/// A mesh's vertex positions, normals and tangents, to move together.
+type Frames<'a> = (&'a mut [[f32; 3]], &'a mut [[f32; 3]], &'a mut [[f32; 4]]);
+
+/// Moves `range` of the vertices by `m`, their normals by its normal matrix `nm` and their
+/// tangents by `m` itself. A matrix that moves nothing leaves them exactly as they are, as an
+/// unskinned mesh's are, but for normals and tangents a morph changed (`morphed`), which are
+/// renormalized.
+fn transform(
+    m: &M4,
+    nm: &[[f64; 3]; 3],
+    morphed: bool,
+    (positions, normals, tangents): Frames<'_>,
+    range: std::ops::Range<usize>,
+) {
+    let still = m[..12] == IDENTITY[..12] && m[12..15] == [0.0; 3];
+    if !still {
+        for p in &mut positions[range.clone()] {
+            *p = apply_point(m, *p);
+        }
+    }
+    let end = range.end.min(tangents.len());
+    if (morphed || !still) && range.start < end {
+        let flip = det3(m) < 0.0;
+        for t in &mut tangents[range.start..end] {
+            *t = apply_tangent(m, *t, flip);
+        }
+    }
+    let end = range.end.min(normals.len());
+    if (morphed || !still) && range.start < end {
+        // Single precision: within a unit in the last place of double, at a fraction of the cost.
+        // A block at a time, with no branch in the loop (one stops it vectorizing, for a quarter
+        // of the speed); a block where single precision couldn't square a normal is redone. Rows
+        // written out, as in `apply_point`.
+        let n = nm.map(|r| r.map(f32_of));
+        let turn = |[x, y, z]: [f32; 3]| {
+            [
+                n[0][0] * x + n[0][1] * y + n[0][2] * z,
+                n[1][0] * x + n[1][1] * y + n[1][2] * z,
+                n[2][0] * x + n[2][1] * y + n[2][2] * z,
+            ]
+        };
+        let fits = |len2: f32| len2 > 0.0 && len2.is_finite();
+        for block in normals[range.start..end].chunks_mut(64) {
+            let mut kept = [[0.0; 3]; 64];
+            kept[..block.len()].copy_from_slice(block);
+            let mut all = true;
+            for nv in block.iter_mut() {
+                let [x, y, z] = turn(*nv);
+                let len2 = x * x + y * y + z * z;
+                all &= fits(len2);
+                let inv = 1.0 / len2.sqrt();
+                *nv = [x * inv, y * inv, z * inv];
+            }
+            if !all {
+                for (nv, &k) in block.iter_mut().zip(&kept) {
+                    let o = turn(k);
+                    if !fits(o[0] * o[0] + o[1] * o[1] + o[2] * o[2]) {
+                        // Too small or large for single precision to square: double's answer.
+                        *nv = apply_normal(nm, k);
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn apply_point(m: &M4, p: [f32; 3]) -> [f32; 3] {
     let [x, y, z] = p.map(f64::from);
-    [0, 1, 2].map(|r| f32_of(m[r] * x + m[4 + r] * y + m[8 + r] * z + m[12 + r]))
+    // Row by row, written out: built with `map`, the result shuffles through registers at a
+    // third of the speed.
+    [
+        f32_of(m[0] * x + m[4] * y + m[8] * z + m[12]),
+        f32_of(m[1] * x + m[5] * y + m[9] * z + m[13]),
+        f32_of(m[2] * x + m[6] * y + m[10] * z + m[14]),
+    ]
 }
 
 fn apply_normal(n: &[[f64; 3]; 3], v: [f32; 3]) -> [f32; 3] {
     let [x, y, z] = v.map(f64::from);
-    let o = [0, 1, 2].map(|r| n[r][0] * x + n[r][1] * y + n[r][2] * z);
-    let len = (o[0] * o[0] + o[1] * o[1] + o[2] * o[2]).sqrt();
+    // Written out, as in `apply_point`.
+    let (a, b, c) = (
+        n[0][0] * x + n[0][1] * y + n[0][2] * z,
+        n[1][0] * x + n[1][1] * y + n[1][2] * z,
+        n[2][0] * x + n[2][1] * y + n[2][2] * z,
+    );
+    let len = (a * a + b * b + c * c).sqrt();
     if len > 0.0 {
-        o.map(|c| f32_of(c / len))
+        let inv = 1.0 / len;
+        [f32_of(a * inv), f32_of(b * inv), f32_of(c * inv)]
     } else {
         [0.0, 0.0, 1.0]
+    }
+}
+
+/// A tangent turned by `m` (its upper 3x3, as surface directions turn) and made unit length;
+/// its handedness flips under a mirroring `m` (`flip`), as the triangles' winding does.
+fn apply_tangent(m: &M4, t: [f32; 4], flip: bool) -> [f32; 4] {
+    let [x, y, z] = [t[0], t[1], t[2]].map(f64::from);
+    let (a, b, c) = (
+        m[0] * x + m[4] * y + m[8] * z,
+        m[1] * x + m[5] * y + m[9] * z,
+        m[2] * x + m[6] * y + m[10] * z,
+    );
+    let w = if (t[3] < 0.0) == flip { 1.0 } else { -1.0 };
+    let len = (a * a + b * b + c * c).sqrt();
+    if len > 0.0 && len.is_finite() {
+        let inv = 1.0 / len;
+        [f32_of(a * inv), f32_of(b * inv), f32_of(c * inv), w]
+    } else {
+        [1.0, 0.0, 0.0, w]
     }
 }
 
@@ -1002,10 +1343,88 @@ fn normalize(v: &mut [f32; 3]) {
 struct Geometry {
     positions: Vec<[f32; 3]>,
     normals: Vec<[f32; 3]>,
+    tangents: Vec<[f32; 4]>,
     uvs: Vec<[f32; 2]>,
+    uv_sets: Vec<Vec<[f32; 2]>>,
     colors: Vec<[f32; 4]>,
-    indices: Vec<u32>,
+    color_sets: Vec<Vec<[f32; 4]>>,
+    draws: Draws,
     joints: Vec<u32>,
+    /// Each vertex's four strongest joints as nodes (`u32::MAX` for none), and their weights.
+    skin_joints: Vec<[u32; 4]>,
+    skin_weights: Vec<[f32; 4]>,
+}
+
+/// What a primitive draws on its vertices, as indices into them.
+#[derive(Default)]
+struct Draws {
+    /// Three to a triangle.
+    triangles: Vec<u32>,
+    /// Two to a segment.
+    lines: Vec<u32>,
+    points: Vec<u32>,
+}
+
+impl Draws {
+    fn is_empty(&self) -> bool {
+        self.triangles.is_empty() && self.lines.is_empty() && self.points.is_empty()
+    }
+}
+
+/// Whether glTF primitive `p` is drawn on the same vertices as `q`: the same attributes,
+/// material, morph targets and extensions, and no Draco stream of its own.
+fn same_vertices(p: &Value, q: &Value) -> bool {
+    let draco = |v: &Value| v.pointer("/extensions/KHR_draco_mesh_compression").is_some();
+    ["attributes", "material", "targets", "extensions"]
+        .iter()
+        .all(|k| p.get(k) == q.get(k))
+        && !draco(p)
+        && !draco(q)
+}
+
+/// Line segments, in pairs, from a primitive's indices, by mode (1 lines, 2 loop, 3 strip), per
+/// the glTF 2.0 specification's section 3.7.2.1.
+fn segments(mode: u64, idx: Vec<u32>) -> Vec<u32> {
+    match mode {
+        2 | 3 => {
+            let n = idx.len();
+            let mut out = Vec::with_capacity(n * 2);
+            for w in idx.windows(2) {
+                out.extend_from_slice(w);
+            }
+            if mode == 2 && n >= 2 {
+                out.extend_from_slice(&[idx[n - 1], idx[0]]);
+            }
+            out
+        }
+        _ => {
+            let mut idx = idx;
+            idx.truncate(idx.len() / 2 * 2);
+            idx
+        }
+    }
+}
+
+/// Keeps the groups of `N` indices in `idx` that `keep` takes, in order.
+fn retain_groups<const N: usize>(idx: &mut Vec<u32>, keep: impl Fn(&[u32; N]) -> bool) {
+    let mut w = 0;
+    for g in 0..idx.len() / N {
+        let group: [u32; N] = std::array::from_fn(|k| idx[g * N + k]);
+        if keep(&group) {
+            idx[w..w + N].copy_from_slice(&group);
+            w += N;
+        }
+    }
+    idx.truncate(w);
+}
+
+/// What [`Reader::skin`] gives each vertex: its strongest joint's node, and its four strongest
+/// joints' nodes (`u32::MAX` for none) and weights, summing to 1.
+#[derive(Default)]
+struct Skinned {
+    strongest: Vec<u32>,
+    joints: Vec<[u32; 4]>,
+    weights: Vec<[f32; 4]>,
 }
 
 /// Triangle lists from a primitive's indices, by mode (4 triangles, 5 strip, 6 fan), per the
@@ -1045,26 +1464,234 @@ impl Reader<'_> {
         let uses = self.uses()?;
         let mut mesh = Mesh::default();
         for u in &uses {
+            // The primitive last drawn, and its place in the mesh: points and lines on the same
+            // vertices join it.
+            let mut last: Option<(&Value, usize)> = None;
             for p in items(self.get("meshes", u.mesh)?, "primitives") {
+                if let Some((q, at)) = last
+                    && mode(p) < 4
+                    && same_vertices(p, q)
+                {
+                    self.join(p, u, &mut mesh.prims[at])?;
+                    continue;
+                }
+                let before = mesh.prims.len();
                 self.primitive(p, u, &mut mesh)?;
+                last = (mesh.prims.len() > before).then_some((p, before));
             }
         }
-        Ok((mesh.triangles() > 0).then_some(mesh))
+        self.skeleton(&mut mesh);
+        Ok(mesh.prims.iter().any(|p| !p.is_empty()).then_some(mesh))
+    }
+
+    /// Whether a primitive in `mode` is drawn: triangles, strips and fans, and points and lines
+    /// when the document draws them.
+    fn drawn(&self, mode: u64) -> bool {
+        matches!(mode, 4..=6) || (mode < 4 && self.doc.lines_and_points)
+    }
+
+    /// Checks that primitive `p`, in `mode`, drawn `k` times, stays within what may still be
+    /// drawn, before anything is read: what its accessors declare is counted.
+    fn afford(&self, p: &Value, pos: usize, mode: u64, k: usize) -> Result<()> {
+        let corners = match index(p, "indices") {
+            Some(i) => self.acc(i)?.count,
+            None => self.acc(pos)?.count,
+        };
+        let n = match mode {
+            0 | 2 => corners,
+            1 => corners / 2,
+            3 => corners.saturating_sub(1),
+            4 => corners / 3,
+            _ => corners.saturating_sub(2),
+        };
+        let total = n.saturating_mul(k);
+        if mode < 4 {
+            ensure!(
+                total <= self.point_budget,
+                "too many points and lines to convert (more than {})",
+                self.doc.max_points
+            );
+        } else {
+            ensure!(
+                total <= self.budget,
+                "too many triangles to convert (more than {})",
+                self.doc.max_triangles
+            );
+        }
+        Ok(())
+    }
+
+    /// What primitive `p` draws in `mode` on its `n` vertices: triangles, line segments or
+    /// points. Those that name a vertex that doesn't exist are dropped, and segments from a
+    /// vertex to itself.
+    fn draws(&mut self, p: &Value, mode: u64, n: usize) -> Result<Draws> {
+        let idx = match index(p, "indices") {
+            Some(i) => self.read_indices(i)?,
+            None => (0..u32_of(n)).collect(),
+        };
+        let fits = |i: u32| (i as usize) < n;
+        let mut d = Draws::default();
+        match mode {
+            0 => {
+                d.points = idx;
+                d.points.retain(|&i| fits(i));
+            }
+            1..=3 => {
+                d.lines = segments(mode, idx);
+                retain_groups(&mut d.lines, |&[a, b]: &[u32; 2]| a != b && fits(a) && fits(b));
+            }
+            _ => {
+                d.triangles = triangles(mode, idx);
+                if d.triangles.iter().copied().max().is_some_and(|m| !fits(m)) {
+                    // Drop triangles that name vertices that don't exist.
+                    retain_groups(&mut d.triangles, |t: &[u32; 3]| t.iter().all(|&i| fits(i)));
+                }
+            }
+        }
+        Ok(d)
+    }
+
+    /// Takes what `d`, drawn `k` times, draws from what may still be drawn.
+    fn charge(&mut self, d: &Draws, k: usize) {
+        self.budget -= d.triangles.len() / 3 * k;
+        self.point_budget -= (d.lines.len() / 2 + d.points.len()) * k;
+    }
+
+    /// Adds the points or lines of primitive `p`, drawn on the same vertices `prim` was made
+    /// from, to `prim`.
+    fn join(&mut self, p: &Value, u: &Use, prim: &mut Prim) -> Result<()> {
+        let mode = mode(p);
+        let Some(pos) = p.get("attributes").and_then(|a| index(a, "POSITION")) else {
+            return Ok(());
+        };
+        if !self.drawn(mode) {
+            return Ok(());
+        }
+        let k = u.transforms.len();
+        self.afford(p, pos, mode, k)?;
+        let n = prim.positions.len() / k.max(1);
+        let d = self.draws(p, mode, n)?;
+        self.charge(&d, k);
+        extend(prim, &d, n, &u.transforms);
+        Ok(())
+    }
+
+    /// The mesh's skeleton: every node a vertex is bound to, and their ancestors, parents first,
+    /// where they are in the pose drawn. Each primitive's joints, nodes until now, become bones.
+    fn skeleton(&self, mesh: &mut Mesh) {
+        let nodes = list(self.json, "nodes");
+        let mut used = vec![false; nodes.len()];
+        for p in mesh.prims.iter().filter(|p| p.skinned()) {
+            for &j in p.skin_joints.as_flattened() {
+                if let Some(u) = used.get_mut(j as usize) {
+                    *u = true;
+                }
+            }
+        }
+        // Each node's parent: the first node listing it as a child, as `Document::rig` has it.
+        let mut parent = vec![None; nodes.len()];
+        for (i, n) in nodes.iter().enumerate() {
+            for c in list_of(n, "children") {
+                if c < nodes.len() && c != i && parent[c].is_none() {
+                    parent[c] = Some(i);
+                }
+            }
+        }
+        // Ancestors too, so the bones hang together as the nodes do. Bounded, against cycles.
+        for i in 0..nodes.len() {
+            if !used[i] {
+                continue;
+            }
+            let mut at = parent[i];
+            for _ in 0..nodes.len() {
+                let Some(p) = at else { break };
+                if used[p] {
+                    break;
+                }
+                used[p] = true;
+                at = parent[p];
+            }
+        }
+        // Parents first: down from each bone whose parent isn't one; a cycle's nodes, with no
+        // such bone above them, become roots after.
+        let mut kids = vec![Vec::new(); nodes.len()];
+        for i in (0..nodes.len()).filter(|&i| used[i]) {
+            if let Some(p) = parent[i].filter(|&p| used[p]) {
+                kids[p].push(i);
+            }
+        }
+        let mut bone_of = vec![None::<usize>; nodes.len()];
+        let mut order = Vec::new();
+        let roots: Vec<usize> = (0..nodes.len())
+            .filter(|&i| used[i] && parent[i].is_none_or(|p| !used[p]))
+            .collect();
+        let cyclic: Vec<usize> = (0..nodes.len()).filter(|&i| used[i]).collect();
+        for root in roots.into_iter().chain(cyclic) {
+            if bone_of[root].is_some() {
+                continue;
+            }
+            let mut stack = vec![root];
+            while let Some(i) = stack.pop() {
+                if bone_of[i].is_some() {
+                    continue;
+                }
+                bone_of[i] = Some(order.len());
+                order.push(i);
+                stack.extend(kids[i].iter().rev().copied());
+            }
+        }
+        mesh.skeleton = order
+            .iter()
+            .map(|&i| crate::mesh::Bone {
+                name: nodes[i].get("name").and_then(Value::as_str).map(str::to_owned),
+                parent: parent[i]
+                    .and_then(|p| bone_of[p])
+                    .filter(|&b| bone_of[i].is_some_and(|me| b < me)),
+                node: i,
+                matrix: self
+                    .bound
+                    .get(i)
+                    .copied()
+                    .flatten()
+                    .or_else(|| self.world.get(i).copied())
+                    .unwrap_or(IDENTITY)
+                    .map(f32_of),
+            })
+            .collect();
+        // Each node's bone, as a flat table: one load per joint, no branches.
+        let bone: Vec<u32> = bone_of.iter().map(|b| b.map_or(0, u32_of)).collect();
+        for p in &mut mesh.prims {
+            if mesh.skeleton.is_empty() || !p.skinned() {
+                p.skin_joints = Vec::new();
+                p.skin_weights = Vec::new();
+                continue;
+            }
+            // Slots no joint fills keep weight 0 and name the first bone.
+            for (j, w) in p.skin_joints.iter_mut().zip(&p.skin_weights) {
+                *j = std::array::from_fn(|k| {
+                    let b = bone.get(j[k] as usize).copied().unwrap_or(0);
+                    if w[k] > 0.0 { b } else { 0 }
+                });
+            }
+        }
     }
 
     fn primitive(&mut self, p: &Value, u: &Use, mesh: &mut Mesh) -> Result<()> {
-        let mode = p.get("mode").and_then(Value::as_u64).unwrap_or(4);
+        let mode = mode(p);
         let attrs = p.get("attributes").cloned().unwrap_or(Value::Null);
         let Some(pos) = index(&attrs, "POSITION") else {
             return Ok(());
         };
-        if !matches!(mode, 4..=6) {
-            // Points and lines are counted, not drawn.
+        if !self.drawn(mode) {
             return Ok(());
         }
 
         self.draco.clear();
         if let Some(ext) = p.get("extensions").and_then(|e| e.get("KHR_draco_mesh_compression")) {
+            if mode < 4 {
+                // Draco point clouds and lines aren't decoded.
+                return Ok(());
+            }
             #[cfg(feature = "draco")]
             self.decode_draco(ext, &attrs, index(p, "indices"))?;
             #[cfg(not(feature = "draco"))]
@@ -1078,39 +1705,13 @@ impl Reader<'_> {
             }
         }
 
-        // Check the triangle count before reading any vertices.
-        let corners = match index(p, "indices") {
-            Some(i) => self.acc(i)?.count,
-            None => self.acc(pos)?.count,
-        };
-        let tris = if mode == 4 {
-            corners / 3
-        } else {
-            corners.saturating_sub(2)
-        };
-        let total = tris.saturating_mul(u.transforms.len());
-        ensure!(total <= self.budget, "too many triangles to convert");
+        // Check the count before reading any vertices.
+        self.afford(p, pos, mode, u.transforms.len())?;
 
         let mut positions = self.read(pos, [0.0; 3])?;
         let n = positions.len();
-        let idx = match index(p, "indices") {
-            Some(i) => self.read_indices(i)?,
-            None => (0..u32_of(n)).collect(),
-        };
-        let mut indices = triangles(mode, idx);
-        if indices.iter().copied().max().is_some_and(|m| m as usize >= n) {
-            // Drop triangles that name vertices that don't exist.
-            let mut w = 0;
-            for t in 0..indices.len() / 3 {
-                let tri = [indices[t * 3], indices[t * 3 + 1], indices[t * 3 + 2]];
-                if tri.iter().all(|&i| (i as usize) < n) {
-                    indices[w..w + 3].copy_from_slice(&tri);
-                    w += 3;
-                }
-            }
-            indices.truncate(w);
-        }
-        if indices.is_empty() {
+        let draws = self.draws(p, mode, n)?;
+        if draws.is_empty() {
             return Ok(());
         }
 
@@ -1137,6 +1738,23 @@ impl Reader<'_> {
             uvs = Vec::new();
         }
         let colors = if colors.len() == n { colors } else { Vec::new() };
+        // Tangents mean nothing without the normals they're perpendicular to.
+        let mut tangents = match attr("TANGENT") {
+            Some(a) if !normals.is_empty() => self.read(a, [1.0, 0.0, 0.0, 1.0])?,
+            _ => Vec::new(),
+        };
+        if tangents.len() != n {
+            tangents = Vec::new();
+        }
+        // The other sets: one that can't be read, or doesn't fit, is dropped, not the model.
+        let uv_sets = numbered(&attrs, "TEXCOORD_", |k| k != set, |a| self.read(a, [0.0; 2]).ok(), n);
+        let color_sets = numbered(
+            &attrs,
+            "COLOR_",
+            |k| k != 0,
+            |a| self.read(a, [0.0, 0.0, 0.0, 1.0]).ok(),
+            n,
+        );
         if let Some(t) = uv_matrix {
             for uv in &mut uvs {
                 let [u0, v0] = *uv;
@@ -1166,24 +1784,42 @@ impl Reader<'_> {
                     }
                 }
             }
+            if !tangents.is_empty()
+                && let Some(a) = index(target, "TANGENT")
+            {
+                for (v, d) in tangents.iter_mut().zip(self.read(a, [0.0; 3])?) {
+                    for c in 0..3 {
+                        v[c] += w * d[c];
+                    }
+                }
+            }
         }
-        let mut joints = Vec::new();
+        let mut skinned = Skinned::default();
+        let morphed = !u.weights.is_empty();
         if let Some(skin) = u.skin {
-            joints = self.skin(skin, &attrs, &mut positions, &mut normals)?;
-        } else if !u.weights.is_empty() {
+            skinned = self.skin(skin, &attrs, &mut positions, &mut normals, &mut tangents, morphed)?;
+        } else if morphed {
             normals.iter_mut().for_each(normalize);
+            for t in &mut tangents {
+                *t = apply_tangent(&IDENTITY, *t, false);
+            }
         }
 
         let g = Geometry {
             positions,
             normals,
+            tangents,
             uvs,
+            uv_sets,
             colors,
-            indices,
-            joints,
+            color_sets,
+            draws,
+            joints: skinned.strongest,
+            skin_joints: skinned.joints,
+            skin_weights: skinned.weights,
         };
         let material = self.material(material, mesh);
-        self.budget -= g.indices.len() / 3 * u.transforms.len();
+        self.charge(&g.draws, u.transforms.len());
         mesh.prims.push(place(g, &u.transforms, material));
         Ok(())
     }
@@ -1203,7 +1839,7 @@ impl Reader<'_> {
         let bytes = self.view_bytes(view)?;
         let limits = DecodeLimits::default()
             .with_max_faces(self.budget as u64)
-            .with_max_points(MAX_VERTICES as u64);
+            .with_max_points(self.max_vertices as u64);
         let mut buffer = DecoderBuffer::new(&bytes).with_limits(limits);
         let mut dm = draco_core::mesh::Mesh::new();
         MeshDecoder::new()
@@ -1256,20 +1892,35 @@ impl Reader<'_> {
     }
 
     /// Poses a skinned primitive: each vertex goes through its joints' matrices, blended by
-    /// weight. Gives each vertex's most-weighted joint node, or nothing if the weights can't be read.
+    /// weight over every `JOINTS_n`/`WEIGHTS_n` set, not just the first four. Gives each vertex's
+    /// joints, or nothing if the weights can't be read. `morphed` normals are renormalized even
+    /// where the joints don't move them.
     fn skin(
         &mut self,
         skin: usize,
         attrs: &Value,
         positions: &mut [[f32; 3]],
         normals: &mut [[f32; 3]],
-    ) -> Result<Vec<u32>> {
-        let s = self.get("skins", skin)?.clone();
-        let joints = list_of(&s, "joints");
-        let ibm = match index(&s, "inverseBindMatrices") {
+        tangents: &mut [[f32; 4]],
+        morphed: bool,
+    ) -> Result<Skinned> {
+        let s = self.get("skins", skin)?;
+        let joints = list_of(s, "joints");
+        let ibm = match index(s, "inverseBindMatrices") {
             Some(a) => self.read(a, IDENTITY.map(f32_of))?,
             None => Vec::new(),
         };
+        if self.bind {
+            if self.bound.is_empty() {
+                self.bound = vec![None; self.posed.len()];
+            }
+            for (k, &j) in joints.iter().enumerate() {
+                let b = ibm.get(k).map_or(IDENTITY, |m| m.map(f64::from));
+                if let Some(slot @ None) = self.bound.get_mut(j) {
+                    *slot = Some(affine_inverse(&b).unwrap_or(IDENTITY));
+                }
+            }
+        }
         let mats: Vec<M4> = joints
             .iter()
             .enumerate()
@@ -1279,77 +1930,195 @@ impl Reader<'_> {
                 mul(&w, &b)
             })
             .collect();
-        let (Some(ja), Some(wa)) = (index(attrs, "JOINTS_0"), index(attrs, "WEIGHTS_0")) else {
-            return Ok(Vec::new());
-        };
-        // Joint indices are integers, read as floats exactly.
-        let ji = self.read(ja, [0.0; 4])?;
-        let wi = self.read(wa, [0.0; 4])?;
-        if ji.len() != positions.len() || wi.len() != positions.len() {
-            return Ok(Vec::new());
+        // Every set of four influences, JOINTS_0/WEIGHTS_0 then JOINTS_1/WEIGHTS_1 and on, as
+        // long as both halves are there and fit the vertices. Joint indices are integers, read as
+        // floats exactly.
+        let mut sets = Vec::new();
+        for n in 0.. {
+            let (Some(ja), Some(wa)) = (
+                index(attrs, &format!("JOINTS_{n}")),
+                index(attrs, &format!("WEIGHTS_{n}")),
+            ) else {
+                break;
+            };
+            let ji = self.read(ja, [0.0; 4])?;
+            let wi = self.read(wa, [0.0; 4])?;
+            if ji.len() != positions.len() || wi.len() != positions.len() {
+                break;
+            }
+            sets.push((ji, wi));
         }
+        if sets.is_empty() {
+            return Ok(Skinned::default());
+        }
+        // A skin's joint index as its node, `None` past the skin's joints.
         let node = |j: f32| {
             #[allow(
                 clippy::cast_possible_truncation,
                 clippy::cast_sign_loss,
                 reason = "joint indices are small whole numbers; `as` saturates bad ones and `get` refuses them"
             )]
-            joints.get(j as usize).map_or(u32::MAX, |&n| u32_of(n))
+            joints.get(j as usize).copied()
         };
-        let mut strongest = Vec::with_capacity(positions.len());
-        for (v, (j, w)) in ji.iter().zip(&wi).enumerate() {
-            let top = (0..4).fold(0, |a, k| if w[k] > w[a] { k } else { a });
-            strongest.push(node(j[top]));
-            let sum: f32 = w.iter().sum();
-            if sum <= 0.0 {
+        let n = positions.len();
+        let mut out = Skinned {
+            strongest: Vec::with_capacity(n),
+            joints: Vec::with_capacity(n),
+            weights: Vec::with_capacity(n),
+        };
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "joint indices are small whole numbers; `as` saturates bad ones and `get` refuses them"
+        )]
+        let joint = |j: f32| j as usize;
+        // Each joint's normal matrix, made the first time a vertex follows that joint alone.
+        let mut rigid: Vec<Option<[[f64; 3]; 3]>> = vec![None; mats.len()];
+        let unmoved = normal_matrix(&IDENTITY);
+        // The previous vertex's influences and blend, reused when the next one's are the same:
+        // neighbouring vertices often share their weights.
+        let mut last: Vec<(f32, f32)> = Vec::with_capacity(4 * sets.len());
+        let (mut m, mut nm) = (IDENTITY, unmoved);
+        // Vertices `start..v` all go through `m` (when `moving`; they stay put otherwise). They
+        // are moved together when it changes, in one tight loop rather than one at a time.
+        let (mut start, mut moving) = (0, false);
+        // In the bind pose nothing moves; morphed normals are still renormalized, below.
+        let bind = self.bind;
+        let bits = |a: [f32; 4]| a.map(f32::to_bits);
+        // One vertex's influences, (joint index, weight), reused.
+        let mut inf: Vec<(f32, f32)> = Vec::with_capacity(4 * sets.len());
+        // The previous vertex's output, kept at hand for the next one that repeats it.
+        let mut prev = (u32::MAX, [u32::MAX; 4], [0.0f32; 4]);
+        for v in 0..n {
+            // The same rows as the previous vertex: everything it worked out holds for this one.
+            if v > 0
+                && sets
+                    .iter()
+                    .all(|(ji, wi)| bits(ji[v]) == bits(ji[v - 1]) && bits(wi[v]) == bits(wi[v - 1]))
+            {
+                out.strongest.push(prev.0);
+                out.joints.push(prev.1);
+                out.weights.push(prev.2);
                 continue;
             }
-            let mut m = [0.0; 16];
-            for k in 0..4 {
-                if w[k] == 0.0 {
-                    continue;
-                }
-                #[allow(
-                    clippy::cast_possible_truncation,
-                    clippy::cast_sign_loss,
-                    reason = "joint indices are small whole numbers; `as` saturates bad ones and `get` refuses them"
-                )]
-                let jm = mats.get(j[k] as usize).unwrap_or(&IDENTITY);
-                let f = f64::from(w[k] / sum);
-                for (o, x) in m.iter_mut().zip(jm) {
-                    *o += f * x;
+            inf.clear();
+            for (ji, wi) in &sets {
+                for k in 0..4 {
+                    let (j, w) = (ji[v][k], wi[v][k]);
+                    // Negative and NaN weights move nothing.
+                    if w > 0.0 {
+                        match inf.iter_mut().find(|(i, _)| i.to_bits() == j.to_bits()) {
+                            Some((_, x)) => *x += w,
+                            None => inf.push((j, w)),
+                        }
+                    }
                 }
             }
-            positions[v] = apply_point(&m, positions[v]);
-            if let Some(nv) = normals.get_mut(v) {
-                *nv = apply_normal(&normal_matrix(&m), *nv);
+            // Strongest first, the earlier on a tie, as the file lists them. Weights here are
+            // positive, so `<` orders them; a few of them sort fastest by insertion.
+            for i in 1..inf.len() {
+                let mut k = i;
+                while k > 0 && inf[k - 1].1 < inf[k].1 {
+                    inf.swap(k - 1, k);
+                    k -= 1;
+                }
+            }
+            prev.0 = inf.first().and_then(|&(j, _)| node(j)).map_or(u32::MAX, u32_of);
+            out.strongest.push(prev.0);
+            // The four strongest that name a joint, for binding the vertex back to them.
+            let mut top = [(u32::MAX, 0.0f32); 4];
+            let mut slots = top.iter_mut();
+            for &(j, w) in &inf {
+                if let Some(nd) = node(j) {
+                    let Some(slot) = slots.next() else { break };
+                    *slot = (u32_of(nd), w);
+                }
+            }
+            let kept: f32 = top.iter().map(|t| t.1).sum();
+            prev.1 = top.map(|t| t.0);
+            prev.2 = if kept > 0.0 { top.map(|t| t.1 / kept) } else { [0.0; 4] };
+            out.joints.push(prev.1);
+            out.weights.push(prev.2);
+
+            let sum: f32 = inf.iter().map(|t| t.1).sum();
+            if bind || !(sum > 0.0 && sum.is_finite()) {
+                if moving {
+                    transform(&m, &nm, morphed, (positions, normals, tangents), start..v);
+                    moving = false;
+                }
+                continue;
+            }
+            let same = inf.len() == last.len()
+                && inf
+                    .iter()
+                    .zip(&last)
+                    .all(|(a, b)| a.0.to_bits() == b.0.to_bits() && a.1.to_bits() == b.1.to_bits());
+            if !(same && moving) {
+                if moving {
+                    transform(&m, &nm, morphed, (positions, normals, tangents), start..v);
+                }
+                (start, moving) = (v, true);
+            }
+            if !same {
+                if let [(j, _)] = inf[..] {
+                    // One joint: its matrix as it is (its weight over the sum is exactly 1).
+                    let j = joint(j);
+                    m = mats.get(j).copied().unwrap_or(IDENTITY);
+                    nm = match rigid.get_mut(j) {
+                        Some(slot) => *slot.get_or_insert_with(|| normal_matrix(&m)),
+                        None => unmoved,
+                    };
+                } else if let Some(first) = inf
+                    .iter()
+                    .map(|&(j, _)| mats.get(joint(j)).unwrap_or(&IDENTITY))
+                    .try_fold(None::<&M4>, |seen, jm| match seen {
+                        #[allow(clippy::float_cmp, reason = "the very same matrix, bit for bit, is what's sought")]
+                        Some(s) if s != jm => Err(()),
+                        _ => Ok(Some(jm)),
+                    })
+                    .ok()
+                    .flatten()
+                {
+                    // Joints that all sit the same way: their blend is that matrix exactly,
+                    // which rounding the weights' sum would miss.
+                    m = *first;
+                    nm = normal_matrix(&m);
+                } else {
+                    // Only the upper three rows: the bottom one is never read.
+                    m = [0.0; 16];
+                    for &(j, w) in &inf {
+                        let jm = mats.get(joint(j)).unwrap_or(&IDENTITY);
+                        let f = f64::from(w / sum);
+                        for c in 0..4 {
+                            for r in 0..3 {
+                                m[c * 4 + r] += f * jm[c * 4 + r];
+                            }
+                        }
+                    }
+                    nm = normal_matrix(&m);
+                }
+                last.clone_from(&inf);
             }
         }
-        Ok(strongest)
+        if moving {
+            transform(&m, &nm, morphed, (positions, normals, tangents), start..n);
+        }
+        if bind && morphed {
+            normals.iter_mut().for_each(normalize);
+            for t in tangents.iter_mut() {
+                *t = apply_tangent(&IDENTITY, *t, false);
+            }
+        }
+        Ok(out)
     }
 
     /// The texture coordinate set a material's color texture reads, and its
     /// `KHR_texture_transform` as a 2x3 matrix (row-major).
     fn uv_set(&self, material: Option<usize>) -> (u64, Option<[f32; 6]>) {
-        let Some(info) = material
+        material
             .and_then(|m| list(self.json, "materials").get(m))
             .and_then(color_texture)
-        else {
-            return (0, None);
-        };
-        let mut set = info.get("texCoord").and_then(Value::as_u64).unwrap_or(0);
-        let Some(t) = info.get("extensions").and_then(|e| e.get("KHR_texture_transform")) else {
-            return (set, None);
-        };
-        if let Some(s) = t.get("texCoord").and_then(Value::as_u64) {
-            set = s;
-        }
-        let [ox, oy] = f32s(t.get("offset"), [0.0; 2]);
-        let [sx, sy] = f32s(t.get("scale"), [1.0; 2]);
-        let r = f32_of(t.get("rotation").and_then(Value::as_f64).unwrap_or(0.0));
-        let (sin, cos) = r.sin_cos();
-        // translation * rotation * scale, as the extension defines them.
-        (set, Some([cos * sx, sin * sy, ox, -sin * sx, cos * sy, oy]))
+            .map_or((0, None), mapping)
     }
 
     /// The mesh material for glTF material `i` (or glTF's default material).
@@ -1362,14 +2131,10 @@ impl Reader<'_> {
             return s;
         }
         let mut m = Material {
-            name: String::new(),
             color: [1.0; 4],
-            color_image: None,
-            normal_image: None,
-            emissive: [0.0; 3],
             metallic: 1.0,
             roughness: 1.0,
-            double_sided: false,
+            ..Material::plain("", [1.0; 4])
         };
         let def = i.and_then(|i| list(self.json, "materials").get(i)).cloned();
         if let Some(d) = &def {
@@ -1399,15 +2164,27 @@ impl Reader<'_> {
                 .map_or(1.0, f32_of);
             m.emissive = f32s(d.get("emissiveFactor"), [0.0; 3]).map(|e| e * strength);
             m.double_sided = d.get("doubleSided").and_then(Value::as_bool).unwrap_or(false);
-            if d.get("alphaMode").and_then(Value::as_str).unwrap_or("OPAQUE") == "OPAQUE" {
-                m.color[3] = 1.0;
+            match d.get("alphaMode").and_then(Value::as_str) {
+                Some("BLEND") => {}
+                Some("MASK") => {
+                    let cutoff = d.get("alphaCutoff").and_then(Value::as_f64).map_or(0.5, f32_of);
+                    m.alpha_cutoff = Some(if cutoff.is_finite() { cutoff.max(0.0) } else { 0.5 });
+                }
+                _ => m.color[3] = 1.0,
             }
-            if let Some(t) = color_texture(d).and_then(|t| index(t, "index")) {
-                m.color_image = self.texture(t, mesh);
-            }
-            if let Some(t) = d.get("normalTexture").and_then(|t| index(t, "index")) {
-                m.normal_image = self.texture(t, mesh);
-            }
+            m.unlit = d.pointer("/extensions/KHR_materials_unlit").is_some();
+            // Every texture reads the color texture's coordinates (`Prim::uvs`): one that reads
+            // others would land in the wrong place, and is left out.
+            let uv = color_texture(d).map_or((0, None), mapping);
+            let mut take = |info: Option<&Value>| {
+                let info = info.filter(|t| mapping(t) == uv)?;
+                self.texture(index(info, "index")?, mesh)
+            };
+            m.color_image = take(color_texture(d));
+            m.normal_image = take(d.get("normalTexture"));
+            m.occlusion_image = take(d.get("occlusionTexture"));
+            m.emissive_image = take(d.get("emissiveTexture"));
+            m.metallic_roughness_image = take(d.pointer("/pbrMetallicRoughness/metallicRoughnessTexture"));
         }
         mesh.materials.push(m);
         let s = mesh.materials.len() - 1;
@@ -1429,13 +2206,23 @@ impl Reader<'_> {
         sources.into_iter().find_map(|s| self.image(s, mesh))
     }
 
-    /// The mesh image for glTF image `s`, when it's PNG or JPEG (or WebP, with the `webp`
-    /// feature).
+    /// The mesh image for glTF image `s`, when it's PNG or JPEG, or a format a feature
+    /// re-encodes (WebP, TGA, BMP, GIF, TIFF, PSD, DDS).
     fn image(&mut self, s: usize, mesh: &mut Mesh) -> Option<usize> {
         if let Some(done) = *self.images.get(s)? {
             return done;
         }
         let img = list(self.json, "images").get(s)?;
+        // TGA has no signature: its MIME type, or a file name, says what it is.
+        let name = match img.get("mimeType").and_then(Value::as_str) {
+            Some("image/x-tga" | "image/tga" | "image/x-targa" | "image/targa") => "image.tga",
+            _ => img
+                .get("uri")
+                .and_then(Value::as_str)
+                .filter(|u| !u.starts_with("data:"))
+                .unwrap_or(""),
+        };
+        let name = std::path::PathBuf::from(name);
         let bytes = if let Some(v) = index(img, "bufferView") {
             self.view_bytes(v).ok()
         } else {
@@ -1446,13 +2233,53 @@ impl Reader<'_> {
                 .and_then(|u| container::data_uri(u).ok())
                 .map(|(_, b)| b)
         };
-        let out = bytes.and_then(Image::decode).map(|i| {
+        let out = bytes.and_then(|b| Image::decode_named(b, &name)).map(|i| {
             mesh.images.push(i);
             mesh.images.len() - 1
         });
         self.images[s] = Some(out);
         out
     }
+}
+
+/// The node and property (`translation`, `rotation`, `scale` or `weights`) an animation
+/// channel's target animates: named outright, or by a `KHR_animation_pointer` to one of them.
+pub(crate) fn node_target(target: &Value) -> Option<(usize, &str)> {
+    if let (Some(node), Some(path)) = (index(target, "node"), target.get("path").and_then(Value::as_str))
+        && path != "pointer"
+    {
+        return Some((node, path));
+    }
+    let pointer = target
+        .pointer("/extensions/KHR_animation_pointer/pointer")
+        .and_then(Value::as_str)?;
+    let (node, path) = pointer.strip_prefix("/nodes/")?.split_once('/')?;
+    // An index the way JSON pointers write them: no sign, no leading zeros.
+    if node.is_empty() || !node.bytes().all(|b| b.is_ascii_digit()) || (node.len() > 1 && node.starts_with('0')) {
+        return None;
+    }
+    let path = ["translation", "rotation", "scale", "weights"]
+        .into_iter()
+        .find(|&p| p == path)?;
+    Some((node.parse().ok()?, path))
+}
+
+/// The texture coordinate set a texture info reads, and its `KHR_texture_transform` as a 2x3
+/// matrix (row-major).
+fn mapping(info: &Value) -> (u64, Option<[f32; 6]>) {
+    let mut set = info.get("texCoord").and_then(Value::as_u64).unwrap_or(0);
+    let Some(t) = info.get("extensions").and_then(|e| e.get("KHR_texture_transform")) else {
+        return (set, None);
+    };
+    if let Some(s) = t.get("texCoord").and_then(Value::as_u64) {
+        set = s;
+    }
+    let [ox, oy] = f32s(t.get("offset"), [0.0; 2]);
+    let [sx, sy] = f32s(t.get("scale"), [1.0; 2]);
+    let r = f32_of(t.get("rotation").and_then(Value::as_f64).unwrap_or(0.0));
+    let (sin, cos) = r.sin_cos();
+    // translation * rotation * scale, as the extension defines them.
+    (set, Some([cos * sx, sin * sy, ox, -sin * sx, cos * sy, oy]))
 }
 
 /// A material's color texture info: `baseColorTexture`, or the specular-glossiness diffuse.
@@ -1466,6 +2293,42 @@ fn color_texture(m: &Value) -> Option<&Value> {
         })
 }
 
+/// The most sets of one attribute (`TEXCOORD_n`, `COLOR_n`) read: past any real model's, and a
+/// bound on what a hostile name like `TEXCOORD_4000000000` could make room for.
+const MAX_SETS: usize = 64;
+
+/// A primitive's numbered attribute sets (`prefix` then the number), each at its number, for
+/// the numbers `want` picks: a set that `read` can't read or that doesn't have `n` elements is
+/// left empty, and so are the gaps. Empty when no set is kept.
+fn numbered<T>(
+    attrs: &Value,
+    prefix: &str,
+    want: impl Fn(u64) -> bool,
+    mut read: impl FnMut(usize) -> Option<Vec<T>>,
+    n: usize,
+) -> Vec<Vec<T>> {
+    let mut out: Vec<Vec<T>> = Vec::new();
+    let Some(attrs) = attrs.as_object() else { return out };
+    for (name, a) in attrs {
+        let Some(k) = name.strip_prefix(prefix).and_then(|k| k.parse::<u64>().ok()) else {
+            continue;
+        };
+        let (Some(a), Ok(slot)) = (a.as_u64().and_then(|a| usize::try_from(a).ok()), usize::try_from(k)) else {
+            continue;
+        };
+        if slot >= MAX_SETS || !want(k) {
+            continue;
+        }
+        if let Some(v) = read(a).filter(|v| v.len() == n) {
+            if out.len() <= slot {
+                out.resize_with(slot + 1, Vec::new);
+            }
+            out[slot] = v;
+        }
+    }
+    out
+}
+
 /// A primitive's geometry at each of `transforms`, as one primitive.
 #[allow(clippy::float_cmp_const, reason = "only the exact identity may skip the transform")]
 fn place(g: Geometry, transforms: &[M4], material: usize) -> Prim {
@@ -1475,11 +2338,18 @@ fn place(g: Geometry, transforms: &[M4], material: usize) -> Prim {
         return Prim {
             positions: g.positions,
             normals: g.normals,
+            tangents: g.tangents,
             uvs: g.uvs,
+            uv_sets: g.uv_sets,
             colors: g.colors,
-            indices: g.indices,
+            color_sets: g.color_sets,
+            indices: g.draws.triangles,
+            lines: g.draws.lines,
+            points: g.draws.points,
             material,
             joints: g.joints,
+            skin_joints: g.skin_joints,
+            skin_weights: g.skin_weights,
         };
     }
     let n = g.positions.len();
@@ -1487,27 +2357,60 @@ fn place(g: Geometry, transforms: &[M4], material: usize) -> Prim {
     let mut p = Prim {
         positions: Vec::with_capacity(n * k),
         normals: Vec::with_capacity(g.normals.len() * k),
+        tangents: Vec::with_capacity(g.tangents.len() * k),
         uvs: Vec::with_capacity(g.uvs.len() * k),
+        uv_sets: g.uv_sets.iter().map(|s| Vec::with_capacity(s.len() * k)).collect(),
         colors: Vec::with_capacity(g.colors.len() * k),
-        indices: Vec::with_capacity(g.indices.len() * k),
+        color_sets: g.color_sets.iter().map(|s| Vec::with_capacity(s.len() * k)).collect(),
+        indices: Vec::with_capacity(g.draws.triangles.len() * k),
+        lines: Vec::with_capacity(g.draws.lines.len() * k),
+        points: Vec::with_capacity(g.draws.points.len() * k),
         material,
         joints: Vec::with_capacity(g.joints.len() * k),
+        skin_joints: Vec::with_capacity(g.skin_joints.len() * k),
+        skin_weights: Vec::with_capacity(g.skin_weights.len() * k),
     };
     for t in transforms {
-        let base = u32_of(p.positions.len());
         p.positions.extend(g.positions.iter().map(|&v| apply_point(t, v)));
         let nm = normal_matrix(t);
         p.normals.extend(g.normals.iter().map(|&v| apply_normal(&nm, v)));
-        p.uvs.extend_from_slice(&g.uvs);
-        p.colors.extend_from_slice(&g.colors);
-        p.joints.extend_from_slice(&g.joints);
         let flip = det3(t) < 0.0;
-        for tri in g.indices.chunks_exact(3) {
+        p.tangents.extend(g.tangents.iter().map(|&v| apply_tangent(t, v, flip)));
+        p.uvs.extend_from_slice(&g.uvs);
+        for (to, from) in p.uv_sets.iter_mut().zip(&g.uv_sets) {
+            to.extend_from_slice(from);
+        }
+        p.colors.extend_from_slice(&g.colors);
+        for (to, from) in p.color_sets.iter_mut().zip(&g.color_sets) {
+            to.extend_from_slice(from);
+        }
+        p.joints.extend_from_slice(&g.joints);
+        p.skin_joints.extend_from_slice(&g.skin_joints);
+        p.skin_weights.extend_from_slice(&g.skin_weights);
+    }
+    extend(&mut p, &g.draws, n, transforms);
+    p
+}
+
+/// Adds what `d` draws on `n` vertices to `p`, once for each of `transforms`, where `p` has those
+/// vertices at each in turn: the `k`th's from `k * n`. A mirroring transform flips the triangles'
+/// winding back.
+fn extend(p: &mut Prim, d: &Draws, n: usize, transforms: &[M4]) {
+    for (k, t) in transforms.iter().enumerate() {
+        let base = u32_of(k * n);
+        let flip = det3(t) < 0.0;
+        for tri in d.triangles.chunks_exact(3) {
             let [a, b, c] = [tri[0] + base, tri[1] + base, tri[2] + base];
             p.indices.extend_from_slice(&if flip { [a, c, b] } else { [a, b, c] });
         }
+        p.lines.extend(d.lines.iter().map(|&i| i + base));
+        p.points.extend(d.points.iter().map(|&i| i + base));
     }
-    p
+}
+
+/// A glTF primitive's mode: 4 (triangles) when it doesn't say.
+fn mode(p: &Value) -> u64 {
+    p.get("mode").and_then(Value::as_u64).unwrap_or(4)
 }
 
 impl Reader<'_> {
@@ -1519,9 +2422,8 @@ impl Reader<'_> {
         let anim = self.get("animations", a)?;
         let samplers = items(anim, "samplers");
         for ch in items(anim, "channels") {
-            let Some(target) = ch.get("target") else { continue };
-            let (Some(node), Some(path)) = (index(target, "node"), target.get("path").and_then(Value::as_str)) else {
-                // A channel for an extension's target (KHR_animation_pointer), or none.
+            let Some((node, path)) = ch.get("target").and_then(node_target) else {
+                // A channel for another extension's target, or none.
                 continue;
             };
             if node >= self.posed.len() {
@@ -1544,12 +2446,15 @@ impl Reader<'_> {
             let Some(v) = sample(&times, &values, interpolation, time, path == "rotation") else {
                 continue;
             };
+            // A sampler with fewer outputs than keys samples narrower than its path: skipped,
+            // as `Rig::pose` skips it, rather than read past its values.
             let p = &mut self.posed[node];
-            match path {
-                "translation" => p.translation = Some([v[0], v[1], v[2]]),
-                "scale" => p.scale = Some([v[0], v[1], v[2]]),
-                "rotation" => p.rotation = Some([v[0], v[1], v[2], v[3]]),
-                _ => p.weights = Some(v.into_iter().map(f32_of).collect()),
+            match (path, v.as_slice()) {
+                ("translation", &[x, y, z]) => p.translation = Some([x, y, z]),
+                ("scale", &[x, y, z]) => p.scale = Some([x, y, z]),
+                ("rotation", &[x, y, z, w]) => p.rotation = Some([x, y, z, w]),
+                ("weights", _) => p.weights = Some(v.into_iter().map(f32_of).collect()),
+                _ => {}
             }
         }
         Ok(())
@@ -1750,6 +2655,7 @@ mod tests {
             prims,
             materials: vec![red, Material::plain("Blue", [0.0, 0.0, 1.0, 0.5])],
             images: Vec::new(),
+            skeleton: Vec::new(),
         }
     }
 
@@ -1830,6 +2736,222 @@ mod tests {
     }
 
     #[test]
+    fn tangents_and_every_set_are_read_and_follow_the_node() {
+        // One triangle with a tangent, three UV sets and a second color set (but no first), its
+        // color texture reading set 1 at twice the scale, on a node mirrored in x.
+        let floats: Vec<f32> = [
+            &[0., 0., 0., 1., 0., 0., 0., 1., 0.][..],         // POSITION
+            &[0., 0., 1., 0., 0., 1., 0., 0., 1.],             // NORMAL
+            &[1., 0., 0., 1., 1., 0., 0., 1., 1., 0., 0., 1.], // TANGENT
+            &[0., 0., 1., 0., 0., 1.],                         // TEXCOORD_0
+            &[0.1, 0.2, 0.3, 0.4, 0.5, 0.6],                   // TEXCOORD_1
+            &[7., 8., 7., 8., 7., 8.],                         // TEXCOORD_2
+            &[1., 0., 0., 1., 0., 1., 0., 1., 0., 0., 1., 1.], // COLOR_1
+        ]
+        .concat();
+        let bin: Vec<u8> = floats.iter().flat_map(|f| f.to_le_bytes()).collect();
+        let parts = [
+            ("VEC3", 3),
+            ("VEC3", 3),
+            ("VEC4", 4),
+            ("VEC2", 2),
+            ("VEC2", 2),
+            ("VEC2", 2),
+            ("VEC4", 4),
+        ];
+        let mut offset = 0;
+        let mut accessors = Vec::new();
+        let mut views = Vec::new();
+        for (i, (kind, width)) in parts.iter().enumerate() {
+            views.push(serde_json::json!({ "buffer": 0, "byteOffset": offset, "byteLength": 12 * width }));
+            let mut a = serde_json::json!({ "bufferView": i, "componentType": 5126, "count": 3, "type": kind });
+            if i == 0 {
+                a["min"] = serde_json::json!([0, 0, 0]);
+                a["max"] = serde_json::json!([1, 1, 0]);
+            }
+            accessors.push(a);
+            offset += 12 * width;
+        }
+        let gltf = serde_json::json!({
+            "asset": { "version": "2.0" },
+            "buffers": [{ "uri": "t.bin", "byteLength": bin.len() }],
+            "bufferViews": views,
+            "accessors": accessors,
+            "materials": [{ "pbrMetallicRoughness": { "baseColorTexture": {
+                "index": 0, "texCoord": 0,
+                "extensions": { "KHR_texture_transform": { "texCoord": 1, "scale": [2, 2] } }
+            } } }],
+            "meshes": [{ "primitives": [{ "material": 0, "attributes": {
+                "POSITION": 0, "NORMAL": 1, "TANGENT": 2,
+                "TEXCOORD_0": 3, "TEXCOORD_1": 4, "TEXCOORD_2": 5, "COLOR_1": 6, "TEXCOORD_99999999999": 5
+            } }] }],
+            "nodes": [{ "mesh": 0, "scale": [-1, 1, 1] }],
+            "scenes": [{ "nodes": [0] }],
+        });
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("t.bin"), &bin).unwrap();
+        let mesh = load(dir.path(), "t.gltf", gltf.to_string().as_bytes());
+        let p = &mesh.prims[0];
+        let near = |a: [f32; 2], b: [f32; 2]| (a[0] - b[0]).abs() < 1e-6 && (a[1] - b[1]).abs() < 1e-6;
+        assert!(
+            near(p.uvs[0], [0.2, 0.4]) && near(p.uvs[2], [1.0, 1.2]),
+            "set 1, transformed: {:?}",
+            p.uvs
+        );
+        assert_eq!(
+            p.uv_sets.len(),
+            3,
+            "set 0, set 1 (in `uvs`), set 2; a set number past any real one is ignored"
+        );
+        assert_eq!(
+            p.uv_sets[0],
+            [[0., 0.], [1., 0.], [0., 1.]],
+            "the other sets as the file has them"
+        );
+        assert_eq!(p.uv_sets[1], Vec::<[f32; 2]>::new());
+        assert_eq!(p.uv_sets[2], [[7., 8.]; 3]);
+        assert_eq!(p.colors, Vec::<[f32; 4]>::new());
+        assert_eq!(p.color_sets.len(), 2);
+        assert_eq!(p.color_sets[1][2], [0., 0., 1., 1.]);
+        // Mirrored, the tangent turns with the node and its handedness flips, so the bitangent,
+        // cross(normal, tangent) * w, still points up +y as the node moves it.
+        assert_eq!(p.tangents, [[-1., 0., 0., -1.]; 3]);
+        assert_eq!(p.normals, [[0., 0., 1.]; 3]);
+
+        // Written out, the sets are renumbered from 0 with no gaps, the color texture's first.
+        let glb = to_glb(&mesh).unwrap();
+        let back = load(dir.path(), "back.glb", &glb);
+        let q = &back.prims[0];
+        assert_eq!(q.uvs, p.uvs);
+        assert_eq!(q.uv_sets, [vec![], p.uv_sets[0].clone(), p.uv_sets[2].clone()]);
+        assert_eq!(q.colors, p.color_sets[1]);
+        assert_eq!(q.tangents, p.tangents);
+    }
+
+    #[test]
+    fn a_cut_out_unlit_material_keeps_its_textures_through_a_round_trip() {
+        let floats: Vec<f32> = [
+            &[0., 0., 0., 1., 0., 0., 0., 1., 0.][..], // POSITION
+            &[0., 0., 1., 0., 0., 1.],                 // TEXCOORD_0
+            &[0., 0., 1., 0., 0., 1.],                 // TEXCOORD_1
+        ]
+        .concat();
+        let bin: Vec<u8> = floats.iter().flat_map(|f| f.to_le_bytes()).collect();
+        let gltf = serde_json::json!({
+            "asset": { "version": "2.0" },
+            "buffers": [{ "uri": "m.bin", "byteLength": bin.len() }],
+            "bufferViews": [
+                { "buffer": 0, "byteOffset": 0, "byteLength": 36 },
+                { "buffer": 0, "byteOffset": 36, "byteLength": 24 },
+                { "buffer": 0, "byteOffset": 60, "byteLength": 24 },
+            ],
+            "accessors": [
+                { "bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3",
+                  "min": [0, 0, 0], "max": [1, 1, 0] },
+                { "bufferView": 1, "componentType": 5126, "count": 3, "type": "VEC2" },
+                { "bufferView": 2, "componentType": 5126, "count": 3, "type": "VEC2" },
+            ],
+            "images": [{ "uri": "a.png" }, { "uri": "b.png" }, { "uri": "c.png" }],
+            "textures": [{ "source": 0 }, { "source": 1 }, { "source": 2 }],
+            "materials": [{
+                "alphaMode": "MASK", "alphaCutoff": 0.3,
+                "pbrMetallicRoughness": {
+                    "baseColorFactor": [1, 1, 1, 0.8],
+                    "baseColorTexture": { "index": 0 },
+                    "metallicRoughnessTexture": { "index": 1 },
+                },
+                "occlusionTexture": { "index": 1 },
+                // Read through the other set, so not where `uvs` would put it.
+                "emissiveTexture": { "index": 2, "texCoord": 1 },
+                "extensions": { "KHR_materials_unlit": {} },
+            }],
+            "meshes": [{ "primitives": [{ "material": 0,
+                "attributes": { "POSITION": 0, "TEXCOORD_0": 1, "TEXCOORD_1": 2 } }] }],
+            "nodes": [{ "mesh": 0 }],
+            "scenes": [{ "nodes": [0] }],
+        });
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("m.bin"), &bin).unwrap();
+        for (i, name) in ["a.png", "b.png", "c.png"].into_iter().enumerate() {
+            let png = [
+                &b"\x89PNG\r\n\x1a\n"[..],
+                &[0, 0, 0, 13, b'I', b'H', b'D', b'R', u8::try_from(i).unwrap()],
+            ]
+            .concat();
+            std::fs::write(dir.path().join(name), png).unwrap();
+        }
+        let mesh = load(dir.path(), "m.gltf", gltf.to_string().as_bytes());
+        let check = |mesh: &Mesh| {
+            let m = &mesh.materials[mesh.prims[0].material];
+            assert_eq!(m.alpha_cutoff, Some(0.3));
+            assert!((m.color[3] - 0.8).abs() < 1e-6, "a cut-out material keeps its alpha");
+            assert!(m.unlit);
+            let (Some(c), Some(o)) = (m.color_image, m.occlusion_image) else {
+                panic!("{m:?}")
+            };
+            assert_ne!(mesh.images[c], mesh.images[o]);
+            assert_eq!(m.metallic_roughness_image, Some(o), "one image, two textures");
+            assert_eq!(m.emissive_image, None);
+        };
+        check(&mesh);
+        let back = load(dir.path(), "back.glb", &to_glb(&mesh).unwrap());
+        check(&back);
+    }
+
+    #[test]
+    fn an_animation_pointer_to_a_node_moves_it() {
+        let floats: Vec<f32> = [
+            &[0., 0., 0., 1., 0., 0., 0., 1., 0.][..], // POSITION
+            &[0., 1.],                                 // times
+            &[0., 0., 0., 2., 0., 0.],                 // translations
+        ]
+        .concat();
+        let bin: Vec<u8> = floats.iter().flat_map(|f| f.to_le_bytes()).collect();
+        let pointer = |p: &str| {
+            serde_json::json!({ "sampler": 0, "target": { "path": "pointer",
+            "extensions": { "KHR_animation_pointer": { "pointer": p } } } })
+        };
+        let gltf = serde_json::json!({
+            "asset": { "version": "2.0" },
+            "extensionsUsed": ["KHR_animation_pointer"],
+            "extensionsRequired": ["KHR_animation_pointer"],
+            "buffers": [{ "uri": "a.bin", "byteLength": bin.len() }],
+            "bufferViews": [
+                { "buffer": 0, "byteOffset": 0, "byteLength": 36 },
+                { "buffer": 0, "byteOffset": 36, "byteLength": 8 },
+                { "buffer": 0, "byteOffset": 44, "byteLength": 24 },
+            ],
+            "accessors": [
+                { "bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3",
+                  "min": [0, 0, 0], "max": [1, 1, 0] },
+                { "bufferView": 1, "componentType": 5126, "count": 2, "type": "SCALAR", "min": [0], "max": [1] },
+                { "bufferView": 2, "componentType": 5126, "count": 2, "type": "VEC3" },
+            ],
+            "meshes": [{ "primitives": [{ "attributes": { "POSITION": 0 } }] }],
+            "nodes": [{ "mesh": 0 }],
+            "scenes": [{ "nodes": [0] }],
+            "animations": [{
+                "samplers": [{ "input": 1, "output": 2 }],
+                // The first is the one that counts; the others aren't a node's, or aren't
+                // indices as JSON pointers write them.
+                "channels": [pointer("/nodes/0/translation"), pointer("/materials/0/emissiveFactor"),
+                             pointer("/nodes/00/translation"), pointer("/nodes/0/extras")],
+            }],
+        });
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.bin"), &bin).unwrap();
+        std::fs::write(dir.path().join("a.gltf"), gltf.to_string()).unwrap();
+        let doc =
+            crate::formats::load(&dir.path().join("a.gltf"), "gltf", &Folder::new(dir.path()), Keep::ALL).unwrap();
+        let mesh = doc.flatten(Pose::Animation { index: 0, time: 0.5 }).unwrap().unwrap();
+        assert_eq!(mesh.prims[0].positions[0], [1., 0., 0.]);
+        let rig = doc.rig().unwrap();
+        let ch = &rig.animations[0].channels;
+        assert_eq!(ch.len(), 1);
+        assert_eq!((ch[0].node, ch[0].path), (0, crate::rig::Path::Translation));
+    }
+
+    #[test]
     fn reads_back_what_to_glb_writes() {
         let dir = tempfile::tempdir().unwrap();
         let mesh = grid(30);
@@ -1878,6 +3000,75 @@ mod tests {
         let glb = doc.to_glb().unwrap();
         doc.decode().unwrap();
         assert_eq!(glb, doc.to_glb().unwrap());
+    }
+
+    #[test]
+    fn reads_accessors_matrices_padded() {
+        // MAT2 of bytes: each column 2 bytes, padded to 4. MAT3 of normalized shorts: each
+        // column 6 bytes, padded to 8. A sparse VEC3 of floats with one element replaced.
+        let mut bin = vec![1, 2, 0xAA, 0xAA, 3, 4, 0xAA, 0xAA];
+        for c in 0..3i16 {
+            for r in 0..3i16 {
+                bin.extend_from_slice(&(c * 3 + r - 4).saturating_mul(8191).to_le_bytes());
+            }
+            bin.extend_from_slice(&[0xAA, 0xAA]);
+        }
+        let floats = bin.len();
+        for v in [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 9.0, 8.0, 7.0] {
+            bin.extend_from_slice(&v.to_le_bytes());
+        }
+        let sparse = bin.len();
+        bin.extend_from_slice(&[1, 0, 0, 0]);
+        let json = serde_json::json!({
+            "asset": {"version": "2.0"},
+            "bufferViews": [
+                {"buffer": 0, "byteLength": 8},
+                {"buffer": 0, "byteOffset": 8, "byteLength": 24},
+                {"buffer": 0, "byteOffset": floats, "byteLength": 24},
+                {"buffer": 0, "byteOffset": floats + 24, "byteLength": 12},
+                {"buffer": 0, "byteOffset": sparse, "byteLength": 4},
+            ],
+            "accessors": [
+                {"bufferView": 0, "componentType": 5121, "count": 1, "type": "MAT2"},
+                {"bufferView": 1, "componentType": 5122, "normalized": true, "count": 1, "type": "MAT3"},
+                {"bufferView": 2, "componentType": 5126, "count": 2, "type": "VEC3",
+                 "sparse": {"count": 1, "indices": {"bufferView": 4, "componentType": 5121},
+                            "values": {"bufferView": 3}}},
+                {"bufferView": 4, "componentType": 5121, "count": 1, "type": "SCALAR"},
+            ],
+        });
+        let mut doc = crate::document::Document::empty(serde_json::Map::new());
+        doc.json = json.as_object().unwrap().clone();
+        doc.push_buffer(bin);
+        assert_eq!(doc.read_floats(0).unwrap(), (4, vec![1.0, 2.0, 3.0, 4.0]));
+        let (width, m3) = doc.read_floats(1).unwrap();
+        assert_eq!(width, 9);
+        let want: Vec<f32> = (0..9).map(|k| ((k - 4) * 8191) as f32 / 32767.0).collect();
+        assert!(m3.iter().zip(&want).all(|(a, b)| (a - b).abs() < 1e-6), "{m3:?}");
+        assert_eq!(doc.read_floats(2).unwrap(), (3, vec![1.0, 2.0, 3.0, 9.0, 8.0, 7.0]));
+        assert_eq!(doc.read_indices(3).unwrap(), vec![1]);
+        assert!(doc.read_indices(0).is_err(), "a matrix isn't indices");
+        assert!(doc.read_floats(9).is_err());
+    }
+
+    #[test]
+    fn decode_keeps_required_extensions_it_cant_draw() {
+        let dir = tempfile::tempdir().unwrap();
+        let packed = crate::gltf::compress(&to_glb(&grid(10)).unwrap()).unwrap();
+        let path = dir.path().join("packed.glb");
+        std::fs::write(&path, &packed).unwrap();
+        let mut doc = crate::formats::load(&path, "glb", &Folder::new(dir.path()), Keep::ALL).unwrap();
+        for key in ["extensionsUsed", "extensionsRequired"] {
+            let list = doc.json.entry(key).or_insert_with(|| serde_json::json!([]));
+            list.as_array_mut().unwrap().push("EXT_made_up".into());
+        }
+        assert!(
+            doc.flatten(Pose::Rest).is_err(),
+            "drawing needs every required extension"
+        );
+        doc.decode().unwrap();
+        assert_eq!(doc.json["extensionsRequired"], serde_json::json!(["EXT_made_up"]));
+        assert!(!serde_json::to_string(&doc.json).unwrap().contains("meshopt"));
     }
 
     #[test]
@@ -1970,5 +3161,211 @@ mod tests {
         );
         let err = doc.flatten(Pose::Rest).unwrap_err().to_string();
         assert!(err.contains("EXT_some_future_geometry"), "{err}");
+    }
+
+    /// A document of a unit square's four corners (accessor 0), with index accessors 1
+    /// (`[3, 2, 1, 0]`), 2 (two triangles) and 3 (`[0, 0, 1, 2, 3]`), drawn by `meshes` on
+    /// `nodes`.
+    fn corners(meshes: serde_json::Value, nodes: serde_json::Value) -> crate::document::Document<'static> {
+        let mut bin: Vec<u8> = [[0f32, 0., 0.], [1., 0., 0.], [1., 1., 0.], [0., 1., 0.]]
+            .iter()
+            .flatten()
+            .flat_map(|f| f.to_le_bytes())
+            .collect();
+        bin.extend([3u16, 2, 1, 0].iter().flat_map(|i| i.to_le_bytes()));
+        bin.extend([0u8, 1, 2, 0, 2, 3, 0, 0, 1, 2, 3, 0]);
+        let n = (0..nodes.as_array().unwrap().len()).collect::<Vec<_>>();
+        let mut json = serde_json::json!({
+            "asset": { "version": "2.0" },
+            "buffers": [{ "byteLength": bin.len() }],
+            "bufferViews": [
+                { "buffer": 0, "byteLength": 48 },
+                { "buffer": 0, "byteOffset": 48, "byteLength": 8 },
+                { "buffer": 0, "byteOffset": 56, "byteLength": 6 },
+                { "buffer": 0, "byteOffset": 62, "byteLength": 5 },
+            ],
+            "accessors": [
+                { "bufferView": 0, "componentType": 5126, "count": 4, "type": "VEC3",
+                  "min": [0, 0, 0], "max": [1, 1, 0] },
+                { "bufferView": 1, "componentType": 5123, "count": 4, "type": "SCALAR" },
+                { "bufferView": 2, "componentType": 5121, "count": 6, "type": "SCALAR" },
+                { "bufferView": 3, "componentType": 5121, "count": 5, "type": "SCALAR" },
+            ],
+            "scenes": [{ "nodes": n }],
+        });
+        json["meshes"] = meshes;
+        json["nodes"] = nodes;
+        let mut doc = crate::document::Document::empty(serde_json::Map::new());
+        let serde_json::Value::Object(json) = json else {
+            unreachable!()
+        };
+        doc.json = json;
+        doc.push_buffer(bin);
+        doc
+    }
+
+    #[test]
+    fn point_only_mesh_flattens_with_points() {
+        let meshes = serde_json::json!([{ "primitives": [{ "attributes": { "POSITION": 0 }, "mode": 0 }] }]);
+        let mut doc = corners(meshes, serde_json::json!([{ "mesh": 0 }]));
+        let mesh = doc.flatten(Pose::Rest).unwrap().expect("points are drawn");
+        assert_eq!(mesh.prims.len(), 1);
+        let p = &mesh.prims[0];
+        assert_eq!(p.points, [0, 1, 2, 3]);
+        assert!(p.indices.is_empty() && p.lines.is_empty());
+        assert_eq!(p.positions.len(), 4);
+        assert!(p.normals.is_empty(), "no normals are made up for points");
+        assert_eq!((mesh.triangles(), mesh.lines(), mesh.points()), (0, 0, 4));
+
+        doc.set_max_points(3);
+        let err = doc.flatten(Pose::Rest).unwrap_err().to_string();
+        assert!(err.contains("too many points"), "{err}");
+        doc.set_lines_and_points(false);
+        assert!(doc.flatten(Pose::Rest).unwrap().is_none(), "left out, nothing is drawn");
+    }
+
+    #[test]
+    fn strips_and_loops_expand_to_segments() {
+        let meshes = serde_json::json!([
+            { "primitives": [{ "attributes": { "POSITION": 0 }, "mode": 3, "indices": 1 }] },
+            { "primitives": [{ "attributes": { "POSITION": 0 }, "mode": 2 }] },
+            { "primitives": [{ "attributes": { "POSITION": 0 }, "mode": 1, "indices": 3 }] },
+            { "primitives": [{ "attributes": { "POSITION": 0 }, "mode": 1 }] },
+        ]);
+        let nodes = serde_json::json!([{ "mesh": 0 }, { "mesh": 1 }, { "mesh": 2 }, { "mesh": 3 }]);
+        let mesh = corners(meshes, nodes).flatten(Pose::Rest).unwrap().unwrap();
+        let lines: Vec<&[u32]> = mesh.prims.iter().map(|p| p.lines.as_slice()).collect();
+        assert_eq!(lines[0], [3, 2, 2, 1, 1, 0], "a strip: each index to the next");
+        assert_eq!(lines[1], [0, 1, 1, 2, 2, 3, 3, 0], "a loop: closed back to the first");
+        assert_eq!(lines[2], [1, 2], "a segment to itself and an odd index out are dropped");
+        assert_eq!(
+            lines[3],
+            [0, 1, 2, 3],
+            "plain lines, without indices, pair the vertices"
+        );
+        assert_eq!(mesh.lines(), 3 + 4 + 1 + 2);
+        assert_eq!(mesh.triangles(), 0);
+    }
+
+    #[test]
+    fn node_transforms_move_lines_and_points() {
+        let meshes = serde_json::json!([{ "primitives": [
+            { "attributes": { "POSITION": 0 }, "indices": 2 },
+            { "attributes": { "POSITION": 0 }, "mode": 3, "indices": 1 },
+            { "attributes": { "POSITION": 0 }, "mode": 0 },
+        ] }]);
+        let nodes = serde_json::json!([
+            { "mesh": 0, "translation": [10, 0, 0] },
+            { "mesh": 0, "scale": [-1, 1, 1] },
+        ]);
+        let mesh = corners(meshes, nodes).flatten(Pose::Rest).unwrap().unwrap();
+        // Both nodes draw the mesh: one primitive, the vertices once in each place.
+        assert_eq!(
+            mesh.prims.len(),
+            1,
+            "lines and points on a primitive's vertices join it"
+        );
+        let p = &mesh.prims[0];
+        assert_eq!(p.positions[2], [11.0, 1.0, 0.0], "moved");
+        assert_eq!(p.positions[5], [-1.0, 0.0, 0.0], "mirrored");
+        assert_eq!(
+            p.indices,
+            [0, 1, 2, 0, 2, 3, 4, 6, 5, 4, 7, 6],
+            "a mirror flips triangles back"
+        );
+        assert_eq!(p.lines, [3, 2, 2, 1, 1, 0, 7, 6, 6, 5, 5, 4], "but not lines");
+        assert_eq!(p.points, [0, 1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!((mesh.triangles(), mesh.lines(), mesh.points()), (4, 6, 8));
+    }
+
+    #[test]
+    fn instances_repeat_lines_and_points() {
+        let meshes = serde_json::json!([{ "primitives": [
+            { "attributes": { "POSITION": 0 }, "mode": 1, "indices": 1 },
+            { "attributes": { "POSITION": 0 }, "mode": 0 },
+        ] }]);
+        let mut doc = corners(meshes, serde_json::json!([{ "mesh": 0 }]));
+        // Two instances, 5 apart along x.
+        let bin: Vec<u8> = [0f32, 0., 0., 5., 0., 0.]
+            .iter()
+            .flat_map(|f| f.to_le_bytes())
+            .collect();
+        let b = doc.push_buffer(bin);
+        let json = &mut doc.json;
+        json["buffers"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({ "byteLength": 24 }));
+        json["bufferViews"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({ "buffer": b, "byteLength": 24 }));
+        json["accessors"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({ "bufferView": 4, "componentType": 5126, "count": 2, "type": "VEC3" }));
+        json["nodes"][0]["extensions"] =
+            serde_json::json!({ "EXT_mesh_gpu_instancing": { "attributes": { "TRANSLATION": 4 } } });
+        json.insert("extensionsUsed".into(), serde_json::json!(["EXT_mesh_gpu_instancing"]));
+        let mesh = doc.flatten(Pose::Rest).unwrap().unwrap();
+        assert_eq!(mesh.prims.len(), 1);
+        let p = &mesh.prims[0];
+        assert_eq!(p.positions.len(), 8);
+        assert_eq!(p.positions[5], [6.0, 0.0, 0.0]);
+        assert_eq!(
+            p.lines,
+            [3, 2, 1, 0, 7, 6, 5, 4],
+            "each instance's segments on its own vertices"
+        );
+        assert_eq!(p.points, [0, 1, 2, 3, 4, 5, 6, 7]);
+    }
+
+    #[test]
+    fn glb_round_trip_keeps_lines_and_points() {
+        let mut mesh = grid(2);
+        mesh.prims[0].lines = vec![0, 1, 1, 2, 2, 5];
+        mesh.prims[0].points = vec![4, 8];
+        mesh.prims[1].indices.clear();
+        mesh.prims[1].normals.clear();
+        mesh.prims[1].points = (0..9).collect();
+        let glb = to_glb(&mesh).unwrap();
+        let len = u32::from_le_bytes(glb[12..16].try_into().unwrap()) as usize;
+        let json: serde_json::Value = serde_json::from_slice(&glb[20..20 + len]).unwrap();
+        let prims = json["meshes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|m| m["primitives"].as_array().unwrap().clone())
+            .collect::<Vec<_>>();
+        let modes: Vec<u64> = prims.iter().map(|p| p["mode"].as_u64().unwrap_or(4)).collect();
+        assert_eq!(modes, [4, 1, 0, 0]);
+        assert_eq!(prims[0]["attributes"], prims[1]["attributes"], "one set of vertices");
+        assert_eq!(prims[0]["attributes"], prims[2]["attributes"]);
+        assert_eq!(prims[1]["material"], prims[0]["material"]);
+        let lines = &json["accessors"][usize::try_from(prims[1]["indices"].as_u64().unwrap()).unwrap()];
+        assert_eq!(
+            (lines["componentType"].as_u64(), lines["count"].as_u64()),
+            (Some(5123), Some(6))
+        );
+        assert!(prims[3].get("indices").is_none(), "a point cloud needs no indices");
+
+        let none = crate::assets::Memory::new();
+        let back = crate::formats::load_bytes(&glb, "m.glb", "glb", &none, Keep::ALL)
+            .unwrap()
+            .flatten(Pose::Rest)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            back.prims.len(),
+            2,
+            "lines and points join the triangles they share vertices with"
+        );
+        assert_eq!(back.prims[0].indices, mesh.prims[0].indices);
+        assert_eq!(back.prims[0].lines, mesh.prims[0].lines);
+        assert_eq!(back.prims[0].points, mesh.prims[0].points);
+        assert_eq!(back.prims[0].positions, mesh.prims[0].positions);
+        assert_eq!(back.prims[1].points, mesh.prims[1].points);
+        assert!(back.prims[1].normals.is_empty(), "no normals are made up for points");
+        assert!(to_glb(&back).unwrap() == glb, "written again, the same bytes");
     }
 }

@@ -1,0 +1,66 @@
+; FBX 7.5.0 project file
+FBXHeaderExtension:  {
+	FBXHeaderVersion: 1003
+	FBXVersion: 7400
+	Creator: "FBX SDK/FBX Plugins version 2020.3"
+}
+
+Creator: "FBX SDK/FBX Plugins version 2020.3"
+
+GlobalSettings:  {
+	Version: 1000
+	Properties70:  {
+		P: "UpAxis", "int", "Integer", "", 2
+		P: "UpAxisSign", "int", "Integer", "", 1
+		P: "FrontAxis", "int", "Integer", "", 1
+		P: "FrontAxisSign", "int", "Integer", "", -1
+		P: "CoordAxis", "int", "Integer", "", 0
+		P: "CoordAxisSign", "int", "Integer", "", 1
+		P: "OriginalUpAxis", "int", "Integer", "", -1
+		P: "OriginalUpAxisSign", "int", "Integer", "", 1
+		P: "UnitScaleFactor", "double", "Number", "", 1
+		P: "OriginalUnitScaleFactor", "double", "Number", "", 1
+	}
+}
+
+Documents:  {
+	Count: 1
+}
+
+Definitions:  {
+	Version: 100
+	Count: 1
+}
+
+Objects:  {
+	Model: 10, "Model::Wire", "Line" {
+		Version: 232
+		Properties70:  {
+			P: "GeometricTranslation", "Vector3D", "", "", 0, 0, 5
+			P: "Lcl Translation", "Lcl Translation", "", "A", 10, 20, 30
+			P: "Lcl Rotation", "Lcl Rotation", "", "A", 0, 0, 90
+		}
+		Shading: T
+		Culling: "CullingOff"
+	}
+	Geometry: 1, "Geometry::Wire", "Line" {
+		Properties70:  {
+			P: "Color", "ColorRGB", "Color", "", 0.2, 0.6, 0.9
+		}
+		GeometryVersion: 124
+		Type: "Line"
+		LineVersion: 100
+		Points: *24 {
+			a: 0,0,0,100,0,0,100,100,0,0,100,0,0,0,50,50,0,50,50,50,50,9,9,9
+		}
+		PointsIndex: *8 {
+			a: 0,1,2,3,-1,4,5,-7
+		}
+	}
+}
+
+Connections:  {
+	C: "OO", 10, 0
+	C: "OO", 1, 10
+}
+

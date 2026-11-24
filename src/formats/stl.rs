@@ -10,7 +10,7 @@
 //!
 //! STL is for printing, where Z is up (the build plate is XY), so the solids sit under a
 //! `RootNode` that turns them from Z-up to glTF's Y-up. Units are left as they are: STL has none,
-//! though most files are millimetres.
+//! though most files are millimeters.
 //!
 //! The file is read a block at a time, never whole.
 
@@ -22,20 +22,30 @@ use super::Input;
 use super::stream::{self, Blocks};
 use crate::Result;
 use crate::document::Document;
-use crate::mesh::{GRAY, MAX_TRIANGLES, Material, Mesh, Prim, Welder, single, srgb_to_linear};
+use crate::mesh::{GRAY, Material, Mesh, Prim, Welder, single, srgb_to_linear};
 
 type Tri = [[f32; 3]; 3];
+
+/// The bytes UTF-8 text may start with.
+const BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
 
 pub(crate) fn stl(input: Input<'_>) -> Result<Document<'static>> {
     let mut blocks = input.blocks()?;
     let size = blocks.size_hint() as u64;
     let head = blocks.need(1024)?;
     let Some(n) = binary_count(head, size) else {
-        let solids: Vec<_> = ascii(blocks)?.into_iter().map(|(name, p)| (name, vec![p])).collect();
+        let solids: Vec<_> = ascii(blocks, input.limit)?
+            .into_iter()
+            .map(|(name, p)| (name, vec![p]))
+            .collect();
         let source = json!({ "format": "STL", "encoding": "ASCII", "upAxis": "Z" });
         return Ok(document(solids, &single(Prim::default()), source));
     };
-    ensure!(n <= MAX_TRIANGLES, "too many triangles to convert ({n})");
+    ensure!(
+        n <= input.limit,
+        "too many triangles to convert ({n}, more than {})",
+        input.limit
+    );
     let header: [u8; 80] = head[..80].try_into().unwrap_or([0; 80]);
     let mut source = json!({ "format": "STL", "encoding": "binary", "upAxis": "Z" });
     if let Some(text) = header_text(&header) {
@@ -65,7 +75,7 @@ fn document(meshes: Vec<(Option<String>, Vec<Prim>)>, mesh: &Mesh, source: Value
     let mut facts = Map::new();
     facts.insert("triangles".into(), json!(triangles));
     // STL has no textures.
-    let mut doc = Document::from_named(meshes, &mesh.materials, Vec::new(), Some(source), facts);
+    let mut doc = Document::from_named(meshes, &mesh.materials, Vec::new(), Some(source), facts, &[]);
     // Z-up to Y-up: a quarter turn about X.
     let h = std::f32::consts::FRAC_1_SQRT_2;
     let roots = doc.json["scenes"][0]["nodes"].take();
@@ -102,6 +112,7 @@ fn binary_count(head: &[u8], size: u64) -> Option<usize> {
 /// Whether the file starts like ASCII STL: `solid`, then a `facet` or `endsolid` soon after.
 fn looks_ascii(head: &[u8]) -> bool {
     let head = &head[..head.len().min(1024)];
+    let head = head.strip_prefix(BOM).unwrap_or(head);
     let starts = head
         .trim_ascii_start()
         .get(..5)
@@ -221,8 +232,12 @@ fn finite(t: &Tri) -> bool {
 /// endfacet`, repeated; `endsolid`. Keywords in any case, any whitespace between words, and
 /// any number of solids one after another, each a mesh named by the rest of its `solid` line
 /// (up to a `facet` keyword, for files written on one line). Otherwise only the `vertex` lines
-/// matter.
-fn ascii(mut blocks: Blocks<'_>) -> Result<Vec<(Option<String>, Prim)>> {
+/// matter: a facet with more than three is a fan of triangles, and one with fewer, or a vertex
+/// line that doesn't read as three numbers, is dropped. A leading byte order mark is skipped.
+fn ascii(mut blocks: Blocks<'_>, limit: usize) -> Result<Vec<(Option<String>, Prim)>> {
+    if blocks.need(BOM.len())?.starts_with(BOM) {
+        blocks.consume(BOM.len());
+    }
     let head = blocks.need(5)?;
     ensure!(
         head.trim_ascii_start()
@@ -241,9 +256,13 @@ fn ascii(mut blocks: Blocks<'_>) -> Result<Vec<(Option<String>, Prim)>> {
     let mut read = 0;
     let mut sized = false;
     let mut tri: Tri = [[0.0; 3]; 3];
-    // The corner being read (0-2), and how many of its coordinates are still to come (0 when
-    // not in a `vertex` line).
+    let mut vert = [0.0; 3];
+    // The corners read in this facet (three once its first triangle is out), and how many of
+    // the vertex's coordinates are still to come (0 when not in a `vertex` line).
     let (mut corner, mut want) = (0, 0);
+    // Whether `facet` keywords mark the facets (otherwise every three vertices are one), whether
+    // this facet has a bad vertex line, and how many facets were dropped for one.
+    let (mut marked, mut bad, mut dropped) = (false, false, 0usize);
     while let Some(text) = blocks.text(stream::words)? {
         if !sized && w.triangles() > 0 {
             sized = true;
@@ -251,10 +270,10 @@ fn ascii(mut blocks: Blocks<'_>) -> Result<Vec<(Option<String>, Prim)>> {
                 clippy::cast_precision_loss,
                 clippy::cast_possible_truncation,
                 clippy::cast_sign_loss,
-                reason = "a capacity guess from the rate so far; MAX_TRIANGLES caps it"
+                reason = "a capacity guess from the rate so far; the limit caps it"
             )]
             let est = (size as f64 * w.triangles() as f64 / read as f64 * 1.02) as usize + 16;
-            w.expect(est.min(MAX_TRIANGLES));
+            w.expect(est.min(limit));
         }
         read += text.len();
         let mut i = 0;
@@ -275,23 +294,46 @@ fn ascii(mut blocks: Blocks<'_>) -> Result<Vec<(Option<String>, Prim)>> {
             }
             let word = &text[start..i];
             if want > 0 {
-                let c = &mut tri[corner][3 - want];
-                *c = stream::f32_from(word).ok_or_else(|| invalid!("bad vertex line in STL"))?;
-                want -= 1;
-                if want == 0 {
-                    corner += 1;
+                if let Some(x) = stream::f32_from(word) {
+                    vert[3 - want] = x;
+                    want -= 1;
+                    if want > 0 || bad {
+                        continue;
+                    }
+                    if corner < 3 {
+                        tri[corner] = vert;
+                        corner += 1;
+                    } else {
+                        // Past the third: a fan from the first.
+                        tri[1] = tri[2];
+                        tri[2] = vert;
+                    }
                     if corner == 3 {
-                        corner = 0;
+                        if !marked {
+                            corner = 0;
+                        }
                         if finite(&tri) {
                             w.push(tri);
                             total += 1;
-                            ensure!(total <= MAX_TRIANGLES, "too many triangles to convert");
+                            ensure!(total <= limit, "too many triangles to convert (more than {limit})");
                         }
                     }
+                    continue;
                 }
-            } else if word.len() == 6 && word.eq_ignore_ascii_case(b"vertex") {
+                // Fewer than three numbers: the facet is dropped, and the word read as a keyword.
+                want = 0;
+                dropped += usize::from(!bad);
+                bad = true;
+            }
+            if word.len() == 6 && word.eq_ignore_ascii_case(b"vertex") {
                 want = 3;
+            } else if word.len() == 5 && word.eq_ignore_ascii_case(b"facet") {
+                // Corners left over from a facet with fewer than three are dropped.
+                (corner, bad, marked) = (0, false, true);
+            } else if word.len() == 7 && word.eq_ignore_ascii_case(b"endloop") {
+                (corner, bad) = (0, false);
             } else if word.len() == 5 && word[0] | 0x20 == b's' && word.eq_ignore_ascii_case(b"solid") {
+                (corner, bad) = (0, false);
                 if seen {
                     finish_solid(&mut solids, &name, std::mem::replace(&mut w, Welder::with_capacity(0)));
                 }
@@ -301,9 +343,17 @@ fn ascii(mut blocks: Blocks<'_>) -> Result<Vec<(Option<String>, Prim)>> {
             }
         }
     }
-    ensure!(want == 0, "bad vertex line in STL");
+    dropped += usize::from(want > 0 && !bad);
     finish_solid(&mut solids, &name, w);
-    ensure!(!solids.is_empty(), "STL has no triangles");
+    ensure!(
+        !solids.is_empty(),
+        "STL has no triangles{}",
+        if dropped > 0 {
+            format!(" ({dropped} dropped for a bad vertex line)")
+        } else {
+            String::new()
+        }
+    );
     Ok(solids)
 }
 
@@ -357,6 +407,36 @@ mod tests {
 
     fn facet(z: f32) -> String {
         format!("facet normal 0 0 1 outer loop vertex 0 0 {z} vertex 1 0 {z} vertex 0 1 {z} endloop endfacet\n")
+    }
+
+    #[test]
+    fn a_byte_order_mark_before_solid() {
+        let text = format!("\u{feff}solid t\n{}endsolid t\n", facet(0.0));
+        assert!(looks_ascii(text.as_bytes()));
+        assert_eq!(read(text.as_bytes()).facts["triangles"], 1);
+    }
+
+    #[test]
+    fn facets_with_too_many_or_too_few_vertices_dont_throw_off_the_rest() {
+        let quad = "facet normal 0 0 1\nouter loop\nvertex 0 0 5\nvertex 1 0 5\nvertex 1 1 5\nvertex 0 1 5\nendloop\nendfacet\n";
+        let two = "facet normal 0 0 1\nouter loop\nvertex 0 0 6\nvertex 1 0 6\nendloop\nendfacet\n";
+        let bad = "facet normal 0 0 1\nouter loop\nvertex 0 0 7\nvertex 1 0\nvertex 0 1 7\nendloop\nendfacet\n";
+        let text = format!("solid t\n{quad}{two}{bad}{}endsolid t\n", facet(1.0));
+        let doc = read(text.as_bytes());
+        // The quad as two triangles, then the good facet; the short and bad ones dropped.
+        assert_eq!(doc.facts["triangles"], 3);
+        let m = doc.flatten(crate::document::Pose::Rest).unwrap().unwrap();
+        let p = &m.prims[0].positions;
+        assert!(
+            p.iter().all(|q| (q[1] - 6.0).abs() > 0.5 && (q[1] - 7.0).abs() > 0.5),
+            "{p:?}"
+        );
+        let only_bad = format!("solid t\n{bad}endsolid t\n");
+        let err = stl(Input::memory(only_bad.as_bytes(), "t.stl"))
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(err.contains("bad vertex"), "{err}");
     }
 
     #[test]

@@ -25,11 +25,17 @@ const MAX_ATTR_DEPTH: usize = 16;
 const MAX_V20_FILLER_PAD: usize = 29;
 /// Where the throwaway slot-base probes number from, far above any real slot.
 const PROBE_BASE: u64 = 1 << 20;
+/// A tag's line style (`SketchUp` 2019 on) opens with its entity preamble twice in 2019, once from 2020.
+const FIRST_SINGLE_PREAMBLE_LINE_STYLE: u32 = 20;
 
 #[derive(Debug, Default, Clone, Copy)]
 struct Draw {
     mat: u64,
     hidden: bool,
+    /// An edge drawn without a line (Soften).
+    soft: bool,
+    /// An edge the faces either side shade smoothly across.
+    smooth: bool,
     layer: u64,
 }
 
@@ -39,6 +45,10 @@ struct TexBlock {
     inline: Option<(usize, usize)>,
     tile: [f64; 2],
     rgb: [u8; 3],
+    /// The image's average color.
+    average: [u8; 3],
+    /// A colorized copy of a texture: shown tinted toward `rgb`.
+    colorize: bool,
     opacity: f64,
 }
 
@@ -56,6 +66,7 @@ struct FaceRec {
     draw: Draw,
     normal: [f64; 3],
     loops: Vec<Rc<Value>>,
+    back_mat: u64,
 }
 
 #[derive(Debug)]
@@ -75,6 +86,7 @@ enum Value {
     Edge {
         v1: u64,
         v2: u64,
+        smooth: bool,
     },
     EdgeUse {
         edge: u64,
@@ -91,7 +103,8 @@ enum Value {
         start: usize,
         len: usize,
     },
-    Ftc([f64; 9]),
+    /// The front's and the back's positioned-texture matrices.
+    Ftc(Box<[[f64; 9]; 2]>),
     Definition {
         name: String,
         ents: Vec<Obj>,
@@ -153,6 +166,10 @@ struct Archive<'a> {
     current_loop: u64,
     slots: HashMap<u64, Entry>,
     class_slot: HashMap<String, u64>,
+    /// Where each class was first declared in full, in the walker's numbering.
+    first_class_slot: HashMap<String, u64>,
+    /// Whether a tag's line style has been read.
+    seen_line_style: bool,
     /// Store-map indices the writer burned without writing bytes (annotation connection points), as
     /// (file band start, width). References past a band run ahead of the walker's numbering.
     burns: Vec<(u64, u64)>,
@@ -185,6 +202,8 @@ impl<'a> Archive<'a> {
             current_loop: 0,
             slots: HashMap::new(),
             class_slot: HashMap::new(),
+            first_class_slot: HashMap::new(),
+            seen_line_style: false,
             burns: Vec::new(),
             cum_delta: 0,
             annot_watermark: None,
@@ -238,6 +257,7 @@ impl<'a> Archive<'a> {
                     v: None,
                 });
                 self.class_slot.insert(name.to_string(), cs);
+                self.first_class_slot.entry(name.to_string()).or_insert(cs);
                 self.new_obj(name)
             }
             t if t & 0x8000 != 0 => self.new_class_ref(u64::from(t & 0x7fff), expect),
@@ -466,9 +486,12 @@ impl<'a> Archive<'a> {
             8
         })?;
         let mut out = Draw::default();
+        // Material, hidden, casts and receives shadows, soft, smooth, then (from SketchUp 5) locked.
         if !v3 {
             out.mat = u64::from(u16::from_le_bytes([b[0], b[1]]));
             out.hidden = b[2] != 0;
+            out.soft = b[5] != 0;
+            out.smooth = b[6] != 0;
         }
         // The layer is normally a u16 id, but can be the layer object itself: inline on first use, an escaped
         // back-reference after.
@@ -485,7 +508,7 @@ impl<'a> Archive<'a> {
         Ok(out)
     }
 
-    /// The textured-material payload shared by a textured `CMaterial` and a colour-by-layer `CLayer`.
+    /// The textured-material payload shared by a textured `CMaterial` and a color-by-layer `CLayer`.
     fn texture_block(&mut self) -> Result<TexBlock> {
         let mut t = TexBlock::default();
         if self.ver < FIRST_DIB_OBJECT {
@@ -515,10 +538,14 @@ impl<'a> Archive<'a> {
         }
         t.tile = self.r.f64s::<2>()?;
         self.r.utf16()?;
+        // the image's average RGBA, a zero, then the material's own RGBA
         let c = self.r.raw(9)?;
+        t.average = [c[0], c[1], c[2]];
         t.rgb = [c[5], c[6], c[7]];
         self.r.utf16()?;
-        self.r.skip(8)?;
+        // the material type (2 for a colorized texture) and the colorize mode
+        let kind = self.r.raw(8)?;
+        t.colorize = kind[0] == 2;
         t.opacity = self.r.f64()?;
         if self.r.u8()? == 0 {
             t.opacity = 0.0;
@@ -540,8 +567,52 @@ impl<'a> Archive<'a> {
         unmatched_class_ref && tag & 0x8000 != 0 && tag != 0xffff
     }
 
-    /// Some v18 files follow a colour layer with 12 zero bytes and a u32 before the next `CLayer`.
-    fn skip_clayer_colour_ext(&mut self) {
+    /// The line style a color layer may point at after its tail: nothing (0) for a plain tag, the style in full
+    /// where a tag first uses it (a `CCustomLineStyle` class declaration, or a reference to that class once
+    /// known), or a back-reference to a style an earlier tag wrote. Anything else is left for the callers.
+    ///
+    /// The slot-base probe numbers from [`PROBE_BASE`], so the file's own references can't be looked up there: a
+    /// class reference is matched by its distance from the `CLayer` class (the same in both numberings), and once
+    /// a style has been read, any other plain object reference here is a back-reference to it.
+    fn read_clayer_line_style(&mut self) -> Result<()> {
+        const CLASS: &str = "CCustomLineStyle";
+        let d = self.d();
+        let p = self.r.p;
+        let Some(tag) = u16_at(d, p) else { return Ok(()) };
+        if tag == 0xffff {
+            if u16_at(d, p + 4) != Some(16) || !bytes_at(d, p + 6, CLASS.as_bytes()) {
+                return Ok(());
+            }
+        } else if tag & 0x8000 != 0 {
+            let Some(&cs) = self.class_slot.get(CLASS) else {
+                return Ok(());
+            };
+            let shift = match (self.class_slot.get("CLayer"), self.first_class_slot.get("CLayer")) {
+                (Some(&now), Some(&first)) => i128::from(now) - i128::from(first),
+                _ => 0,
+            };
+            if i128::from(cs) + shift != i128::from(tag & 0x7fff) {
+                return Ok(());
+            }
+        } else if tag == 0 || tag == 0x7fff {
+            return Ok(());
+        } else if self.base >= PROBE_BASE {
+            if !self.seen_line_style {
+                return Ok(());
+            }
+        } else if !self
+            .slots
+            .get(&u64::from(tag))
+            .is_some_and(|e| !e.cls && &*e.name == CLASS)
+        {
+            return Ok(());
+        }
+        self.object(Some(CLASS))?;
+        Ok(())
+    }
+
+    /// Some v18 files follow a color layer with 12 zero bytes and a u32 before the next `CLayer`.
+    fn skip_clayer_color_ext(&mut self) {
         let p = self.r.p;
         let Some(pad) = self.d().get(p..p + 18) else { return };
         if pad[..12].iter().all(|&b| b == 0) && self.clayer_record_at(p + 16, true) {
@@ -616,11 +687,15 @@ impl<'a> Archive<'a> {
             }
             "CEdge" => {
                 self.preamble()?;
-                self.draw()?;
+                let draw = self.draw()?;
                 let v1 = self.object(Some("CVertex"))?.slot;
                 let v2 = self.object(Some("CVertex"))?.slot;
                 self.object(None)?; // the curve the edge belongs to
-                Ok(Value::Edge { v1, v2 })
+                Ok(Value::Edge {
+                    v1,
+                    v2,
+                    smooth: draw.smooth,
+                })
             }
             "CCurve" => {
                 self.preamble()?;
@@ -703,6 +778,18 @@ impl<'a> Archive<'a> {
             "CText" => self.read_text(),
             "CComponentDefinition" => self.read_definition(),
             "CComponentInstance" | "CGroup" => self.read_instance(),
+            "CCustomLineStyle" => {
+                // A tag's line style ("Dash", "Solid Basic", ...): its name, its dash pattern and three doubles.
+                self.early_preamble()?;
+                if self.ver < FIRST_SINGLE_PREAMBLE_LINE_STYLE {
+                    self.early_preamble()?;
+                }
+                self.r.utf16()?;
+                self.r.utf16()?;
+                self.r.skip(3 * 8)?;
+                self.seen_line_style = true;
+                Ok(Value::Other)
+            }
             other => bail!("no legacy reader for {other}"),
         }
     }
@@ -775,12 +862,13 @@ impl<'a> Archive<'a> {
                 loops.push(v);
             }
         }
-        self.r.u16()?; // back material
+        let back_mat = u64::from(self.r.u16()?);
         Ok(Value::Face(Box::new(FaceRec {
             attrs,
             draw,
             normal: [plane[0], plane[1], plane[2]],
             loops,
+            back_mat,
         })))
     }
 
@@ -839,14 +927,15 @@ impl<'a> Archive<'a> {
         self.r.utf16()?;
         let flags = self.r.u16()?;
         if flags & 0x00ff != 0 {
-            // colour-by-layer with a textured material
+            // color-by-layer with a textured material
             self.texture_block()?;
             self.r.skip(4)?;
         } else {
             self.r.skip(4)?;
             self.r.utf16()?;
             self.r.skip(if self.ver < FIRST_V4 { 17 } else { 21 })?;
-            self.skip_clayer_colour_ext();
+            self.read_clayer_line_style()?;
+            self.skip_clayer_color_ext();
             self.skip_clayer_parent_ref(me);
         }
         Ok(Value::Layer {
@@ -888,16 +977,18 @@ impl<'a> Archive<'a> {
     fn read_texture_coords(&mut self) -> Result<Value> {
         self.preamble()?;
         self.r.u32()?;
+        // the front's matrix sits at 0 and the back's at 12
         let a = self.r.f64s::<24>()?;
-        let mut uvf = [0.0; 9];
-        uvf.copy_from_slice(&a[..9]);
+        let mut sides = [[0.0; 9]; 2];
+        sides[0].copy_from_slice(&a[..9]);
+        sides[1].copy_from_slice(&a[12..21]);
         for _ in 0..2 {
             let z = self.r.u32()? as usize;
             self.r
                 .skip(z.checked_mul(32).context("texture point count overflows")?)?;
         }
         self.r.skip(8)?; // front and back flags
-        Ok(Value::Ftc(uvf))
+        Ok(Value::Ftc(Box::new(sides)))
     }
 
     fn read_image(&mut self) -> Result<Value> {
@@ -1418,21 +1509,22 @@ fn material(data: &[u8], slots: &HashMap<u64, Entry>, rec: &MatRec) -> model::Ma
             },
         };
         let bytes = data.get(start..start.checked_add(len)?)?;
-        super::glb::image_mime(bytes)?;
         Some(model::Texture {
-            bytes: bytes.to_vec(),
+            bytes: super::image::embeddable(bytes)?,
             tile: t.tile,
+            average: Some(t.average),
         })
     });
     model::Material {
         name: rec.name.clone(),
         rgb: [rec.rgba[0], rec.rgba[1], rec.rgba[2]],
         alpha: legacy_alpha(rec),
+        colorize: rec.tex.as_ref().is_some_and(|t| t.colorize),
         texture,
     }
 }
 
-/// The colour's own alpha times the material's opacity. The opacity field only counts when the flag after it
+/// The color's own alpha times the material's opacity. The opacity field only counts when the flag after it
 /// says transparency is in use; otherwise the reader has already zeroed it.
 fn legacy_alpha(rec: &MatRec) -> f64 {
     let transparency = (1.0 - rec.opacity).clamp(0.0, 1.0);
@@ -1446,15 +1538,27 @@ fn fill(ents: &[Obj], slots: &HashMap<u64, Entry>) -> model::Definition {
     for obj in ents {
         match obj.v.as_deref() {
             Some(Value::Face(f)) => {
-                let loops: Vec<Vec<[f64; 3]>> = f.loops.iter().filter_map(|l| loop_points(l, slots)).collect();
+                let mut smooth = Vec::new();
+                let loops: Vec<Vec<[f64; 3]>> = f
+                    .loops
+                    .iter()
+                    .filter_map(|l| loop_points(l, slots, &mut smooth))
+                    .collect();
                 if loops.is_empty() {
                     continue;
                 }
+                if !smooth.contains(&true) {
+                    smooth = Vec::new();
+                }
+                let uv = f.attrs.and_then(|a| texture_matrices(a, slots));
                 def.faces.push(model::Face {
                     loops,
+                    smooth,
                     normal: f.normal,
                     material: nonzero(f.draw.mat),
-                    uv_matrix: f.attrs.and_then(|a| texture_matrix(a, slots)),
+                    back_material: nonzero(f.back_mat),
+                    uv_matrix: uv.map(|m| m[0]),
+                    back_uv_matrix: uv.map(|m| m[1]),
                     hidden: f.draw.hidden,
                     layer: nonzero(f.draw.layer),
                 });
@@ -1473,42 +1577,47 @@ fn fill(ents: &[Obj], slots: &HashMap<u64, Entry>) -> model::Definition {
     def
 }
 
-/// The positioned-texture matrix kept among a face's attributes, if any.
-fn texture_matrix(attrs: u64, slots: &HashMap<u64, Entry>) -> Option<[f64; 9]> {
+/// The front's and back's positioned-texture matrices kept among a face's attributes, if any.
+fn texture_matrices(attrs: u64, slots: &HashMap<u64, Entry>) -> Option<[[f64; 9]; 2]> {
     let Some(Value::Attrs(ents)) = slots.get(&attrs)?.v.as_deref() else {
         return None;
     };
     ents.iter().find_map(|e| match e.v.as_deref() {
-        Some(Value::Ftc(m)) => Some(*m),
+        Some(Value::Ftc(m)) => Some(**m),
         _ => None,
     })
 }
 
-/// A loop's corner points: each edge use starts at its edge's first vertex, or its second when reversed.
-fn loop_points(l: &Value, slots: &HashMap<u64, Entry>) -> Option<Vec<[f64; 3]>> {
+/// A loop's corner points: each edge use starts at its edge's first vertex, or its second when reversed. Pushes
+/// onto `smooth`, for each corner kept, whether the edge leaving it is smooth.
+fn loop_points(l: &Value, slots: &HashMap<u64, Entry>, smooth: &mut Vec<bool>) -> Option<Vec<[f64; 3]>> {
     let Value::Loop(uses) = l else { return None };
-    let mut ids: Vec<u64> = Vec::new();
+    let mut ids: Vec<(u64, bool)> = Vec::new();
     for u in uses {
         let Value::EdgeUse { edge, sense } = **u else { continue };
-        let Some(Value::Edge { v1, v2 }) = slots.get(&edge).and_then(|e| e.v.as_deref()) else {
+        let Some(&Value::Edge { v1, v2, smooth }) = slots.get(&edge).and_then(|e| e.v.as_deref()) else {
             continue;
         };
-        let id = if sense { *v2 } else { *v1 };
-        if ids.last() != Some(&id) {
-            ids.push(id);
+        let id = if sense { v2 } else { v1 };
+        // after a zero-length edge, the edge that really leaves the corner is the one that counts
+        match ids.last_mut() {
+            Some(last) if last.0 == id => last.1 = smooth,
+            _ => ids.push((id, smooth)),
         }
     }
-    if ids.len() > 1 && ids.first() == ids.last() {
+    if ids.len() > 1 && ids.first().map(|c| c.0) == ids.last().map(|c| c.0) {
         ids.pop();
     }
     let points: Option<Vec<[f64; 3]>> = ids
         .iter()
-        .map(|id| match slots.get(id)?.v.as_deref()? {
+        .map(|&(id, _)| match slots.get(&id)?.v.as_deref()? {
             Value::Vertex(p) => Some(*p),
             _ => None,
         })
         .collect();
-    points.filter(|p| p.len() >= 3)
+    let points = points.filter(|p| p.len() >= 3)?;
+    smooth.extend(ids.iter().map(|c| c.1));
+    Some(points)
 }
 
 #[cfg(test)]
@@ -1542,6 +1651,48 @@ mod tests {
         let again = ar.object(None).unwrap();
         assert_eq!(again.slot, 11);
         assert_eq!(&*again.name, "CVertex");
+    }
+
+    #[test]
+    fn reads_tag_line_styles_and_counts_their_slots() {
+        let string = |s: &str| {
+            let mut out = vec![0xff, 0xfe, 0xff, s.len() as u8];
+            out.extend(s.encode_utf16().flat_map(u16::to_le_bytes));
+            out
+        };
+        for ver in [19, 20] {
+            // The style in full where the first tag uses it: its class, a null attribute container and an empty
+            // mask (twice in 2019), its name, its dash pattern and three doubles.
+            let mut d = class_decl("CCustomLineStyle");
+            for _ in 0..if ver < 20 { 2 } else { 1 } {
+                d.extend([0, 0, 0]);
+            }
+            d.extend(string("Dash"));
+            d.extend(string("4 2"));
+            d.extend([0; 24]);
+            let end = d.len();
+            // A later tag's back-reference to it, a tag with none, and a reference to something else.
+            d.extend(11u16.to_le_bytes());
+            d.extend(0u16.to_le_bytes());
+            d.extend(5u16.to_le_bytes());
+            let mut ar = Archive::new(&d, ver);
+            ar.next = 10;
+            ar.base = 10;
+            ar.read_clayer_line_style().unwrap();
+            assert_eq!((ar.r.p, ar.next), (end, 12), "version {ver}");
+            ar.read_clayer_line_style().unwrap();
+            assert_eq!(ar.r.p, end + 2);
+            ar.read_clayer_line_style().unwrap();
+            assert_eq!(ar.r.p, end + 2);
+            ar.r.p += 2;
+            ar.read_clayer_line_style().unwrap();
+            assert_eq!(ar.r.p, end + 4);
+            // Cut short: an error, never a panic.
+            for len in 0..end {
+                let mut ar = Archive::new(&d[..len], ver);
+                let _ = ar.read_clayer_line_style();
+            }
+        }
     }
 
     #[test]
@@ -1600,5 +1751,33 @@ mod tests {
         assert_eq!(ar.translate_ref(11), None);
         assert_eq!(ar.translate_ref(12), Some(10));
         assert_eq!(ar.translate_ref(30), Some(25));
+    }
+
+    #[test]
+    fn loops_carry_each_corners_smooth_flag() {
+        let entry = |v: Value| Entry {
+            cls: false,
+            name: Rc::from(""),
+            v: Some(Rc::new(v)),
+        };
+        let mut slots = HashMap::new();
+        for (id, p) in [(1, [0.0, 0.0, 0.0]), (2, [1.0, 0.0, 0.0]), (3, [0.0, 1.0, 0.0])] {
+            slots.insert(id, entry(Value::Vertex(p)));
+        }
+        // the edge from 2 to 3 is smooth; 13 is a zero-length edge at 2 and must not take over its corner
+        for (id, v1, v2, smooth) in [
+            (10, 1, 2, false),
+            (11, 3, 2, true),
+            (12, 3, 1, false),
+            (13, 2, 2, false),
+        ] {
+            slots.insert(id, entry(Value::Edge { v1, v2, smooth }));
+        }
+        let uses = [(10, false), (13, false), (11, true), (12, false)]
+            .map(|(edge, sense)| Rc::new(Value::EdgeUse { edge, sense }));
+        let mut smooth = Vec::new();
+        let points = loop_points(&Value::Loop(uses.to_vec()), &slots, &mut smooth).unwrap();
+        assert_eq!(points.len(), 3);
+        assert_eq!(smooth, [false, true, false]);
     }
 }

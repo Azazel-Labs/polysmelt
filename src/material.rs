@@ -140,7 +140,7 @@ pub(crate) struct Anisotropy {
 pub(crate) struct Iridescence {
     pub factor: Factor,
     pub ior: f32,
-    /// The thin film's thickness range in nanometres.
+    /// The thin film's thickness range in nanometers.
     pub thickness: [f32; 2],
     pub thickness_tex: Option<Tex>,
 }
@@ -220,10 +220,18 @@ impl From<&Material> for Full {
             base_color_tex: m.color_image.map(Tex::new),
             metallic: m.metallic,
             roughness: m.roughness,
+            metallic_roughness_tex: m.metallic_roughness_image.map(Tex::new),
             normal_tex: m.normal_image.map(Tex::new),
+            occlusion_tex: m.occlusion_image.map(Tex::new),
             emissive: m.emissive,
-            alpha: if m.color[3] < 1.0 { Alpha::Blend } else { Alpha::Opaque },
+            emissive_tex: m.emissive_image.map(Tex::new),
+            alpha: match m.alpha_cutoff {
+                Some(c) => Alpha::Mask(c),
+                None if m.color[3] < 1.0 => Alpha::Blend,
+                None => Alpha::Opaque,
+            },
             double_sided: m.double_sided,
+            unlit: m.unlit,
             ..Self::default()
         }
     }

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<X3D profile="Interchange" version="3.3">
+<head></head>
+<Scene>
+<ProtoDeclare name='Pillar'><ProtoInterface><field name='size' type='SFVec3f' accessType='initializeOnly' value='1 1 1'/></ProtoInterface><ProtoBody><Shape><Box><IS><connect nodeField='size' protoField='size'/></IS></Box></Shape></ProtoBody></ProtoDeclare>
+</Scene>
+</X3D>

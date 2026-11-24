@@ -78,10 +78,8 @@ impl Document<'_> {
             let samplers = items(a, "samplers");
             let mut channels = Vec::new();
             for ch in items(a, "channels") {
-                let Some(target) = ch.get("target") else { continue };
-                let (Some(node), Some(path)) = (index(target, "node"), target.get("path").and_then(Value::as_str))
-                else {
-                    // A KHR_animation_pointer target, or none.
+                let Some((node, path)) = ch.get("target").and_then(super::node_target) else {
+                    // A channel for another extension's target, or none.
                     continue;
                 };
                 let path = match path {

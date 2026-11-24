@@ -113,21 +113,37 @@ fn text(p: &[u8]) -> String {
     String::from_utf8_lossy(p).into_owned()
 }
 
-/// The front face's positioned-texture matrix, nested five records deep in the face's `DC05` payload.
-fn uv_matrix(p: &[u8]) -> Option<[f64; 9]> {
+/// The positioned-texture matrices of a face's front and back, nested deep in the face's `DC05` payload: under
+/// `1027`, the front's side is `1127` and the back's `1227`.
+fn uv_matrices(p: &[u8]) -> [Option<[f64; 9]>; 2] {
     let mut cur = p;
-    for tag in [0xDD05, 0xB136, 0xB236, 0x1027, 0x1127, 0x1327, 0x1527] {
-        cur = flat(cur).into_iter().find(|r| r.0 == tag)?.1;
+    for tag in [0xDD05, 0xB136, 0xB236, 0x1027] {
+        match flat(cur).into_iter().find(|r| r.0 == tag) {
+            Some(r) => cur = r.1,
+            None => return [None, None],
+        }
     }
-    if cur.len() != 72 {
-        return None;
-    }
-    let mut m = [0.0; 9];
-    for (i, v) in m.iter_mut().enumerate() {
-        *v = f64_at(cur, i * 8)?;
-    }
-    Some(m)
+    let sides = flat(cur);
+    let side = |tag: u16| {
+        let mut cur = sides.iter().find(|r| r.0 == tag)?.1;
+        for tag in [0x1327, 0x1527] {
+            cur = flat(cur).into_iter().find(|r| r.0 == tag)?.1;
+        }
+        if cur.len() != 72 {
+            return None;
+        }
+        let mut m = [0.0; 9];
+        for (i, v) in m.iter_mut().enumerate() {
+            *v = f64_at(cur, i * 8)?;
+        }
+        Some(m)
+    };
+    [side(0x1127), side(0x1227)]
 }
+
+/// `D307` draw-flag bits: 1 hidden, 2 casts shadows, 4 receives shadows, 8 soft, 16 smooth, 32 locked.
+const DRAW_HIDDEN: u8 = 1;
+const DRAW_SMOOTH: u8 = 16;
 
 /// Draw flags, material and tag from a `D007` drawing-element record.
 #[derive(Default)]
@@ -135,18 +151,24 @@ struct Drawing {
     material: Option<Id>,
     layer: Option<Id>,
     hidden: bool,
-    uv: Option<[f64; 9]>,
+    smooth: bool,
+    uv: [Option<[f64; 9]>; 2],
 }
 
-fn drawing(n: &Node<'_>) -> Drawing {
+/// The drawing element of `n`. Texture matrices are only looked for when `uv` is set, since only faces have them.
+fn drawing(n: &Node<'_>, uv: bool) -> Drawing {
     let mut out = Drawing::default();
     for d in n.children.iter().filter(|c| c.tag == 0xD007) {
         for x in &d.children {
             match x.tag {
                 0xD107 => out.material = varint(x.payload),
                 0xD207 => out.layer = varint(x.payload),
-                0xD307 => out.hidden = x.payload.first().is_some_and(|f| f & 1 != 0),
-                0xDC05 => out.uv = uv_matrix(x.payload),
+                0xD307 => {
+                    let flags = x.payload.first().copied().unwrap_or(0);
+                    out.hidden = flags & DRAW_HIDDEN != 0;
+                    out.smooth = flags & DRAW_SMOOTH != 0;
+                }
+                0xDC05 if uv => out.uv = uv_matrices(x.payload),
                 _ => {}
             }
         }
@@ -158,12 +180,20 @@ struct RawFace {
     normal: [f64; 3],
     loops: Vec<Vec<(Id, bool)>>,
     drawing: Drawing,
+    back_material: Option<Id>,
+}
+
+/// An edge's two vertex ids and whether it is smooth.
+struct RawEdge {
+    start: Option<Id>,
+    end: Option<Id>,
+    smooth: bool,
 }
 
 #[derive(Default)]
 struct Builder {
     vertices: HashMap<Id, [f64; 3]>,
-    edges: HashMap<Id, (Option<Id>, Option<Id>)>,
+    edges: HashMap<Id, RawEdge>,
     faces: Vec<RawFace>,
     instances: Vec<model::Instance>,
 }
@@ -182,7 +212,12 @@ fn collect_geometry(nodes: &[Node<'_>], b: &mut Builder) {
             0xB80B => {
                 if let Some(id) = entity_id(e) {
                     let end = |tag| find(&e.children, tag).and_then(|n| varint(n.payload));
-                    b.edges.insert(id, (end(0xB90B), end(0xBA0B)));
+                    let edge = RawEdge {
+                        start: end(0xB90B),
+                        end: end(0xBA0B),
+                        smooth: drawing(e, false).smooth,
+                    };
+                    b.edges.insert(id, edge);
                 }
             }
             0xAC0D => {
@@ -228,7 +263,12 @@ fn face(e: &Node<'_>) -> RawFace {
     RawFace {
         normal,
         loops,
-        drawing: drawing(e),
+        drawing: drawing(e, true),
+        back_material: e
+            .children
+            .iter()
+            .find(|c| c.tag == 0xAF0D)
+            .and_then(|c| varint(c.payload)),
     }
 }
 
@@ -241,7 +281,7 @@ fn instance(e: &Node<'_>) -> Option<model::Instance> {
             *v = f64_at(m.payload, i * 8)?;
         }
     }
-    let d = drawing(e);
+    let d = drawing(e, false);
     Some(model::Instance {
         definition,
         name,
@@ -257,31 +297,45 @@ fn to_definition(b: Builder, name: String) -> model::Definition {
         .faces
         .into_iter()
         .filter_map(|f| {
+            let mut smooth = Vec::new();
             let loops: Vec<Vec<[f64; 3]>> = f
                 .loops
                 .iter()
                 .filter_map(|l| {
-                    let mut ids: Vec<Id> = Vec::new();
+                    // each corner, with whether the edge leaving it is smooth
+                    let mut ids: Vec<(Id, bool)> = Vec::new();
                     for &(edge, reversed) in l {
-                        let Some(&(v1, v2)) = b.edges.get(&edge) else { continue };
-                        if let Some(id) = if reversed { v2 } else { v1 }
-                            && ids.last() != Some(&id)
-                        {
-                            ids.push(id);
+                        let Some(e) = b.edges.get(&edge) else { continue };
+                        let Some(id) = (if reversed { e.end } else { e.start }) else {
+                            continue;
+                        };
+                        // after a zero-length edge, the edge that really leaves the corner is the one that counts
+                        match ids.last_mut() {
+                            Some(last) if last.0 == id => last.1 = e.smooth,
+                            _ => ids.push((id, e.smooth)),
                         }
                     }
-                    if ids.len() > 1 && ids.first() == ids.last() {
+                    if ids.len() > 1 && ids.first().map(|c| c.0) == ids.last().map(|c| c.0) {
                         ids.pop();
                     }
-                    let points: Option<Vec<[f64; 3]>> = ids.iter().map(|id| b.vertices.get(id).copied()).collect();
-                    points.filter(|p| p.len() >= 3)
+                    let points: Option<Vec<[f64; 3]>> = ids.iter().map(|(id, _)| b.vertices.get(id).copied()).collect();
+                    let points = points.filter(|p| p.len() >= 3)?;
+                    smooth.extend(ids.iter().map(|c| c.1));
+                    Some(points)
                 })
                 .collect();
+            if !smooth.contains(&true) {
+                smooth = Vec::new();
+            }
+            let [uv_matrix, back_uv_matrix] = f.drawing.uv;
             (!loops.is_empty()).then_some(model::Face {
                 loops,
+                smooth,
                 normal: f.normal,
                 material: f.drawing.material,
-                uv_matrix: f.drawing.uv,
+                back_material: f.back_material,
+                uv_matrix,
+                back_uv_matrix,
                 hidden: f.drawing.hidden,
                 layer: f.drawing.layer,
             })
@@ -458,6 +512,10 @@ fn materials(zip: &Zip<'_>) -> HashMap<String, model::Material> {
             Some(model::Texture {
                 bytes,
                 tile: [scale("xScale"), scale("yScale")],
+                // ABGR, red in the low byte
+                average: attr(t, "avgColor")
+                    .and_then(|v| v.trim().parse::<u32>().ok())
+                    .map(|v| [v.to_le_bytes()[0], v.to_le_bytes()[1], v.to_le_bytes()[2]]),
             })
         });
         let name = get("name")
@@ -467,6 +525,8 @@ fn materials(zip: &Zip<'_>) -> HashMap<String, model::Material> {
             name: name.clone(),
             rgb: [channel("colorRed"), channel("colorGreen"), channel("colorBlue")],
             alpha,
+            // type 2 is a textured material colorized in SketchUp's material editor
+            colorize: texture.is_some() && get("type").is_some_and(|t| t.trim() == "2"),
             texture,
         };
         out.insert(folder, m.clone());
@@ -489,7 +549,7 @@ fn texture_bytes(zip: &Zip<'_>, names: &[String], xml_path: &str, folder: &str, 
     candidates
         .into_iter()
         .chain(others.cloned())
-        .find_map(|n| zip.get(&n)?.ok().filter(|b| super::glb::image_mime(b).is_some()))
+        .find_map(|n| super::image::embeddable(&zip.get(&n)?.ok()?))
 }
 
 /// The attribute text of the first `<name ...>` element, allowing a namespace prefix.
@@ -648,7 +708,15 @@ mod tests {
             geometry.extend(rec(0xC409, &vertex(n, p)));
         }
         for (n, a, b) in [(11, 1, 2), (12, 2, 3), (13, 3, 1)] {
-            geometry.extend(rec(0xB80B, &[id(0xDE05, n), id(0xB90B, a), id(0xBA0B, b)].concat()));
+            // the second edge soft and smooth on top of the default shadow flags, the others plain
+            let flags = if n == 12 { 0x1e } else { 0x06 };
+            let edge = [
+                id(0xDE05, n),
+                id(0xB90B, a),
+                id(0xBA0B, b),
+                rec(0xD007, &id(0xD307, flags)),
+            ];
+            geometry.extend(rec(0xB80B, &edge.concat()));
         }
         let co_edges: Vec<u8> = (11..=13)
             .flat_map(|e| rec(0xA00F, &[id(0xA10F, e), id(0xA20F, 0)].concat()))
@@ -659,14 +727,16 @@ mod tests {
             rec(0xAD0D, &normal),
             rec(0xAE0D, &rec(0x9411, &co_edges)),
             rec(0xD007, &[id(0xD107, 5), id(0xD207, 7)].concat()),
+            id(0xAF0D, 6),
         ]
         .concat();
         geometry.extend(rec(0xAC0D, &face));
         let material = rec(0xC832, &[rec(0xDC05, &[5]), rec(0xCC32, b"Brick")].concat());
         let layer = rec(0x993A, &rec(0x8C3C, &[rec(0xDC05, &[7]), rec(0x8E3C, &[1])].concat()));
         let dat = rec(0xF401, &[material, layer, rec(0xF601, &geometry)].concat());
-        let xml = br#"<material name="Brick" colorRed="200" colorGreen="10" colorBlue="20" useTrans="1" trans="0.5">
-            <texture textureFilename="C:\textures\brick.png" xScale="2" yScale="3"/></material>"#;
+        let xml = br#"<material name="Brick" type="2" colorRed="200" colorGreen="10" colorBlue="20" useTrans="1"
+            trans="0.5"><texture textureFilename="C:\textures\brick.png" xScale="2" yScale="3"
+            avgColor="4278850590"/></material>"#;
         let png = b"\x89PNG\r\n\x1a\n0000IHDR";
         let zip = super::super::zip::tests::archive_of(
             &[
@@ -685,12 +755,37 @@ mod tests {
         assert_eq!(m.root.faces.len(), 1);
         let f = &m.root.faces[0];
         assert_eq!(f.loops, [vec![[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [0.0, 10.0, 0.0]]]);
-        assert_eq!((f.material, f.layer), (Some(5), Some(7)));
+        assert_eq!((f.material, f.back_material, f.layer), (Some(5), Some(6), Some(7)));
+        // each corner says whether the edge leaving it is smooth: the second corner starts the smooth edge
+        assert_eq!(f.smooth, [false, true, false]);
         assert_eq!(m.hidden_layers, [7]);
         let mat = &m.materials[&5];
         assert_eq!((mat.name.as_str(), mat.rgb, mat.alpha), ("Brick", [200, 10, 20], 0.5));
         let tex = mat.texture.as_ref().unwrap();
         assert_eq!((tex.bytes.len(), tex.tile), (16, [2.0, 3.0]));
+        assert_eq!((tex.average, mat.colorize), (Some([30, 20, 10]), true));
+    }
+
+    #[test]
+    fn reads_both_sides_texture_matrices() {
+        let matrix = |k: f64| -> Vec<u8> {
+            let m: Vec<u8> = (0..9).flat_map(|i| (k + f64::from(i)).to_le_bytes()).collect();
+            rec(0x1327, &rec(0x1527, &m))
+        };
+        let sides = [rec(0x1127, &matrix(1.0)), rec(0x1227, &matrix(10.0))].concat();
+        let mut p = rec(0x1027, &sides);
+        for tag in [0xB236, 0xB136, 0xDD05] {
+            p = rec(tag, &p);
+        }
+        let [front, back] = uv_matrices(&p);
+        assert_eq!(front.map(|m| m[0]), Some(1.0));
+        assert_eq!(back.map(|m| m[8]), Some(18.0));
+        let front_only = rec(
+            0xDD05,
+            &rec(0xB136, &rec(0xB236, &rec(0x1027, &rec(0x1127, &matrix(1.0))))),
+        );
+        assert_eq!(uv_matrices(&front_only)[1], None);
+        assert_eq!(uv_matrices(&[1, 2, 3]), [None, None]);
     }
 
     #[test]

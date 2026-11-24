@@ -1,0 +1,8 @@
+{
+  "spec": "SketchUp .skp (closed; as openskp reads it): a triangle on each tag, the tags carrying line styles: six tags, four with a line style (SketchUp 2019)",
+  "source": "saved by SketchUp, from openskp's test fixtures (packages/cpp/tests/fixtures)",
+  "facts": {
+    "application": "SketchUp 2019"
+  },
+  "triangles": 6
+}

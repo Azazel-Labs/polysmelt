@@ -1,16 +1,20 @@
 //! `MagicaVoxel` `.vox` (the format as documented in ephtracy/voxel-model, versions 150 and 200).
 //!
 //! Each model becomes a mesh of the faces between a voxel and empty space, a primitive per
-//! palette color, in its own space: centred on its pivot, `floor(size / 2)`, when a scene graph
+//! palette color, in its own space: centered on its pivot, `floor(size / 2)`, when a scene graph
 //! places it, as `MagicaVoxel` shows it; a file without a scene graph keeps the raw voxel
-//! coordinates, a node per model. The scene graph becomes nodes: each `nTRN` transform (first
-//! frame, its name, layer and attributes in extras) with the `nGRP` group or `nSHP` shape under
-//! it; a placed model's nodes share its mesh. Hidden nodes and nodes on hidden layers are kept,
-//! hidden with `KHR_node_visibility`. More than one frame is a step animation at
-//! [`FRAMES_PER_SECOND`]. Colors are sRGB (the default palette when the file has none), and
-//! `MATL` metal, roughness and emission carry over. The asset's `extras.source` keeps the
-//! palette, every `MATL`, the layers, render settings, cameras, notes and index map. Coordinates
-//! turn from Z-up to glTF's Y-up.
+//! coordinates, a node per model. Same-colored faces on a plane merge into rectangles that share
+//! their vertices, split so no vertex sits inside another triangle's edge (see [`mesh_model`]).
+//! The scene graph becomes nodes: each `nTRN` transform (first frame, its name, layer and
+//! attributes in extras) with the `nGRP` group or `nSHP` shape under it; a placed model's nodes
+//! share its mesh. A shape with a model per animation frame draws frame 0's and keeps each other
+//! frame's as a hidden child node named for its frame. Hidden nodes and nodes on hidden layers
+//! are kept, hidden with `KHR_node_visibility`. More than one transform frame is a step animation
+//! at [`FRAMES_PER_SECOND`]. Colors are sRGB (the default palette when the file has none), and
+//! `MATL` (or legacy `MATT`) metal, roughness, emission and glass carry over, glass's
+//! transparency as opacity too. The asset's `extras.source` keeps the palette, every material,
+//! the layers, render settings, cameras, notes and index map. Coordinates turn from Z-up to
+//! glTF's Y-up.
 
 use std::collections::HashMap;
 
@@ -172,7 +176,14 @@ struct Matl {
     emit: f32,
     transmission: Option<f32>,
     ior: Option<f32>,
+    /// Glass's or a blend's opacity, from the transparency it gives (`_trans`, or the older
+    /// `_alpha`), so a client without transmission still shows it see-through; never below
+    /// [`MIN_OPACITY`], so clear glass doesn't vanish there.
+    opacity: Option<f32>,
 }
+
+/// The least opacity glass is given.
+const MIN_OPACITY: f32 = 0.1;
 
 impl Matl {
     fn new(d: &Dict) -> Matl {
@@ -195,7 +206,42 @@ impl Matl {
             },
             transmission: glass.then(|| f("_trans").unwrap_or(if ty == "_glass" { 1.0 } else { 0.0 })),
             ior: (metal || glass).then(|| f("_ior")).flatten().map(|i| 1.0 + i),
+            opacity: glass
+                .then(|| f("_trans").or_else(|| f("_alpha")))
+                .flatten()
+                .map(|t| (1.0 - t.clamp(0.0, 1.0)).max(MIN_OPACITY)),
         }
+    }
+
+    /// The `MATL` dictionary of a legacy `MATT` chunk's material: its type and weight (metal's
+    /// metalness, glass's transparency, an emitter's glow) and, when given, its roughness.
+    fn legacy(b: &mut Body) -> Result<(u32, Dict)> {
+        let id = b.u32()?;
+        let kind = b.u32()?;
+        let weight = f32::from_bits(b.u32()?);
+        let bits = b.u32()?;
+        let mut d = Dict::new();
+        let (ty, key) = match kind {
+            1 => ("_metal", "_metal"),
+            2 => ("_glass", "_trans"),
+            3 => ("_emit", "_emit"),
+            _ => ("_diffuse", ""),
+        };
+        d.insert("_type".into(), ty.into());
+        if !key.is_empty() {
+            d.insert(key.into(), weight.to_string());
+        }
+        // Values follow for each set bit below the seventh, in bit order: plastic, roughness,
+        // specular, index of refraction, attenuation, power, glow.
+        for bit in 0..7 {
+            if bits >> bit & 1 == 1 {
+                let value = f32::from_bits(b.u32()?);
+                if bit == 1 {
+                    d.insert("_rough".into(), value.to_string());
+                }
+            }
+        }
+        Ok((id, d))
     }
 }
 
@@ -218,6 +264,8 @@ struct Vox {
     nodes: HashMap<u32, Node>,
     layers: Vec<(i32, Dict)>,
     matl: Vec<(u32, Dict)>,
+    /// Legacy `MATT` materials, as `MATL` dictionaries; a `MATL` for the same color wins.
+    matt: Vec<(u32, Dict)>,
     render: Vec<Value>,
     cameras: Vec<Value>,
     notes: Vec<String>,
@@ -232,7 +280,7 @@ pub(crate) fn vox(data: &[u8], keep: Keep) -> Result<Document<'static>> {
     let scene = v.nodes.contains_key(&0);
     let models = &v.models;
 
-    // Each model in its own space: centred on its pivot when a scene graph places it.
+    // Each model in its own space: centered on its pivot when a scene graph places it.
     let mut meshed: Vec<Vec<(u8, Prim)>> = Vec::with_capacity(models.len());
     for m in models {
         let mut prims: HashMap<u8, Prim> = HashMap::new();
@@ -316,14 +364,16 @@ pub(crate) fn vox(data: &[u8], keep: Keep) -> Result<Document<'static>> {
     }
 
     let palette = v.palette.unwrap_or_else(default_palette);
-    let matl: HashMap<u32, Matl> = v.matl.iter().map(|(i, d)| (*i, Matl::new(d))).collect();
+    let matl: HashMap<u32, Matl> = v.matt.iter().chain(&v.matl).map(|(i, d)| (*i, Matl::new(d))).collect();
     let materials: Vec<Full> = colors
         .iter()
         .map(|&c| {
             let rgba = palette[usize::from(c)];
             let [r, g, b] = [rgba[0], rgba[1], rgba[2]].map(|v| srgb_to_linear(f32::from(v) / 255.0));
-            let mut mat = Full::from(Material::plain(&format!("color_{c}"), [r, g, b, 1.0]));
-            if let Some(x) = matl.get(&u32::from(c)) {
+            let x = matl.get(&u32::from(c));
+            let alpha = x.and_then(|x| x.opacity).unwrap_or(1.0);
+            let mut mat = Full::from(Material::plain(&format!("color_{c}"), [r, g, b, alpha]));
+            if let Some(x) = x {
                 mat.metallic = x.metal;
                 if let Some(rough) = x.rough {
                     mat.roughness = rough;
@@ -362,6 +412,10 @@ fn source(v: &Vox) -> Value {
     if !v.matl.is_empty() {
         let m: Map<String, Value> = v.matl.iter().map(|(i, d)| (i.to_string(), dict_json(d))).collect();
         s.insert("materials".into(), Value::Object(m));
+    }
+    if !v.matt.is_empty() {
+        let m: Map<String, Value> = v.matt.iter().map(|(i, d)| (i.to_string(), dict_json(d))).collect();
+        s.insert("legacyMaterials".into(), Value::Object(m));
     }
     if !v.layers.is_empty() {
         let layers: Vec<Value> = v
@@ -512,6 +566,7 @@ fn read(data: &[u8]) -> Result<Vox> {
                 let id = b.u32()?;
                 v.matl.push((id, b.dict()?));
             }
+            b"MATT" => v.matt.push(Matl::legacy(&mut b)?),
             b"rOBJ" => v.render.push(dict_json(&b.dict()?)),
             b"rCAM" => {
                 let id = b.u32()?;
@@ -625,18 +680,36 @@ impl Walk<'_> {
                 if !attrs.is_empty() {
                     extras.insert("shape".into(), dict_json(attrs));
                 }
-                if let Some(&(m, _)) = models.first() {
-                    let m = m as usize;
-                    if let Some(model) = self.v.models.get(m) {
+                // A model per animation frame (`_f`): the earliest is drawn, each other one a
+                // hidden child to show in its place.
+                let frame = |d: &Dict| d.get("_f").and_then(|f| f.trim().parse::<u32>().ok()).unwrap_or(0);
+                let shown = (0..models.len()).min_by_key(|&k| frame(&models[k].1));
+                for (k, (m, d)) in models.iter().enumerate() {
+                    let m = *m as usize;
+                    let (Some(model), Some(&mesh)) = (self.v.models.get(m), self.mesh_of.get(m)) else {
+                        continue;
+                    };
+                    if Some(k) == shown {
                         if visible {
                             self.voxels += model.voxels.len();
                         }
-                        if let Some(mesh) = self.mesh_of[m] {
+                        if let Some(mesh) = mesh {
                             out.insert("mesh".into(), json!(mesh));
                         }
+                    } else if let Some(mesh) = mesh
+                        && self.out.len() < MAX_NODES
+                    {
+                        self.out.push(json!({
+                            "name": format!("frame_{}", frame(d)),
+                            "mesh": mesh,
+                            "extensions": { "KHR_node_visibility": { "visible": false } },
+                            "extras": { "frame": frame(d), "model": m },
+                        }));
+                        self.hidden = true;
+                        children.push(self.out.len() - 1);
                     }
                 }
-                // A model per frame: the first is drawn, the rest kept by number.
+                // Every frame's model and attributes, by number.
                 if models.len() > 1 || models.first().is_some_and(|(_, d)| !d.is_empty()) {
                     let list: Vec<Value> = models
                         .iter()
@@ -783,18 +856,73 @@ fn animation(b: &mut Builder, animated: &[(usize, &[Frame])]) -> Value {
     json!({ "name": "frames", "channels": channels, "samplers": samplers })
 }
 
-/// Faces as (neighbor direction, four corners counter-clockwise from outside), Z-up.
-const FACES: [([i32; 3], [[i32; 3]; 4]); 6] = [
-    ([1, 0, 0], [[1, 0, 0], [1, 1, 0], [1, 1, 1], [1, 0, 1]]),
-    ([-1, 0, 0], [[0, 0, 0], [0, 0, 1], [0, 1, 1], [0, 1, 0]]),
-    ([0, 1, 0], [[0, 1, 0], [0, 1, 1], [1, 1, 1], [1, 1, 0]]),
-    ([0, -1, 0], [[0, 0, 0], [1, 0, 0], [1, 0, 1], [0, 0, 1]]),
-    ([0, 0, 1], [[0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1]]),
-    ([0, 0, -1], [[0, 0, 0], [0, 1, 0], [1, 1, 0], [1, 0, 0]]),
+/// Each face direction as the axis it faces along, whether it faces the positive way, and the
+/// in-plane axes `u` and `v`, ordered so counter-clockwise in `(u, v)` is counter-clockwise seen
+/// from outside; Z-up.
+const DIRS: [(usize, bool, usize, usize); 6] = [
+    (0, true, 1, 2),
+    (0, false, 2, 1),
+    (1, true, 2, 0),
+    (1, false, 0, 2),
+    (2, true, 0, 1),
+    (2, false, 1, 0),
 ];
 
-/// Adds a model's exposed faces to the primitive of each voxel's color, centred on its pivot
-/// when `centred`.
+type Fast = std::hash::BuildHasherDefault<crate::mesh::FxHasher>;
+
+/// A rectangle of same-colored faces on one plane: `[u0, u1) x [v0, v1)` in that plane's axes.
+#[derive(Clone, Copy)]
+struct Rect {
+    /// The direction (an index into [`DIRS`]) times 1025, plus the plane.
+    bucket: u16,
+    color: u8,
+    u0: u16,
+    u1: u16,
+    v0: u16,
+    v1: u16,
+}
+
+impl Rect {
+    /// The lattice point at `(u, v)` on this rectangle's plane.
+    fn point(&self, u: usize, v: usize) -> [usize; 3] {
+        let (d, plane) = (usize::from(self.bucket) / 1025, usize::from(self.bucket) % 1025);
+        let (axis, _, ua, va) = DIRS[d];
+        let mut p = [0; 3];
+        p[axis] = plane;
+        p[ua] = u;
+        p[va] = v;
+        p
+    }
+}
+
+/// A lattice point (each coordinate at most 1024) as one number.
+fn lattice(p: [usize; 3]) -> u64 {
+    p[0] as u64 | (p[1] as u64) << 11 | (p[2] as u64) << 22
+}
+
+/// Triangles between two chains of `ring` points on parallel sides, `a` and `b`, both in order
+/// of coordinate `k`, `b` to the left of `a`'s direction; `ids` are the points' vertices.
+fn strip(p: &mut Prim, ring: &[[usize; 2]], ids: &[u32], a: &[usize], b: &[usize], k: usize) {
+    let (mut i, mut j) = (0, 0);
+    while i + 1 < a.len() || j + 1 < b.len() {
+        if j + 1 == b.len() || (i + 1 < a.len() && ring[a[i + 1]][k] <= ring[b[j + 1]][k]) {
+            p.indices.extend([ids[a[i]], ids[a[i + 1]], ids[b[j]]]);
+            i += 1;
+        } else {
+            p.indices.extend([ids[a[i]], ids[b[j + 1]], ids[b[j]]]);
+            j += 1;
+        }
+    }
+}
+
+/// Adds a model's exposed faces to the primitive of each voxel's color, centered on its pivot
+/// when `centered`.
+///
+/// Same-colored faces on a plane merge into rectangles: runs along each row, then runs of equal
+/// extent on the rows after. A rectangle's side is split wherever another rectangle has a corner
+/// on it, and at every voxel along the model's bounding box, so no vertex sits inside another
+/// triangle's edge (a T-junction, which shows as a crack), within the model or where models
+/// placed side by side meet. Vertices are shared between a plane's rectangles of one color.
 #[allow(
     clippy::cast_sign_loss,
     clippy::cast_possible_wrap,
@@ -802,13 +930,14 @@ const FACES: [([i32; 3], [[i32; 3]; 4]); 6] = [
     clippy::cast_precision_loss,
     reason = "model sizes are checked to 1..=1024, so every coordinate is small and signs are checked"
 )]
-fn mesh_model(model: &Model, centred: bool, prims: &mut HashMap<u8, Prim>) -> Result<()> {
+fn mesh_model(model: &Model, centered: bool, prims: &mut HashMap<u8, Prim>) -> Result<()> {
     let [sx, sy, sz] = model.size;
     ensure!(
         (1..=1024).contains(&sx) && (1..=1024).contains(&sy) && (1..=1024).contains(&sz),
         "VOX model size {sx}x{sy}x{sz} is out of range"
     );
-    let (sx, sy, sz) = (sx as usize, sy as usize, sz as usize);
+    let size = [sx as usize, sy as usize, sz as usize];
+    let [sx, sy, sz] = size;
     let cell = |x: usize, y: usize, z: usize| (z * sy + y) * sx + x;
     let mut occupied = vec![0u64; (sx * sy * sz).div_ceil(64)];
     let inside = |v: &[u8; 4]| (v[0] as usize) < sx && (v[1] as usize) < sy && (v[2] as usize) < sz && v[3] != 0;
@@ -816,48 +945,214 @@ fn mesh_model(model: &Model, centred: bool, prims: &mut HashMap<u8, Prim>) -> Re
         let c = cell(v[0].into(), v[1].into(), v[2].into());
         occupied[c / 64] |= 1 << (c % 64);
     }
-    let filled = |x: i32, y: i32, z: i32| {
-        if x < 0 || y < 0 || z < 0 || x as usize >= sx || y as usize >= sy || z as usize >= sz {
+    let filled = |p: [i32; 3]| {
+        if p.iter().zip(size).any(|(&c, s)| c < 0 || c as usize >= s) {
             return false;
         }
-        let c = cell(x as usize, y as usize, z as usize);
+        let c = cell(p[0] as usize, p[1] as usize, p[2] as usize);
         occupied[c / 64] >> (c % 64) & 1 == 1
     };
-    let pivot = if centred {
-        [sx / 2, sy / 2, sz / 2].map(|p| p as i32)
-    } else {
-        [0; 3]
-    };
-    // MagicaVoxel is Z-up, glTF Y-up: (x, y, z) -> (x, z, -y).
-    let to_gltf = |p: [i32; 3]| [p[0] as f32, p[2] as f32, -p[1] as f32];
+
+    // Every exposed face as one number: its bucket (direction and plane), row, column and color,
+    // so sorting gathers each plane's faces row by row.
+    let mut faces: Vec<u64> = Vec::new();
     let mut seen = vec![0u64; occupied.len()];
     for v in model.voxels.iter().filter(|v| inside(v)) {
-        let (x, y, z) = (i32::from(v[0]), i32::from(v[1]), i32::from(v[2]));
         // A voxel listed twice draws once.
         let c = cell(v[0].into(), v[1].into(), v[2].into());
         if seen[c / 64] >> (c % 64) & 1 == 1 {
             continue;
         }
         seen[c / 64] |= 1 << (c % 64);
-        for (d, corners) in &FACES {
-            if filled(x + d[0], y + d[1], z + d[2]) {
+        let p = [usize::from(v[0]), usize::from(v[1]), usize::from(v[2])];
+        for (d, &(axis, positive, ua, va)) in DIRS.iter().enumerate() {
+            let mut n = p.map(|c| c as i32);
+            n[axis] += if positive { 1 } else { -1 };
+            if filled(n) {
                 continue;
             }
-            let p = prims.entry(v[3]).or_default();
-            let base = u32::try_from(p.positions.len())?;
-            let normal = to_gltf(*d);
-            for c in corners {
-                p.positions
-                    .push(to_gltf([x + c[0] - pivot[0], y + c[1] - pivot[1], z + c[2] - pivot[2]]));
-                p.normals.push(normal);
+            let bucket = d * 1025 + p[axis] + usize::from(positive);
+            faces.push((bucket as u64) << 28 | (p[va] as u64) << 18 | (p[ua] as u64) << 8 | u64::from(v[3]));
+        }
+    }
+    faces.sort_unstable();
+
+    // Rectangles: runs of one color along a row, grown a row at a time while the next row has a
+    // run of the same extent and color.
+    let mut rects: Vec<Rect> = Vec::new();
+    let (mut open, mut next): (Vec<usize>, Vec<usize>) = (Vec::new(), Vec::new());
+    let mut i = 0;
+    while i < faces.len() {
+        let bucket = faces[i] >> 28;
+        let end = i + faces[i..].partition_point(|f| f >> 28 == bucket);
+        open.clear();
+        while i < end {
+            let line = faces[i] >> 18;
+            next.clear();
+            let mut k = 0;
+            while i < end && faces[i] >> 18 == line {
+                let (u0, color) = ((faces[i] >> 8) & 0x3ff, faces[i] as u8);
+                let mut u1 = u0 + 1;
+                i += 1;
+                while i < end && faces[i] >> 18 == line && (faces[i] >> 8) & 0x3ff == u1 && faces[i] as u8 == color {
+                    u1 += 1;
+                    i += 1;
+                }
+                let (u0, u1, row) = (u0 as u16, u1 as u16, (line & 0x3ff) as u16);
+                while k < open.len() && rects[open[k]].u0 < u0 {
+                    k += 1;
+                }
+                if let Some(&o) = open.get(k)
+                    && rects[o].v1 == row
+                    && rects[o].u0 == u0
+                    && rects[o].u1 == u1
+                    && rects[o].color == color
+                {
+                    rects[o].v1 += 1;
+                    next.push(o);
+                    k += 1;
+                    continue;
+                }
+                rects.push(Rect {
+                    bucket: bucket as u16,
+                    color,
+                    u0,
+                    u1,
+                    v0: row,
+                    v1: row + 1,
+                });
+                next.push(rects.len() - 1);
             }
-            p.indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+            std::mem::swap(&mut open, &mut next);
+        }
+    }
+
+    let mut corners: std::collections::HashSet<u64, Fast> = std::collections::HashSet::default();
+    corners.reserve(rects.len() * 2);
+    for r in &rects {
+        let (u0, u1, v0, v1) = (r.u0.into(), r.u1.into(), r.v0.into(), r.v1.into());
+        for (u, v) in [(u0, v0), (u1, v0), (u1, v1), (u0, v1)] {
+            corners.insert(lattice(r.point(u, v)));
+        }
+    }
+
+    let pivot = if centered {
+        size.map(|p| (p / 2) as f32)
+    } else {
+        [0.0; 3]
+    };
+    // MagicaVoxel is Z-up, glTF Y-up: (x, y, z) -> (x, z, -y).
+    let to_gltf = |p: [f32; 3]| [p[0] - pivot[0], p[2] - pivot[2], pivot[1] - p[1]];
+    let on_box = |axis: usize, c: usize| c == 0 || c == size[axis];
+    // The current plane's vertices, by color and point.
+    let mut shared: HashMap<u32, u32, Fast> = HashMap::default();
+    let mut current = u16::MAX;
+    // A rectangle's outline counter-clockwise from (u0, v0), each point's vertex, and two chains
+    // of outline points to strip between.
+    let mut ring: Vec<[usize; 2]> = Vec::new();
+    let mut ids: Vec<u32> = Vec::new();
+    let (mut a, mut b): (Vec<usize>, Vec<usize>) = (Vec::new(), Vec::new());
+    for r in &rects {
+        if r.bucket != current {
+            shared.clear();
+            current = r.bucket;
+        }
+        let (axis, positive, ua, va) = DIRS[usize::from(r.bucket) / 1025];
+        let plane = usize::from(r.bucket) % 1025;
+        let (u0, u1, v0, v1) = (r.u0.into(), r.u1.into(), r.v0.into(), r.v1.into());
+        // The sides, counter-clockwise: from, to, and whether it runs along `u`.
+        let sides: [([usize; 2], [usize; 2], bool); 4] = [
+            ([u0, v0], [u1, v0], true),
+            ([u1, v0], [u1, v1], false),
+            ([u1, v1], [u0, v1], true),
+            ([u0, v1], [u0, v0], false),
+        ];
+        ring.clear();
+        let mut at = [0usize; 4];
+        let mut clean = [true; 4];
+        for (s, &(from, to, along_u)) in sides.iter().enumerate() {
+            at[s] = ring.len();
+            ring.push(from);
+            let (fixed_axis, fixed, a, b) = if along_u {
+                (va, from[1], from[0], to[0])
+            } else {
+                (ua, from[0], from[1], to[1])
+            };
+            let every = on_box(axis, plane) || on_box(fixed_axis, fixed);
+            for t in 1..a.abs_diff(b) {
+                let c = if b > a { a + t } else { a - t };
+                let q = if along_u { [c, fixed] } else { [fixed, c] };
+                if every || corners.contains(&lattice(r.point(q[0], q[1]))) {
+                    ring.push(q);
+                    clean[s] = false;
+                }
+            }
+        }
+        let p = prims.entry(r.color).or_default();
+        let mut normal = [0.0f32; 3];
+        normal[axis] = if positive { 1.0 } else { -1.0 };
+        let normal = [normal[0], normal[2], -normal[1]];
+        ids.clear();
+        for q in &ring {
+            let key = u32::from(r.color) | (q[0] as u32) << 8 | (q[1] as u32) << 19;
+            let id = if let Some(&id) = shared.get(&key) {
+                id
+            } else {
+                let id = u32::try_from(p.positions.len())?;
+                p.positions.push(to_gltf(r.point(q[0], q[1]).map(|c| c as f32)));
+                p.normals.push(normal);
+                shared.insert(key, id);
+                id
+            };
+            ids.push(id);
+        }
+        let n = ids.len();
+        if let Some(c) = (0..4).find(|&c| clean[c] && clean[(c + 3) % 4]) {
+            // A corner between two unsplit sides fans to every other point without a sliver.
+            for t in 1..n - 1 {
+                p.indices
+                    .extend([ids[at[c]], ids[(at[c] + t) % n], ids[(at[c] + t + 1) % n]]);
+            }
+        } else if clean[1] && clean[3] {
+            // Unsplit left and right: a strip between bottom and top, both walked along `u`.
+            a.clear();
+            b.clear();
+            a.extend(at[0]..=at[1]);
+            b.extend((at[2]..=at[3]).rev());
+            strip(p, &ring, &ids, &a, &b, 0);
+        } else if clean[0] && clean[2] {
+            // Unsplit bottom and top: a strip between right and left, both walked along `v`.
+            a.clear();
+            b.clear();
+            a.extend(at[1]..=at[2]);
+            b.push(0);
+            b.extend((at[3]..n).rev());
+            strip(p, &ring, &ids, &a, &b, 1);
+        } else {
+            // A point in the middle, which no edge of any other rectangle passes through.
+            let id = u32::try_from(p.positions.len())?;
+            let mut m = r.point(0, 0).map(|c| c as f32);
+            m[ua] = (u0 + u1) as f32 / 2.0;
+            m[va] = (v0 + v1) as f32 / 2.0;
+            p.positions.push(to_gltf(m));
+            p.normals.push(normal);
+            for t in 0..n {
+                p.indices.extend([id, ids[t], ids[(t + 1) % n]]);
+            }
         }
     }
     Ok(())
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::float_cmp,
+    reason = "small test models, and exact unit normals"
+)]
 mod tests {
     use super::*;
 
@@ -913,5 +1208,343 @@ mod tests {
             }
         }
         assert_eq!(seen, 48);
+    }
+
+    /// A `.vox` file of one model: its size, voxels and, when given, palette.
+    fn file(size: [i32; 3], voxels: &[[u8; 4]], extra: &[u8]) -> Vec<u8> {
+        let chunk = |id: &[u8], content: &[u8]| {
+            let mut c = id.to_vec();
+            c.extend(u32::try_from(content.len()).unwrap().to_le_bytes());
+            c.extend(0u32.to_le_bytes());
+            c.extend(content);
+            c
+        };
+        let mut children = chunk(b"SIZE", &size.map(i32::to_le_bytes).concat());
+        let mut xyzi = u32::try_from(voxels.len()).unwrap().to_le_bytes().to_vec();
+        xyzi.extend(voxels.concat());
+        children.extend(chunk(b"XYZI", &xyzi));
+        children.extend(extra);
+        let mut f = b"VOX ".to_vec();
+        f.extend(150u32.to_le_bytes());
+        f.extend(b"MAIN");
+        f.extend(0u32.to_le_bytes());
+        f.extend(u32::try_from(children.len()).unwrap().to_le_bytes());
+        f.extend(children);
+        f
+    }
+
+    /// A shell `thick` voxels deep inside a ball filling `n`³, banded in eight colors by height.
+    fn ball(n: i32, thick: f32) -> Vec<[u8; 4]> {
+        let r = n as f32 / 2.0;
+        let mut v = Vec::new();
+        for z in 0..n {
+            for y in 0..n {
+                for x in 0..n {
+                    let d = [x, y, z].map(|c| c as f32 + 0.5 - r);
+                    let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+                    if len <= r && len > r - thick {
+                        v.push([x as u8, y as u8, z as u8, 1 + (z * 8 / n) as u8]);
+                    }
+                }
+            }
+        }
+        v
+    }
+
+    /// Rolling hills `n` wide, colored by height, solid below.
+    fn terrain(n: i32) -> Vec<[u8; 4]> {
+        let mut v = Vec::new();
+        for y in 0..n {
+            for x in 0..n {
+                let h = 24.0 + 12.0 * ((x as f32 / 23.0).sin() + (y as f32 / 31.0).cos());
+                for z in 0..h as i32 {
+                    v.push([x as u8, y as u8, z as u8, 1 + (z / 6) as u8]);
+                }
+            }
+        }
+        v
+    }
+
+    /// Run with `cargo test --release -- --ignored --nocapture measure_meshing`.
+    #[test]
+    #[ignore = "a measurement, not a check"]
+    fn measure_meshing() {
+        for (name, n, thick) in [
+            ("256 shell", 256, 6.0),
+            ("196 ball", 196, 196.0),
+            ("256 terrain", 256, 0.0),
+        ] {
+            let voxels = if thick > 0.0 { ball(n, thick) } else { terrain(n) };
+            let bytes = file([n; 3], &voxels, &[]);
+            let start = std::time::Instant::now();
+            let doc = vox(&bytes, Keep::ALL).unwrap();
+            let load = start.elapsed();
+            let mesh = doc.flatten(crate::document::Pose::Rest).unwrap().unwrap();
+            let verts: usize = mesh.prims.iter().map(|p| p.positions.len()).sum();
+            println!(
+                "{name}: {} voxels, {verts} vertices, {} triangles, {load:?}, {} buffer bytes",
+                voxels.len(),
+                mesh.triangles(),
+                doc.buffer(0).map_or(0, |b| b.len())
+            );
+        }
+    }
+
+    /// Checks a meshed model against the voxels it came from: every triangle faces the way its
+    /// normal says, the area facing each way is the number of exposed faces that way, no vertex
+    /// sits inside another triangle's edge, and every edge is walked as often each way.
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        reason = "small test models"
+    )]
+    fn check_surface(model: &Model, prims: &HashMap<u8, Prim>) {
+        let key = |p: [f32; 3]| p.map(|c| (c * 2.0).round() as i32);
+        let mut points: Vec<[i32; 3]> = Vec::new();
+        let mut area = [0.0f32; 6];
+        let mut edges: HashMap<([i32; 3], [i32; 3]), i32> = HashMap::new();
+        for p in prims.values() {
+            points.extend(p.positions.iter().map(|&q| key(q)));
+            for t in p.indices.chunks_exact(3) {
+                let [a, b, c] = [0, 1, 2].map(|k| p.positions[t[k] as usize]);
+                let n = crate::mesh::face_normal(a, b, c);
+                let want = p.normals[t[0] as usize];
+                assert!(
+                    (0..3).all(|k| (n[k] - want[k]).abs() < 1e-4),
+                    "triangle faces {n:?}, not {want:?}"
+                );
+                let e1 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+                let e2 = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+                let x = [
+                    e1[1] * e2[2] - e1[2] * e2[1],
+                    e1[2] * e2[0] - e1[0] * e2[2],
+                    e1[0] * e2[1] - e1[1] * e2[0],
+                ];
+                let twice = (x[0] * x[0] + x[1] * x[1] + x[2] * x[2]).sqrt();
+                assert!(twice > 1e-4, "a sliver triangle");
+                let dir = (0..6)
+                    .find(|&d| {
+                        let (axis, positive, _, _) = DIRS[d];
+                        let mut m = [0.0; 3];
+                        m[axis] = if positive { 1.0 } else { -1.0 };
+                        [m[0], m[2], -m[1]] == want
+                    })
+                    .unwrap();
+                area[dir] += twice / 2.0;
+                for (u, v) in [(a, b), (b, c), (c, a)] {
+                    *edges.entry((key(u), key(v))).or_default() += 1;
+                    *edges.entry((key(v), key(u))).or_default() -= 1;
+                }
+            }
+        }
+        for ((u, v), n) in &edges {
+            assert_eq!(*n, 0, "edge {u:?}-{v:?} isn't closed");
+            for q in &points {
+                // Strictly inside the segment: collinear and between the ends.
+                let d = [v[0] - u[0], v[1] - u[1], v[2] - u[2]];
+                let w = [q[0] - u[0], q[1] - u[1], q[2] - u[2]];
+                let cross = [
+                    d[1] * w[2] - d[2] * w[1],
+                    d[2] * w[0] - d[0] * w[2],
+                    d[0] * w[1] - d[1] * w[0],
+                ];
+                let along = d[0] * w[0] + d[1] * w[1] + d[2] * w[2];
+                let len = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+                assert!(
+                    cross != [0; 3] || along <= 0 || along >= len,
+                    "T-junction: {q:?} inside edge {u:?}-{v:?}"
+                );
+            }
+        }
+        let [sx, sy, sz] = model.size.map(|s| s as usize);
+        let mut grid = vec![false; sx * sy * sz];
+        for v in &model.voxels {
+            grid[(usize::from(v[2]) * sy + usize::from(v[1])) * sx + usize::from(v[0])] = true;
+        }
+        let filled = |p: [i32; 3]| {
+            p.iter().zip([sx, sy, sz]).all(|(&c, s)| c >= 0 && (c as usize) < s)
+                && grid[(p[2] as usize * sy + p[1] as usize) * sx + p[0] as usize]
+        };
+        let mut want = [0.0f32; 6];
+        for z in 0..sz as i32 {
+            for y in 0..sy as i32 {
+                for x in 0..sx as i32 {
+                    if !filled([x, y, z]) {
+                        continue;
+                    }
+                    for (d, &(axis, positive, _, _)) in DIRS.iter().enumerate() {
+                        let mut n = [x, y, z];
+                        n[axis] += if positive { 1 } else { -1 };
+                        if !filled(n) {
+                            want[d] += 1.0;
+                        }
+                    }
+                }
+            }
+        }
+        for d in 0..6 {
+            assert!(
+                (area[d] - want[d]).abs() < 1e-3,
+                "direction {d}: area {} of {}",
+                area[d],
+                want[d]
+            );
+        }
+    }
+
+    /// Random models of a few colors mesh into closed surfaces without T-junctions, fewer
+    /// triangles than two to a face.
+    #[test]
+    fn meshing_is_closed_and_free_of_t_junctions() {
+        let mut seed = 0x2545_f491_u32;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed
+        };
+        for round in 0..40 {
+            let size = [
+                3 + (next() % 9) as i32,
+                3 + (next() % 9) as i32,
+                3 + (next() % 9) as i32,
+            ];
+            let colors = 1 + next() % 4;
+            let fill = 30 + next() % 70;
+            let mut voxels = Vec::new();
+            for z in 0..size[2] as u8 {
+                for y in 0..size[1] as u8 {
+                    for x in 0..size[0] as u8 {
+                        // Lower layers fuller, so there are big flat runs as well as noise.
+                        if next() % 100 < fill.saturating_sub(u32::from(z) * 8).max(5) {
+                            voxels.push([x, y, z, 1 + (next() % colors) as u8]);
+                        }
+                    }
+                }
+            }
+            let model = Model { size, voxels };
+            for centered in [false, true] {
+                let mut prims = HashMap::new();
+                mesh_model(&model, centered, &mut prims).unwrap();
+                check_surface(&model, &prims);
+                let tris: usize = prims.values().map(|p| p.indices.len() / 3).sum();
+                assert!(tris > 0 || model.voxels.is_empty(), "round {round}: nothing meshed");
+            }
+        }
+    }
+
+    /// A solid block of one color clear of its model's box is six rectangles: twelve triangles
+    /// on eight shared corners. Filling the box, its sides split at every voxel, to meet the
+    /// faces of a model placed against it.
+    #[test]
+    fn a_block_is_twelve_triangles() {
+        let block = |at: u8| {
+            let mut voxels = Vec::new();
+            for z in 0..4 {
+                for y in 0..5 {
+                    for x in 0..6 {
+                        voxels.push([x + at, y + at, z + at, 7]);
+                    }
+                }
+            }
+            voxels
+        };
+        let model = Model {
+            size: [8, 7, 6],
+            voxels: block(1),
+        };
+        let mut prims = HashMap::new();
+        mesh_model(&model, false, &mut prims).unwrap();
+        check_surface(&model, &prims);
+        assert_eq!((prims[&7].positions.len(), prims[&7].indices.len()), (24, 36));
+
+        let model = Model {
+            size: [6, 5, 4],
+            voxels: block(0),
+        };
+        let mut prims = HashMap::new();
+        mesh_model(&model, true, &mut prims).unwrap();
+        check_surface(&model, &prims);
+        // The +Z side: 6 + 5 + 6 + 5 outline points around a middle one.
+        let top = prims[&7].normals.iter().filter(|n| n[1] > 0.5).count();
+        assert_eq!(top, 2 * (6 + 1) + 2 * (5 + 1) - 4 + 1);
+    }
+
+    /// A chunk with no children.
+    fn chunk(id: &[u8], content: &[u8]) -> Vec<u8> {
+        let mut c = id.to_vec();
+        c.extend(u32::try_from(content.len()).unwrap().to_le_bytes());
+        c.extend(0u32.to_le_bytes());
+        c.extend(content);
+        c
+    }
+
+    /// A `DICT` of `pairs`.
+    fn dict(pairs: &[(&str, &str)]) -> Vec<u8> {
+        let mut d = u32::try_from(pairs.len()).unwrap().to_le_bytes().to_vec();
+        for s in pairs.iter().flat_map(|(k, v)| [k, v]) {
+            d.extend(u32::try_from(s.len()).unwrap().to_le_bytes());
+            d.extend(s.as_bytes());
+        }
+        d
+    }
+
+    /// Glass takes its opacity from its transparency, a legacy `MATT` chunk's glass too, and a
+    /// shape with a model per frame draws the first and keeps the second as a hidden child.
+    #[test]
+    fn glass_opacity_and_frame_models() {
+        let mut extra = chunk(b"SIZE", &[2i32, 2, 2].map(i32::to_le_bytes).concat());
+        extra.extend(chunk(b"XYZI", &[2, 0, 0, 0, 0, 0, 0, 2, 1, 1, 1, 2]));
+        let mut trn = 0u32.to_le_bytes().to_vec();
+        trn.extend(dict(&[]));
+        for v in [1i32, -1, -1, 1] {
+            trn.extend(v.to_le_bytes());
+        }
+        trn.extend(dict(&[]));
+        extra.extend(chunk(b"nTRN", &trn));
+        let mut shp = 1u32.to_le_bytes().to_vec();
+        shp.extend(dict(&[]));
+        shp.extend(2u32.to_le_bytes());
+        shp.extend(1u32.to_le_bytes());
+        shp.extend(dict(&[("_f", "3")]));
+        shp.extend(0u32.to_le_bytes());
+        shp.extend(dict(&[("_f", "0")]));
+        extra.extend(chunk(b"nSHP", &shp));
+        let mut matl = 1u32.to_le_bytes().to_vec();
+        matl.extend(dict(&[("_type", "_glass"), ("_trans", "0.75")]));
+        extra.extend(chunk(b"MATL", &matl));
+        let mut matt = Vec::new();
+        for v in [2, 2, 0.5f32.to_bits(), 0b10, 0.25f32.to_bits()] {
+            matt.extend(v.to_le_bytes());
+        }
+        extra.extend(chunk(b"MATT", &matt));
+
+        let doc = vox(&file([1, 1, 1], &[[0, 0, 0, 1]], &extra), Keep::ALL).unwrap();
+        let materials = doc.json["materials"].as_array().unwrap();
+        let alpha = |m: &Value| m["pbrMetallicRoughness"]["baseColorFactor"][3].as_f64().unwrap();
+        assert!((alpha(&materials[0]) - 0.25).abs() < 1e-6, "{}", materials[0]);
+        assert_eq!(materials[0]["alphaMode"], "BLEND");
+        assert!((alpha(&materials[1]) - 0.5).abs() < 1e-6, "{}", materials[1]);
+        assert!(
+            (materials[1]["pbrMetallicRoughness"]["roughnessFactor"]
+                .as_f64()
+                .unwrap()
+                - 0.25)
+                .abs()
+                < 1e-6
+        );
+
+        let nodes = doc.json["nodes"].as_array().unwrap();
+        let shape = nodes.iter().find(|n| n.get("children").is_some()).unwrap();
+        let alternate = &nodes[shape["children"][0].as_u64().unwrap() as usize];
+        assert_eq!(alternate["name"], "frame_3");
+        assert_eq!(alternate["extensions"]["KHR_node_visibility"]["visible"], false);
+        assert_ne!(alternate["mesh"], shape["mesh"]);
+        assert_eq!(doc.facts["voxels"], 1);
+        // Only frame 0's one voxel is drawn, not frame 3's two.
+        assert_eq!(
+            doc.flatten(crate::document::Pose::Rest).unwrap().unwrap().triangles(),
+            12
+        );
     }
 }

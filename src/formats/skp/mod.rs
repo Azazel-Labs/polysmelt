@@ -8,10 +8,15 @@
 //!   ZIP holding tagged records ([`vff`]).
 //! - Component instances become glTF nodes with their transforms; each definition's faces become
 //!   one mesh per inherited material, shared by every placement.
-//! - Hidden entities and entities on hidden tags (layers) are left out.
-//! - Lengths are turned from inches to metres, and Z up to glTF's Y up.
+//! - Hidden entities and entities on hidden tags (layers) are kept as nodes marked invisible with
+//!   `KHR_node_visibility`, when the triangle budget leaves room for them.
+//! - Normals are averaged across smooth edges and split at hard ones. A face painted differently on
+//!   its back gets single-sided front and back faces; otherwise it is one double-sided face.
+//! - BMP and TGA textures are re-encoded as PNG; GIF and TIFF textures are dropped.
+//! - Lengths are turned from inches to meters, and Z up to glTF's Y up.
 
 mod glb;
+mod image;
 mod legacy;
 mod model;
 mod reader;
@@ -29,7 +34,7 @@ use crate::{Context, Result};
 /// Reads the `SketchUp` model `input`, with what it holds in a glTF document.
 pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document<'static>> {
     let bytes = input.read()?;
-    let (glb, major) = convert(&bytes)?;
+    let (glb, major) = convert(&bytes, input.limit)?;
     let mut facts = Map::new();
     facts.insert("application".into(), json!(format!("SketchUp {}", version_name(major))));
     // An empty model, or one of only edges, guides and text, has nothing to draw.
@@ -52,13 +57,13 @@ fn is_skp(bytes: &[u8]) -> bool {
     bytes.starts_with(&MAGIC)
 }
 
-/// Converts a `SketchUp` file to a GLB file in metres with Y up (`None` when nothing in it is
-/// visible), with the file's major version.
+/// Converts a `SketchUp` file to a GLB file in meters with Y up (`None` when nothing in it is
+/// visible), with the file's major version; `limit` is the most triangles it may draw.
 ///
 /// # Errors
 /// When the bytes are not a `SketchUp` file, come from a version this reader doesn't know, or
 /// are damaged.
-fn convert(bytes: &[u8]) -> Result<(Option<Vec<u8>>, u32)> {
+fn convert(bytes: &[u8], limit: usize) -> Result<(Option<Vec<u8>>, u32)> {
     if !is_skp(bytes) {
         bail!("not a SketchUp file");
     }
@@ -74,7 +79,7 @@ fn convert(bytes: &[u8]) -> Result<(Option<Vec<u8>>, u32)> {
     } else {
         vff::parse(bytes).with_context(reading)?
     };
-    Ok((glb::write(&model)?, major))
+    Ok((glb::write(&model, limit)?, major))
 }
 
 /// `SketchUp`'s marketing name for a major version: 3 to 8 kept the number, 13 to 2020 became years.
@@ -104,6 +109,7 @@ fn major_version(bytes: &[u8]) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mesh::MAX_TRIANGLES;
 
     fn header(version: &str) -> Vec<u8> {
         let mut out = MAGIC.to_vec();
@@ -124,11 +130,11 @@ mod tests {
 
     #[test]
     fn rejects_what_it_cannot_read() {
-        assert!(convert(b"hello").is_err());
-        assert!(convert(&header("{2.0.1}")).is_err());
-        assert!(convert(&header("{15.0.9350}")).is_err());
-        assert!(convert(&header("{23.0.1}")).is_err());
-        assert!(convert(&MAGIC).is_err());
+        assert!(convert(b"hello", MAX_TRIANGLES).is_err());
+        assert!(convert(&header("{2.0.1}"), MAX_TRIANGLES).is_err());
+        assert!(convert(&header("{15.0.9350}"), MAX_TRIANGLES).is_err());
+        assert!(convert(&header("{23.0.1}"), MAX_TRIANGLES).is_err());
+        assert!(convert(&MAGIC, MAX_TRIANGLES).is_err());
     }
 
     #[test]
@@ -146,10 +152,20 @@ mod tests {
         ))
         .unwrap();
         for len in (0..data.len()).step_by(7) {
-            let _ = convert(&data[..len]);
+            let _ = convert(&data[..len], MAX_TRIANGLES);
         }
         for len in (0..vff.len()).step_by(7) {
-            let _ = convert(&vff[..len]);
+            let _ = convert(&vff[..len], MAX_TRIANGLES);
+        }
+        // Tags with line styles, in the 2019 layout.
+        let styles = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/corpus/skp/sdk_saved_tag_line_styles_2019/sdk_saved_tag_line_styles_2019.skp"
+        ))
+        .unwrap();
+        assert!(convert(&styles, MAX_TRIANGLES).is_ok());
+        for len in (0..styles.len()).step_by(7) {
+            let _ = convert(&styles[..len], MAX_TRIANGLES);
         }
     }
 }

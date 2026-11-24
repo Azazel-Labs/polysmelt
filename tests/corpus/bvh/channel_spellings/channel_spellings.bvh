@@ -1,0 +1,15 @@
+HIERARCHY
+ROOT Hips
+{
+  OFFSET 0 90 0
+  CHANNELS 7 XTRANSLATION ytranslation Ztranslation zROTATION XRotation yrotation XScaling
+  End Site
+  {
+    OFFSET 0 10 0
+  }
+}
+MOTION
+Frames: 2
+Frame Time: 0.04
+0 90 0 0 0 0 1
+1 92 -3 30 60 -90 2.5

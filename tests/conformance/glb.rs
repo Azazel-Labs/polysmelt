@@ -12,7 +12,12 @@ pub struct Prim {
     pub normals: Vec<[f32; 3]>,
     pub uvs: Vec<[f32; 2]>,
     pub colors: Vec<[f32; 4]>,
+    /// Triangles, three indices each.
     pub indices: Vec<u32>,
+    /// Line segments (mode 1), two indices each, from a primitive on the same vertices.
+    pub lines: Vec<u32>,
+    /// Points (mode 0), from a primitive on the same vertices.
+    pub points: Vec<u32>,
     pub material: Option<usize>,
 }
 
@@ -45,6 +50,12 @@ impl Glb {
     }
     pub fn vertices(&self) -> usize {
         self.prims.iter().map(|p| p.positions.len()).sum()
+    }
+    pub fn lines(&self) -> usize {
+        self.prims.iter().map(|p| p.lines.len() / 2).sum()
+    }
+    pub fn points(&self) -> usize {
+        self.prims.iter().map(|p| p.points.len()).sum()
     }
 }
 
@@ -315,15 +326,49 @@ pub fn validate(bytes: &[u8]) -> Result<Glb, String> {
         }
     }
 
-    let mut prims = Vec::new();
+    // Indices a primitive in `mode` draws on `n` vertices: every one in range, a whole number of
+    // triangles or segments.
+    let draws = |p: &Value, mode: u64, n: usize| -> Result<Vec<u32>, String> {
+        let indices = match p.get("indices") {
+            Some(i) => read_u32s(idx(i, "indices")?)?,
+            None => (0..n as u32).collect(),
+        };
+        let per = match mode {
+            4 => 3,
+            1 => 2,
+            _ => 1,
+        };
+        if !indices.len().is_multiple_of(per) {
+            return Err(format!("mode {mode} index count is not a multiple of {per}"));
+        }
+        if let Some(&bad) = indices.iter().find(|&&i| i as usize >= n) {
+            return Err(format!("index {bad} >= vertex count {n}"));
+        }
+        Ok(indices)
+    };
+
+    let mut prims: Vec<Prim> = Vec::new();
     for mesh in &meshes {
+        // The POSITION accessor and material of the primitive decoded last in this mesh: lines and
+        // points on the same vertices join it.
+        let mut last: Option<(usize, Option<Value>)> = None;
         for p in mesh["primitives"].as_array().cloned().unwrap_or_default() {
             let mode = p["mode"].as_u64().unwrap_or(4);
-            if mode != 4 {
-                return Err(format!("primitive mode {mode}, not triangles"));
+            if !matches!(mode, 0 | 1 | 4) {
+                return Err(format!("primitive mode {mode}, not triangles, lines or points"));
             }
             let attrs = &p["attributes"];
             let pos_a = idx(&attrs["POSITION"], "POSITION")?;
+            if mode != 4
+                && let Some((a, material)) = &last
+                && *a == pos_a
+                && material.as_ref() == p.get("material")
+                && let Some(prim) = prims.last_mut()
+            {
+                let d = draws(&p, mode, prim.positions.len())?;
+                if mode == 1 { &mut prim.lines } else { &mut prim.points }.extend(d);
+                continue;
+            }
             let (pos, w, acc) = read_accessor(pos_a)?;
             if w != 3 || acc["componentType"] != 5126 {
                 return Err("POSITION is not float VEC3".into());
@@ -388,16 +433,12 @@ pub fn validate(bytes: &[u8]) -> Result<Glb, String> {
                     .map(|c| [c[0], c[1], c[2], if w == 4 { c[3] } else { 1.0 }])
                     .collect();
             }
-            prim.indices = match p.get("indices") {
-                Some(i) => read_u32s(idx(i, "indices")?)?,
-                None => (0..n as u32).collect(),
-            };
-            if !prim.indices.len().is_multiple_of(3) {
-                return Err("index count is not a multiple of 3".into());
-            }
-            if let Some(&bad) = prim.indices.iter().find(|&&i| i as usize >= n) {
-                return Err(format!("index {bad} >= vertex count {n}"));
-            }
+            let d = draws(&p, mode, n)?;
+            *match mode {
+                4 => &mut prim.indices,
+                1 => &mut prim.lines,
+                _ => &mut prim.points,
+            } = d;
             if let Some(m) = p.get("material") {
                 let m = idx(m, "material")?;
                 if m >= materials.len() {
@@ -406,6 +447,7 @@ pub fn validate(bytes: &[u8]) -> Result<Glb, String> {
                 prim.material = Some(m);
             }
             prims.push(prim);
+            last = Some((pos_a, p.get("material").cloned()));
         }
     }
     if prims.is_empty() {

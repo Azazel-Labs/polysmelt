@@ -1,0 +1,15 @@
+HIERARCHY
+ROOT Hips
+{
+  OFFSET 0 0 0
+  CHANNELS 3 Yrotation Wiggle Xrotation
+  End Site
+  {
+    OFFSET 0 1 0
+  }
+}
+MOTION
+Frames: 2
+Frame Time: 0.04
+90 1234 0
+0 -5 90

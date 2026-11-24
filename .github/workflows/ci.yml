@@ -41,6 +41,19 @@ jobs:
           - --no-default-features --features webp
           - --no-default-features --features skp
           - --no-default-features --features fbx
+          - --no-default-features --features bvh
+          - --no-default-features --features dae
+          - --no-default-features --features x3d
+          - --no-default-features --features off
+          - --no-default-features --features dxf
+          - --no-default-features --features 3mf
+          - --no-default-features --features usd
+          - --no-default-features --features tga
+          - --no-default-features --features bmp
+          - --no-default-features --features gif
+          - --no-default-features --features tiff
+          - --no-default-features --features psd
+          - --no-default-features --features dds
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install && rustup component add clippy
@@ -69,7 +82,7 @@ jobs:
       - uses: actions/checkout@v4
       - run: rustup toolchain install && rustup target add wasm32-unknown-unknown && rustup component add clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --target wasm32-unknown-unknown --no-default-features --features stl,ply,obj,gltf,draco,vox,3ds,webp,skp -- -D warnings
+      - run: cargo clippy --target wasm32-unknown-unknown --no-default-features --features stl,ply,obj,gltf,draco,vox,3ds,webp,skp,bvh,off,dxf,fbx,3mf,dae,x3d,tga,bmp,gif,tiff,psd,dds -- -D warnings
 
   msrv:
     runs-on: ubuntu-latest
@@ -78,7 +91,7 @@ jobs:
       matrix:
         include:
           - rust: "1.88"
-            features: --no-default-features --features minimal,fbx,3mf,draco,webp,skp
+            features: --no-default-features --features minimal,fbx,3mf,draco,webp,skp,dae,x3d,tga,bmp,gif,tiff,psd,dds
           - rust: "1.96"
             features: ""
     steps:

@@ -34,6 +34,26 @@ use crate::{Context as _, Result};
 #[cfg(feature = "fs")]
 const HEAD: usize = 64 * 1024;
 
+/// Files up to this size are read whole, in one call: the reads and seeks a binary chunk left in
+/// the file costs later outweigh the memory it saves.
+#[cfg(feature = "fs")]
+const WHOLE: u64 = 4 * 1024 * 1024;
+
+#[cfg(all(test, feature = "fs"))]
+thread_local! {
+    /// [`WHOLE`], which tests lower to read every file's binary chunk in pieces.
+    static WHOLE_AT: std::cell::Cell<u64> = const { std::cell::Cell::new(WHOLE) };
+}
+
+/// The size up to which a file is read whole.
+#[cfg(feature = "fs")]
+fn whole() -> u64 {
+    #[cfg(test)]
+    return WHOLE_AT.get();
+    #[cfg(not(test))]
+    WHOLE
+}
+
 /// Reads the glTF or GLB `input`.
 pub(crate) fn load<'a>(input: Input<'a>, assets: &'a dyn Assets, keep: Keep) -> Result<Document<'a>> {
     let (json, mut bin) = match input.bytes() {
@@ -77,6 +97,9 @@ pub(crate) fn load<'a>(input: Input<'a>, assets: &'a dyn Assets, keep: Keep) -> 
         buffers: Vec::new(),
         facts: Map::new(),
         refs: crate::images::Refs::new(),
+        max_triangles: crate::mesh::MAX_TRIANGLES,
+        lines_and_points: true,
+        max_points: crate::mesh::MAX_POINTS,
     };
     let n = doc.json.get("buffers").and_then(Value::as_array).map_or(0, Vec::len);
     for i in 0..n {
@@ -209,8 +232,17 @@ fn external<'a>(input: Input<'a>, assets: &'a dyn Assets, uri: &str) -> Result<B
     if input.bytes().is_none() {
         let rel = container::percent_decode(uri);
         let p = input.dir().join(checked(&rel)?);
-        let file = File::open(&p).map_err(|e| invalid!("glTF buffer {rel:?}: {e}"))?;
+        let mut file = File::open(&p).map_err(|e| invalid!("glTF buffer {rel:?}: {e}"))?;
         let len = file.metadata()?.len();
+        if len <= whole() {
+            // Small: read whole now, as the model itself is.
+            let mut all = Vec::new();
+            all.try_reserve_exact(usize_of(len))
+                .map_err(|_| invalid!("glTF buffer {rel:?} of {len} bytes"))?;
+            file.read_to_end(&mut all)
+                .map_err(|e| invalid!("glTF buffer {rel:?}: {e}"))?;
+            return Ok(Blob::Bytes(Cow::Owned(all)));
+        }
         return Ok(Blob::File(FileSpan::new(file, 0, len, 0)));
     }
     read_external(input, assets, uri).map(Blob::Bytes)
@@ -251,9 +283,7 @@ fn glb_layout(
         let end = u64::from(u32_at(&head, 8)).min(total);
         ensure!(20 + json_len <= end, "GLB is truncated");
         let text = read(20, usize_of(json_len))?;
-        let Value::Object(json) = serde_json::from_slice(&text).context("GLB JSON doesn't parse")? else {
-            bail!("glTF JSON is not an object")
-        };
+        let json = glb_json(&text)?;
         return Ok((json, Some((20 + json_len, end - 20 - json_len))));
     }
     ensure!(u32_at(&head, 4) == 2, "GLB version {} is not 1 or 2", u32_at(&head, 4));
@@ -261,9 +291,7 @@ fn glb_layout(
     let json_len = u64::from(u32_at(&head, 12));
     ensure!(20 + json_len <= total, "GLB is truncated");
     let text = read(20, usize_of(json_len))?;
-    let Value::Object(json) = serde_json::from_slice(&text).context("GLB JSON doesn't parse")? else {
-        bail!("glTF JSON is not an object")
-    };
+    let json = glb_json(&text)?;
     let at = (20 + json_len).next_multiple_of(4);
     let mut bin = None;
     if at + 8 <= total {
@@ -300,6 +328,17 @@ fn glb_in_memory(bytes: Cow<'_, [u8]>) -> Result<(Map<String, Value>, Option<Blo
     Ok((json, bin))
 }
 
+/// A GLB's JSON chunk, after any byte-order mark: the spec forbids one, but writers add it.
+fn glb_json(text: &[u8]) -> Result<Map<String, Value>> {
+    let text = text.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(text);
+    // The chunk is padded with spaces, or by some writers with zeros.
+    let end = text.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
+    let Value::Object(json) = serde_json::from_slice(&text[..end]).context("GLB JSON doesn't parse")? else {
+        bail!("glTF JSON is not an object")
+    };
+    Ok(json)
+}
+
 /// glTF JSON (a `.gltf`), after any byte-order mark.
 fn gltf_json(bytes: &[u8]) -> Result<Map<String, Value>> {
     let text = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
@@ -316,9 +355,17 @@ fn open_file(path: &Path) -> Result<(Map<String, Value>, Option<Blob<'static>>)>
     let mut file = File::open(path)?;
     let total = file.metadata()?.len();
     // One read for the header, the JSON and the binary chunk's header in the usual case,
-    // and the whole file when it's small.
-    let mut head = vec![0; usize::try_from(total).unwrap_or(HEAD).min(HEAD)];
-    file.read_exact(&mut head)?;
+    // and the whole file when it's small. Read into spare capacity: nothing is zeroed first.
+    let first = if total <= whole() {
+        usize_of(total)
+    } else {
+        usize_of(total.min(HEAD as u64))
+    };
+    let mut head = Vec::new();
+    head.try_reserve_exact(first)
+        .map_err(|_| invalid!("glTF file of {total} bytes"))?;
+    (&mut file).take(first as u64).read_to_end(&mut head)?;
+    ensure!(head.len() == first, "glTF file is shorter than it says");
     let glb = head.starts_with(b"glTF");
     if glb && head.len() as u64 == total {
         return glb_in_memory(Cow::Owned(head));
@@ -352,10 +399,11 @@ mod tests {
     use crate::assets::Folder;
     use crate::document::{Document, Keep};
 
-    /// A GLB's JSON and binary chunk.
+    /// A GLB's JSON (after any byte-order mark) and binary chunk.
     fn split(glb: &[u8]) -> (Value, &[u8]) {
         let n = u32::from_le_bytes(glb[12..16].try_into().unwrap()) as usize;
-        let json = serde_json::from_slice(&glb[20..20 + n]).unwrap();
+        let text = &glb[20..20 + n];
+        let json = serde_json::from_slice(text.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(text)).unwrap();
         let bin = glb.get(20 + n + 8..).unwrap_or(&[]);
         (json, bin)
     }
@@ -406,6 +454,34 @@ mod tests {
     }
 
     #[test]
+    fn a_binary_chunk_left_in_its_file_reads_as_one_in_memory() {
+        // Every file read in pieces, as only big ones are otherwise.
+        super::WHOLE_AT.set(0);
+        let mut n = 0;
+        for path in glbs() {
+            let dir = path.parent().unwrap();
+            let Ok(doc) = crate::formats::load(&path, "glb", &Folder::new(dir), Keep::ALL) else {
+                continue;
+            };
+            let bytes = std::fs::read(&path).unwrap();
+            let assets = Folder::new(dir);
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            let mem = crate::formats::load_bytes(&bytes, &name, "glb", &assets, Keep::ALL).unwrap();
+            let shown = |d: &Document<'_>| {
+                format!(
+                    "{:?}",
+                    d.flatten(crate::document::Pose::Rest).map_err(|e| e.to_string())
+                )
+            };
+            assert_eq!(shown(&doc), shown(&mem), "{}", path.display());
+            assert!(doc.to_glb().unwrap() == mem.to_glb().unwrap(), "{}", path.display());
+            n += 1;
+        }
+        super::WHOLE_AT.set(super::WHOLE);
+        assert!(n > 20, "only {n} GLBs read");
+    }
+
+    #[test]
     fn glb_round_trips() {
         let mut n = 0;
         for path in glbs() {
@@ -435,5 +511,24 @@ mod tests {
             n += 1;
         }
         assert!(n > 20, "only {n} GLBs round-tripped");
+    }
+
+    #[test]
+    fn a_json_chunk_padded_with_zeros_reads() {
+        let mut json = br#"{"asset":{"version":"2.0"},"scene":0,"scenes":[{}]}"#.to_vec();
+        json.resize(json.len().next_multiple_of(4) + 4, 0);
+        let len = u32::try_from(json.len()).unwrap();
+        let glb = [
+            &b"glTF"[..],
+            &2u32.to_le_bytes(),
+            &(20 + len).to_le_bytes(),
+            &len.to_le_bytes(),
+            b"JSON",
+            &json,
+        ]
+        .concat();
+        let assets = crate::assets::Memory::new();
+        let doc = crate::formats::load_bytes(&glb, "x.glb", "glb", &assets, Keep::ALL).unwrap();
+        assert_eq!(doc.json["scene"], 0);
     }
 }

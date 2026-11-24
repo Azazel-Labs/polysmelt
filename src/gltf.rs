@@ -830,8 +830,13 @@ pub(crate) fn meshopt_of(v: &Value) -> Option<(&'static str, &Map<String, Value>
 }
 
 pub(crate) fn is_fallback(b: &Value) -> bool {
-    MESHOPT_EXTENSIONS.iter().any(|n| {
-        b.pointer(&format!("/extensions/{n}/fallback"))
+    // Key by key, without building a pointer string for each buffer.
+    let Some(exts) = b.get("extensions") else {
+        return false;
+    };
+    MESHOPT_EXTENSIONS.iter().any(|&n| {
+        exts.get(n)
+            .and_then(|e| e.get("fallback"))
             .and_then(Value::as_bool)
             .unwrap_or(false)
     })
@@ -1048,6 +1053,7 @@ mod tests {
                 bytes: png,
                 mime: "image/png",
             }],
+            skeleton: Vec::new(),
         };
         to_glb(&mesh).unwrap()
     }

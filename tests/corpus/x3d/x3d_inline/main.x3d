@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<X3D profile="Interchange" version="3.3">
+<head></head>
+<Scene>
+<Inline url='"part.x3d"'/><Transform translation='3 0 0'><Inline url='"missing.x3d" "part.x3d"'/></Transform>
+</Scene>
+</X3D>

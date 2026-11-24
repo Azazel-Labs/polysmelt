@@ -9,11 +9,18 @@
 //! animation, its TCB splines as glTF cubic splines (rotations as linear, between the turns the keys add up to). A
 //! placed mesh is moved into its node's space as lib3ds does (back through the mesh matrix and the pivot), unless that
 //! wouldn't put it back where the editor has it at rest; then the rest pose decides. Materials have a diffuse color, a
-//! transparency and maybe a texture named by file; every value they hold, maps included, is kept in `extras`.
-//! Smoothing groups are bit masks: faces sharing a bit share normals at their common corners. 3DS is Z up; the data
-//! stays so under a root node that turns it to glTF's Y up.
+//! transparency and maybe a texture named by file; every value they hold, maps included, is kept in `extras`. Of the
+//! other maps, the specular map tints the highlight, the self-illumination map glows, and the bump map is the normal
+//! map when its image is one (scaled by its amount); a bump map that is a height map, the shininess map (glossiness,
+//! the inverse of glTF's roughness) and the reflection map (an environment) have no glTF slot and stay in `extras`.
+//! Smoothing groups are bit masks: faces sharing a bit share normals at their common corners (by position, so a
+//! texture seam doesn't crease them), and a material shaded flat ignores them. A mesh matrix that mirrors leaves its
+//! faces wound inside out in world space; they are turned back. An opacity map that is the color map uses its alpha.
+//! 3DS is Z up; the data stays so under a root node that turns it to glTF's Y up.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
+use std::path::Path;
 
 use serde_json::{Map, Value, json};
 
@@ -23,7 +30,7 @@ use crate::assets::Assets;
 use crate::document::{Builder, Document, Keep};
 use crate::images::Images;
 use crate::material::{self, Alpha, Factor, Full, Specular, Tex, UvTransform};
-use crate::mesh::{FastMap, GRAY, MAX_TRIANGLES, Material, Prim, face_normal, srgb_to_linear};
+use crate::mesh::{FastMap, GRAY, Material, Prim, face_normal, srgb_to_linear};
 use crate::num::u32_of;
 
 const MAIN: u16 = 0x4D4D;
@@ -328,13 +335,117 @@ fn material(d: &[u8]) -> Mat {
 }
 
 /// What a material shows beyond its flat view: how its color map is laid out, its highlight and the map that
-/// tints it, its glow map, and whether the color map's alpha cuts it.
+/// tints it, its glow map, its normal map, and whether the color map's alpha cuts it.
 #[derive(Default)]
 struct Look {
     color: Option<Tex>,
     specular: Option<Specular>,
     emissive: Option<Tex>,
+    normal: Option<Tex>,
     alpha_source: bool,
+}
+
+/// Whether the bump map `file` is a tangent-space normal map rather than the height map 3DS bump maps were made as.
+/// The image says when it can: gray is a height map, and a PNG's sampled pixels are a normal map when they are mostly
+/// unit vectors leaning toward +Z (bluish, red and green near the middle). A color JPEG, or a PNG without a decoder
+/// for its pixels, goes by its name (`_n`, `normal`, `nrm`, ...). Unreadable, it's neither.
+fn bump_is_normal_map(assets: &dyn Assets, dir: &Path, file: &str) -> bool {
+    let Some(path) = assets.find(file, dir) else {
+        return false;
+    };
+    let Some(image) = assets.read(&path).and_then(|b| assets.image(&b, &path)) else {
+        return false;
+    };
+    let b = &image.bytes;
+    if b.starts_with(b"\x89PNG") {
+        // IHDR's color type: gray, or gray and alpha.
+        if matches!(b.get(25), Some(0 | 4)) {
+            return false;
+        }
+        #[cfg(any(
+            feature = "webp",
+            feature = "skp",
+            feature = "tga",
+            feature = "bmp",
+            feature = "gif",
+            feature = "tiff",
+            feature = "psd",
+            feature = "dds"
+        ))]
+        if let Some(pixels) = crate::png::sample(b) {
+            return normal_pixels(&pixels);
+        }
+    } else if jpeg_components(b) == Some(1) {
+        return false;
+    }
+    named_normal_map(file)
+}
+
+/// Whether sampled RGB pixels read as a tangent-space normal map: on average blue well above red and green, those
+/// near the middle, and three in four of them unit vectors (within 20%) facing +Z.
+#[cfg_attr(
+    not(any(
+        feature = "webp",
+        feature = "skp",
+        feature = "tga",
+        feature = "bmp",
+        feature = "gif",
+        feature = "tiff",
+        feature = "psd",
+        feature = "dds"
+    )),
+    allow(dead_code, reason = "only builds that read a PNG's pixels sample them")
+)]
+fn normal_pixels(pixels: &[[u8; 3]]) -> bool {
+    let n = pixels.len().max(1);
+    let mut sum = [0usize; 3];
+    let mut unit = 0;
+    for p in pixels {
+        for (s, &c) in sum.iter_mut().zip(p) {
+            *s += usize::from(c);
+        }
+        let v = p.map(|c| f32::from(c) / 127.5 - 1.0);
+        let len2 = v[0] * v[0] + v[1] * v[1] + v[2] * v[2];
+        if v[2] > 0.0 && (0.64..=1.44).contains(&len2) {
+            unit += 1;
+        }
+    }
+    let [r, g, b] = sum.map(|s| s / n);
+    let middle = |c: usize| (88..=168).contains(&c);
+    b >= r.max(g) + 48 && middle(r) && middle(g) && unit * 4 >= n * 3
+}
+
+/// A JPEG's color components (1 for gray), from its frame header.
+fn jpeg_components(b: &[u8]) -> Option<u8> {
+    let mut at = 2;
+    loop {
+        if *b.get(at)? != 0xFF {
+            return None;
+        }
+        let marker = *b.get(at + 1)?;
+        match marker {
+            // Fill bytes.
+            0xFF => at += 1,
+            // Start of frame, any kind (not DHT, JPG or DAC).
+            0xC0..=0xCF if !matches!(marker, 0xC4 | 0xC8 | 0xCC) => return b.get(at + 9).copied(),
+            // Markers without a length, or the scan: no frame header.
+            0xD0..=0xDA | 0x01 => return None,
+            _ => at += 2 + usize::from(u16_at_be(b, at + 2)?),
+        }
+    }
+}
+
+fn u16_at_be(b: &[u8], at: usize) -> Option<u16> {
+    Some(u16::from_be_bytes([*b.get(at)?, *b.get(at + 1)?]))
+}
+
+/// Whether a texture's file name marks it as a normal map: `normal`, `norm`, `nrm`, `nmap` or `ddn` in it, or `_n`,
+/// `-n`, `_nm` or `_nor` ending it.
+fn named_normal_map(file: &str) -> bool {
+    let name = file.rsplit(['/', '\\']).next().unwrap_or(file);
+    let stem = name.rsplit_once('.').map_or(name, |(s, _)| s).to_ascii_lowercase();
+    ["norm", "nrm", "nmap", "ddn"].iter().any(|k| stem.contains(k))
+        || ["_n", "-n", "_nm", "_nor"].iter().any(|k| stem.ends_with(k))
 }
 
 /// Bit flags of a map's tiling: mirrored, not tiled, the image's alpha as opacity.
@@ -385,6 +496,7 @@ impl Look {
         }
         f.specular.clone_from(&self.specular);
         f.emissive_tex.clone_from(&self.emissive);
+        f.normal_tex.clone_from(&self.normal);
         f
     }
 }
@@ -499,7 +611,7 @@ struct Camera {
     target: [f32; 3],
     /// Degrees about the line of sight.
     roll: f32,
-    /// The focal length in millimetres, on 35 mm film.
+    /// The focal length in millimeters, on 35 mm film.
     lens: f32,
     /// Near and far.
     range: Option<[f32; 2]>,
@@ -799,7 +911,8 @@ fn near_identity(m: &M4, scale: f64) -> bool {
     (0..3).all(|i| (0..3).all(|j| (m[i][j] - IDENTITY[i][j]).abs() < 1e-3) && m[i][3].abs() < 1e-3 * scale.max(1.0))
 }
 
-/// `prims` moved by `m`, their normals turned with them.
+/// `prims` moved by `m`, their normals turned with them. A mirroring `m` would turn the faces inside out, so their
+/// corners are put in the other order.
 fn placed(mut prims: Vec<Prim>, m: &M4) -> Vec<Prim> {
     #[allow(clippy::float_cmp, reason = "only the exact identity moves nothing")]
     if *m == IDENTITY {
@@ -812,8 +925,16 @@ fn placed(mut prims: Vec<Prim>, m: &M4) -> Vec<Prim> {
             m[i1][j1] * m[i2][j2] - m[i1][j2] * m[i2][j1]
         })
     });
+    // The cofactors are the inverse transpose times the determinant: a mirror's points them inward.
+    let mirror = xform::det3(m) < 0.0;
+    let sign = if mirror { -1.0 } else { 1.0 };
     #[allow(clippy::cast_possible_truncation, reason = "back to the f32 the file had")]
     for p in &mut prims {
+        if mirror {
+            for t in p.indices.chunks_exact_mut(3) {
+                t.swap(1, 2);
+            }
+        }
         for v in &mut p.positions {
             let x = v.map(f64::from);
             *v = std::array::from_fn(|i| (m[i][0] * x[0] + m[i][1] * x[1] + m[i][2] * x[2] + m[i][3]) as f32);
@@ -823,7 +944,7 @@ fn placed(mut prims: Vec<Prim>, m: &M4) -> Vec<Prim> {
             let r: [f64; 3] = std::array::from_fn(|i| c[i][0] * x[0] + c[i][1] * x[1] + c[i][2] * x[2]);
             let len = r.iter().map(|v| v * v).sum::<f64>().sqrt();
             if len > 0.0 {
-                *n = r.map(|v| (v / len) as f32);
+                *n = r.map(|v| (sign * v / len) as f32);
             }
         }
     }
@@ -1065,10 +1186,14 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
     let mut materials: Vec<Material> = Vec::new();
     let mut raws: Vec<Map<String, Value>> = Vec::new();
     let mut looks: Vec<Look> = Vec::new();
+    // Whether each material is shaded flat.
+    let mut flat: Vec<bool> = Vec::new();
     let mut by_name: HashMap<String, usize> = HashMap::new();
     let dir = input.dir();
     let mut images = Images::new(!keep.image_bytes, dir);
     let mut image_of: HashMap<String, Option<usize>> = HashMap::new();
+    // Whether each bump map file is a normal map.
+    let mut normal_of: HashMap<String, bool> = HashMap::new();
     let mut objects = Vec::new();
     for (id, b) in chunks(editor) {
         match id {
@@ -1106,7 +1231,32 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
                     Some(map_tex(map, image))
                 };
                 let (spec_tex, emissive) = (slot("specular"), slot("selfIllumination"));
+                let bump = map("bump").filter(|b| {
+                    let Some(f) = b
+                        .get("file")
+                        .and_then(Value::as_str)
+                        .filter(|_| keep.materials && keep.textures)
+                    else {
+                        return false;
+                    };
+                    *normal_of
+                        .entry(f.to_lowercase())
+                        .or_insert_with(|| bump_is_normal_map(assets, dir, f))
+                });
+                // The bump amount as the normal map's scale.
+                #[allow(clippy::cast_possible_truncation, reason = "it was an f32")]
+                let normal = bump.and_then(|_| slot("bump")).map(|mut t| {
+                    let amount = bump.and_then(|b| b.get("percent")).and_then(Value::as_f64);
+                    t.scale = amount.map_or(1.0, |p| (p / 100.0) as f32);
+                    t
+                });
                 let tiling = map("texture").and_then(|t| t.get("tiling")).and_then(Value::as_u64);
+                // An opacity map that is the color map: its alpha.
+                let opacity = map("opacity").and_then(|o| o.get("file")).and_then(Value::as_str);
+                let cut = opacity
+                    .zip(m.texture.as_deref())
+                    .is_some_and(|(o, t)| o.eq_ignore_ascii_case(t));
+                flat.push(m.raw.get("shading").and_then(Value::as_u64) == Some(1));
                 looks.push(Look {
                     color: image.and(map("texture")).map(|t| map_tex(t, 0)),
                     // Phong's highlight: its color, scaled by its strength.
@@ -1118,7 +1268,8 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
                         }
                     }),
                     emissive,
-                    alpha_source: tiling.is_some_and(|t| t & TILE_ALPHA != 0),
+                    normal: normal.clone(),
+                    alpha_source: cut || tiling.is_some_and(|t| t & TILE_ALPHA != 0),
                 });
                 // A texture shows as painted, not tinted by the color under it.
                 let rgb = if image.is_some() { [1.0; 3] } else { m.color };
@@ -1126,6 +1277,7 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
                 by_name.insert(m.name.clone(), materials.len());
                 materials.push(Material {
                     color_image: image,
+                    normal_image: normal.map(|t| t.image),
                     emissive: m.color.map(|c| c * m.self_illum),
                     roughness: m.glossiness.map_or(plain.roughness, |g| 1.0 - g),
                     double_sided: m.two_sided,
@@ -1149,7 +1301,7 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         let mut prims: HashMap<usize, Prim> = HashMap::new();
         for t in ts {
             triangles += t.faces.len();
-            ensure!(triangles <= MAX_TRIANGLES, "more than {MAX_TRIANGLES} triangles");
+            ensure!(triangles <= input.limit, "more than {} triangles", input.limit);
             let mut face_mat = vec![None; t.faces.len()];
             for (name, faces) in &t.materials {
                 let m = by_name.get(name).copied();
@@ -1159,7 +1311,7 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
                     }
                 }
             }
-            add_faces(t, &face_mat, &mut prims, &mut materials);
+            add_faces(t, &face_mat, &flat, &mut prims, &mut materials);
         }
         let mut prims: Vec<Prim> = prims.into_values().filter(|p| !p.indices.is_empty()).collect();
         prims.sort_by_key(|p| p.material);
@@ -1450,18 +1602,42 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
 
 /// A trimesh's faces, into the prims of their materials. A corner's normal averages the faces around its vertex that
 /// share a smoothing bit with its own face, each weighed by its angle there (so the triangulation doesn't matter); a
-/// face in no group is flat. Corners share a vertex when material, position and normal agree.
-fn add_faces(t: &Trimesh, face_mat: &[Option<usize>], prims: &mut HashMap<usize, Prim>, materials: &mut Vec<Material>) {
+/// face in no group, or in a material shaded flat, is flat. Vertices at one position are one corner to smoothing.
+/// Corners share a vertex when material, vertex and normal agree. Missing texture coordinates are zero.
+fn add_faces(
+    t: &Trimesh,
+    face_mat: &[Option<usize>],
+    flat: &[bool],
+    prims: &mut HashMap<usize, Prim>,
+    materials: &mut Vec<Material>,
+) {
     let pos = &t.vertices;
-    let has_uvs = !t.uvs.is_empty() && t.uvs.len() >= t.vertices.len();
+    let has_uvs = !t.uvs.is_empty();
     let n = pos.len();
     let whole = |f: &[u16; 3]| f.iter().all(|&i| usize::from(i) < n);
-    let group = |f: usize| t.smoothing.get(f).copied().unwrap_or(0);
+    let group = |f: usize| {
+        let flat = face_mat
+            .get(f)
+            .copied()
+            .flatten()
+            .is_some_and(|m| flat.get(m) == Some(&true));
+        if flat {
+            0
+        } else {
+            t.smoothing.get(f).copied().unwrap_or(0)
+        }
+    };
+    // A mirroring mesh matrix leaves the faces inside out in the world space the vertices are in.
+    let faces: Cow<'_, [[u16; 3]]> = if t.matrix.is_some_and(|m| xform::det3(&mesh_matrix(&m)) < 0.0) {
+        t.faces.iter().map(|&[a, b, c]| [a, c, b]).collect()
+    } else {
+        Cow::Borrowed(&t.faces)
+    };
 
     // Each face's unit normal and its angle at each corner.
-    let mut unit = vec![[0.0f32; 3]; t.faces.len()];
-    let mut angle = vec![[0.0f32; 3]; t.faces.len()];
-    for (f, face) in t.faces.iter().enumerate() {
+    let mut unit = vec![[0.0f32; 3]; faces.len()];
+    let mut angle = vec![[0.0f32; 3]; faces.len()];
+    for (f, face) in faces.iter().enumerate() {
         if !whole(face) {
             continue;
         }
@@ -1480,14 +1656,20 @@ fn add_faces(t: &Trimesh, face_mat: &[Option<usize>], prims: &mut HashMap<usize,
         }
     }
 
-    // The faces around each vertex, as (face, corner), in compressed rows; only built when some face is smoothed.
-    let smoothed = t.faces.iter().enumerate().any(|(f, face)| whole(face) && group(f) != 0);
+    // The faces around each position, as (face, corner), in compressed rows, the position named by its first vertex
+    // (a texture seam splits a vertex where the surface is smooth); only built when some face is smoothed.
+    let smoothed = faces.iter().enumerate().any(|(f, face)| whole(face) && group(f) != 0);
     let mut start = vec![0u32; n + 1];
     let mut around: Vec<(u32, u8)> = Vec::new();
+    let mut canon: Vec<u32> = Vec::new();
     if smoothed {
-        for face in t.faces.iter().filter(|f| whole(f)) {
+        let mut first: FastMap<[u32; 3], u32> = FastMap::default();
+        canon = (pos.iter().enumerate())
+            .map(|(i, p)| *first.entry(p.map(|c| (c + 0.0).to_bits())).or_insert(u32_of(i)))
+            .collect();
+        for face in faces.iter().filter(|f| whole(f)) {
             for &i in face {
-                start[usize::from(i) + 1] += 1;
+                start[canon[usize::from(i)] as usize + 1] += 1;
             }
         }
         for i in 0..n {
@@ -1495,9 +1677,9 @@ fn add_faces(t: &Trimesh, face_mat: &[Option<usize>], prims: &mut HashMap<usize,
         }
         let mut fill = start.clone();
         around = vec![(0, 0); start[n] as usize];
-        for (f, face) in t.faces.iter().enumerate().filter(|(_, f)| whole(f)) {
+        for (f, face) in faces.iter().enumerate().filter(|(_, f)| whole(f)) {
             for (k, &i) in face.iter().enumerate() {
-                let slot = &mut fill[usize::from(i)];
+                let slot = &mut fill[canon[usize::from(i)] as usize];
                 #[allow(
                     clippy::cast_possible_truncation,
                     reason = "3DS has at most 65535 faces of 3 corners"
@@ -1510,7 +1692,7 @@ fn add_faces(t: &Trimesh, face_mat: &[Option<usize>], prims: &mut HashMap<usize,
     }
 
     let mut seen: FastMap<(usize, u16, [u32; 3]), u32> = FastMap::default();
-    for (f, face) in t.faces.iter().enumerate() {
+    for (f, face) in faces.iter().enumerate() {
         if !whole(face) {
             continue;
         }
@@ -1528,7 +1710,7 @@ fn add_faces(t: &Trimesh, face_mat: &[Option<usize>], prims: &mut HashMap<usize,
         for &vi in face {
             let mut nrm = unit[f];
             if g != 0 {
-                let v = usize::from(vi);
+                let v = canon[usize::from(vi)] as usize;
                 let mut sum = [0.0f32; 3];
                 for &(o, k) in &around[start[v] as usize..start[v + 1] as usize] {
                     let o = o as usize;
@@ -1554,7 +1736,7 @@ fn add_faces(t: &Trimesh, face_mat: &[Option<usize>], prims: &mut HashMap<usize,
                 prim.positions.push(pos[usize::from(vi)]);
                 prim.normals.push(nrm);
                 if has_uvs {
-                    let [s, tv] = t.uvs[usize::from(vi)];
+                    let [s, tv] = t.uvs.get(usize::from(vi)).copied().unwrap_or_default();
                     prim.uvs.push([s, 1.0 - tv]);
                 }
                 u32_of(prim.positions.len() - 1)
@@ -1665,6 +1847,21 @@ mod tests {
 
     fn close(a: [f32; 3], b: [f32; 3]) -> bool {
         (0..3).all(|k| (a[k] - b[k]).abs() < 1e-4)
+    }
+
+    #[test]
+    fn the_triangle_limit_refuses_bigger_models() {
+        let read = |max_triangles| {
+            let keep = Keep {
+                max_triangles,
+                ..Keep::ALL
+            };
+            crate::formats::load_bytes(&square(), "s.3ds", "3ds", &crate::assets::Memory::new(), keep)
+                .map(|d| d.flatten(crate::document::Pose::Rest).unwrap().unwrap().triangles())
+        };
+        let err = read(2).unwrap_err();
+        assert!(format!("{err:#}").contains("more than 2 triangles"), "{err:#}");
+        assert_eq!(read(3).unwrap(), 3);
     }
 
     #[test]
@@ -1815,6 +2012,330 @@ mod tests {
         // The spot looks straight down: -Z already.
         let q = doc.json["nodes"][2]["rotation"].as_array().unwrap();
         assert!((q[3].as_f64().unwrap().abs() - 1.0).abs() < 1e-6, "{q:?}");
+    }
+
+    /// The flattened mesh's triangles, each as its winding's normal and its corners' normals.
+    fn windings(mesh: &crate::mesh::Mesh) -> Vec<([f32; 3], Vec<[f32; 3]>)> {
+        let mut out = Vec::new();
+        for p in &mesh.prims {
+            for t in p.indices.chunks_exact(3) {
+                let [a, b, c] = [0, 1, 2].map(|k| p.positions[t[k] as usize]);
+                let n = face_normal(a, b, c);
+                let len = n.iter().map(|v| v * v).sum::<f32>().sqrt();
+                out.push((n.map(|v| v / len), t.iter().map(|&i| p.normals[i as usize]).collect()));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn a_mirroring_mesh_matrix_doesnt_turn_faces_inside_out() {
+        // Made facing +Z, then mirrored in X: the vertices are written mirrored, the faces as made.
+        let mirrored = |origin: [f32; 3]| {
+            let verts: Vec<[f32; 3]> = at([0.; 3]).iter().map(|v| [origin[0] - v[0], v[1], v[2]]).collect();
+            let mut t = chunk(VERTICES, &{
+                let mut v = 3u16.to_le_bytes().to_vec();
+                v.extend(f32s(verts.as_flattened()));
+                v
+            });
+            t.extend(chunk(
+                MESH_MATRIX,
+                &f32s(&[-1., 0., 0., 0., 1., 0., 0., 0., 1., origin[0], origin[1], origin[2]]),
+            ));
+            t.extend(chunk(FACES, &u16s(&[1, 0, 1, 2, 0])));
+            chunk(TRIMESH, &t)
+        };
+        // Where the editor has it, and placed by the keyframer through a mirroring node.
+        let alone = chunk(MAIN, &chunk(EDITOR, &object("Alone", &mirrored([0.; 3]))));
+        let mut main = chunk(EDITOR, &object("Placed", &mirrored([4., 0., 0.])));
+        main.extend(chunk(
+            KEYFRAMER,
+            &node(
+                0,
+                "Placed",
+                u16::MAX,
+                [0.; 3],
+                &[
+                    track(POS_TRACK, &[(0, &[4., 0., 0.])]),
+                    track(SCL_TRACK, &[(0, &[-1., 1., 1.])]),
+                ],
+            ),
+        ));
+        for file in [alone, chunk(MAIN, &main)] {
+            let mesh = read("m.3ds", &file).unwrap().flatten(Pose::Rest).unwrap().unwrap();
+            let w = windings(&mesh);
+            assert_eq!(w.len(), 1);
+            // Z up is Y up.
+            assert!(close(w[0].0, [0.0, 1.0, 0.0]), "{w:?}");
+            assert!(w[0].1.iter().all(|&n| close(n, [0.0, 1.0, 0.0])), "{w:?}");
+        }
+    }
+
+    #[test]
+    fn smoothing_spans_texture_seams_and_flat_materials_ignore_it() {
+        // A fold of two faces in one group, their shared edge's vertices written twice (as a texture seam does).
+        let tri = |shading: Option<u16>| {
+            let verts = [
+                [0., 0., 0.],
+                [1., 0., 0.],
+                [0., 1., 0.],
+                [0., 0., 0.],
+                [1., 0., 0.],
+                [0., 0., 1.],
+            ];
+            let mut faces = 2u16.to_le_bytes().to_vec();
+            faces.extend(u16s(&[0, 1, 2, 0, 3, 5, 4, 0]));
+            let mut fm = b"M\0".to_vec();
+            fm.extend(u16s(&[2, 0, 1]));
+            faces.extend(chunk(FACE_MATERIAL, &fm));
+            faces.extend(chunk(
+                SMOOTHING,
+                &[1u32, 1].iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<_>>(),
+            ));
+            let mut v = 6u16.to_le_bytes().to_vec();
+            v.extend(f32s(verts.as_flattened()));
+            let mut t = chunk(VERTICES, &v);
+            // Too few texture coordinates: the rest are zero.
+            let mut uv = 2u16.to_le_bytes().to_vec();
+            uv.extend(f32s(&[0., 0., 1., 0.]));
+            t.extend(chunk(UVS, &uv));
+            t.extend(chunk(FACES, &faces));
+            let mut mat = chunk(MAT_NAME, b"M\0");
+            if let Some(s) = shading {
+                mat.extend(chunk(MAT_SHADING, &s.to_le_bytes()));
+            }
+            let mut editor = chunk(MATERIAL, &mat);
+            editor.extend(object("Fold", &chunk(TRIMESH, &t)));
+            chunk(MAIN, &chunk(EDITOR, &editor))
+        };
+        let h = std::f32::consts::FRAC_1_SQRT_2;
+        let mesh = read("s.3ds", &tri(Some(3)))
+            .unwrap()
+            .flatten(Pose::Rest)
+            .unwrap()
+            .unwrap();
+        let p = &mesh.prims[0];
+        assert_eq!(p.uvs.len(), p.positions.len());
+        // The fold's edge: (0, 0, 0) and (1, 0, 0), Z up turned Y up, all four of its vertices one normal.
+        let edge: Vec<_> = (p.positions.iter().zip(&p.normals))
+            .filter(|(q, _)| q[1].abs() < 1e-6 && q[2].abs() < 1e-6)
+            .collect();
+        assert_eq!(edge.len(), 4, "{p:?}");
+        assert!(edge.iter().all(|(_, n)| close(**n, [0.0, h, -h])), "{edge:?}");
+        // Shaded flat: each face its own normal.
+        let mesh = read("s.3ds", &tri(Some(1)))
+            .unwrap()
+            .flatten(Pose::Rest)
+            .unwrap()
+            .unwrap();
+        for (face, normals) in windings(&mesh) {
+            assert!(normals.iter().all(|&n| close(n, face)), "{face:?} {normals:?}");
+        }
+    }
+
+    #[test]
+    fn an_opacity_map_that_is_the_color_map_cuts_by_its_alpha() {
+        let mut mat = chunk(MAT_NAME, b"Leaf\0");
+        mat.extend(chunk(MAT_TEXTURE, &chunk(MAP_FILE, b"leaf.png\0")));
+        mat.extend(chunk(MAT_OPACMAP, &chunk(MAP_FILE, b"LEAF.PNG\0")));
+        let mut t = trimesh(&at([0.; 3]), &[], None);
+        let mut faces = 1u16.to_le_bytes().to_vec();
+        faces.extend(u16s(&[0, 1, 2, 0]));
+        let mut fm = b"Leaf\0".to_vec();
+        fm.extend(u16s(&[1, 0]));
+        faces.extend(chunk(FACE_MATERIAL, &fm));
+        let mut uv = 3u16.to_le_bytes().to_vec();
+        uv.extend(f32s(&[0., 0., 1., 0., 0., 1.]));
+        t.extend(chunk(UVS, &uv));
+        t.extend(chunk(FACES, &faces));
+        let mut editor = chunk(MATERIAL, &mat);
+        editor.extend(object("Leaf", &chunk(TRIMESH, &t)));
+        let mut png = Vec::new();
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([0, 200, 0, 100]))
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let assets = crate::assets::Memory::new().with("leaf.png", png);
+        let file = chunk(MAIN, &chunk(EDITOR, &editor));
+        let doc = crate::formats::load_bytes(&file, "l.3ds", "3ds", &assets, Keep::ALL).unwrap();
+        let leaf = &doc.json["materials"][0];
+        assert!(leaf["pbrMetallicRoughness"]["baseColorTexture"].is_object(), "{leaf}");
+        assert_eq!(leaf["alphaMode"], "BLEND", "{leaf}");
+    }
+
+    /// A PNG of `w` × `h` RGB pixels made by `f`.
+    fn rgb_png(w: u32, h: u32, f: impl Fn(u32, u32) -> [u8; 3]) -> Vec<u8> {
+        let mut png = Vec::new();
+        image::RgbImage::from_fn(w, h, |x, y| image::Rgb(f(x, y)))
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        png
+    }
+
+    /// A tangent-space normal map's pixels: bumps leaning every way around +Z.
+    fn bumps(x: u32, y: u32) -> [u8; 3] {
+        #[allow(clippy::cast_precision_loss, reason = "small test values")]
+        let (a, b) = ((x as f32 * 0.7).sin() * 0.4, (y as f32 * 0.9).cos() * 0.4);
+        let z = (1.0 - a * a - b * b).sqrt();
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "0 to 255")]
+        [a, b, z].map(|c| ((c + 1.0) * 127.5).round() as u8)
+    }
+
+    /// The start of a JPEG: its markers up to a baseline frame header with `components`.
+    fn jpeg(components: u8) -> Vec<u8> {
+        let mut j = vec![0xFF, 0xD8, 0xFF, 0xE0, 0, 16];
+        j.extend(b"JFIF\0\x01\x01\0\0\x01\0\x01\0\0");
+        j.extend([0xFF, 0xFF, 0xC0, 0, 8 + 3 * components, 8, 0, 4, 0, 4, components]);
+        for c in 0..components {
+            j.extend([c + 1, 0x11, 0]);
+        }
+        j
+    }
+
+    /// A model of one textured triangle per material, each material only a bump map (`file`, at `percent`).
+    fn bumped(maps: &[(&str, &str, Option<u16>)]) -> Vec<u8> {
+        let mut editor = Vec::new();
+        let mut t = trimesh(&at([0.; 3]), &[], None);
+        let mut faces = u16::try_from(maps.len()).unwrap().to_le_bytes().to_vec();
+        for _ in maps {
+            faces.extend(u16s(&[0, 1, 2, 0]));
+        }
+        for (i, (name, file, percent)) in maps.iter().enumerate() {
+            let mut mat = chunk(MAT_NAME, format!("{name}\0").as_bytes());
+            let mut map = chunk(MAP_FILE, format!("{file}\0").as_bytes());
+            if let Some(p) = percent {
+                map.extend(chunk(PERCENT_U16, &p.to_le_bytes()));
+            }
+            mat.extend(chunk(MAT_BUMPMAP, &map));
+            editor.extend(chunk(MATERIAL, &mat));
+            let mut fm = format!("{name}\0").into_bytes();
+            fm.extend(u16s(&[1, u16::try_from(i).unwrap()]));
+            faces.extend(chunk(FACE_MATERIAL, &fm));
+        }
+        let mut uv = 3u16.to_le_bytes().to_vec();
+        uv.extend(f32s(&[0., 0., 1., 0., 0., 1.]));
+        t.extend(chunk(UVS, &uv));
+        t.extend(chunk(FACES, &faces));
+        editor.extend(object("Wall", &chunk(TRIMESH, &t)));
+        chunk(MAIN, &chunk(EDITOR, &editor))
+    }
+
+    #[test]
+    fn a_bump_map_is_the_normal_map_when_its_image_is_one() {
+        // Whether this build reads a PNG's pixels.
+        let decodes = cfg!(any(
+            feature = "webp",
+            feature = "skp",
+            feature = "tga",
+            feature = "bmp",
+            feature = "gif",
+            feature = "tiff",
+            feature = "psd",
+            feature = "dds"
+        ));
+        let mut gray = Vec::new();
+        image::GrayImage::from_fn(8, 8, |x, y| image::Luma([u8::try_from(x * 30 + y).unwrap()]))
+            .write_to(&mut std::io::Cursor::new(&mut gray), image::ImageFormat::Png)
+            .unwrap();
+        let assets = crate::assets::Memory::new()
+            .with("bricks.png", rgb_png(40, 30, bumps))
+            .with(
+                "height.png",
+                rgb_png(40, 30, |x, y| [u8::try_from((x * 6 + y) % 256).unwrap(); 3]),
+            )
+            .with("gray_normal.png", gray)
+            .with("wall_n.jpg", jpeg(3))
+            .with("rough.jpg", jpeg(3))
+            .with("mono_nrm.jpg", jpeg(1));
+        let file = bumped(&[
+            ("Pixels", "bricks.png", Some(50)),
+            ("Height", "height.png", None),
+            ("Gray", "gray_normal.png", None),
+            ("Named", "maps\\wall_n.jpg", None),
+            ("Plain", "rough.jpg", None),
+            ("Mono", "mono_nrm.jpg", None),
+            ("Missing", "gone_normal.png", None),
+        ]);
+        let doc = crate::formats::load_bytes(&file, "b.3ds", "3ds", &assets, Keep::ALL).unwrap();
+        let normal = |name: &str| {
+            let m = doc.json["materials"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|m| m["name"] == name)
+                .unwrap();
+            // Every bump map stays in extras.
+            assert!(m["extras"]["3ds"]["maps"]["bump"]["file"].is_string(), "{m}");
+            m.get("normalTexture").cloned()
+        };
+        let pixels = normal("Pixels");
+        assert_eq!(pixels.is_some(), decodes);
+        if decodes {
+            assert_eq!(pixels.unwrap()["scale"], json!(0.5));
+        }
+        assert!(normal("Height").is_none());
+        assert!(normal("Gray").is_none());
+        assert_eq!(normal("Named").unwrap().get("scale"), None);
+        assert!(normal("Plain").is_none());
+        assert!(normal("Mono").is_none());
+        assert!(normal("Missing").is_none());
+        let mesh = doc.flatten(Pose::Rest).unwrap().unwrap();
+        assert_eq!(
+            mesh.materials.iter().filter(|m| m.normal_image.is_some()).count(),
+            1 + usize::from(decodes)
+        );
+
+        // Images cut short or damaged: never a panic.
+        let png = rgb_png(40, 30, bumps);
+        for len in (0..png.len()).step_by(3) {
+            let mut bad = png.clone();
+            bad.truncate(len);
+            let assets = crate::assets::Memory::new().with("bricks.png", bad);
+            let file = bumped(&[("Pixels", "bricks.png", None)]);
+            let _ = crate::formats::load_bytes(&file, "b.3ds", "3ds", &assets, Keep::ALL);
+        }
+        let mut flipped = png;
+        for i in (8..flipped.len()).step_by(5) {
+            flipped[i] ^= 0x5A;
+        }
+        let assets = crate::assets::Memory::new().with("bricks.png", flipped);
+        let file = bumped(&[("Pixels", "bricks.png", None)]);
+        let _ = crate::formats::load_bytes(&file, "b.3ds", "3ds", &assets, Keep::ALL);
+        for len in 0..file.len() {
+            let _ = crate::formats::load_bytes(&file[..len], "b.3ds", "3ds", &assets, Keep::ALL);
+        }
+    }
+
+    #[test]
+    fn normal_maps_by_pixels_header_and_name() {
+        let flat = vec![[128, 128, 255]; 10];
+        assert!(normal_pixels(&flat));
+        let mut some_gray = flat.clone();
+        some_gray.extend([[200, 200, 200]; 3]);
+        assert!(normal_pixels(&some_gray));
+        assert!(!normal_pixels(&[[201, 201, 201]; 10]));
+        assert!(!normal_pixels(&[[54, 54, 54]; 10]));
+        assert!(!normal_pixels(&[[40, 40, 255]; 10]));
+        assert!(!normal_pixels(&[]));
+        assert_eq!(jpeg_components(&jpeg(1)), Some(1));
+        assert_eq!(jpeg_components(&jpeg(3)), Some(3));
+        let j = jpeg(3);
+        for len in 0..j.len() {
+            let _ = jpeg_components(&j[..len]);
+        }
+        assert_eq!(jpeg_components(&[0xFF, 0xD8, 0xFF, 0xDA, 0, 2]), None);
+        for name in [
+            "brick_n.png",
+            "Brick_Normal.tga",
+            "C:\\maps\\wall_NRM.jpg",
+            "rock-n.png",
+            "x_ddn.tga",
+            "a_nor.png",
+        ] {
+            assert!(named_normal_map(name), "{name}");
+        }
+        for name in ["bump.png", "brick_b.jpg", "n.png", "normalmaps/brick.png", "tin.png"] {
+            assert!(!named_normal_map(name), "{name}");
+        }
     }
 
     #[test]

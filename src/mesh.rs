@@ -1,44 +1,132 @@
-//! A model as plain triangle lists: what the format readers produce, written out as a GLB.
+//! A model as plain triangle lists (and line and point lists): what the format readers
+//! produce, written out as a GLB.
 
 use crate::Result;
 use crate::document::Document;
 use crate::num::u32_of;
 
-/// The most triangles a reader accepts, against hostile or runaway files.
+/// The most triangles a load accepts by default, against hostile or runaway files:
+/// [`Keep::max_triangles`](crate::document::Keep::max_triangles) raises or lowers it.
 pub const MAX_TRIANGLES: usize = 4_000_000;
 
-/// One material's worth of triangles.
+/// The most triangles any load accepts, whatever
+/// [`Keep::max_triangles`](crate::document::Keep::max_triangles) says: three vertices to each
+/// still fit a 32-bit index.
+pub const TRIANGLE_CEILING: usize = 1 << 30;
+
+/// The most points and line segments a flattened model draws by default, against huge point
+/// clouds: [`Keep::max_points`](crate::document::Keep::max_points) raises or lowers it.
+pub const MAX_POINTS: usize = 16_000_000;
+
+/// One material's worth of triangles, and of the lines and points drawn on the same vertices.
 #[derive(Debug, Default, Clone)]
 pub struct Prim {
     pub positions: Vec<[f32; 3]>,
     /// Unit vertex normals; empty for a faceted model (STL), which glTF clients shade flat.
     pub normals: Vec<[f32; 3]>,
-    /// Texture coordinates, glTF convention (origin top-left); empty when the model has none.
+    /// Unit tangents for normal mapping, as glTF stores them: `xyz` the direction, `w` ±1 the
+    /// bitangent's handedness (`bitangent = cross(normal, xyz) * w`). Empty when the model has
+    /// none, or has no normals.
+    pub tangents: Vec<[f32; 4]>,
+    /// The texture coordinates the color texture reads, glTF convention (origin top-left), with
+    /// its texture transform applied; empty when the model has none.
     pub uvs: Vec<[f32; 2]>,
-    /// Vertex colors, linear RGBA; empty when the model has none.
+    /// Every other texture coordinate set, by number (glTF's `TEXCOORD_n`): lightmaps, masks,
+    /// detail maps. The slot of the set `uvs` holds is left empty, as is any set a model lacks,
+    /// so nothing is stored twice; empty when the model has only the one set.
+    pub uv_sets: Vec<Vec<[f32; 2]>>,
+    /// Vertex colors, linear RGBA (glTF's `COLOR_0`); empty when the model has none.
     pub colors: Vec<[f32; 4]>,
+    /// Every other vertex color set, by number (glTF's `COLOR_n`), linear RGBA. Slot 0, which
+    /// `colors` holds, is left empty, as is any set a model lacks; empty when the model has
+    /// only the one set.
+    pub color_sets: Vec<Vec<[f32; 4]>>,
+    /// Triangles, three vertex indices each.
     pub indices: Vec<u32>,
+    /// Line segments, two vertex indices each (glTF's `LINES`; line strips and loops are
+    /// stored as their segments).
+    pub lines: Vec<u32>,
+    /// Points, a vertex index each (glTF's `POINTS`): a point cloud is a primitive of these
+    /// alone.
+    pub points: Vec<u32>,
     pub material: usize,
     /// Each vertex's most-weighted joint, as a node index (the order of `Rig::nodes`), when the primitive is skinned;
     /// empty otherwise. Tells which bone each part of the surface moves with, for fitting a body to its skeleton.
+    /// `u32::MAX` for a vertex no joint moves.
     pub joints: Vec<u32>,
+    /// Each vertex's four strongest joints, as indices into [`Mesh::skeleton`], strongest first, when the
+    /// primitive is skinned; empty otherwise. A file may weight a vertex to more than four joints: they're all
+    /// used to pose it, and the four strongest kept here.
+    pub skin_joints: Vec<[u32; 4]>,
+    /// The weights of `skin_joints`, summing to 1, or all 0 for a vertex no joint moves.
+    pub skin_weights: Vec<[f32; 4]>,
 }
 
-/// A material: a base color, optionally textured, an optional normal map, and the metallic-roughness scalars.
+impl Prim {
+    /// Whether it draws nothing: no triangles, lines or points.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.indices.is_empty() && self.lines.is_empty() && self.points.is_empty()
+    }
+
+    /// Whether every vertex has joints and weights, so the primitive can be bound to [`Mesh::skeleton`].
+    #[must_use]
+    pub fn skinned(&self) -> bool {
+        !self.positions.is_empty()
+            && self.skin_joints.len() == self.positions.len()
+            && self.skin_weights.len() == self.positions.len()
+    }
+}
+
+/// A joint skinned primitives are bound to.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Bone {
+    pub name: Option<String>,
+    /// The bone it hangs from, an index into [`Mesh::skeleton`], always before this one.
+    pub parent: Option<usize>,
+    /// The document node it was made from.
+    pub node: usize,
+    /// Where the bone is in the pose the mesh was drawn in: its world transform, column-major.
+    pub matrix: [f32; 16],
+}
+
+/// A material, glTF's metallic-roughness model: a base color, the metallic and roughness
+/// scalars, and the textures that vary them. Every texture reads [`Prim::uvs`]; the images
+/// are indices into [`Mesh::images`].
 #[derive(Debug, Clone)]
 pub struct Material {
     pub name: String,
-    /// Linear RGBA.
+    /// Linear RGBA. Its alpha is opacity: below 1 the material is blended, unless
+    /// `alpha_cutoff` makes it cut out instead.
     pub color: [f32; 4],
-    /// Index into `Mesh::images`.
     pub color_image: Option<usize>,
+    /// A tangent-space normal map.
     pub normal_image: Option<usize>,
+    /// Roughness in the green channel, metalness in the blue, as glTF packs them; they scale
+    /// `roughness` and `metallic`.
+    pub metallic_roughness_image: Option<usize>,
+    /// Ambient occlusion in the red channel.
+    pub occlusion_image: Option<usize>,
     /// Linear RGB light given off.
     pub emissive: [f32; 3],
+    /// Light given off, scaling `emissive`.
+    pub emissive_image: Option<usize>,
     pub metallic: f32,
     pub roughness: f32,
     /// Seen from both sides rather than culled from behind.
     pub double_sided: bool,
+    /// Cut out where the color's alpha is below this, rather than blended (foliage, fences,
+    /// hair cards); `None` blends when the alpha is below 1.
+    pub alpha_cutoff: Option<f32>,
+    /// Drawn in its color as it is, without lighting (glTF's `KHR_materials_unlit`).
+    pub unlit: bool,
+}
+
+impl Default for Material {
+    /// [`Material::plain`] in [`GRAY`], unnamed.
+    fn default() -> Self {
+        Self::plain("", GRAY)
+    }
 }
 
 impl Material {
@@ -50,10 +138,15 @@ impl Material {
             color,
             color_image: None,
             normal_image: None,
+            metallic_roughness_image: None,
+            occlusion_image: None,
             emissive: [0.0; 3],
+            emissive_image: None,
             metallic: 0.0,
             roughness: 0.85,
             double_sided: false,
+            alpha_cutoff: None,
+            unlit: false,
         }
     }
 }
@@ -67,12 +160,15 @@ pub struct Image {
     pub mime: &'static str,
 }
 
-/// A model as triangles grouped by material, ready to write as glTF.
+/// A model as triangles (and lines and points) grouped by material, ready to write as glTF.
 #[derive(Debug, Default, Clone)]
 pub struct Mesh {
     pub prims: Vec<Prim>,
     pub materials: Vec<Material>,
     pub images: Vec<Image>,
+    /// The joints skinned primitives are bound to, parents first; empty when nothing is skinned. Written out, a
+    /// skin binds the vertices where they are, so the GLB loads in the pose the mesh was drawn in, ready to move.
+    pub skeleton: Vec<Bone>,
 }
 
 impl Mesh {
@@ -80,6 +176,18 @@ impl Mesh {
     #[must_use]
     pub fn triangles(&self) -> usize {
         self.prims.iter().map(|p| p.indices.len() / 3).sum()
+    }
+
+    /// The number of line segments across all primitives.
+    #[must_use]
+    pub fn lines(&self) -> usize {
+        self.prims.iter().map(|p| p.lines.len() / 2).sum()
+    }
+
+    /// The number of points across all primitives.
+    #[must_use]
+    pub fn points(&self) -> usize {
+        self.prims.iter().map(|p| p.points.len()).sum()
     }
 }
 
@@ -102,15 +210,41 @@ impl Image {
         Some(Self { bytes, mime })
     }
 
-    /// `bytes` as an image: PNG and JPEG as they are, and with the `webp` feature, WebP
-    /// re-encoded as PNG.
+    /// `bytes` as an image: PNG and JPEG as they are, and WebP, BMP, GIF, TIFF, PSD and DDS
+    /// re-encoded as PNG, each with the feature of its name. TGA has no signature, so only one
+    /// with a version 2 footer is found here; [`Image::decode_named`] also goes by its name.
     #[must_use]
     pub fn decode(bytes: Vec<u8>) -> Option<Self> {
+        Self::decode_named(bytes, std::path::Path::new(""))
+    }
+
+    /// `bytes`, a file named `name` (a path, or just its extension's worth, as `x.tga`), as an
+    /// image, as [`Image::decode`] makes one; the name finds TGA files without a footer.
+    #[must_use]
+    pub fn decode_named(bytes: Vec<u8>, name: &std::path::Path) -> Option<Self> {
         if Self::mime_of(&bytes).is_some() {
-            Self::from_png_or_jpeg(bytes)
-        } else {
-            Self::webp(&bytes)
+            return Self::from_png_or_jpeg(bytes);
         }
+        let image = Self::webp(&bytes);
+        #[cfg(any(
+            feature = "tga",
+            feature = "bmp",
+            feature = "gif",
+            feature = "tiff",
+            feature = "psd",
+            feature = "dds"
+        ))]
+        let image = image.or_else(|| crate::raster::decode(&bytes, name));
+        #[cfg(not(any(
+            feature = "tga",
+            feature = "bmp",
+            feature = "gif",
+            feature = "tiff",
+            feature = "psd",
+            feature = "dds"
+        )))]
+        let _ = name;
+        image
     }
 
     /// WebP `bytes` re-encoded as PNG, with the `webp` feature.
@@ -183,6 +317,7 @@ pub(crate) fn single(p: Prim) -> Mesh {
         prims: vec![p],
         materials: vec![Material::plain("default", GRAY)],
         images: Vec::new(),
+        skeleton: Vec::new(),
     }
 }
 
@@ -324,13 +459,14 @@ impl Welder {
     }
 }
 
-/// A GLB with one mesh: a primitive per `Prim`, its materials, and the images embedded.
+/// A GLB with one mesh: a primitive per `Prim` (and one more for its lines, and one for its
+/// points, on the same vertices), its materials, and the images embedded.
 ///
 /// # Errors
 ///
 /// When the mesh has nothing to draw.
 pub fn to_glb(mesh: &Mesh) -> Result<Vec<u8>> {
-    ensure!(mesh.prims.iter().any(|p| !p.indices.is_empty()), "nothing to draw");
+    ensure!(mesh.prims.iter().any(|p| !p.is_empty()), "nothing to draw");
     Document::from_mesh(mesh.clone(), serde_json::Map::new()).to_glb()
 }
 
@@ -354,60 +490,22 @@ pub(crate) fn triangulate(corners: &[[f32; 3]], out: &mut Vec<[u32; 3]>) {
         out.push([0, 1, 2]);
         return;
     }
+    if let Some(t) = <&[[f32; 3]; 4]>::try_from(corners).ok().and_then(quad) {
+        out.extend(t);
+        return;
+    }
     // The plane's normal (Newell), then 2D coordinates along its two other axes.
     let mut nrm = [0f64; 3];
     for (i, a) in corners.iter().enumerate() {
-        let b = corners[(i + 1) % n];
-        let (a, b) = (a.map(f64::from), b.map(f64::from));
-        nrm[0] += (a[1] - b[1]) * (a[2] + b[2]);
-        nrm[1] += (a[2] - b[2]) * (a[0] + b[0]);
-        nrm[2] += (a[0] - b[0]) * (a[1] + b[1]);
+        let b = corners[if i + 1 == n { 0 } else { i + 1 }];
+        newell(&mut nrm, a.map(f64::from), b.map(f64::from));
     }
-    let axis = (0..3)
-        .max_by(|&i, &j| nrm[i].abs().total_cmp(&nrm[j].abs()))
-        .unwrap_or(2);
+    let axis = plane_axis(nrm);
     if nrm[axis] == 0.0 || n > 4096 {
         out.extend((1..u32_of(n) - 1).map(|k| [0, k, k + 1]));
         return;
     }
-    // Project so the polygon winds counter-clockwise in 2D.
-    let (u, v) = match axis {
-        0 => (1, 2),
-        1 => (2, 0),
-        _ => (0, 1),
-    };
-    let flip = nrm[axis] < 0.0;
-    let to2 = |c: &[f32; 3]| {
-        let (x, y) = (f64::from(c[u]), f64::from(c[v]));
-        if flip { [y, x] } else { [x, y] }
-    };
-    let cross = |a: [f64; 2], b: [f64; 2], c: [f64; 2]| (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
-    if n == 4 {
-        // Quads, most faces that aren't triangles: no allocation. A convex one is fanned; one
-        // with a single reflex corner is cut along the diagonal from that corner.
-        let q = [to2(&corners[0]), to2(&corners[1]), to2(&corners[2]), to2(&corners[3])];
-        let turn = |k: usize| cross(q[(k + 3) % 4], q[k], q[(k + 1) % 4]);
-        let mut r = None;
-        let mut count = 0;
-        for k in 0..4 {
-            if turn(k) < 0.0 {
-                r = Some(u32_of(k));
-                count += 1;
-            }
-        }
-        match (count, r) {
-            (0, _) => {
-                out.extend([[0, 1, 2], [0, 2, 3]]);
-                return;
-            }
-            (1, Some(r)) => {
-                let c = |k: u32| (r + k) % 4;
-                out.extend([[r, c(1), c(2)], [r, c(2), c(3)]]);
-                return;
-            }
-            _ => {}
-        }
-    }
+    let to2 = projection(nrm, axis);
     let all: Vec<u32> = (0..u32_of(n)).collect();
     let p: Vec<[f64; 2]> = corners.iter().map(to2).collect();
     if (0..n).all(|i| cross(p[i], p[(i + 1) % n], p[(i + 2) % n]) >= 0.0) {
@@ -440,6 +538,92 @@ pub(crate) fn triangulate(corners: &[[f32; 3]], out: &mut Vec<[u32; 3]>) {
         idx.remove(i);
     }
     fan(out, &idx);
+}
+
+/// A step of Newell's normal: the edge from `a` to `b`.
+#[inline]
+fn newell(nrm: &mut [f64; 3], a: [f64; 3], b: [f64; 3]) {
+    nrm[0] += (a[1] - b[1]) * (a[2] + b[2]);
+    nrm[1] += (a[2] - b[2]) * (a[0] + b[0]);
+    nrm[2] += (a[0] - b[0]) * (a[1] + b[1]);
+}
+
+/// The axis a polygon with normal `nrm` faces most: the last of the largest.
+#[inline]
+fn plane_axis(nrm: [f64; 3]) -> usize {
+    (0..3)
+        .max_by(|&i, &j| nrm[i].abs().total_cmp(&nrm[j].abs()))
+        .unwrap_or(2)
+}
+
+/// 2D coordinates along the two axes other than `axis`, so the polygon winds counter-clockwise.
+#[inline]
+fn projection(nrm: [f64; 3], axis: usize) -> impl Fn(&[f32; 3]) -> [f64; 2] {
+    let (u, v) = match axis {
+        0 => (1, 2),
+        1 => (2, 0),
+        _ => (0, 1),
+    };
+    let flip = nrm[axis] < 0.0;
+    move |c: &[f32; 3]| {
+        let (x, y) = (f64::from(c[u]), f64::from(c[v]));
+        if flip { [y, x] } else { [x, y] }
+    }
+}
+
+/// How far `c` turns left of the line from `a` through `b`.
+#[inline]
+fn cross(a: [f64; 2], b: [f64; 2], c: [f64; 2]) -> f64 {
+    (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+}
+
+/// A quad's two triangles as [`triangulate`] makes them, without allocating: fanned when
+/// convex, cut along the diagonal from the one reflex corner when there is one. `None` for a
+/// quad with more, which [`triangulate`] ear-clips.
+#[inline]
+pub(crate) fn quad(c: &[[f32; 3]; 4]) -> Option<[[u32; 3]; 2]> {
+    const FAN: [[u32; 3]; 2] = [[0, 1, 2], [0, 2, 3]];
+    let p = [
+        c[0].map(f64::from),
+        c[1].map(f64::from),
+        c[2].map(f64::from),
+        c[3].map(f64::from),
+    ];
+    let mut nrm = [0f64; 3];
+    newell(&mut nrm, p[0], p[1]);
+    newell(&mut nrm, p[1], p[2]);
+    newell(&mut nrm, p[2], p[3]);
+    newell(&mut nrm, p[3], p[0]);
+    let axis = plane_axis(nrm);
+    if nrm[axis] == 0.0 {
+        return Some(FAN);
+    }
+    // As `projection` does it: swapping the axes is the flip.
+    let (u, v) = match axis {
+        0 => (1, 2),
+        1 => (2, 0),
+        _ => (0, 1),
+    };
+    let (u, v) = if nrm[axis] < 0.0 { (v, u) } else { (u, v) };
+    let q = [
+        [p[0][u], p[0][v]],
+        [p[1][u], p[1][v]],
+        [p[2][u], p[2][v]],
+        [p[3][u], p[3][v]],
+    ];
+    let right = [
+        cross(q[3], q[0], q[1]) < 0.0,
+        cross(q[0], q[1], q[2]) < 0.0,
+        cross(q[1], q[2], q[3]) < 0.0,
+        cross(q[2], q[3], q[0]) < 0.0,
+    ];
+    match right {
+        [false | true, false, false, false] => Some(FAN),
+        [false, true, false, false] => Some([[1, 2, 3], [1, 3, 0]]),
+        [false, false, true, false] => Some([[2, 3, 0], [2, 0, 1]]),
+        [false, false, false, true] => Some([[3, 0, 1], [3, 1, 2]]),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -481,16 +665,105 @@ mod triangulate_tests {
         triangulate(&quad, &mut t);
         assert_eq!(t, [[0, 1, 2], [0, 2, 3]]);
     }
+
+    /// Quads the long way, every step written out: Newell's normal in order, the last of the
+    /// largest axes, and the corners that turn right.
+    fn quad_by_hand(c: &[[f32; 3]; 4]) -> Option<Vec<[u32; 3]>> {
+        let p = c.map(|c| c.map(f64::from));
+        let mut nrm = [0.0f64; 3];
+        for i in 0..4 {
+            let (a, b) = (p[i], p[(i + 1) % 4]);
+            nrm[0] += (a[1] - b[1]) * (a[2] + b[2]);
+            nrm[1] += (a[2] - b[2]) * (a[0] + b[0]);
+            nrm[2] += (a[0] - b[0]) * (a[1] + b[1]);
+        }
+        let mut axis = 0;
+        for i in 1..3 {
+            if nrm[i].abs().total_cmp(&nrm[axis].abs()).is_ge() {
+                axis = i;
+            }
+        }
+        if nrm[axis] == 0.0 {
+            return Some(vec![[0, 1, 2], [0, 2, 3]]);
+        }
+        let (u, v) = [(1, 2), (2, 0), (0, 1)][axis];
+        let q = p.map(|c| if nrm[axis] < 0.0 { [c[v], c[u]] } else { [c[u], c[v]] });
+        let right: Vec<u32> = (0..4u32)
+            .filter(|&k| {
+                let (a, b, c) = (q[(k as usize + 3) % 4], q[k as usize], q[(k as usize + 1) % 4]);
+                (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]) < 0.0
+            })
+            .collect();
+        match right[..] {
+            [] => Some(vec![[0, 1, 2], [0, 2, 3]]),
+            [r] => Some(vec![[r, (r + 1) % 4, (r + 2) % 4], [r, (r + 2) % 4, (r + 3) % 4]]),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn quads_cut_like_the_rules_say() {
+        let mut rng = crate::test_rng::Pcg32::new(7);
+        // Mostly small grids of values, so corners repeat, line up and cancel; some wild ones.
+        let pick = |rng: &mut crate::test_rng::Pcg32| match rng.below(10) {
+            0 => f32::NAN,
+            1 => -0.0,
+            2 => rng.f32() * 2e30 - 1e30,
+            3 => rng.f32() * 2e-30,
+            4..=6 => rng.f32() * 2.0 - 1.0,
+            _ => [-2.0, -1.0, 0.0, 1.0, 2.0][rng.below(5) as usize],
+        };
+        let mut t = Vec::new();
+        let mut cut = 0;
+        for k in 0..200_000 {
+            let flat = k % 3 == 0;
+            let c: [[f32; 3]; 4] = std::array::from_fn(|_| {
+                let z = if flat { 0.5 } else { pick(&mut rng) };
+                [pick(&mut rng), pick(&mut rng), z]
+            });
+            let want = quad_by_hand(&c);
+            assert_eq!(super::quad(&c).map(Vec::from), want, "{c:?}");
+            t.clear();
+            triangulate(&c, &mut t);
+            match want {
+                Some(w) => {
+                    cut += usize::from(w[0][0] != 0);
+                    assert_eq!(t, w, "{c:?}");
+                }
+                // Twisted: ear-clipped, still two triangles over the four corners.
+                None => assert_eq!(t.len(), 2, "{c:?}"),
+            }
+        }
+        assert!(cut > 1000, "few quads had a reflex corner: {cut}");
+    }
 }
 
 /// A multiply-rotate hasher (the Fx hash) for small integer keys: much faster than the
 /// default `SipHash`, and keys here come from the file being read, not from an attacker who can
 /// see the hash.
-#[cfg(any(feature = "ply", feature = "3ds", feature = "fbx"))]
+#[cfg(any(
+    feature = "ply",
+    feature = "3ds",
+    feature = "fbx",
+    feature = "vox",
+    feature = "3mf",
+    feature = "off",
+    feature = "x3d",
+    feature = "dxf"
+))]
 #[derive(Default, Clone, Copy)]
 pub(crate) struct FxHasher(u64);
 
-#[cfg(any(feature = "ply", feature = "3ds", feature = "fbx"))]
+#[cfg(any(
+    feature = "ply",
+    feature = "3ds",
+    feature = "fbx",
+    feature = "vox",
+    feature = "3mf",
+    feature = "off",
+    feature = "x3d",
+    feature = "dxf"
+))]
 impl std::hash::Hasher for FxHasher {
     #[inline]
     fn write(&mut self, bytes: &[u8]) {
@@ -519,5 +792,34 @@ impl std::hash::Hasher for FxHasher {
 }
 
 /// A `HashMap` with [`FxHasher`].
-#[cfg(any(feature = "ply", feature = "3ds", feature = "fbx"))]
+#[cfg(any(
+    feature = "ply",
+    feature = "3ds",
+    feature = "fbx",
+    feature = "off",
+    feature = "x3d",
+    feature = "dxf"
+))]
 pub(crate) type FastMap<K, V> = std::collections::HashMap<K, V, std::hash::BuildHasherDefault<FxHasher>>;
+
+#[cfg(all(test, feature = "tga"))]
+mod image_tests {
+    use super::Image;
+    use std::path::Path;
+
+    /// A 2 by 1 uncompressed true-color TGA, red then blue, with no footer.
+    fn tga() -> Vec<u8> {
+        let mut b = vec![0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 1, 0, 24, 0];
+        b.extend([0, 0, 255, 255, 0, 0]);
+        b
+    }
+
+    #[test]
+    fn a_tga_is_found_by_its_name() {
+        let image = Image::decode_named(tga(), Path::new("textures/albedo.TGA")).unwrap();
+        assert_eq!(image.mime, "image/png");
+        assert!(image.bytes.starts_with(b"\x89PNG"));
+        // Without a name or a footer, nothing says it's a TGA.
+        assert!(Image::decode(tga()).is_none());
+    }
+}

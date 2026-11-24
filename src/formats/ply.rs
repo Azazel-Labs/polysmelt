@@ -1,9 +1,16 @@
 //! PLY (the Stanford polygon file format), ASCII and binary in either byte order.
 //!
-//! Read: positions, normals, vertex colors (sRGB, as integers or floats), texture coordinates
-//! under any of their usual names, polygons (triangulated in their plane) and triangle strips;
-//! `MeshLab`'s per-face texture coordinates and `comment TextureFile`; per-face colors. Elements
-//! the reader doesn't use are skipped.
+//! Read: positions, normals (`nx` or `normal_x`), vertex colors (sRGB, as integers or floats),
+//! texture coordinates under any of their usual names, polygons (triangulated in their plane) and
+//! triangle strips; `MeshLab`'s per-face texture coordinates and `comment TextureFile` (several, a
+//! face picking one by its `texnumber`, a material each); per-face colors. Elements the reader
+//! doesn't use are skipped. Gaussian splats show their color: the zero-order spherical harmonics
+//! (`f_dc_0` to `f_dc_2`) and `opacity` give the vertex colors when the file has no other. A zero
+//! normal (splat files write nothing else) is a placeholder: a mesh's vertex takes a made one, and
+//! a file of nothing but zeros has none. Made normals are smooth across vertices split only by
+//! texture coordinates. Header lines may end in a lone `\r`, and a leading byte order mark is
+//! skipped. Counts the header gives are checked against the bytes left before anything is
+//! allocated for them.
 //!
 //! Nothing the vertices carry is lost: properties beyond those are custom attributes, named as
 //! the file names them in capitals after an underscore (`_CONFIDENCE`, `_F_DC_0`). A file without
@@ -20,7 +27,7 @@ use super::stream::{self, Blocks};
 use crate::assets::Assets;
 use crate::document::{Builder, Document, Keep, Part};
 use crate::images::Images;
-use crate::mesh::{FastMap, MAX_TRIANGLES, Material, Mesh, Prim, smooth_normals, srgb_to_linear, triangulate};
+use crate::mesh::{FastMap, Material, Mesh, Prim, quad, smooth_normals, srgb_to_linear, triangulate};
 use crate::num::{f32_of, u32_of};
 use crate::{Context as _, Result};
 
@@ -103,6 +110,19 @@ impl Element {
         names
             .iter()
             .find_map(|n| self.props.iter().position(|p| p.name == *n && p.count.is_some()))
+    }
+
+    /// The fewest bytes one item can take: its scalars' sizes and its lists' counts (binary),
+    /// or a character and a separator per property (ASCII).
+    fn min_size(&self, format: Format) -> usize {
+        self.props
+            .iter()
+            .map(|p| match (format, p.count) {
+                (Format::Ascii, _) => 2,
+                (_, Some(c)) => c.size(),
+                (_, None) => p.ty.size(),
+            })
+            .sum()
     }
 }
 
@@ -243,40 +263,49 @@ impl Cursor<'_> {
 /// A binary value at the start of `b`, which holds at least its size.
 #[inline]
 fn at(b: &[u8], ty: Ty, be: bool) -> f64 {
-    let mut a = [0u8; 8];
-    let n = ty.size();
-    a[..n].copy_from_slice(&b[..n]);
-    if be {
-        a[..n].reverse();
-    }
     match ty {
-        Ty::I8 => f64::from(a[0].cast_signed()),
-        Ty::U8 => f64::from(a[0]),
-        Ty::I16 => f64::from(i16::from_le_bytes([a[0], a[1]])),
-        Ty::U16 => f64::from(u16::from_le_bytes([a[0], a[1]])),
-        Ty::I32 => f64::from(i32::from_le_bytes([a[0], a[1], a[2], a[3]])),
-        Ty::U32 => f64::from(u32::from_le_bytes([a[0], a[1], a[2], a[3]])),
-        Ty::F32 => f64::from(f32::from_le_bytes([a[0], a[1], a[2], a[3]])),
-        Ty::F64 => f64::from_le_bytes(a),
+        Ty::I8 => f64::from(b[0].cast_signed()),
+        Ty::U8 => f64::from(b[0]),
+        Ty::I16 => f64::from(i16::from_le_bytes(ordered(b, be))),
+        Ty::U16 => f64::from(u16::from_le_bytes(ordered(b, be))),
+        Ty::I32 => f64::from(i32::from_le_bytes(ordered(b, be))),
+        Ty::U32 => f64::from(u32::from_le_bytes(ordered(b, be))),
+        Ty::F32 => f64::from(f32::from_le_bytes(ordered(b, be))),
+        Ty::F64 => f64::from_le_bytes(ordered(b, be)),
     }
+}
+
+/// The first `N` bytes of `b` (which holds them) in little-endian order.
+#[inline]
+fn ordered<const N: usize>(b: &[u8], be: bool) -> [u8; N] {
+    let mut a = [0u8; N];
+    a.copy_from_slice(&b[..N]);
+    if be {
+        a.reverse();
+    }
+    a
 }
 
 /// What the header says besides its elements.
 struct Header {
     format: Format,
     version: String,
-    /// The texture file `MeshLab` names.
-    texture: Option<String>,
+    /// The texture files the `TextureFile` comments name, in order: a face's `texnumber`
+    /// picks one.
+    textures: Vec<String>,
     comments: Vec<String>,
     obj_info: Vec<String>,
 }
+
+/// The UTF-8 byte order mark some editors put first.
+const BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
 
 /// The header, its elements, and where the data starts.
 fn header(data: &[u8]) -> Result<(Header, Vec<Element>, usize)> {
     let mut format = None;
     let mut version = String::new();
     let mut elements: Vec<Element> = Vec::new();
-    let mut texture = None;
+    let mut textures = Vec::new();
     let (mut comments, mut obj_info) = (Vec::new(), Vec::new());
     let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
     let mut at = 0;
@@ -286,10 +315,20 @@ fn header(data: &[u8]) -> Result<(Header, Vec<Element>, usize)> {
             .get(at..)
             .filter(|r| !r.is_empty())
             .context("PLY header has no end_header")?;
-        let len = rest.iter().position(|&c| c == b'\n').map_or(rest.len(), |n| n + 1);
+        let len = rest
+            .iter()
+            .position(|&c| c == b'\n' || c == b'\r')
+            .unwrap_or(rest.len());
         let line = rest[..len].trim_ascii();
-        at += len;
+        // A line ends at `\n`, `\r\n` or a lone `\r`.
+        at += len
+            + match rest.get(len..len + 2) {
+                Some(b"\r\n") => 2,
+                Some(_) => 1,
+                None => rest.len() - len,
+            };
         if first {
+            let line = line.strip_prefix(BOM).unwrap_or(line);
             ensure!(line == b"ply", "not a PLY file");
             first = false;
             continue;
@@ -308,7 +347,7 @@ fn header(data: &[u8]) -> Result<(Header, Vec<Element>, usize)> {
             }
             [b"comment", kind, ..] if kind.eq_ignore_ascii_case(b"texturefile") => {
                 let name = line[b"comment".len()..].trim_ascii_start()[kind.len()..].trim_ascii();
-                texture = Some(text(name));
+                textures.push(text(name));
                 comments.push(text(line[b"comment".len()..].trim_ascii()));
             }
             [b"comment", ..] => comments.push(text(line[b"comment".len()..].trim_ascii())),
@@ -345,7 +384,7 @@ fn header(data: &[u8]) -> Result<(Header, Vec<Element>, usize)> {
     let header = Header {
         format: format.context("PLY header names no format")?,
         version,
-        texture,
+        textures,
         comments,
         obj_info,
     };
@@ -374,6 +413,8 @@ struct Faces {
     corners: Vec<u32>,
     corner_uv: Vec<[f32; 2]>,
     corner_col: Vec<[f32; 4]>,
+    /// Each face's texture number, when the faces give one.
+    texture: Vec<u32>,
 }
 
 const X: &[&str] = &["x"];
@@ -385,25 +426,69 @@ const R: &[&str] = &["red", "diffuse_red", "r"];
 const G: &[&str] = &["green", "diffuse_green", "g"];
 const B: &[&str] = &["blue", "diffuse_blue", "b"];
 const A: &[&str] = &["alpha", "diffuse_alpha", "a"];
+const NX: &[&str] = &["nx", "normal_x", "normalx", "n_x"];
+const NY: &[&str] = &["ny", "normal_y", "normaly", "n_y"];
+const NZ: &[&str] = &["nz", "normal_z", "normalz", "n_z"];
+/// Gaussian splats' color: the first spherical-harmonic band's coefficients, and opacity
+/// before its sigmoid.
+const DC: [&[&str]; 3] = [&["f_dc_0"], &["f_dc_1"], &["f_dc_2"]];
+const OPACITY: &[&str] = &["opacity"];
+/// The zeroth spherical-harmonic basis function's constant, `1 / (2 sqrt(pi))`.
+const SH_C0: f64 = 0.282_094_791_773_878_14;
 
-fn color(el: &Element, vals: &[f64], slots: &[usize; 3], alpha: Option<usize>) -> [f32; 4] {
-    let ch = |s: usize| {
-        let c = f32_of((vals[s] / el.props[s].ty.color_scale()).clamp(0.0, 1.0));
-        srgb_to_linear(c)
+/// A color from its channels' values. `bytes` holds each byte value's channel (made linear) and
+/// alpha, for binary files' `uchar` channels; it's empty otherwise.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "a binary uchar's value is a whole number from 0 to 255"
+)]
+fn color(el: &Element, vals: &[f64], slots: &[usize; 3], alpha: Option<usize>, bytes: &[[f32; 2]]) -> [f32; 4] {
+    let byte = |s: usize| {
+        (el.props[s].ty == Ty::U8)
+            .then(|| bytes.get(vals[s] as usize))
+            .flatten()
     };
-    let a = alpha.map_or(1.0, |s| {
-        f32_of((vals[s] / el.props[s].ty.color_scale()).clamp(0.0, 1.0))
+    let ch = |s: usize| match byte(s) {
+        Some(b) => b[0],
+        None => srgb_to_linear(f32_of((vals[s] / el.props[s].ty.color_scale()).clamp(0.0, 1.0))),
+    };
+    let a = alpha.map_or(1.0, |s| match byte(s) {
+        Some(b) => b[1],
+        None => f32_of((vals[s] / el.props[s].ty.color_scale()).clamp(0.0, 1.0)),
     });
     [ch(slots[0]), ch(slots[1]), ch(slots[2]), a]
 }
 
-fn unit(n: [f32; 3]) -> [f32; 3] {
+/// For each byte value, the color channel it gives (made linear) and the alpha, as [`color`]
+/// works them out.
+fn byte_colors() -> Vec<[f32; 2]> {
+    (0..=255u8)
+        .map(|v| {
+            let c = f32_of((f64::from(v) / 255.0).clamp(0.0, 1.0));
+            [srgb_to_linear(c), c]
+        })
+        .collect()
+}
+
+/// A gaussian splat's color: its base spherical-harmonic band as sRGB, made linear, and its
+/// opacity through a sigmoid.
+fn splat_color(vals: &[f64], dc: [usize; 3], opacity: Option<usize>) -> [f32; 4] {
+    let ch = |s: usize| srgb_to_linear(f32_of((0.5 + SH_C0 * vals[s]).clamp(0.0, 1.0)));
+    let a = opacity.map_or(1.0, |s| f32_of(1.0 / (1.0 + (-vals[s]).exp())));
+    [ch(dc[0]), ch(dc[1]), ch(dc[2]), if a.is_finite() { a } else { 1.0 }]
+}
+
+/// Whether `n` is the zero vector, the placeholder for a vertex without a normal.
+#[allow(clippy::float_cmp, reason = "the placeholder is written exactly")]
+fn is_zero(n: [f32; 3]) -> bool {
+    n == [0.0; 3]
+}
+
+/// `n` made unit length; `None` for a zero or broken one, which says nothing.
+fn unit(n: [f32; 3]) -> Option<[f32; 3]> {
     let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
-    if len > 0.0 && len.is_finite() {
-        n.map(|c| c / len)
-    } else {
-        [0.0, 1.0, 0.0]
-    }
+    (len > 0.0 && len.is_finite()).then(|| n.map(|c| c / len))
 }
 
 /// Where an element's properties are, and which of them the reader uses.
@@ -412,9 +497,14 @@ struct Plan {
     n: Option<[usize; 3]>,
     rgb: Option<[usize; 3]>,
     alpha: Option<usize>,
+    /// A gaussian splat's color, for vertices without one of their own; the properties stay
+    /// custom attributes too.
+    splat: Option<([usize; 3], Option<usize>)>,
     uv: Option<(usize, usize)>,
     index_list: Option<usize>,
     uv_list: Option<usize>,
+    /// A face's texture, by its place among the `TextureFile` comments.
+    texnumber: Option<usize>,
     /// An edge's two vertices.
     edge: Option<[usize; 2]>,
     /// A vertex's scalar properties beyond those above, kept as custom attributes.
@@ -423,6 +513,13 @@ struct Plan {
     wanted: Vec<bool>,
     /// Binary records of fixed size (no lists): the size and each property's offset.
     fixed: Option<(usize, Vec<usize>)>,
+    /// With `fixed`, the wanted properties: each one's place, offset and type.
+    reads: Vec<(usize, usize, Ty)>,
+    /// An element of nothing but its vertex index list, counted by a `uchar`, of `int` or
+    /// `uint`: the list's type.
+    lone_list: Option<Ty>,
+    /// The colors byte values give, for binary files' `uchar` colors; see [`color`].
+    bytes: Vec<[f32; 2]>,
 }
 
 impl Plan {
@@ -431,18 +528,23 @@ impl Plan {
         let xyz = [el.slot(X), el.slot(Y), el.slot(Z)];
         let mut plan = Plan {
             xyz: xyz.map(|s| s.unwrap_or(usize::MAX)),
-            n: tri(el.slot(&["nx"]), el.slot(&["ny"]), el.slot(&["nz"])),
+            n: tri(el.slot(NX), el.slot(NY), el.slot(NZ)),
             rgb: tri(el.slot(R), el.slot(G), el.slot(B)),
             alpha: el.slot(A),
+            splat: None,
             uv: el.slot(U).zip(el.slot(V)),
             index_list: el.list(&["vertex_indices", "vertex_index"]),
             uv_list: el.list(&["texcoord"]),
+            texnumber: (kind == Kind::Face).then(|| el.slot(&["texnumber"])).flatten(),
             edge: (kind == Kind::Edge)
                 .then(|| Some([el.slot(&["vertex1"])?, el.slot(&["vertex2"])?]))
                 .flatten(),
             extra: Vec::new(),
             wanted: vec![false; el.props.len()],
             fixed: None,
+            reads: Vec::new(),
+            lone_list: None,
+            bytes: Vec::new(),
         };
         let used: Vec<usize> = xyz
             .into_iter()
@@ -452,6 +554,7 @@ impl Plan {
             .chain(plan.alpha)
             .chain(plan.uv.into_iter().flat_map(|(u, v)| [u, v]))
             .chain(plan.edge.into_iter().flatten())
+            .chain(plan.texnumber)
             .collect();
         for &s in &used {
             plan.wanted[s] = true;
@@ -463,6 +566,9 @@ impl Plan {
             for &k in &plan.extra {
                 plan.wanted[k] = true;
             }
+            if plan.rgb.is_none() {
+                plan.splat = tri(el.slot(DC[0]), el.slot(DC[1]), el.slot(DC[2])).map(|dc| (dc, el.slot(OPACITY)));
+            }
         }
         if el.props.iter().all(|p| p.count.is_none()) {
             let mut offsets = Vec::with_capacity(el.props.len());
@@ -471,7 +577,17 @@ impl Plan {
                 offsets.push(size);
                 size += p.ty.size();
             }
+            plan.reads = (0..el.props.len())
+                .filter(|&k| plan.wanted[k])
+                .map(|k| (k, offsets[k], el.props[k].ty))
+                .collect();
             plan.fixed = Some((size, offsets));
+        }
+        if let ([p], Some(0)) = (&el.props[..], plan.index_list)
+            && p.count == Some(Ty::U8)
+            && matches!(p.ty, Ty::I32 | Ty::U32)
+        {
+            plan.lone_list = Some(p.ty);
         }
         plan
     }
@@ -492,6 +608,10 @@ struct Body {
     /// Edges, as vertex indices, checked against the vertex count at the end.
     edges: Vec<u32>,
     points: usize,
+    /// Vertices whose normal is zero (or broken): placeholders, filled in later.
+    zero_normals: usize,
+    /// The most triangles the file may have.
+    limit: usize,
     /// The vertex element's other scalar properties' names, for `Vertices::extra`.
     extra_names: Vec<String>,
     /// Elements read past.
@@ -514,8 +634,8 @@ pub(crate) fn ply(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<D
         let d = blocks.data();
         let ended = d
             .windows(11)
-            .position(|w| w == b"\nend_header")
-            .is_some_and(|i| d[i + 11..].contains(&b'\n'));
+            .position(|w| matches!(w[0], b'\n' | b'\r') && &w[1..] == b"end_header")
+            .is_some_and(|i| d[i + 11..].iter().any(|&c| c == b'\n' || c == b'\r'));
         if ended || blocks.at_end() {
             break header(d)?;
         }
@@ -526,14 +646,22 @@ pub(crate) fn ply(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<D
     let has_faces = elements
         .iter()
         .any(|e| (e.name == "face" || e.name == "tristrips") && e.count > 0);
-    let mut body = Body::default();
+    let mut body = Body {
+        limit: input.limit,
+        ..Body::default()
+    };
+    // Every item takes at least its smallest record, so counts the file can't hold are refused
+    // before anything is reserved for them (the last ASCII value needs no separator).
+    let mut least = 0usize;
     for el in &elements {
-        // Every item takes at least a byte (binary) or two (ASCII, a value and a space).
+        least = least.saturating_add(el.count.saturating_mul(el.min_size(head.format)));
         ensure!(
-            el.count <= room,
-            "PLY element {} counts more items than the file holds",
+            el.count <= room && least <= room.saturating_add(1),
+            "PLY data ends early: element {} counts more items than the file holds",
             el.name
         );
+    }
+    for el in &elements {
         read_element(&mut blocks, head.format, el, &mut body)?;
     }
     let mut source = json!({
@@ -574,22 +702,28 @@ pub(crate) fn ply(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<D
     let mut shared = None;
     if has_faces {
         // A texture that would only be dropped isn't read.
-        let texture = head.texture.filter(|_| keep.materials && keep.textures);
+        let textures = if keep.materials && keep.textures {
+            head.textures.as_slice()
+        } else {
+            &[]
+        };
         let dir = path.parent().unwrap_or(Path::new(""));
         let mut images = Images::new(!keep.image_bytes, dir);
-        let (mesh, src) = build(&mut body, texture, path, assets, &mut images)?;
+        let (mesh, srcs) = build(&mut body, textures, path, assets, &mut images)?;
         facts.insert("triangles".into(), json!(mesh.triangles()));
         facts.insert(
             "vertices".into(),
             json!(mesh.prims.iter().map(|p| p.positions.len()).sum::<usize>()),
         );
         let Mesh { prims, materials, .. } = mesh;
-        for p in prims {
+        for (k, p) in prims.into_iter().enumerate() {
             let n = p.positions.len();
+            let material = p.material;
+            let src = srcs.as_ref().and_then(|s| s.get(k));
             if let Some(mut prim) = b.primitive(p) {
-                let columns = gather(&mut body.verts.extra, src.as_deref(), n);
+                let columns = gather(&mut body.verts.extra, src.map(Vec::as_slice), n);
                 custom(&mut b, &mut prim["attributes"], &names, columns);
-                prim["material"] = json!(0);
+                prim["material"] = json!(material);
                 if src.is_none() {
                     shared = Some(prim["attributes"].clone());
                 }
@@ -600,7 +734,7 @@ pub(crate) fn ply(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<D
     } else {
         facts.insert("points".into(), json!(body.points));
         if nv > 0 {
-            let attributes = vertex_attributes(&mut b, &mut body.verts, &names);
+            let attributes = vertex_attributes(&mut b, &mut body.verts, body.zero_normals, &names);
             primitives.push(json!({ "attributes": attributes, "mode": 0 }));
             shared = Some(attributes);
         }
@@ -657,10 +791,16 @@ fn custom(b: &mut Builder, attributes: &mut Value, names: &[String], columns: Ve
 }
 
 /// A point cloud's attributes: everything its vertices carry.
-fn vertex_attributes(b: &mut Builder, v: &mut Vertices, names: &[String]) -> Value {
+fn vertex_attributes(b: &mut Builder, v: &mut Vertices, zero_normals: usize, names: &[String]) -> Value {
     let n = v.pos.len();
     let mut attributes = json!({ "POSITION": b.positions(std::mem::take(&mut v.pos)) });
-    if v.nrm.len() == n {
+    // Normals that are all zero are placeholders; a point without one faces up.
+    if v.nrm.len() == n && zero_normals < n {
+        for c in &mut v.nrm {
+            if is_zero(*c) {
+                *c = [0.0, 1.0, 0.0];
+            }
+        }
         let a = b.accessor(
             Part::f32(std::mem::take(&mut v.nrm).into_flattened()),
             5126,
@@ -701,6 +841,13 @@ enum Kind {
     Other,
 }
 
+/// Room for `n` more items, or an error where there isn't memory for them.
+fn reserve<T>(v: &mut Vec<T>, n: usize) -> Result<()> {
+    v.try_reserve_exact(n)
+        .ok()
+        .context("not enough memory for the PLY data")
+}
+
 /// Reads one element's items, a block of the file at a time.
 fn read_element(blocks: &mut Blocks<'_>, format: Format, el: &Element, body: &mut Body) -> Result<()> {
     let kind = match el.name.as_str() {
@@ -710,7 +857,14 @@ fn read_element(blocks: &mut Blocks<'_>, format: Format, el: &Element, body: &mu
         "edge" => Kind::Edge,
         _ => Kind::Other,
     };
-    let plan = Plan::new(el, kind);
+    let mut plan = Plan::new(el, kind);
+    if format == Format::Ascii {
+        // Read as text, a uchar may hold anything.
+        plan.fixed = None;
+        plan.lone_list = None;
+    } else if plan.rgb.is_some() {
+        plan.bytes = byte_colors();
+    }
     if kind == Kind::Other || kind == Kind::Edge && plan.edge.is_none() {
         body.skipped.push(el.name.clone());
     }
@@ -720,22 +874,33 @@ fn read_element(blocks: &mut Blocks<'_>, format: Format, el: &Element, body: &mu
             "PLY vertices have no x, y and z"
         );
         let v = &mut body.verts;
-        v.pos.reserve_exact(el.count);
-        if plan.n.is_some() {
-            v.nrm.reserve_exact(el.count);
-        }
-        if plan.rgb.is_some() {
-            v.col.reserve_exact(el.count);
-        }
-        if plan.uv.is_some() {
-            v.uv.reserve_exact(el.count);
-        }
+        let n = el.count;
+        reserve(&mut v.pos, n)?;
+        reserve(&mut v.nrm, if plan.n.is_some() { n } else { 0 })?;
+        reserve(
+            &mut v.col,
+            if plan.rgb.is_some() || plan.splat.is_some() {
+                n
+            } else {
+                0
+            },
+        )?;
+        reserve(&mut v.uv, if plan.uv.is_some() { n } else { 0 })?;
         body.extra_names = plan.extra.iter().map(|&k| el.props[k].name.clone()).collect();
-        v.extra = plan.extra.iter().map(|_| Vec::with_capacity(el.count)).collect();
+        v.extra = Vec::new();
+        for _ in &plan.extra {
+            let mut col = Vec::new();
+            reserve(&mut col, n)?;
+            v.extra.push(col);
+        }
     }
     // Faces become triangles as they're read when their vertices are known and their corners
     // share the vertices' data.
-    let direct = kind == Kind::Face && body.have_verts && plan.rgb.is_none() && plan.uv_list.is_none();
+    let direct = kind == Kind::Face
+        && body.have_verts
+        && plan.rgb.is_none()
+        && plan.uv_list.is_none()
+        && plan.texnumber.is_none();
     // Sized from the first block's triangles per face once it's read.
     let mut sized = !direct;
     body.vals.resize(el.props.len(), 0.0);
@@ -779,18 +944,23 @@ fn read_element(blocks: &mut Blocks<'_>, format: Format, el: &Element, body: &mu
             // One record is longer than what's buffered.
             blocks.need(buffered * 2 + 64)?;
         }
-        ensure!(body.tris.len() / 3 <= MAX_TRIANGLES, "too many triangles to convert");
+        ensure!(
+            body.tris.len() / 3 <= body.limit,
+            "too many triangles to convert (more than {})",
+            body.limit
+        );
         if !sized && done > 0 {
             sized = true;
             #[allow(
                 clippy::cast_precision_loss,
                 clippy::cast_possible_truncation,
                 clippy::cast_sign_loss,
-                reason = "a capacity guess from the rate so far; MAX_TRIANGLES caps it"
+                reason = "a capacity guess from the rate so far; the limit caps it"
             )]
             let est = (body.tris.len() as f64 / done as f64 * el.count as f64 * 1.01) as usize + 48;
-            let est = est.min(MAX_TRIANGLES * 3);
-            body.tris.reserve_exact(est.saturating_sub(body.tris.len()));
+            let est = est.min(body.limit.saturating_mul(3));
+            let more = est.saturating_sub(body.tris.len());
+            reserve(&mut body.tris, more)?;
         }
     }
     if kind == Kind::Vertex {
@@ -810,19 +980,31 @@ fn record(
     idx: &mut Vec<u32>,
     tc: &mut Vec<f32>,
 ) -> Got<()> {
-    if let (Some((size, offsets)), false) = (&plan.fixed, cur.format == Format::Ascii) {
+    let be = cur.format == Format::Be;
+    if let Some((size, _)) = plan.fixed {
         let rec = cur.d.get(cur.pos..cur.pos + size).ok_or(Stop::Short)?;
-        let be = cur.format == Format::Be;
-        for (k, p) in el.props.iter().enumerate() {
-            if plan.wanted[k] {
-                vals[k] = at(&rec[offsets[k]..], p.ty, be);
-            }
+        for &(k, off, ty) in &plan.reads {
+            vals[k] = at(&rec[off..], ty, be);
         }
         cur.pos += size;
         return Ok(());
     }
     idx.clear();
     tc.clear();
+    if let Some(ty) = plan.lone_list {
+        let d = &cur.d[cur.pos..];
+        let n = usize::from(*d.first().ok_or(Stop::Short)?);
+        let list = d.get(1..1 + 4 * n).ok_or(Stop::Short)?;
+        for b in list.as_chunks::<4>().0 {
+            let b = ordered::<4>(b, be);
+            idx.push(match ty {
+                Ty::I32 => u32::try_from(i32::from_le_bytes(b)).unwrap_or(u32::MAX),
+                _ => u32::from_le_bytes(b),
+            });
+        }
+        cur.pos += 1 + 4 * n;
+        return Ok(());
+    }
     for (k, p) in el.props.iter().enumerate() {
         match p.count {
             None if plan.wanted[k] => vals[k] = cur.value(p.ty)?,
@@ -854,10 +1036,15 @@ fn vertex(cur: &mut Cursor, el: &Element, plan: &Plan, body: &mut Body) -> Got<(
     let g = |s: usize| f32_of(vals[s]);
     v.pos.push(plan.xyz.map(g));
     if let Some(n) = plan.n {
-        v.nrm.push(unit(n.map(g)));
+        v.nrm.push(unit(n.map(g)).unwrap_or_else(|| {
+            body.zero_normals += 1;
+            [0.0; 3]
+        }));
     }
     if let Some(s) = plan.rgb {
-        v.col.push(color(el, vals, &s, plan.alpha));
+        v.col.push(color(el, vals, &s, plan.alpha, &plan.bytes));
+    } else if let Some((dc, opacity)) = plan.splat {
+        v.col.push(splat_color(vals, dc, opacity));
     }
     if let Some((a, b)) = plan.uv {
         v.uv.push([g(a), 1.0 - g(b)]);
@@ -903,6 +1090,14 @@ fn face(cur: &mut Cursor, el: &Element, plan: &Plan, direct: bool, body: &mut Bo
             body.tris.extend_from_slice(idx);
             return Ok(());
         }
+        if let &[a, b, c, d] = &idx[..] {
+            let pos = &body.verts.pos;
+            let q = [a, b, c, d];
+            if let Some(t) = quad(&q.map(|i| pos[i as usize])) {
+                body.tris.extend(t.iter().flatten().map(|&k| q[k as usize]));
+                return Ok(());
+            }
+        }
         body.pts.clear();
         body.pts.extend(idx.iter().map(|&i| body.verts.pos[i as usize]));
         body.local.clear();
@@ -922,8 +1117,17 @@ fn face(cur: &mut Cursor, el: &Element, plan: &Plan, direct: bool, body: &mut Bo
         }
     }
     if let Some(s) = plan.rgb {
-        let c = color(el, &body.vals, &s, plan.alpha);
+        let c = color(el, &body.vals, &s, plan.alpha, &plan.bytes);
         f.corner_col.extend(std::iter::repeat_n(c, idx.len()));
+    }
+    if let Some(k) = plan.texnumber {
+        let t = body.vals[k];
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "checked to be a small whole number"
+        )]
+        f.texture.push(if (0.0..65536.0).contains(&t) { t as u32 } else { 0 });
     }
     Ok(())
 }
@@ -962,25 +1166,35 @@ fn other(cur: &mut Cursor, el: &Element, plan: &Plan) -> Got<()> {
     Ok(())
 }
 
-/// The primitive: shared vertices as the file has them, or split where faces give their corners
-/// their own texture coordinates or colors.
-/// Also the source vertex of each drawn vertex when they were split, `None` when they are the
-/// file's own. The vertices' positions, normals, texture coordinates and colors are taken.
+/// The primitives: shared vertices as the file has them, or split where faces give their
+/// corners their own texture coordinates or colors, with a primitive per texture when faces
+/// pick one of several. Also the source vertex of each drawn vertex, by primitive, when they
+/// were split; `None` when they are the file's own. The vertices' positions, normals, texture
+/// coordinates and colors are taken.
 fn build(
     body: &mut Body,
-    texture: Option<String>,
+    textures: &[String],
     path: &Path,
     assets: &dyn Assets,
     images: &mut Images,
-) -> Result<(Mesh, Option<Vec<u32>>)> {
+) -> Result<(Mesh, Option<Vec<Vec<u32>>>)> {
+    let limit = body.limit;
+    let zero_normals = body.zero_normals;
     let verts = &mut body.verts;
     let mut tris = std::mem::take(&mut body.tris);
     let faces = std::mem::take(&mut body.faces);
     let strip_tris = std::mem::take(&mut body.strip_tris);
     let nv = verts.pos.len();
+    // Faces pick one of several textures: a material and primitive each.
+    let slots = if textures.len() > 1 && !faces.texture.is_empty() {
+        textures.len()
+    } else {
+        1
+    };
     // Faces kept for later become triangles, as corner numbers (into faces.corners) so
-    // per-corner data follows.
+    // per-corner data follows, and each triangle's texture when there are several.
     let mut corner_tris: Vec<[usize; 3]> = Vec::new();
+    let mut corner_slot: Vec<u32> = Vec::new();
     let mut local: Vec<[u32; 3]> = Vec::new();
     let mut pts: Vec<[f32; 3]> = Vec::new();
     for (f, &s) in faces.starts.iter().enumerate() {
@@ -989,6 +1203,7 @@ fn build(
         if face.len() < 3 || face.iter().any(|&i| i as usize >= nv) {
             continue;
         }
+
         if face.len() == 3 {
             corner_tris.push([s, s + 1, s + 2]);
         } else {
@@ -998,70 +1213,96 @@ fn build(
             triangulate(&pts, &mut local);
             corner_tris.extend(local.iter().map(|t| t.map(|k| s + k as usize)));
         }
-        ensure!(corner_tris.len() <= MAX_TRIANGLES, "too many triangles to convert");
+        if slots > 1 {
+            // A texture number past the list takes the first.
+            let t = faces.texture.get(f).copied().filter(|&t| (t as usize) < slots);
+            corner_slot.resize(corner_tris.len(), t.unwrap_or(0));
+        }
+        ensure!(
+            corner_tris.len() <= limit,
+            "too many triangles to convert (more than {limit})"
+        );
     }
     let strips: Vec<[u32; 3]> = strip_tris
         .into_iter()
         .filter(|t| t.iter().all(|&i| (i as usize) < nv))
         .collect();
     let total = tris.len() / 3 + corner_tris.len() + strips.len();
-    ensure!(total <= MAX_TRIANGLES, "too many triangles to convert");
+    ensure!(total <= limit, "too many triangles to convert (more than {limit})");
     ensure!(total > 0, "PLY has no faces");
 
-    let per_corner = !faces.corner_uv.is_empty() || !faces.corner_col.is_empty();
+    let per_corner = !faces.corner_uv.is_empty() || !faces.corner_col.is_empty() || slots > 1;
     let has_uv = !faces.corner_uv.is_empty() || verts.uv.len() == nv && nv > 0;
     let has_col = !faces.corner_col.is_empty() || verts.col.len() == nv && nv > 0;
-    let has_nrm = verts.nrm.len() == nv;
-    let mut p = Prim::default();
-    let mut src = Vec::new();
+    // Normals that are all zero are placeholders, as good as none.
+    let has_nrm = verts.nrm.len() == nv && zero_normals < nv;
+    let mut prims: Vec<Prim> = (0..slots)
+        .map(|k| Prim {
+            material: k,
+            ..Prim::default()
+        })
+        .collect();
+    let mut srcs: Vec<Vec<u32>> = vec![Vec::new(); slots];
     if per_corner {
-        // One output vertex per distinct (vertex, corner data).
-        let mut seen: FastMap<(u32, [u32; 2], [u32; 4]), u32> = FastMap::default();
-        let mut emit = |p: &mut Prim, v: u32, uv: Option<[f32; 2]>, col: Option<[f32; 4]>| -> u32 {
+        // Generated normals are smoothed over the file's vertices, so splitting a vertex by its
+        // corners' data leaves no seam.
+        let smooth = if has_nrm && zero_normals == 0 {
+            Vec::new()
+        } else {
+            let mut by_vertex = Vec::with_capacity(total * 3);
+            by_vertex.extend_from_slice(&tris);
+            by_vertex.extend(corner_tris.iter().flatten().map(|&c| faces.corners[c]));
+            by_vertex.extend(strips.iter().flatten());
+            smooth_normals(&verts.pos, &by_vertex)
+        };
+        // One output vertex per distinct (texture, vertex, corner data).
+        let mut seen: FastMap<(u32, u32, [u32; 2], [u32; 4]), u32> = FastMap::default();
+        let mut emit = |slot: u32, v: u32, uv: Option<[f32; 2]>, col: Option<[f32; 4]>| {
             let key = (
+                slot,
                 v,
                 uv.unwrap_or_default().map(f32::to_bits),
                 col.unwrap_or_default().map(f32::to_bits),
             );
-            *seen.entry(key).or_insert_with(|| {
-                src.push(v);
-                p.positions.push(verts.pos[v as usize]);
-                if has_nrm {
-                    p.normals.push(verts.nrm[v as usize]);
-                }
+            let p = &mut prims[slot as usize];
+            let id = *seen.entry(key).or_insert_with(|| {
+                srcs[slot as usize].push(v);
+                let at = v as usize;
+                p.positions.push(verts.pos[at]);
+                let own = verts.nrm.get(at).copied().filter(|&n| has_nrm && !is_zero(n));
+                p.normals
+                    .push(own.or_else(|| smooth.get(at).copied()).unwrap_or([0.0, 1.0, 0.0]));
                 if has_uv {
                     p.uvs
-                        .push(uv.or_else(|| verts.uv.get(v as usize).copied()).unwrap_or([0.0, 1.0]));
+                        .push(uv.or_else(|| verts.uv.get(at).copied()).unwrap_or([0.0, 1.0]));
                 }
                 if has_col {
                     p.colors
-                        .push(col.or_else(|| verts.col.get(v as usize).copied()).unwrap_or([1.0; 4]));
+                        .push(col.or_else(|| verts.col.get(at).copied()).unwrap_or([1.0; 4]));
                 }
                 u32_of(p.positions.len() - 1)
-            })
+            });
+            p.indices.push(id);
         };
         for &v in &tris {
-            let id = emit(&mut p, v, None, None);
-            p.indices.push(id);
+            emit(0, v, None, None);
         }
-        for t in &corner_tris {
+        for (k, t) in corner_tris.iter().enumerate() {
+            let slot = corner_slot.get(k).copied().unwrap_or(0);
             for &c in t {
-                let id = emit(
-                    &mut p,
+                emit(
+                    slot,
                     faces.corners[c],
                     faces.corner_uv.get(c).copied(),
                     faces.corner_col.get(c).copied(),
                 );
-                p.indices.push(id);
             }
         }
-        for t in &strips {
-            for &v in t {
-                let id = emit(&mut p, v, None, None);
-                p.indices.push(id);
-            }
+        for &v in strips.iter().flatten() {
+            emit(0, v, None, None);
         }
     } else {
+        let p = &mut prims[0];
         tris.reserve_exact(total * 3 - tris.len());
         tris.extend(corner_tris.iter().flatten().map(|&c| faces.corners[c]));
         tris.extend(strips.iter().flatten());
@@ -1079,38 +1320,190 @@ fn build(
         if has_col {
             p.colors = std::mem::take(&mut verts.col);
         }
-    }
-    if !has_nrm {
-        p.normals = smooth_normals(&p.positions, &p.indices);
+        if !has_nrm {
+            p.normals = smooth_normals(&p.positions, &p.indices);
+        } else if zero_normals > 0 {
+            // Only the vertices without a normal of their own take a smooth one.
+            let smooth = smooth_normals(&p.positions, &p.indices);
+            for (n, s) in p.normals.iter_mut().zip(smooth) {
+                if is_zero(*n) {
+                    *n = s;
+                }
+            }
+        }
     }
 
     let mut mesh = Mesh::default();
     // Vertex colors show as they are; otherwise the usual gray.
     let base = if has_col { [1.0; 4] } else { crate::mesh::GRAY };
-    let mut mat = Material::plain("default", base);
-    if has_uv {
-        let dir = path.parent().unwrap_or(Path::new(""));
-        if let Some(i) = texture.and_then(|t| images.file(assets, assets.find(&t, dir)?, &t)) {
+    let dir = path.parent().unwrap_or(Path::new(""));
+    for k in 0..slots {
+        // One texture: the last the file names, as before there were several.
+        let texture = if slots > 1 { textures.get(k) } else { textures.last() };
+        let name = if slots > 1 {
+            texture.map_or_else(|| format!("texture{k}"), Clone::clone)
+        } else {
+            "default".to_owned()
+        };
+        let mut mat = Material::plain(&name, base);
+        if has_uv
+            && let Some(t) = texture
+            && let Some(i) = assets.find(t, dir).and_then(|f| images.file(assets, f, t))
+        {
             mat.color_image = Some(i);
             mat.color = [1.0; 4];
         }
+        mesh.materials.push(mat);
     }
-    mesh.materials.push(mat);
-    mesh.prims.push(p);
-    Ok((mesh, per_corner.then_some(src)))
+    let mut kept = Vec::new();
+    for (p, src) in prims.into_iter().zip(srcs) {
+        if !p.indices.is_empty() || slots == 1 {
+            mesh.prims.push(p);
+            kept.push(src);
+        }
+    }
+    Ok((mesh, per_corner.then_some(kept)))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn load(bytes: &[u8]) -> Result<Document<'static>> {
+        ply(Input::memory(bytes, "t.ply"), &crate::assets::Memory::new(), Keep::ALL)
+    }
+
     fn read(text: &str) -> Document<'static> {
-        ply(
-            Input::memory(text.as_bytes(), "t.ply"),
-            &crate::assets::Memory::new(),
-            Keep::ALL,
-        )
-        .unwrap()
+        load(text.as_bytes()).unwrap()
+    }
+
+    fn mesh(text: &str) -> Mesh {
+        read(text).flatten(crate::document::Pose::Rest).unwrap().unwrap()
+    }
+
+    fn attributes(doc: &Document<'_>) -> Vec<String> {
+        let prim = &doc.json["meshes"][0]["primitives"][0]["attributes"];
+        prim.as_object().unwrap().keys().cloned().collect()
+    }
+
+    #[test]
+    fn counts_times_record_size_past_the_file_are_refused_before_reserving() {
+        // A thousand one-byte properties times ten million vertices in a file of a few bytes.
+        let mut head = String::from("ply\nformat binary_little_endian 1.0\nelement vertex 10000000\n");
+        head.push_str("property float x\nproperty float y\nproperty float z\n");
+        for k in 0..1000 {
+            head.push_str("property uchar p");
+            head.push_str(&k.to_string());
+            head.push('\n');
+        }
+        head.push_str("end_header\n");
+        let mut bytes = head.into_bytes();
+        bytes.extend(std::iter::repeat_n(0u8, 20_000_000));
+        let err = load(&bytes).err().unwrap().to_string();
+        assert!(err.contains("ends early"), "{err}");
+        // As ASCII: each property needs a character and a separator.
+        let text = "ply\nformat ascii 1.0\nelement vertex 3\nproperty float x\nproperty float y\n\
+                    property float z\nend_header\n0 0 0 1 0 0 0 1";
+        assert!(load(text.as_bytes()).is_err());
+    }
+
+    const TRIANGLE: &str = "format ascii 1.0\nelement vertex 3\nproperty float x\nproperty float y\n\
+                            property float z\nelement face 1\nproperty list uchar int vertex_indices\n\
+                            end_header\n0 0 0\n1 0 0\n0 1 0\n3 0 1 2\n";
+
+    #[test]
+    fn a_byte_order_mark_before_the_header() {
+        let text = format!("\u{feff}ply\r\n{TRIANGLE}");
+        assert_eq!(mesh(&text).triangles(), 1);
+    }
+
+    #[test]
+    fn normals_by_their_other_names_and_zero_ones_filled_in() {
+        let m = mesh(
+            "ply\nformat ascii 1.0\nelement vertex 3\nproperty float x\nproperty float y\nproperty float z\n\
+             property float normal_x\nproperty float normal_y\nproperty float normal_z\n\
+             element face 1\nproperty list uchar int vertex_indices\nend_header\n\
+             0 0 0 0 0 2\n1 0 0 0 0 0\n0 1 0 1 0 0\n3 0 1 2\n",
+        );
+        let n = &m.prims[0].normals;
+        assert_eq!(n[0], [0.0, 0.0, 1.0], "normal_x/y/z read and made unit");
+        assert_eq!(n[1], [0.0, 0.0, 1.0], "a zero normal takes the smooth one");
+        assert_eq!(n[2], [1.0, 0.0, 0.0], "the file's own normals stay");
+        // All zero: as good as none, so the generated ones.
+        let m = mesh(
+            "ply\nformat ascii 1.0\nelement vertex 3\nproperty float x\nproperty float y\nproperty float z\n\
+             property float nx\nproperty float ny\nproperty float nz\n\
+             element face 1\nproperty list uchar int vertex_indices\nend_header\n\
+             0 0 0 0 0 0\n1 0 0 0 0 0\n0 1 0 0 0 0\n3 0 1 2\n",
+        );
+        assert!(m.prims[0].normals.iter().all(|n| (n[2] - 1.0).abs() < 1e-6));
+    }
+
+    #[test]
+    fn header_lines_may_end_in_a_lone_carriage_return() {
+        let text = format!("ply\r{}", TRIANGLE.replace('\n', "\r"));
+        assert_eq!(mesh(&text).triangles(), 1);
+    }
+
+    #[test]
+    fn faces_pick_one_of_several_textures() {
+        let doc = read(
+            "ply\nformat ascii 1.0\ncomment TextureFile a.png\ncomment TextureFile b.png\n\
+             element vertex 4\nproperty float x\nproperty float y\nproperty float z\n\
+             element face 2\nproperty list uchar int vertex_indices\nproperty list uchar float texcoord\n\
+             property int texnumber\nend_header\n0 0 0\n1 0 0\n1 1 0\n0 1 0\n\
+             3 0 1 2 6 0 0 1 0 1 1 1\n3 0 2 3 6 0 0 1 1 0 1 0\n",
+        );
+        let prims = doc.json["meshes"][0]["primitives"].as_array().unwrap();
+        assert_eq!(prims.len(), 2);
+        assert_eq!(prims[0]["material"], 0);
+        assert_eq!(prims[1]["material"], 1);
+        assert_eq!(doc.json["materials"][0]["name"], "a.png");
+        assert_eq!(doc.json["materials"][1]["name"], "b.png");
+        let m = doc.flatten(crate::document::Pose::Rest).unwrap().unwrap();
+        assert_eq!(m.triangles(), 2);
+    }
+
+    #[test]
+    fn generated_normals_have_no_seam_where_texture_coordinates_split_a_vertex() {
+        // A folded strip: vertex 1 and 2 are split by their faces' texture coordinates, and
+        // still share one smooth normal.
+        let m = mesh(
+            "ply\nformat ascii 1.0\nelement vertex 4\nproperty float x\nproperty float y\nproperty float z\n\
+             element face 2\nproperty list uchar int vertex_indices\nproperty list uchar float texcoord\n\
+             end_header\n0 0 0\n1 0 0\n1 1 0\n1 0 -1\n\
+             3 0 1 2 6 0 0 1 0 1 1\n3 1 3 2 6 0.5 0 1 0 0.5 1\n",
+        );
+        let p = &m.prims[0];
+        assert_eq!(p.positions.len(), 6);
+        for (k, a) in p.positions.iter().enumerate() {
+            for (j, b) in p.positions.iter().enumerate() {
+                if a.map(f32::to_bits) == b.map(f32::to_bits) {
+                    assert!(
+                        p.normals[k].map(f32::to_bits) == p.normals[j].map(f32::to_bits),
+                        "one normal at {a:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn gaussian_splats_show_their_color_and_drop_zero_normals() {
+        let doc = read(
+            "ply\nformat ascii 1.0\nelement vertex 2\nproperty float x\nproperty float y\nproperty float z\n\
+             property float nx\nproperty float ny\nproperty float nz\nproperty float f_dc_0\n\
+             property float f_dc_1\nproperty float f_dc_2\nproperty float opacity\nend_header\n\
+             0 0 0 0 0 0 0 0 0 0\n1 0 0 0 0 0 1.7724539 -1.7724539 0 -100\n",
+        );
+        let names = attributes(&doc);
+        assert!(names.contains(&"COLOR_0".to_owned()), "{names:?}");
+        assert!(!names.contains(&"NORMAL".to_owned()), "{names:?}");
+        assert!(names.contains(&"_F_DC_0".to_owned()) && names.contains(&"_OPACITY".to_owned()));
+        let c = splat_color(&[0.0, 0.0, 0.0, 0.0], [0, 1, 2], Some(3));
+        assert!((c[0] - srgb_to_linear(0.5)).abs() < 1e-6 && (c[3] - 0.5).abs() < 1e-6);
+        let c = splat_color(&[1.772_453_9, -1.772_453_9, 0.0, -100.0], [0, 1, 2], Some(3));
+        assert!((c[0] - 1.0).abs() < 1e-5 && c[1].abs() < 1e-6 && c[3] < 1e-6, "{c:?}");
     }
 
     #[test]

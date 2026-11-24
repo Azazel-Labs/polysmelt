@@ -7,7 +7,14 @@
 //! Meshes keep their polygons' outlines (concave faces are ear-clipped, `holeIndices` faces left out) and their
 //! normals, texture coordinates and display colors in any interpolation; with no normals a subdivision surface is
 //! smoothed and a polygonal one faceted. The implicit surfaces (Cube, Sphere, Cylinder, Cone, Capsule, Plane) are
-//! tessellated. Values are read at the stage's start time when it gives a time range, else at the earliest sample,
+//! tessellated. `BasisCurves` become lines: linear curves through their points, cubic ones (Bézier, B-spline and
+//! Catmull-Rom, with their wrap) sampled at eight steps a segment, which is what draws them where they are rather
+//! than along their control hulls. `NurbsCurves` are sampled at eight steps a knot span within their ranges,
+//! rational by their point weights, up to order [`MAX_ORDER`]; `HermiteCurves` at eight steps a segment, leaving
+//! each point along its tangent. Past [`MAX_CURVE_POINTS`] samples in a stage, curves are drawn through their
+//! control points, as are those whose order, knots or tangents don't make a curve. `Points` become points. Curves
+//! and points take their display colors (per curve, per point or per segment end) and their bound material, and
+//! leave widths out. Values are read at the stage's start time when it gives a time range, else at the earliest sample,
 //! so the rest pose is the first frame.
 //!
 //! `UsdSkel` skeletons become joint nodes under their skeleton's node, skinned meshes glTF skins (joint influences
@@ -47,7 +54,7 @@ use crate::assets::{Assets, memory_key};
 use crate::document::{Builder, Document, Keep, Part};
 use crate::images::{Images, Location};
 use crate::material::{self, Alpha, Clearcoat, Factor, Full, Specular, Tex, UvTransform};
-use crate::mesh::{GRAY, MAX_TRIANGLES, Material, Prim, triangulate};
+use crate::mesh::{GRAY, Material, Prim, triangulate};
 use crate::num::f32_of;
 
 /// Prim types that are no node: shading networks, and what the prims using them read (subsets, blend shapes,
@@ -61,6 +68,35 @@ const NOT_NODES: &[&str] = &[
     "SkelAnimation",
 ];
 
+/// Prim types drawn as surfaces: meshes and the implicit surfaces.
+const GPRIMS: &[&str] = &[
+    "Mesh",
+    "Cube",
+    "Sphere",
+    "Cylinder",
+    "Cylinder_1",
+    "Cone",
+    "Capsule",
+    "Capsule_1",
+    "Plane",
+];
+
+/// The steps each segment of a cubic curve is sampled at.
+const CURVE_STEPS: u16 = 8;
+
+/// The most points sampled curves add to a stage: each control point is a few bytes of the file but
+/// [`CURVE_STEPS`] points drawn, so this bounds what a stage of curves costs. Past it, a curve is drawn through its
+/// control points.
+const MAX_CURVE_POINTS: usize = 1 << 22;
+
+/// The highest order of NURBS curve sampled, where its control points' weights still fit a [`Sample`]: degree
+/// seven, past the cubics nearly every curve is. Higher orders are drawn through their control points.
+const MAX_ORDER: usize = 8;
+
+/// The most texture coordinate sets, and the most color sets, a primitive keeps: past what any real model has, and
+/// a bound on what a file with thousands of primvars costs.
+const MAX_SETS: usize = 8;
+
 /// The longest turn between two animation samples, in degrees: longer ones are cut into steps.
 const MAX_STEP_DEGREES: f64 = 10.0;
 
@@ -72,6 +108,12 @@ const MAX_NESTING: usize = 8;
 
 /// The stage as a document; one with nothing to show (a material library, a layer of overrides) has no nodes.
 pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document<'static>> {
+    load_capped(input, assets, keep, MAX_NODES)
+}
+
+/// [`load`], making at most `max_nodes` nodes: past them the rest of the stage is left out, and
+/// `asset.extras.source` says so.
+fn load_capped(input: Input<'_>, assets: &dyn Assets, keep: Keep, max_nodes: usize) -> Result<Document<'static>> {
     let path = input.path;
     let (stage, paths) = match input.bytes() {
         Some(bytes) => open_in_memory(bytes, input, assets)?,
@@ -118,6 +160,7 @@ pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
         mesh_of: HashMap::new(),
         materials: Vec::new(),
         material_of: HashMap::new(),
+        material_reads: Vec::new(),
         images: Images::new(!keep.image_bytes, input.dir()),
         image_of: HashMap::new(),
         skins: Vec::new(),
@@ -129,6 +172,10 @@ pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
         morphed: Vec::new(),
         skinned_roots: Vec::new(),
         drawn: 0,
+        curve_points: 0,
+        limit: input.limit,
+        max_nodes,
+        truncated: false,
     };
     let roots = r.walk(&prims, &prims, None, 0)?;
     r.skin_meshes()?;
@@ -164,6 +211,9 @@ pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
         "metersPerUnit": meters,
         "timeCodesPerSecond": tcps,
     });
+    if r.truncated {
+        source["truncated"] = json!(format!("over {max_nodes} nodes: the rest are left out"));
+    }
     if stage.has_authored_time_code_range() {
         source["startTimeCode"] = json!(stage.start_time_code());
         source["endTimeCode"] = json!(stage.end_time_code());
@@ -350,8 +400,11 @@ struct Reader<'a> {
     /// mesh, `None` when it has no faces.
     mesh_of: HashMap<String, Option<usize>>,
     materials: Vec<Full>,
-    /// Material prim path (or `display:<rgba>` for a display color) to its index in `materials`.
+    /// Material prim path (or `display:<rgba>` for a display color), and whether it's double-sided, to its index
+    /// in `materials`.
     material_of: HashMap<String, usize>,
+    /// What each material reads from the surface it's on, by index in `materials`.
+    material_reads: Vec<Reads>,
     images: Images,
     /// Texture asset path to its index in `images`, or `None` when it couldn't be found.
     image_of: HashMap<String, Option<usize>>,
@@ -369,13 +422,25 @@ struct Reader<'a> {
     skinned_roots: Vec<usize>,
     /// Triangles drawn, every instance counted.
     drawn: usize,
+    /// Points sampled on curves, up to [`MAX_CURVE_POINTS`].
+    curve_points: usize,
+    /// The most triangles the stage may draw.
+    limit: usize,
+    /// The most nodes the stage may make.
+    max_nodes: usize,
+    /// Whether nodes were left out for `max_nodes`.
+    truncated: bool,
 }
 
 impl Reader<'_> {
-    fn push_node(&mut self, node: Value) -> Result<usize> {
-        ensure!(self.nodes.len() < MAX_NODES, "too many nodes (over {MAX_NODES})");
+    /// Adds a node; `None` once there are `max_nodes`, which leaves the rest of the stage out.
+    fn push_node(&mut self, node: Value) -> Option<usize> {
+        if self.nodes.len() >= self.max_nodes {
+            self.truncated = true;
+            return None;
+        }
         self.nodes.push(node);
-        Ok(self.nodes.len() - 1)
+        Some(self.nodes.len() - 1)
     }
 
     fn add_child(&mut self, parent: usize, child: usize) {
@@ -437,7 +502,9 @@ impl Reader<'_> {
                     node["extras"] = Value::Object(extras);
                 }
             }
-            let n = self.push_node(node)?;
+            let Some(n) = self.push_node(node) else {
+                return Ok(roots);
+            };
             // A prim that resets the transform stack ignores its parents' transforms.
             let resets = query.as_ref().is_some_and(XformQuery::resets_xform_stack);
             match (parent, scope) {
@@ -460,7 +527,7 @@ impl Reader<'_> {
                         self.instancer(prim, all, n, depth)?;
                     }
                 }
-                "Skeleton" => self.skeleton(prim, n)?,
+                "Skeleton" => self.skeleton(prim, n),
                 "Camera" if self.keep.cameras => {
                     let camera = self.camera(prim);
                     self.cameras.push(camera);
@@ -471,11 +538,14 @@ impl Reader<'_> {
                     self.lights.push(light);
                     self.nodes[n]["extensions"] = json!({ "KHR_lights_punctual": { "light": self.lights.len() - 1 } });
                 }
-                _ => {
-                    if let Some(shape) = self.shape(prim) {
-                        self.surface(prim, &shape, n)?;
-                    }
+                // glTF has no light all around: the dome's color, intensity and texture go in the node's extras.
+                "DomeLight" | "DomeLight_1" if self.keep.lights => {
+                    let dome = self.dome_light(prim);
+                    self.nodes[n]["extras"]["domeLight"] = dome;
                 }
+                k if GPRIMS.contains(&k) => self.surface(prim, n)?,
+                "BasisCurves" | "NurbsCurves" | "HermiteCurves" | "Points" => self.loose(prim, n),
+                _ => {}
             }
         }
         Ok(roots)
@@ -519,7 +589,9 @@ impl Reader<'_> {
             let t = positions.get(i).copied().unwrap_or_default();
             let mut inst = json!({ "name": format!("instance_{i}") });
             set_transform(&mut inst, &m4(&instance_matrix(s, q, t)));
-            let n = self.push_node(inst)?;
+            let Some(n) = self.push_node(inst) else {
+                return Ok(());
+            };
             self.add_child(node, n);
             self.walk(&parts[w], all, Some((&protos[w], n)), depth + 1)?;
         }
@@ -527,7 +599,7 @@ impl Reader<'_> {
     }
 
     /// A skeleton's joints, as nodes under its node `node`.
-    fn skeleton(&mut self, prim: &usd::Prim, node: usize) -> Result<()> {
+    fn skeleton(&mut self, prim: &usd::Prim, node: usize) {
         let joints = tokens(self.value(&prim.attribute("joints")));
         let binds = matrices(self.value(&prim.attribute("bindTransforms")));
         let rests = matrices(self.value(&prim.attribute("restTransforms")));
@@ -577,7 +649,10 @@ impl Reader<'_> {
             let local = posed.get(i).copied().flatten().unwrap_or(rest[i]);
             let mut n = json!({ "name": leaf(j) });
             set_transform(&mut n, &local);
-            let n = self.push_node(n)?;
+            // Past the node cap the skeleton isn't made: its surfaces go unskinned.
+            let Some(n) = self.push_node(n) else {
+                return;
+            };
             self.add_child(parents[i].map_or(node, |p| nodes[p]), n);
             nodes.push(n);
         }
@@ -591,7 +666,6 @@ impl Reader<'_> {
                 animation,
             },
         );
-        Ok(())
     }
 
     /// A skeletal animation's values at `time`.
@@ -632,22 +706,8 @@ impl Reader<'_> {
 
     /// A light's `KHR_lights_punctual` form. A disk or rectangle lights one side, as a spot with a hemisphere's cone.
     fn light(&self, prim: &usd::Prim, kind: &str) -> Value {
-        // UsdLux's inputs, or the names before they had the `inputs:` prefix.
-        let input = |name: &str| {
-            self.value(&prim.attribute(format!("inputs:{name}").as_str()))
-                .or_else(|| self.value(&prim.attribute(name)))
-        };
-        let number = |name: &str, fallback: f64| match input(name) {
-            Some(sdf::Value::Float(v)) => f64::from(v),
-            Some(sdf::Value::Double(v)) => v,
-            Some(sdf::Value::Half(v)) => f64::from(v.to_f32()),
-            _ => fallback,
-        };
-        let color = input("color")
-            .and_then(vec3s)
-            .and_then(|c| c.first().copied())
-            .unwrap_or([1.0; 3]);
-        let intensity = number("intensity", 1.0).max(0.0) * number("exposure", 0.0).exp2();
+        let number = |name: &str, fallback: f64| self.light_number(prim, name, fallback);
+        let (color, intensity) = self.light_color(prim);
         let mut out = json!({ "color": color, "intensity": intensity });
         let half = std::f64::consts::FRAC_PI_2;
         match kind {
@@ -669,6 +729,51 @@ impl Reader<'_> {
             }
         }
         out
+    }
+
+    /// A light's input: by its `inputs:` name, or the name it had before that prefix.
+    fn light_input(&self, prim: &usd::Prim, name: &str) -> Option<sdf::Value> {
+        self.value(&prim.attribute(format!("inputs:{name}").as_str()))
+            .or_else(|| self.value(&prim.attribute(name)))
+    }
+
+    fn light_number(&self, prim: &usd::Prim, name: &str, fallback: f64) -> f64 {
+        match self.light_input(prim, name) {
+            Some(sdf::Value::Float(v)) => f64::from(v),
+            Some(sdf::Value::Double(v)) => v,
+            Some(sdf::Value::Half(v)) => f64::from(v.to_f32()),
+            _ => fallback,
+        }
+    }
+
+    /// A light's color and its intensity with its exposure applied.
+    fn light_color(&self, prim: &usd::Prim) -> ([f32; 3], f64) {
+        let color = self
+            .light_input(prim, "color")
+            .and_then(vec3s)
+            .and_then(|c| c.first().copied())
+            .unwrap_or([1.0; 3]);
+        let intensity =
+            self.light_number(prim, "intensity", 1.0).max(0.0) * self.light_number(prim, "exposure", 0.0).exp2();
+        (color, intensity)
+    }
+
+    /// A dome light, which glTF has no light for: its color, intensity, and environment map, for the node's extras.
+    fn dome_light(&self, prim: &usd::Prim) -> Value {
+        let (color, intensity) = self.light_color(prim);
+        let mut out = json!({ "color": color, "intensity": intensity });
+        if let Some(sdf::Value::AssetPath(a)) = self.light_input(prim, "texture:file") {
+            out["texture"] = json!(a.authored_path);
+        }
+        if let Some(format) = self.token(&prim.attribute("inputs:texture:format")) {
+            out["format"] = json!(format);
+        }
+        out
+    }
+
+    /// Whether a surface is drawn from both sides: its `doubleSided`, off unless authored.
+    fn double_sided(&self, prim: &usd::Prim) -> bool {
+        matches!(self.value(&prim.attribute("doubleSided")), Some(sdf::Value::Bool(true)))
     }
 
     /// A prim's `userProperties:` attributes (by their names after the prefix) and its `customData`.
@@ -694,13 +799,13 @@ impl Reader<'_> {
 
     /// A surface on node `node`: its mesh there, or for a skinned surface, on a node of its own once its skeleton
     /// is drawn.
-    fn surface(&mut self, prim: &usd::Prim, shape: &Shape, node: usize) -> Result<()> {
+    fn surface(&mut self, prim: &usd::Prim, node: usize) -> Result<()> {
         let skin = if self.keep.skins { self.skin_binding(prim) } else { None };
-        let Some(mesh) = self.mesh(prim, shape, skin.as_ref().map(|s| s.1))? else {
+        let Some(mesh) = self.mesh(prim, skin.as_ref().map(|s| s.1))? else {
             return Ok(());
         };
         self.drawn += self.mesh_triangles[mesh];
-        ensure!(self.drawn <= MAX_TRIANGLES, "too many triangles (over {MAX_TRIANGLES})");
+        ensure!(self.drawn <= self.limit, "too many triangles (over {})", self.limit);
         if let Some((skeleton, _)) = skin {
             self.pending.push(Pending {
                 node,
@@ -712,6 +817,186 @@ impl Reader<'_> {
             self.hold(node, mesh, prim);
         }
         Ok(())
+    }
+
+    /// Curves or points on node `node`: a mesh of their lines or points, made once per prototype and material
+    /// binding.
+    fn loose(&mut self, prim: &usd::Prim, node: usize) {
+        let source = match prim.prim_in_prototype() {
+            Ok(Some(p)) if prim.is_instance_proxy().unwrap_or(false) => p.path().as_str().to_owned(),
+            _ => prim.path().as_str().to_owned(),
+        };
+        let binding = bound(prim).map(|b| b.as_str().to_owned()).unwrap_or_default();
+        let key = format!("{source}|{binding}|loose");
+        let mesh = if let Some(&m) = self.mesh_of.get(&key) {
+            m
+        } else {
+            let m = self.build_loose(prim);
+            self.mesh_of.insert(key, m);
+            m
+        };
+        if let Some(m) = mesh {
+            self.nodes[node]["mesh"] = json!(m);
+        }
+    }
+
+    /// The mesh of a curves prim's lines or a `Points` prim's points; `None` when it draws nothing.
+    fn build_loose(&mut self, prim: &usd::Prim) -> Option<usize> {
+        let mut points = vec3s(self.value(&prim.attribute("points"))?)?;
+        let count = points.len();
+        let type_name = kind(prim);
+        // A Hermite curve's tangents, one a point, follow its points.
+        let hermite = type_name.as_deref() == Some("HermiteCurves")
+            && match self.value(&prim.attribute("tangents")).and_then(vec3s) {
+                Some(tangents) if tangents.len() == count => {
+                    points.extend(tangents);
+                    true
+                }
+                _ => false,
+            };
+        let api = PrimvarsAPI::from_prim_unchecked(prim.clone());
+        let display = self.curve_primvar(&api, "displayColor", vec3s);
+        let opacity = self.curve_primvar(&api, "displayOpacity", floats);
+        let vertex_colors =
+            display.as_ref().is_some_and(|d| !d.constant()) || opacity.as_ref().is_some_and(|o| !o.constant());
+        // Display colors that vary are vertex colors, whatever material is bound, as on surfaces.
+        let colored = vertex_colors;
+        let material = match bound(prim) {
+            Some(path) => self.material(Some(path), GRAY, false),
+            None if vertex_colors => self.material(None, [1.0; 4], false),
+            None => {
+                let [r, g, b] = display
+                    .as_ref()
+                    .and_then(|d| d.values.first().copied())
+                    .unwrap_or([GRAY[0], GRAY[1], GRAY[2]]);
+                let a = opacity.as_ref().and_then(|o| o.values.first().copied()).unwrap_or(1.0);
+                self.material(None, [r, g, b, a.clamp(0.0, 1.0)], false)
+            }
+        };
+        let curves = matches!(
+            type_name.as_deref(),
+            Some("BasisCurves" | "NurbsCurves" | "HermiteCurves")
+        );
+        let mut out = Prim {
+            material,
+            ..Prim::default()
+        };
+        // The curve's first vertex, and the vertex before, while the curve is unbroken.
+        let (mut first, mut prev) = (None, None);
+        let mut emit = |s: &Sample| {
+            if s.starts {
+                (first, prev) = (None, None);
+            }
+            let p = s.eval(|i| points.get(i).copied());
+            let Some(p) = p.filter(|p| p.iter().all(|x| x.is_finite())) else {
+                // A point that isn't there breaks the curve.
+                prev = None;
+                return;
+            };
+            let Ok(v) = u32::try_from(out.positions.len()) else {
+                return;
+            };
+            out.positions.push(p);
+            if colored {
+                let [r, g, b] = display.as_ref().and_then(|d| along(d, s, |c| c)).unwrap_or([1.0; 3]);
+                let [a] = opacity.as_ref().and_then(|o| along(o, s, |a| [a])).unwrap_or([1.0]);
+                out.colors.push([r, g, b, a].map(|c| c.clamp(0.0, 1.0)));
+            }
+            if !curves {
+                out.points.push(v);
+                return;
+            }
+            if let Some(u) = prev {
+                out.lines.extend_from_slice(&[u, v]);
+            }
+            first = first.or(Some(v));
+            prev = Some(v);
+            if s.closes
+                && let Some(f) = first
+                && f + 1 < v
+            {
+                out.lines.extend_from_slice(&[v, f]);
+            }
+        };
+        if curves {
+            let counts = ints(self.value(&prim.attribute("curveVertexCounts")));
+            let budget = MAX_CURVE_POINTS.saturating_sub(self.curve_points);
+            self.curve_points += match type_name.as_deref() {
+                Some("NurbsCurves") => {
+                    let nurbs = Nurbs {
+                        orders: ints(self.value(&prim.attribute("order"))),
+                        knots: self
+                            .value(&prim.attribute("knots"))
+                            .and_then(doubles)
+                            .unwrap_or_default(),
+                        ranges: self
+                            .value(&prim.attribute("ranges"))
+                            .and_then(double2s)
+                            .unwrap_or_default(),
+                        weights: self
+                            .value(&prim.attribute("pointWeights"))
+                            .and_then(doubles)
+                            .unwrap_or_default(),
+                    };
+                    nurbs_samples(&counts, count, &nurbs, budget, &mut emit)
+                }
+                // Without a tangent for each point, Hermite curves are drawn through their points.
+                Some("HermiteCurves") => curve_samples(
+                    &counts,
+                    count,
+                    hermite.then_some(Basis::Hermite),
+                    None,
+                    budget,
+                    &mut emit,
+                ),
+                _ => {
+                    let cubic = match self.token(&prim.attribute("type")).as_deref() {
+                        Some("linear") => None,
+                        _ => Some(match self.token(&prim.attribute("basis")).as_deref() {
+                            Some("bspline") => Basis::Bspline,
+                            Some("catmullRom") => Basis::CatmullRom,
+                            _ => Basis::Bezier,
+                        }),
+                    };
+                    let wrap = self.token(&prim.attribute("wrap"));
+                    curve_samples(&counts, count, cubic, wrap.as_deref(), budget, &mut emit)
+                }
+            };
+        } else {
+            for i in 0..count {
+                emit(&Sample::at(0, i, i));
+            }
+        }
+        if out.is_empty() {
+            return None;
+        }
+        let mut primitives = self.b.primitives(out);
+        for p in &mut primitives {
+            p["material"] = json!(material);
+        }
+        self.meshes
+            .push(json!({ "name": leaf(prim.path().as_str()), "primitives": primitives }));
+        self.mesh_triangles.push(0);
+        Some(self.meshes.len() - 1)
+    }
+
+    /// A primvar of curves or points. Varying (and face-varying) values are per segment end, so they're looked up
+    /// by corner.
+    fn curve_primvar<T>(
+        &self,
+        api: &PrimvarsAPI,
+        name: &str,
+        decode: fn(sdf::Value) -> Option<Vec<T>>,
+    ) -> Option<Primvar<T>> {
+        let pv = api.primvar(name).ok()?;
+        let mut p = self.read_primvar(&pv, decode)?;
+        if pv
+            .interpolation()
+            .is_ok_and(|t| matches!(t.as_token(), "varying" | "faceVarying"))
+        {
+            p.spread = Spread::FaceVarying;
+        }
+        Some(p)
     }
 
     /// Puts `mesh` on node `node`.
@@ -745,13 +1030,19 @@ impl Reader<'_> {
         for p in std::mem::take(&mut self.pending) {
             let Some(skel) = self.skeletons.get(&p.skeleton).filter(|s| !s.nodes.is_empty()) else {
                 // The skeleton isn't drawn: the surface goes unskinned where it is.
-                if let Some(shape) = self.shape(&p.prim)
-                    && let Some(mesh) = self.mesh(&p.prim, &shape, None)?
-                {
+                if let Some(mesh) = self.mesh(&p.prim, None)? {
                     self.hold(p.node, mesh, &p.prim);
                 }
                 continue;
             };
+            if self.nodes.len() >= self.max_nodes {
+                // No room for the skinned node: the surface stays where it is, unskinned.
+                self.truncated = true;
+                if let Some(mesh) = self.mesh(&p.prim, None)? {
+                    self.hold(p.node, mesh, &p.prim);
+                }
+                continue;
+            }
             let own = tokens(self.value(&p.prim.attribute("skel:joints")));
             let names = if own.is_empty() { &skel.joints } else { &own };
             let geom_bind = match self.value(&p.prim.attribute("primvars:skel:geomBindTransform")) {
@@ -773,7 +1064,9 @@ impl Reader<'_> {
             let name = self.nodes[p.node]["name"].clone();
             self.skins
                 .push(json!({ "joints": joints, "inverseBindMatrices": acc, "skeleton": skel.nodes[0] }));
-            let n = self.push_node(json!({ "name": name, "skin": self.skins.len() - 1 }))?;
+            let Some(n) = self.push_node(json!({ "name": name, "skin": self.skins.len() - 1 })) else {
+                continue;
+            };
             self.hold(n, p.mesh, &p.prim);
             self.skinned_roots.push(n);
         }
@@ -1082,10 +1375,513 @@ impl<T: Copy> Primvar<T> {
     }
 }
 
+/// The basis of a cubic curve.
+#[derive(Clone, Copy, PartialEq)]
+enum Basis {
+    Bezier,
+    Bspline,
+    CatmullRom,
+    /// A segment between two points, each leaving along its tangent.
+    Hermite,
+}
+
+impl Basis {
+    /// The weights of a segment's four control points at `t`. Each set sums to one, but for a Hermite segment's,
+    /// whose four are its start, its start's tangent, its end and its end's tangent: its points' sum to one.
+    fn weights(self, t: f32) -> [f32; 4] {
+        let (t2, t3) = (t * t, t * t * t);
+        let u = 1.0 - t;
+        match self {
+            Basis::Bezier => [u * u * u, 3.0 * t * u * u, 3.0 * t2 * u, t3],
+            Basis::Bspline => [
+                u * u * u / 6.0,
+                (3.0 * t3 - 6.0 * t2 + 4.0) / 6.0,
+                (-3.0 * t3 + 3.0 * t2 + 3.0 * t + 1.0) / 6.0,
+                t3 / 6.0,
+            ],
+            Basis::CatmullRom => [
+                0.5 * (-t3 + 2.0 * t2 - t),
+                1.5 * t3 - 2.5 * t2 + 1.0,
+                0.5 * (-3.0 * t3 + 4.0 * t2 + t),
+                0.5 * (t3 - t2),
+            ],
+            Basis::Hermite => [
+                2.0 * t3 - 3.0 * t2 + 1.0,
+                t3 - 2.0 * t2 + t,
+                -2.0 * t3 + 3.0 * t2,
+                t3 - t2,
+            ],
+        }
+    }
+}
+
+/// A point drawn on a curve, or a point of a point cloud: a weighted sum of control points.
+struct Sample {
+    curve: usize,
+    /// Control points and their weights, the first `n`.
+    terms: [(usize, f32); 8],
+    n: usize,
+    /// The segment ends it lies between, as corners for per-segment-end values, and how far along it is.
+    ends: (usize, usize, f32),
+    /// Whether it starts a curve.
+    starts: bool,
+    /// Whether the curve closes from it back to its start.
+    closes: bool,
+    /// Where tangents start among the control points: they carry no primvar values.
+    tangents: usize,
+}
+
+impl Sample {
+    /// Control point `point`, at corner `corner`, of curve `curve`.
+    fn at(curve: usize, point: usize, corner: usize) -> Self {
+        let mut terms = [(0, 0.0); 8];
+        terms[0] = (point, 1.0);
+        Sample {
+            curve,
+            terms,
+            n: 1,
+            ends: (corner, corner, 0.0),
+            starts: false,
+            closes: false,
+            tangents: usize::MAX,
+        }
+    }
+
+    /// Adds `w` of control point `i`.
+    fn add(&mut self, i: usize, w: f32) {
+        if let Some(slot) = self.terms[..self.n].iter_mut().find(|(k, _)| *k == i) {
+            slot.1 += w;
+        } else if let Some(slot) = self.terms.get_mut(self.n) {
+            *slot = (i, w);
+            self.n += 1;
+        }
+    }
+
+    /// The weighted sum of what `get` gives for each control point.
+    fn eval<const N: usize>(&self, get: impl Fn(usize) -> Option<[f32; N]>) -> Option<[f32; N]> {
+        let mut out = [0.0; N];
+        for &(i, w) in &self.terms[..self.n] {
+            let v = get(i)?;
+            for (o, x) in out.iter_mut().zip(v) {
+                *o += w * x;
+            }
+        }
+        Some(out)
+    }
+}
+
+/// A primvar's value at a sample: per curve, per control point (weighted as the point is), or per segment end
+/// (between the two ends).
+fn along<T: Copy, const N: usize>(pv: &Primvar<T>, s: &Sample, to: impl Fn(T) -> [f32; N]) -> Option<[f32; N]> {
+    match pv.spread {
+        Spread::FaceVarying => {
+            let (a, b, t) = s.ends;
+            let (a, b) = (to(pv.at(s.curve, 0, a)?), to(pv.at(s.curve, 0, b)?));
+            Some(std::array::from_fn(|k| a[k] + (b[k] - a[k]) * t))
+        }
+        // A tangent adds nothing: what's left is the points' share, which sums to one.
+        _ => s.eval(|i| {
+            if i >= s.tangents {
+                Some([0.0; N])
+            } else {
+                pv.at(s.curve, i, 0).map(&to)
+            }
+        }),
+    }
+}
+
+/// Emits the points drawn on curves of `counts` control points each (of `points` in all), in order: linear
+/// curves' control points, cubic ones' sampled at [`CURVE_STEPS`] a segment while `budget` lasts and through their
+/// control points after. A cubic curve with too few points for its basis and wrap is drawn through them; the
+/// curves past the points are left out. Hermite curves' tangents follow the points, one each. Returns the points
+/// sampled on cubic curves.
+fn curve_samples(
+    counts: &[i32],
+    points: usize,
+    cubic: Option<Basis>,
+    wrap: Option<&str>,
+    budget: usize,
+    emit: &mut dyn FnMut(&Sample),
+) -> usize {
+    let periodic = wrap == Some("periodic");
+    // Pinned curves meet their end points: B-spline and Catmull-Rom curves get a phantom point past each end.
+    let pinned = wrap == Some("pinned") && cubic.is_some_and(|b| b != Basis::Bezier);
+    let steps = usize::from(CURVE_STEPS);
+    let mut sampled = 0usize;
+    let (mut base, mut corners) = (0usize, 0usize);
+    for (curve, &n) in counts.iter().enumerate() {
+        let Ok(n) = usize::try_from(n) else { break };
+        let Some(end) = base.checked_add(n).filter(|&e| e <= points) else {
+            break;
+        };
+        let segments = match cubic {
+            None => 0,
+            Some(Basis::Hermite) => n.saturating_sub(1),
+            Some(Basis::Bezier) if periodic => {
+                if n >= 3 && n % 3 == 0 {
+                    n / 3
+                } else {
+                    0
+                }
+            }
+            Some(Basis::Bezier) => {
+                if n >= 4 && (n - 4) % 3 == 0 {
+                    (n - 1) / 3
+                } else {
+                    0
+                }
+            }
+            Some(_) if periodic => {
+                if n >= 3 {
+                    n
+                } else {
+                    0
+                }
+            }
+            Some(_) if pinned => n.saturating_sub(1),
+            Some(_) => n.saturating_sub(3),
+        };
+        let want = segments.saturating_mul(steps).saturating_add(1);
+        // Corners for per-segment-end values: one at each segment's end, the last the first when periodic, or one
+        // a control point on linear curves.
+        let span = match cubic {
+            Some(_) if segments > 0 && periodic => segments,
+            Some(_) if segments > 0 => segments + 1,
+            _ => n,
+        };
+        match cubic {
+            Some(basis) if segments > 0 && sampled.saturating_add(want) <= budget => {
+                sampled += want;
+                let stride = if basis == Basis::Bezier { 3 } else { 1 };
+                for seg in 0..segments {
+                    let last = if seg + 1 == segments { steps } else { steps - 1 };
+                    for j in 0..=last {
+                        let t = f32::from(u16::try_from(j).unwrap_or(0)) / f32::from(CURVE_STEPS);
+                        let mut s = Sample::at(curve, 0, 0);
+                        s.n = 0;
+                        for (k, w) in basis.weights(t).into_iter().enumerate() {
+                            let q = seg * stride + k;
+                            if basis == Basis::Hermite {
+                                // A point, then its tangent, then the next point and its tangent.
+                                let at = base + seg + k / 2;
+                                s.add(if k % 2 == 0 { at } else { points + at }, w);
+                                s.tangents = points;
+                            } else if pinned && q == 0 {
+                                s.add(base, 2.0 * w);
+                                s.add(base + 1, -w);
+                            } else if pinned && q == n + 1 {
+                                s.add(base + n - 1, 2.0 * w);
+                                s.add(base + n - 2, -w);
+                            } else if pinned {
+                                s.add(base + q - 1, w);
+                            } else {
+                                s.add(base + q % n, w);
+                            }
+                        }
+                        s.ends = (corners + seg, corners + (seg + 1) % span, t);
+                        s.starts = seg == 0 && j == 0;
+                        emit(&s);
+                    }
+                }
+            }
+            _ => through(curve, base, n, (corners, span), periodic, emit),
+        }
+        corners += span;
+        base = end;
+    }
+    sampled
+}
+
+/// Emits curve `curve`'s `n` control points from `base`, closing back to the first when `closes`. A curve drawn
+/// through its control points takes the nearest of the `span` segment ends' values from corner `corners.0`.
+fn through(
+    curve: usize,
+    base: usize,
+    n: usize,
+    (corners, span): (usize, usize),
+    closes: bool,
+    emit: &mut dyn FnMut(&Sample),
+) {
+    for i in 0..n {
+        let mut s = Sample::at(curve, base + i, corners + (i * span / n).min(span.saturating_sub(1)));
+        s.starts = i == 0;
+        s.closes = closes && i + 1 == n;
+        emit(&s);
+    }
+}
+
+/// What a `NurbsCurves` prim draws its curves by, each per curve but the weights, per control point.
+struct Nurbs {
+    orders: Vec<i32>,
+    /// Each curve's knots in turn, as many as its control points and its order.
+    knots: Vec<f64>,
+    /// Each curve's parameter range; without one, the whole of its knots'.
+    ranges: Vec<[f64; 2]>,
+    /// Every control point's weight; without them, or with one that isn't positive, curves aren't rational.
+    weights: Vec<f64>,
+}
+
+/// Emits the points drawn on NURBS curves of `counts` control points each (of `points` in all), in order: each
+/// knot span within the curve's range sampled at [`CURVE_STEPS`] while `budget` lasts. A curve past the budget,
+/// of order past [`MAX_ORDER`], or whose knots or range don't make a curve is drawn through its control points;
+/// the curves past the points are left out. Returns the points sampled.
+fn nurbs_samples(counts: &[i32], points: usize, nurbs: &Nurbs, budget: usize, emit: &mut dyn FnMut(&Sample)) -> usize {
+    let steps = usize::from(CURVE_STEPS);
+    let mut sampled = 0usize;
+    let (mut base, mut corners, mut knot_at) = (0usize, 0usize, 0usize);
+    for (curve, &n) in counts.iter().enumerate() {
+        let Ok(n) = usize::try_from(n) else { break };
+        let Some(end) = base.checked_add(n).filter(|&e| e <= points) else {
+            break;
+        };
+        let order = nurbs.orders.get(curve).and_then(|&k| usize::try_from(k).ok());
+        // This curve's knots, and where the next one's start: past them all once one is missing.
+        let knot_end = order.and_then(|k| knot_at.checked_add(n)?.checked_add(k));
+        let knots = knot_end.and_then(|e| nurbs.knots.get(knot_at..e));
+        knot_at = knot_end.unwrap_or(usize::MAX);
+        let curve_of = order
+            .zip(knots)
+            .and_then(|(k, knots)| NurbsCurve::new(knots, k, n, nurbs.ranges.get(curve).copied()));
+        let Some(c) = curve_of else {
+            through(curve, base, n, (corners, n), false, emit);
+            corners += n;
+            base = end;
+            continue;
+        };
+        // Per-segment-end values are one at each knot span's end, whether the range draws the span or not.
+        let span = n - c.order + 2;
+        let spans = (c.order - 1..n).filter(|&j| c.clipped(j).is_some()).count();
+        let want = spans.saturating_mul(steps).saturating_add(1);
+        if sampled.saturating_add(want) > budget {
+            through(curve, base, n, (corners, span), false, emit);
+            corners += span;
+            base = end;
+            continue;
+        }
+        sampled += want;
+        let rational =
+            nurbs.weights.len() == points && nurbs.weights[base..end].iter().all(|w| w.is_finite() && *w > 0.0);
+        let weight = |i: usize| if rational { nurbs.weights[i] } else { 1.0 };
+        let mut drawn = 0;
+        for j in c.order - 1..n {
+            let Some((a, b)) = c.clipped(j) else { continue };
+            drawn += 1;
+            let last = if drawn == spans { steps } else { steps - 1 };
+            for step in 0..=last {
+                let t = f64::from(u16::try_from(step).unwrap_or(0)) / f64::from(CURVE_STEPS);
+                let u = a * (1.0 - t) + b * t;
+                // The first control point of the span's `order`.
+                let first = base + j + 1 - c.order;
+                let mut terms = c.basis(j, u);
+                for (r, x) in terms.iter_mut().take(c.order).enumerate() {
+                    *x *= weight(first + r);
+                }
+                let total: f64 = terms.iter().sum();
+                let mut s = Sample::at(curve, 0, 0);
+                s.n = 0;
+                for (r, x) in terms.iter().take(c.order).enumerate() {
+                    s.add(first + r, f32_of(x / total));
+                }
+                let along = (u - c.knots[j]) / (c.knots[j + 1] - c.knots[j]);
+                let at = corners + j + 1 - c.order;
+                s.ends = (at, at + 1, f32_of(along));
+                s.starts = drawn == 1 && step == 0;
+                emit(&s);
+            }
+        }
+        corners += span;
+        base = end;
+    }
+    sampled
+}
+
+/// A NURBS curve its knots and range make: of order 2 to [`MAX_ORDER`], at least as many control points, knots
+/// that never decrease, and a range of some length within them.
+struct NurbsCurve<'a> {
+    knots: &'a [f64],
+    order: usize,
+    /// The parameter range drawn.
+    range: (f64, f64),
+}
+
+impl<'a> NurbsCurve<'a> {
+    fn new(knots: &'a [f64], order: usize, n: usize, range: Option<[f64; 2]>) -> Option<Self> {
+        if !(2..=MAX_ORDER).contains(&order)
+            || n < order
+            || knots.len() != n + order
+            || !knots.iter().all(|k| k.is_finite())
+            || knots.windows(2).any(|w| w[0] > w[1])
+        {
+            return None;
+        }
+        let (lo, hi) = (knots[order - 1], knots[n]);
+        let range = match range {
+            Some([a, b]) if a.is_finite() && b.is_finite() && a < b => (a.max(lo), b.min(hi)),
+            _ => (lo, hi),
+        };
+        (range.0 < range.1).then_some(NurbsCurve { knots, order, range })
+    }
+
+    /// The part of knot span `j` (from knot `j` to the next) the range draws, if any.
+    fn clipped(&self, j: usize) -> Option<(f64, f64)> {
+        let (a, b) = (self.knots[j].max(self.range.0), self.knots[j + 1].min(self.range.1));
+        (a < b).then_some((a, b))
+    }
+
+    /// The weights at `u` in knot span `j` of the `order` control points from `j + 1 - order`, by Cox and de Boor's
+    /// recurrence.
+    fn basis(&self, j: usize, u: f64) -> [f64; MAX_ORDER] {
+        let k = self.knots;
+        let mut n = [0.0; MAX_ORDER];
+        let (mut left, mut right) = ([0.0; MAX_ORDER], [0.0; MAX_ORDER]);
+        n[0] = 1.0;
+        for d in 1..self.order {
+            left[d] = u - k[j + 1 - d];
+            right[d] = k[j + d] - u;
+            let mut saved = 0.0;
+            for r in 0..d {
+                let gap = right[r + 1] + left[d - r];
+                let x = if gap == 0.0 { 0.0 } else { n[r] / gap };
+                n[r] = saved + right[r + 1] * x;
+                saved = left[d - r] * x;
+            }
+            n[d] = saved;
+        }
+        n
+    }
+}
+
 /// One material's part of a mesh, with the point each of its vertices came from.
 struct Part_ {
     prim: Prim,
     points: Vec<usize>,
+    /// Its texture coordinate sets in `TEXCOORD_n` order, as indices into the shape's.
+    uvs: Vec<usize>,
+    /// Its color sets in `COLOR_n` order.
+    colors: Vec<Paint>,
+}
+
+/// Where a primitive's color set comes from.
+#[derive(Clone, Copy, PartialEq)]
+enum Paint {
+    /// `displayColor` and `displayOpacity`.
+    Display,
+    /// One of the shape's color sets.
+    Set(usize),
+    /// What the material's primvar reader reads where the surface lacks the primvar.
+    Fallback([f32; 4]),
+}
+
+/// What a material reads from the surface it's on.
+#[derive(Clone, Default)]
+struct Reads {
+    /// Its texture coordinate sets by primvar name, in `TEXCOORD_n` order: the color texture's first, empty when
+    /// it names none. Empty when no texture names a set.
+    uvs: Vec<String>,
+    /// The color primvar its base color reads, and what it reads where the surface lacks it.
+    color: Option<(String, [f32; 4])>,
+}
+
+/// A blend shape: its name, and its offsets and normal offsets per point.
+struct Target {
+    name: String,
+    offsets: Vec<[f32; 3]>,
+    normals: Option<Vec<[f32; 3]>>,
+}
+
+/// A primitive's texture coordinate sets, as indices into the shape's in `TEXCOORD_n` order, and its color sets in
+/// `COLOR_n` order, for a material that reads `reads`. A set the material names and the surface lacks reads the
+/// first, so the material's set numbers hold; the sets no texture reads follow. `display` is whether the surface
+/// has a display color, `vertex_colors` whether it varies, and `bound` whether the material is one bound to it
+/// rather than made from its display color.
+fn layout(reads: &Reads, shape: &Shape, display: bool, vertex_colors: bool, bound: bool) -> (Vec<usize>, Vec<Paint>) {
+    let find = |name: &str| shape.uvs.iter().position(|(n, _)| n == name);
+    let mut uvs = Vec::with_capacity(shape.uvs.len() + reads.uvs.len());
+    if !shape.uvs.is_empty() {
+        let first = reads.uvs.first().and_then(|n| find(n)).unwrap_or(0);
+        uvs.push(first);
+        uvs.extend(reads.uvs.iter().skip(1).map(|n| find(n).unwrap_or(first)));
+        for k in 0..shape.uvs.len() {
+            if !uvs.contains(&k) {
+                uvs.push(k);
+            }
+        }
+    }
+    let mut colors = Vec::with_capacity(shape.colors.len() + 1);
+    match &reads.color {
+        Some((name, _)) if name == "displayColor" && display => colors.push(Paint::Display),
+        Some((name, fallback)) => colors.push(
+            shape
+                .colors
+                .iter()
+                .position(|(n, _)| n == name)
+                .map_or(Paint::Fallback(*fallback), Paint::Set),
+        ),
+        None => {}
+    }
+    // glTF multiplies `COLOR_0` into the base color. A material that reads no color set must not be tinted by
+    // one, so white goes first and the sets follow as `COLOR_1` on; only display colors on a surface with no
+    // material of its own are its color.
+    if colors.is_empty() && (bound || !vertex_colors) && (vertex_colors || !shape.colors.is_empty()) {
+        colors.push(Paint::Fallback([1.0; 4]));
+    }
+    if vertex_colors && !colors.contains(&Paint::Display) {
+        colors.push(Paint::Display);
+    }
+    for k in 0..shape.colors.len() {
+        if !colors.contains(&Paint::Set(k)) {
+            colors.push(Paint::Set(k));
+        }
+    }
+    (uvs, colors)
+}
+
+/// `n` empty sets, slot 0 and those to fill; none for one set, which is slot 0.
+fn empty_sets<T: Clone>(n: usize) -> Vec<Vec<T>> {
+    if n > 1 { vec![Vec::new(); n] } else { Vec::new() }
+}
+
+fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+/// Whether encoded image bytes are a gray PNG or JPEG, by the header: a PNG's color type, a JPEG's component count.
+fn gray(b: &[u8]) -> bool {
+    if b.starts_with(b"\x89PNG\r\n\x1a\n") {
+        // IHDR comes first; color type 0 is gray, 4 gray with alpha.
+        return b.get(12..16) == Some(b"IHDR".as_slice()) && matches!(b.get(25), Some(0 | 4));
+    }
+    if !b.starts_with(&[0xFF, 0xD8]) {
+        return false;
+    }
+    let mut i = 2usize;
+    while i + 4 <= b.len() {
+        if b[i] != 0xFF {
+            return false;
+        }
+        let marker = b[i + 1];
+        if marker == 0xFF {
+            i += 1;
+            continue;
+        }
+        // A start of frame (not a table): its component count follows the precision, height and width.
+        if (0xC0..=0xCF).contains(&marker) && !matches!(marker, 0xC4 | 0xC8 | 0xCC) {
+            return b.get(i + 9) == Some(&1);
+        }
+        if matches!(marker, 0xD9 | 0xDA) {
+            return false;
+        }
+        i = i.saturating_add(2 + usize::from(u16::from_be_bytes([b[i + 2], b[i + 3]])));
+    }
+    false
 }
 
 impl Reader<'_> {
@@ -1095,7 +1891,11 @@ impl Reader<'_> {
         name: &str,
         decode: impl Fn(sdf::Value) -> Option<Vec<T>>,
     ) -> Option<Primvar<T>> {
-        let pv = api.primvar(name).ok()?;
+        self.read_primvar(&api.primvar(name).ok()?, decode)
+    }
+
+    /// A primvar's values, indices and interpolation.
+    fn read_primvar<T>(&self, pv: &geom::Primvar, decode: impl Fn(sdf::Value) -> Option<Vec<T>>) -> Option<Primvar<T>> {
         let values = decode(pv.attribute().get_at::<sdf::Value>(self.time).ok()??)?;
         let indices = pv.indices(self.time).ok().flatten().filter(|i| !i.is_empty());
         let spread = pv
@@ -1215,7 +2015,13 @@ impl Reader<'_> {
         let holes = ints(self.value(&mesh.hole_indices_attr()));
         let left_handed = self.token(&mesh.orientation_attr()).as_deref() == Some("leftHanded");
         let api = PrimvarsAPI::from_prim_unchecked(mesh.prim().clone());
-        let uvs = UV_NAMES.iter().find_map(|n| self.primvar(&api, n, vec2s));
+        let (uvs, colors) = self.surface_sets(&api);
+        let tangents = ["tangents", "tangent"]
+            .iter()
+            .find_map(|n| self.primvar(&api, n, tangent4s));
+        let bitangents = ["bitangents", "binormals", "bitangent", "binormal"]
+            .iter()
+            .find_map(|n| self.primvar(&api, n, vec3s));
         let normals = self.primvar(&api, "normals", vec3s).or_else(|| {
             let attr = mesh.normals_attr();
             let values = vec3s(self.value(&attr)?)?;
@@ -1241,14 +2047,61 @@ impl Reader<'_> {
             hole,
             normals,
             uvs,
+            colors,
+            tangents,
+            bitangents,
             left_handed,
             smooth,
         })
     }
 
+    /// A mesh's texture coordinate sets and its color sets other than the display color, by primvar name, at most
+    /// [`MAX_SETS`] of each: the usual names for texture coordinates first, then the rest by name. Colors the same
+    /// over the whole surface aren't sets.
+    #[allow(clippy::type_complexity, reason = "two lists of named primvars")]
+    fn surface_sets(&self, api: &PrimvarsAPI) -> (Vec<(String, Primvar<[f32; 2]>)>, Vec<(String, Primvar<[f32; 4]>)>) {
+        let mut uv = Vec::new();
+        let mut color = Vec::new();
+        for pv in api.authored_primvars().unwrap_or_default() {
+            let Ok(Some(ty)) = pv.attribute().type_name() else {
+                continue;
+            };
+            match ty.as_str() {
+                "texCoord2f[]" | "texCoord2d[]" | "texCoord2h[]" | "float2[]" | "double2[]" | "half2[]" => uv.push(pv),
+                "color3f[]" | "color3d[]" | "color3h[]" | "color4f[]" | "color4d[]" | "color4h[]"
+                    if pv.primvar_name() != "displayColor" =>
+                {
+                    color.push(pv);
+                }
+                _ => {}
+            }
+        }
+        uv.sort_by_cached_key(|pv| {
+            let name = pv.primvar_name();
+            (
+                UV_NAMES.iter().position(|n| *n == name).unwrap_or(UV_NAMES.len()),
+                name.to_owned(),
+            )
+        });
+        color.sort_by(|a, b| a.primvar_name().cmp(b.primvar_name()));
+        let uvs = uv
+            .iter()
+            .filter_map(|pv| Some((pv.primvar_name().to_owned(), self.read_primvar(pv, vec2s)?)))
+            .take(MAX_SETS)
+            .collect();
+        let colors = color
+            .iter()
+            .filter_map(|pv| Some((pv.primvar_name().to_owned(), self.read_primvar(pv, vec4s)?)))
+            .filter(|(_, c)| !c.constant())
+            .take(MAX_SETS)
+            .collect();
+        (uvs, colors)
+    }
+
     /// The mesh for a surface, made once per prototype, material binding and skinning; `None` when it has no
-    /// faces. `joints` is how many joints a skinned surface's influences name.
-    fn mesh(&mut self, prim: &usd::Prim, shape: &Shape, joints: Option<usize>) -> Result<Option<usize>> {
+    /// faces. `joints` is how many joints a skinned surface's influences name. The geometry is read only when the
+    /// mesh is made, so each instance of a prototype costs a lookup.
+    fn mesh(&mut self, prim: &usd::Prim, joints: Option<usize>) -> Result<Option<usize>> {
         let source = match prim.prim_in_prototype() {
             Ok(Some(p)) if prim.is_instance_proxy().unwrap_or(false) => p.path().as_str().to_owned(),
             _ => prim.path().as_str().to_owned(),
@@ -1258,7 +2111,10 @@ impl Reader<'_> {
         if let Some(&m) = self.mesh_of.get(&key) {
             return Ok(m);
         }
-        let m = self.build_mesh(prim, shape, joints)?;
+        let m = match self.shape(prim) {
+            Some(shape) => self.build_mesh(prim, &shape, joints)?,
+            None => None,
+        };
         self.mesh_of.insert(key, m);
         Ok(m)
     }
@@ -1285,7 +2141,7 @@ impl Reader<'_> {
             if ok {
                 faces.push((face, start, n));
                 triangles += n - 2;
-                ensure!(triangles <= MAX_TRIANGLES, "too many triangles (over {MAX_TRIANGLES})");
+                ensure!(triangles <= self.limit, "too many triangles (over {})", self.limit);
             }
             start = end;
         }
@@ -1302,19 +2158,20 @@ impl Reader<'_> {
         let display = self.primvar(&api, "displayColor", vec3s);
         let opacity = self.primvar(&api, "displayOpacity", floats);
         let binding = bound(prim);
-        // Display colors show only where no material is bound.
-        let vertex_colors = binding.is_none()
-            && (display.as_ref().is_some_and(|d| !d.constant()) || opacity.as_ref().is_some_and(|o| !o.constant()));
-        let own = match binding {
-            Some(path) => self.material(Some(path), GRAY),
-            None if vertex_colors => self.material(None, [1.0; 4]),
+        // Display colors that vary over the surface are its vertex colors, whatever material is bound.
+        let vertex_colors =
+            display.as_ref().is_some_and(|d| !d.constant()) || opacity.as_ref().is_some_and(|o| !o.constant());
+        let double = self.double_sided(prim);
+        let own = match &binding {
+            Some(path) => self.material(Some(path.clone()), GRAY, double),
+            None if vertex_colors => self.material(None, [1.0; 4], double),
             None => {
                 let [r, g, b] = display
                     .as_ref()
                     .and_then(|d| d.values.first().copied())
                     .unwrap_or([GRAY[0], GRAY[1], GRAY[2]]);
                 let a = opacity.as_ref().and_then(|o| o.values.first().copied()).unwrap_or(1.0);
-                self.material(None, [r, g, b, a.clamp(0.0, 1.0)])
+                self.material(None, [r, g, b, a.clamp(0.0, 1.0)], double)
             }
         };
 
@@ -1330,7 +2187,7 @@ impl Reader<'_> {
                     continue;
                 }
                 let material = match bound(&child) {
-                    Some(path) => self.material(Some(path), GRAY),
+                    Some(path) => self.material(Some(path), GRAY, double),
                     None => own,
                 };
                 for i in ints(self.value(&subset.indices_attr())) {
@@ -1354,12 +2211,20 @@ impl Reader<'_> {
             let next = parts.len();
             let i = *part_of.entry(material).or_insert(next);
             if i == next {
+                let none = Reads::default();
+                let reads = self.material_reads.get(material).unwrap_or(&none);
+                let bound = binding.is_some() || material != own;
+                let (uvs, colors) = layout(reads, shape, display.is_some(), vertex_colors, bound);
                 parts.push(Part_ {
                     prim: Prim {
                         material,
+                        uv_sets: empty_sets(uvs.len()),
+                        color_sets: empty_sets(colors.len()),
                         ..Prim::default()
                     },
                     points: Vec::new(),
+                    uvs,
+                    colors,
                 });
             }
             let part = &mut parts[i];
@@ -1375,15 +2240,45 @@ impl Reader<'_> {
                     (None, Some(f)) => Some(f),
                     (None, None) => point_normals.get(point).copied(),
                 };
-                prim.normals.push(normal.unwrap_or([0.0, 1.0, 0.0]));
-                if let Some(uv) = &shape.uvs {
-                    let [u, v] = uv.at(face, point, c).unwrap_or_default();
-                    prim.uvs.push([u, 1.0 - v]);
+                let normal = normal.unwrap_or([0.0, 1.0, 0.0]);
+                prim.normals.push(normal);
+                if let Some(tv) = &shape.tangents {
+                    let t = tv.at(face, point, c).unwrap_or([1.0, 0.0, 0.0, 1.0]);
+                    // Handedness as authored, else from the bitangent: glTF's is cross(normal, tangent) * w.
+                    let w = if t[3] < 0.0 {
+                        -1.0
+                    } else if t[3] > 0.0 {
+                        1.0
+                    } else {
+                        match shape.bitangents.as_ref().and_then(|b| b.at(face, point, c)) {
+                            Some(b) if dot(cross(normal, [t[0], t[1], t[2]]), b) < 0.0 => -1.0,
+                            _ => 1.0,
+                        }
+                    };
+                    prim.tangents.push([t[0], t[1], t[2], w]);
                 }
-                if vertex_colors {
-                    let [r, g, b] = display.as_ref().and_then(|d| d.at(face, point, c)).unwrap_or([1.0; 3]);
-                    let a = opacity.as_ref().and_then(|o| o.at(face, point, c)).unwrap_or(1.0);
-                    prim.colors.push([r, g, b, a.clamp(0.0, 1.0)]);
+                for (slot, &k) in part.uvs.iter().enumerate() {
+                    let [u, v] = shape.uvs[k].1.at(face, point, c).unwrap_or_default();
+                    let uv = [u, 1.0 - v];
+                    match slot {
+                        0 => prim.uvs.push(uv),
+                        _ => prim.uv_sets[slot].push(uv),
+                    }
+                }
+                for (slot, &paint) in part.colors.iter().enumerate() {
+                    let color = match paint {
+                        Paint::Display => {
+                            let [r, g, b] = display.as_ref().and_then(|d| d.at(face, point, c)).unwrap_or([1.0; 3]);
+                            let a = opacity.as_ref().and_then(|o| o.at(face, point, c)).unwrap_or(1.0);
+                            [r, g, b, a.clamp(0.0, 1.0)]
+                        }
+                        Paint::Set(k) => shape.colors[k].1.at(face, point, c).unwrap_or([1.0; 4]),
+                        Paint::Fallback(f) => f,
+                    };
+                    match slot {
+                        0 => prim.colors.push(color),
+                        _ => prim.color_sets[slot].push(color),
+                    }
                 }
             }
             tris.clear();
@@ -1399,13 +2294,14 @@ impl Reader<'_> {
             inf.iter().map(|v| v.len().div_ceil(4)).max().unwrap_or(0).min(4)
         });
         let targets = if self.keep.morph_targets {
-            self.blend_shapes(prim, points.len())
+            self.blend_shapes(prim, points.len(), shape.normals.is_some())
         } else {
             Vec::new()
         };
+        let target_normals = targets.iter().any(|t| t.normals.is_some());
         let mut primitives = Vec::new();
         let mut drawn = 0;
-        for Part_ { prim: p, points } in parts {
+        for Part_ { prim: p, points, .. } in parts {
             let material = p.material;
             drawn += p.indices.len() / 3;
             let Some(mut json) = self.b.primitive(p) else { continue };
@@ -1431,9 +2327,19 @@ impl Reader<'_> {
             if !targets.is_empty() {
                 let t: Vec<Value> = targets
                     .iter()
-                    .map(|(_, offsets)| {
-                        let d = points.iter().map(|&pt| offsets[pt]).collect();
-                        json!({ "POSITION": self.b.positions(d) })
+                    .map(|t| {
+                        let d = points.iter().map(|&pt| t.offsets[pt]).collect();
+                        let mut target = json!({ "POSITION": self.b.positions(d) });
+                        // Every target has normals when one does: a target without moves none.
+                        if target_normals {
+                            let d = match &t.normals {
+                                Some(n) => points.iter().flat_map(|&pt| n[pt]).collect(),
+                                None => vec![0.0; points.len() * 3],
+                            };
+                            let a = self.b.accessor(Part::f32(d), 5126, points.len(), "VEC3", Some(34962));
+                            target["NORMAL"] = json!(a);
+                        }
+                        target
                     })
                     .collect();
                 json["targets"] = json!(t);
@@ -1446,7 +2352,7 @@ impl Reader<'_> {
         let mut mesh = json!({ "name": leaf(prim.path().as_str()), "primitives": primitives });
         if !targets.is_empty() {
             mesh["weights"] = json!(vec![0.0; targets.len()]);
-            mesh["extras"] = json!({ "targetNames": targets.iter().map(|t| t.0.as_str()).collect::<Vec<_>>() });
+            mesh["extras"] = json!({ "targetNames": targets.iter().map(|t| t.name.as_str()).collect::<Vec<_>>() });
         }
         self.meshes.push(mesh);
         self.mesh_triangles.push(drawn);
@@ -1495,8 +2401,9 @@ impl Reader<'_> {
         Some(out)
     }
 
-    /// A surface's blend shapes: each one's name and its offset per point.
-    fn blend_shapes(&self, prim: &usd::Prim, points: usize) -> Vec<(String, Vec<[f32; 3]>)> {
+    /// A surface's blend shapes: each one's name, its offset per point, and with `normals` (the surface has
+    /// authored normals), its normal offsets per point where it has them.
+    fn blend_shapes(&self, prim: &usd::Prim, points: usize, normals: bool) -> Vec<Target> {
         let names = tokens(self.value(&prim.attribute("skel:blendShapes")));
         let targets = prim
             .relationship("skel:blendShapeTargets")
@@ -1507,51 +2414,66 @@ impl Reader<'_> {
             .zip(targets)
             .filter_map(|(name, path)| {
                 let shape = self.stage.prim(path).ok()?;
-                let offsets = vec3s(self.value(&shape.attribute("offsets"))?)?;
                 let at = ints(self.value(&shape.attribute("pointIndices")));
-                let mut d = vec![[0.0; 3]; points];
-                if at.is_empty() {
-                    for (slot, o) in d.iter_mut().zip(&offsets) {
-                        *slot = *o;
-                    }
-                } else {
-                    for (&i, o) in at.iter().zip(&offsets) {
-                        if let Some(slot) = usize::try_from(i).ok().and_then(|i| d.get_mut(i)) {
+                let per_point = |values: &[[f32; 3]]| {
+                    let mut d = vec![[0.0; 3]; points];
+                    if at.is_empty() {
+                        for (slot, o) in d.iter_mut().zip(values) {
                             *slot = *o;
                         }
+                    } else {
+                        for (&i, o) in at.iter().zip(values) {
+                            if let Some(slot) = usize::try_from(i).ok().and_then(|i| d.get_mut(i)) {
+                                *slot = *o;
+                            }
+                        }
                     }
-                }
-                Some((name, d))
+                    d
+                };
+                let offsets = per_point(&vec3s(self.value(&shape.attribute("offsets"))?)?);
+                let normals = normals
+                    .then(|| vec3s(self.value(&shape.attribute("normalOffsets"))?))
+                    .flatten()
+                    .filter(|n| !n.is_empty())
+                    .map(|n| per_point(&n));
+                Some(Target { name, offsets, normals })
             })
             .collect()
     }
 
-    /// The material at `bound`, made once per material prim; with none, a plain one in `display`.
-    fn material(&mut self, bound: Option<sdf::Path>, display: [f32; 4]) -> usize {
+    /// The material at `bound`, made once per material prim and sidedness (a material on one- and two-sided
+    /// surfaces is two); with none, a plain one in `display`.
+    fn material(&mut self, bound: Option<sdf::Path>, display: [f32; 4], double: bool) -> usize {
         let key = match &bound {
-            Some(p) => p.as_str().to_owned(),
-            None => format!("display:{display:?}"),
+            Some(p) => format!("{}|{double}", p.as_str()),
+            None => format!("display:{display:?}|{double}"),
         };
         if let Some(&i) = self.material_of.get(&key) {
             return i;
         }
-        let material = match bound {
+        let (mut material, reads) = match bound {
             // Without materials kept, the shader isn't read; the plain one goes in the prune.
-            Some(path) if !self.keep.materials => Material::plain(leaf(path.as_str()), display).into(),
+            Some(path) if !self.keep.materials => (
+                Full::from(Material::plain(leaf(path.as_str()), display)),
+                Reads::default(),
+            ),
             Some(path) => self.preview_surface(&path),
-            None => Material::plain("default", display).into(),
+            None => (Full::from(Material::plain("default", display)), Reads::default()),
         };
+        material.double_sided = double;
         let i = self.materials.len();
         self.materials.push(material);
+        self.material_reads.push(reads);
         self.material_of.insert(key, i);
         i
     }
 
+    /// A `UsdPreviewSurface` material, and what it reads from the surface it's on.
     #[allow(clippy::too_many_lines, reason = "one input after another")]
-    fn preview_surface(&mut self, path: &sdf::Path) -> Full {
+    fn preview_surface(&mut self, path: &sdf::Path) -> (Full, Reads) {
         let name = leaf(path.as_str()).to_owned();
         let Ok(Some(ps)) = shade::read_preview_surface(self.stage, path) else {
-            return Material::plain(&name, GRAY).into();
+            return (Material::plain(&name, GRAY).into(), Reads::default());
         };
         let shader = self.stage.prim(ps.shader.as_str()).ok();
         let source = |input: &str| shader.as_ref().and_then(|s| self.texture_source(s, input));
@@ -1570,14 +2492,44 @@ impl Reader<'_> {
                 _ => None,
             })
             .unwrap_or(false);
-        let mut tex = |file: Option<&str>, src: Option<&Source>| {
-            let image = self.image(file?)?;
-            Some(src.map_or_else(|| Tex::new(image), |s| s.tex(image)))
+        // A base color from a primvar reader is the surface's vertex colors.
+        let color_read = shader
+            .as_ref()
+            .and_then(|s| self.connected(s, "inputs:diffuseColor"))
+            .filter(|(r, _)| {
+                self.token(&r.attribute("info:id"))
+                    .is_some_and(|id| id.starts_with("UsdPrimvarReader"))
+            })
+            .and_then(|(r, _)| {
+                let fallback = self
+                    .value(&r.attribute("inputs:fallback"))
+                    .and_then(vec4s)
+                    .and_then(|v| v.first().copied())
+                    .unwrap_or([0.0, 0.0, 0.0, 1.0]);
+                Some((self.varname(&r)?, fallback))
+            });
+        // The texture coordinate sets the textures read, by primvar name: the color texture's first. Without a
+        // color texture, the first set another texture names.
+        let first = if ps.diffuse_color.texture().is_some() {
+            diffuse.as_ref().and_then(|d| d.uv.clone())
+        } else {
+            [
+                &normal,
+                &emissive,
+                &occlusion,
+                &roughness_src,
+                &metallic_src,
+                &specular_src,
+            ]
+            .into_iter()
+            .find_map(|s| s.as_ref().and_then(|s| s.uv.clone()))
         };
+        let mut sets = vec![first.unwrap_or_default()];
 
         // UsdPreviewSurface colors are linear, as glTF's are. Unauthored inputs take the shader's fallbacks.
-        let base_color_tex = tex(ps.diffuse_color.texture(), diffuse.as_ref());
+        let base_color_tex = self.tex(ps.diffuse_color.texture(), diffuse.as_ref(), &mut sets);
         let mut color = match ps.diffuse_color.value() {
+            _ if color_read.is_some() => [1.0; 4],
             Some(c) => [c.x, c.y, c.z, 1.0],
             // A texture's scale tints it.
             None if ps.diffuse_color.texture().is_some() => diffuse.as_ref().map_or([1.0; 4], |d| d.scale),
@@ -1604,23 +2556,36 @@ impl Reader<'_> {
             ps.metallic.value().copied().unwrap_or(0.0)
         };
         let mut roughness = ps.roughness.value().copied().unwrap_or(0.5);
-        // glTF reads roughness from green and metalness from blue of one image.
+        // glTF reads roughness from green and metalness from blue of one image. A gray roughness image reads the
+        // same in every channel, so it serves where nothing is metal.
         let mut metallic_roughness_tex = None;
-        if let Some(r) = roughness_src.as_ref().filter(|r| r.channel == "g")
+        if let Some(r) = roughness_src.as_ref()
             && let Some(file) = ps.roughness.texture()
         {
-            let metal_too = metallic_src
-                .as_ref()
-                .is_some_and(|m| m.channel == "b" && m.file == r.file);
-            if metal_too || ps.metallic.texture().is_none() {
-                metallic_roughness_tex = tex(Some(file), Some(r));
-                roughness = 1.0;
-                if metal_too && !specular_workflow {
-                    metallic = 1.0;
+            let metal_too = r.channel == "g"
+                && metallic_src
+                    .as_ref()
+                    .is_some_and(|m| m.channel == "b" && m.file == r.file);
+            let alone = ps.metallic.texture().is_none();
+            let usable = if r.channel == "g" {
+                metal_too || alone
+            } else {
+                alone
+                    && (specular_workflow || metallic <= 0.0)
+                    && self.image(file).is_some_and(|i| self.single_channel(i))
+            };
+            if usable {
+                metallic_roughness_tex = self.tex(Some(file), Some(r), &mut sets);
+                if metallic_roughness_tex.is_some() {
+                    // The texture's scale scales what it reads, where nothing is added to it.
+                    roughness = r.factor(1);
+                    if metal_too && !specular_workflow {
+                        metallic = metallic_src.as_ref().map_or(1.0, |m| m.factor(2));
+                    }
                 }
             }
         }
-        let emissive_tex = tex(ps.emissive_color.texture(), emissive.as_ref());
+        let emissive_tex = self.tex(ps.emissive_color.texture(), emissive.as_ref(), &mut sets);
         let emissive_color = match ps.emissive_color.value() {
             Some(c) => [c.x, c.y, c.z],
             None if emissive_tex.is_some() => emissive
@@ -1628,10 +2593,41 @@ impl Reader<'_> {
                 .map_or([1.0; 3], |e| [e.scale[0], e.scale[1], e.scale[2]]),
             None => [0.0; 3],
         };
-        let occlusion_tex = occlusion
-            .as_ref()
-            .filter(|o| o.channel == "r")
-            .and_then(|o| tex(ps.occlusion.texture(), Some(o)));
+        // glTF reads occlusion from red: another channel serves only from a gray image, where every channel is red.
+        let occlusion_tex = occlusion.as_ref().and_then(|o| {
+            let file = ps.occlusion.texture()?;
+            let red = matches!(o.channel.as_str(), "r" | "rgb");
+            if !red && !self.image(file).is_some_and(|i| self.single_channel(i)) {
+                return None;
+            }
+            let mut t = self.tex(Some(file), Some(o), &mut sets)?;
+            // A scale `s` and bias `1 - s` is glTF's strength `s`.
+            let k = o.channel_index();
+            let s = o.scale[k];
+            if (o.bias[k] - (1.0 - s)).abs() < 1e-4 && (0.0..=1.0).contains(&s) {
+                t.scale = s;
+            }
+            Some(t)
+        });
+        // A normal map's usual scale 2 and bias -1 is glTF's own reading; twice that a normal scale of 2.
+        let normal_tex = self.tex(ps.normal.texture(), normal.as_ref(), &mut sets).map(|mut t| {
+            if let Some(n) = &normal {
+                let [sx, sy] = [n.scale[0], n.scale[1]];
+                let matched = (sx - sy).abs() < 1e-4
+                    && sx > 0.0
+                    && (n.bias[0] + sx / 2.0).abs() < 1e-4
+                    && (n.bias[1] + sy / 2.0).abs() < 1e-4;
+                if matched {
+                    t.scale = sx / 2.0;
+                }
+            }
+            t
+        });
+        let specular_tex = if specular_workflow {
+            self.tex(ps.specular_color.texture(), specular_src.as_ref(), &mut sets)
+        } else {
+            None
+        };
         let specular = specular_workflow.then(|| {
             // UsdPreviewSurface's specular color is what reflects head on; glTF's scales a dielectric's 4%.
             let c = ps.specular_color.value().map_or([0.0; 3], |c| [c.x, c.y, c.z]);
@@ -1642,7 +2638,7 @@ impl Reader<'_> {
                 } else {
                     c.map(|c| c / 0.04)
                 },
-                color_tex: tex(ps.specular_color.texture(), specular_src.as_ref()),
+                color_tex: specular_tex,
             }
         });
         let clearcoat = ps.clearcoat.value().filter(|c| **c > 0.0).map(|&c| Clearcoat {
@@ -1650,14 +2646,14 @@ impl Reader<'_> {
             roughness: Factor::of(ps.clearcoat_roughness.value().copied().unwrap_or(0.01)),
             normal: None,
         });
-        Full {
+        let full = Full {
             name,
             base_color: color,
             base_color_tex,
             metallic,
             roughness,
             metallic_roughness_tex,
-            normal_tex: tex(ps.normal.texture(), normal.as_ref()),
+            normal_tex,
             occlusion_tex,
             emissive: emissive_color,
             emissive_tex,
@@ -1666,6 +2662,43 @@ impl Reader<'_> {
             clearcoat,
             ior: ps.ior.value().copied(),
             ..Full::default()
+        };
+        let reads = Reads {
+            uvs: if sets.iter().all(String::is_empty) {
+                Vec::new()
+            } else {
+                sets
+            },
+            color: color_read,
+        };
+        (full, reads)
+    }
+
+    /// A texture of `file` as `src` reads it, its coordinates numbered by their place in `sets`.
+    fn tex(&mut self, file: Option<&str>, src: Option<&Source>, sets: &mut Vec<String>) -> Option<Tex> {
+        let image = self.image(file?)?;
+        let mut t = src.map_or_else(|| Tex::new(image), |s| s.tex(image));
+        if let Some(name) = src.and_then(|s| s.uv.as_deref()).filter(|n| !n.is_empty()) {
+            let k = match sets.iter().position(|s| s == name) {
+                Some(k) => k,
+                None if sets.first().is_some_and(String::is_empty) && sets.len() == 1 && t.uv == 0 => 0,
+                None => {
+                    sets.push(name.to_owned());
+                    sets.len() - 1
+                }
+            };
+            t.uv = u32::try_from(k).unwrap_or(0);
+        }
+        Some(t)
+    }
+
+    /// Whether an image is known, from its header, to be gray: one channel, with or without alpha, so its red,
+    /// green and blue read the same. Unknown for an image not yet read.
+    fn single_channel(&self, image: usize) -> bool {
+        match self.images.list.get(image) {
+            Some(crate::images::Source::Image(i)) => gray(&i.bytes),
+            Some(crate::images::Source::Ref(r, _)) => r.bytes.as_deref().is_some_and(gray),
+            None => false,
         }
     }
 
@@ -1682,12 +2715,13 @@ impl Reader<'_> {
             Some("clamp" | "black") => material::CLAMP,
             _ => material::REPEAT,
         };
-        let scale = match self.value(&tex.attribute("inputs:scale")) {
+        let four = |name: &str, fallback: [f32; 4]| match self.value(&tex.attribute(name)) {
             Some(sdf::Value::Vec4f(v)) => [v.x, v.y, v.z, v.w],
             #[allow(clippy::cast_possible_truncation, reason = "colors")]
             Some(sdf::Value::Vec4d(v)) => [v.x as f32, v.y as f32, v.z as f32, v.w as f32],
-            _ => [1.0; 4],
+            _ => fallback,
         };
+        let (scale, bias) = (four("inputs:scale", [1.0; 4]), four("inputs:bias", [0.0; 4]));
         let mut transform = None;
         if let Some((t, _)) = self.connected(&tex, "inputs:st")
             && self.token(&t.attribute("info:id")).as_deref() == Some("UsdTransform2d")
@@ -1710,8 +2744,48 @@ impl Reader<'_> {
             channel,
             wrap: [wrap("inputs:wrapS"), wrap("inputs:wrapT")],
             scale,
+            bias,
             transform,
+            uv: self.st_name(&tex),
         })
+    }
+
+    /// The texture coordinate set a `UsdUVTexture` reads, by primvar name: the primvar reader on its `st`, through
+    /// any `UsdTransform2d`.
+    fn st_name(&self, tex: &usd::Prim) -> Option<String> {
+        let (mut at, _) = self.connected(tex, "inputs:st")?;
+        for _ in 0..8 {
+            let id = self.token(&at.attribute("info:id"))?;
+            if id.starts_with("UsdPrimvarReader") {
+                return self.varname(&at);
+            }
+            if id != "UsdTransform2d" {
+                return None;
+            }
+            at = self.connected(&at, "inputs:in")?.0;
+        }
+        None
+    }
+
+    /// The primvar a `UsdPrimvarReader_*` reads: its `varname`, a token or string, or the material input it's
+    /// connected to.
+    fn varname(&self, reader: &usd::Prim) -> Option<String> {
+        let mut attr = reader.attribute("inputs:varname");
+        for _ in 0..8 {
+            if let Some(path) = attr.connections().ok().and_then(|c| c.into_iter().next()) {
+                let (at, prop) = path.as_str().rsplit_once('.')?;
+                attr = self.stage.prim(at).ok()?.attribute(prop);
+                continue;
+            }
+            let name = match self.value(&attr)? {
+                sdf::Value::Token(t) => t.as_str().to_owned(),
+                sdf::Value::String(s) => s,
+                _ => return None,
+            };
+            let name = name.strip_prefix("primvars:").unwrap_or(&name);
+            return (!name.is_empty()).then(|| name.to_owned());
+        }
+        None
     }
 
     /// The shader and output an attribute connects to, followed through node graphs' outputs.
@@ -1747,10 +2821,38 @@ struct Source {
     wrap: [u32; 2],
     /// `inputs:scale`, which tints what it reads.
     scale: [f32; 4],
+    /// `inputs:bias`, added after the scale.
+    bias: [f32; 4],
     transform: Option<UvTransform>,
+    /// The texture coordinate set it reads, by primvar name, when a primvar reader names it.
+    uv: Option<String>,
 }
 
 impl Source {
+    /// The channel read, as an index into `scale` and `bias`: red for `rgb`.
+    fn channel_index(&self) -> usize {
+        match self.channel.as_str() {
+            "g" => 1,
+            "b" => 2,
+            "a" => 3,
+            _ => 0,
+        }
+    }
+
+    /// The factor a glTF texture of this channel takes: the scale of channel `k`, where no bias is added.
+    fn factor(&self, k: usize) -> f32 {
+        let k = if matches!(self.channel.as_str(), "r" | "g" | "b" | "a") {
+            self.channel_index()
+        } else {
+            k
+        };
+        if self.bias.iter().all(|b| *b == 0.0) {
+            self.scale[k].clamp(0.0, 1.0)
+        } else {
+            1.0
+        }
+    }
+
     fn tex(&self, image: usize) -> Tex {
         Tex {
             transform: self.transform,
@@ -1856,7 +2958,13 @@ struct Shape {
     /// Faces `holeIndices` leaves out.
     hole: Vec<bool>,
     normals: Option<Primvar<[f32; 3]>>,
-    uvs: Option<Primvar<[f32; 2]>>,
+    /// Texture coordinate sets by primvar name, the likeliest color texture's first.
+    uvs: Vec<(String, Primvar<[f32; 2]>)>,
+    /// Color sets other than the display color, by primvar name.
+    colors: Vec<(String, Primvar<[f32; 4]>)>,
+    /// Authored tangents; a w of 0 is a handedness the file leaves to `bitangents`.
+    tangents: Option<Primvar<[f32; 4]>>,
+    bitangents: Option<Primvar<[f32; 3]>>,
     /// Faces wound clockwise.
     left_handed: bool,
     /// Smoothed when it has no normals: a subdivision surface.
@@ -1873,6 +2981,7 @@ const STACKS: usize = 16;
 struct Tess {
     points: Vec<[f32; 3]>,
     normals: Vec<[f32; 3]>,
+    uvs: Vec<[f32; 2]>,
     counts: Vec<i32>,
     corners: Vec<i32>,
 }
@@ -1883,12 +2992,13 @@ impl Tess {
         clippy::cast_possible_wrap,
         reason = "a tessellated shape has AROUND * (STACKS + 1) points at most"
     )]
-    fn face(&mut self, corners: &[([f32; 3], [f32; 3])]) {
+    fn face(&mut self, corners: &[([f32; 3], [f32; 3], [f32; 2])]) {
         self.counts.push(corners.len() as i32);
-        for &(p, n) in corners {
+        for &(p, n, uv) in corners {
             self.corners.push(self.points.len() as i32);
             self.points.push(p);
             self.normals.push(n);
+            self.uvs.push(uv);
         }
     }
 
@@ -1909,31 +3019,42 @@ impl Tess {
                 indices: None,
                 spread: Spread::FaceVarying,
             }),
-            uvs: None,
+            uvs: vec![(
+                "st".to_owned(),
+                Primvar {
+                    values: self.uvs,
+                    indices: None,
+                    spread: Spread::FaceVarying,
+                },
+            )],
+            colors: Vec::new(),
+            tangents: None,
+            bitangents: None,
             left_handed: false,
             smooth: false,
         }
     }
 
-    /// A cube of edge `size` about the origin.
+    /// A cube of edge `size` about the origin, each face's texture coordinates covering the unit square.
     fn cube(size: f32) -> Shape {
         let h = size / 2.0;
         let mut t = Self::default();
         for k in 0..3 {
             let (u, v) = ((k + 1) % 3, (k + 2) % 3);
             for s in [1.0f32, -1.0] {
-                let mut quad: Vec<([f32; 3], [f32; 3])> = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]
-                    .iter()
-                    .map(|&(a, b)| {
-                        let mut p = [0.0; 3];
-                        let mut n = [0.0; 3];
-                        p[k] = s * h;
-                        p[u] = a * h;
-                        p[v] = b * h;
-                        n[k] = s;
-                        (p, n)
-                    })
-                    .collect();
+                let mut quad: Vec<([f32; 3], [f32; 3], [f32; 2])> =
+                    [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]
+                        .iter()
+                        .map(|&(a, b)| {
+                            let mut p = [0.0; 3];
+                            let mut n = [0.0; 3];
+                            p[k] = s * h;
+                            p[u] = a * h;
+                            p[v] = b * h;
+                            n[k] = s;
+                            (p, n, [f32::midpoint(a, 1.0), f32::midpoint(b, 1.0)])
+                        })
+                        .collect();
                 if s < 0.0 {
                     quad.reverse();
                 }
@@ -1943,25 +3064,29 @@ impl Tess {
         t.finish(None)
     }
 
-    /// A plane facing `axis`: `width` along X (Z when facing X), `length` along Y (Z when facing Y).
+    /// A plane facing `axis`: `width` along X (Z when facing X), `length` along Y (Z when facing Y). U runs
+    /// along the width and V along the length, over the unit square.
     fn plane(width: f32, length: f32, axis: Option<&str>) -> Shape {
         let (w, l) = (width / 2.0, length / 2.0);
-        let (corners, n): ([[f32; 3]; 4], [f32; 3]) = match axis {
+        let (corners, n, uvs): ([[f32; 3]; 4], [f32; 3], [[f32; 2]; 4]) = match axis {
             Some("X") => (
                 [[0.0, -l, -w], [0.0, l, -w], [0.0, l, w], [0.0, -l, w]],
                 [1.0, 0.0, 0.0],
+                [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]],
             ),
             Some("Y") => (
                 [[-w, 0.0, -l], [-w, 0.0, l], [w, 0.0, l], [w, 0.0, -l]],
                 [0.0, 1.0, 0.0],
+                [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]],
             ),
             _ => (
                 [[-w, -l, 0.0], [w, -l, 0.0], [w, l, 0.0], [-w, l, 0.0]],
                 [0.0, 0.0, 1.0],
+                [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
             ),
         };
         let mut t = Self::default();
-        t.face(&corners.map(|p| (p, n)));
+        t.face(&[0, 1, 2, 3].map(|k| (corners[k], n, uvs[k])));
         t.finish(None)
     }
 
@@ -2001,27 +3126,49 @@ impl Tess {
         ]
     }
 
-    /// A surface of revolution about Z through `rows`, turned to `axis`.
+    /// A surface of revolution about Z through `rows`, turned to `axis`. U runs once around, V along the
+    /// profile by its length from the bottom.
     #[allow(
         clippy::float_cmp,
         reason = "a radius of exactly 0 is a pole; any other closes a band"
     )]
     fn lathe(rows: &[[f32; 4]], axis: Option<&str>) -> Shape {
-        let ring = |row: [f32; 4], j: usize| {
+        let mut along = Vec::with_capacity(rows.len());
+        let mut length = 0.0f32;
+        for (k, row) in rows.iter().enumerate() {
+            if let Some(prev) = k.checked_sub(1).map(|p| rows[p]) {
+                length += (row[0] - prev[0]).hypot(row[1] - prev[1]);
+            }
+            along.push(length);
+        }
+        let length = if length > 0.0 && length.is_finite() {
+            length
+        } else {
+            1.0
+        };
+        let ring = |k: usize, j: usize| {
+            let row = rows[k];
             #[allow(clippy::cast_precision_loss, reason = "a small loop counter")]
             let (s, c) = (std::f32::consts::TAU * (j % AROUND) as f32 / AROUND as f32).sin_cos();
-            ([row[0] * c, row[0] * s, row[1]], [row[2] * c, row[2] * s, row[3]])
+            #[allow(clippy::cast_precision_loss, reason = "a small loop counter")]
+            let u = j as f32 / AROUND as f32;
+            (
+                [row[0] * c, row[0] * s, row[1]],
+                [row[2] * c, row[2] * s, row[3]],
+                [u, along[k] / length],
+            )
         };
         let mut t = Self::default();
-        for pair in rows.windows(2) {
-            let (a, b) = (pair[0], pair[1]);
+        for k in 0..rows.len().saturating_sub(1) {
+            let (a, b) = (rows[k], rows[k + 1]);
             if (a[0] == b[0] && a[1] == b[1]) || (a[0] == 0.0 && b[0] == 0.0) {
                 continue;
             }
+            let (a, b) = (k, k + 1);
             for i in 0..AROUND {
-                if a[0] == 0.0 {
+                if rows[a][0] == 0.0 {
                     t.face(&[ring(a, i), ring(b, i + 1), ring(b, i)]);
-                } else if b[0] == 0.0 {
+                } else if rows[b][0] == 0.0 {
                     t.face(&[ring(a, i), ring(a, i + 1), ring(b, i)]);
                 } else {
                     t.face(&[ring(a, i), ring(a, i + 1), ring(b, i + 1), ring(b, i)]);
@@ -2150,6 +3297,45 @@ fn vec2s(v: sdf::Value) -> Option<Vec<[f32; 2]>> {
     })
 }
 
+/// Four-component values; three-component ones (a color without alpha) get a fourth of 1.
+fn vec4s(v: sdf::Value) -> Option<Vec<[f32; 4]>> {
+    Some(match v {
+        sdf::Value::Vec4fVec(v) => v.into_iter().map(|p| [p.x, p.y, p.z, p.w]).collect(),
+        sdf::Value::Vec4dVec(v) => v.into_iter().map(|p| [p.x, p.y, p.z, p.w].map(f32_of)).collect(),
+        sdf::Value::Vec4hVec(v) => v
+            .into_iter()
+            .map(|p| [p.x.to_f32(), p.y.to_f32(), p.z.to_f32(), p.w.to_f32()])
+            .collect(),
+        v => vec3s(v)?.into_iter().map(|[x, y, z]| [x, y, z, 1.0]).collect(),
+    })
+}
+
+/// Tangents: a 4-vector's w is its handedness; a 3-vector gets a w of 0, handedness unknown.
+fn tangent4s(v: sdf::Value) -> Option<Vec<[f32; 4]>> {
+    match v {
+        v @ (sdf::Value::Vec4fVec(_) | sdf::Value::Vec4dVec(_) | sdf::Value::Vec4hVec(_)) => vec4s(v),
+        v => Some(vec3s(v)?.into_iter().map(|[x, y, z]| [x, y, z, 0.0]).collect()),
+    }
+}
+
+/// Numbers in double precision, as knots want.
+fn doubles(v: sdf::Value) -> Option<Vec<f64>> {
+    Some(match v {
+        sdf::Value::DoubleVec(v) => v,
+        sdf::Value::FloatVec(v) => v.into_iter().map(f64::from).collect(),
+        sdf::Value::HalfVec(v) => v.into_iter().map(|h| f64::from(h.to_f32())).collect(),
+        _ => return None,
+    })
+}
+
+fn double2s(v: sdf::Value) -> Option<Vec<[f64; 2]>> {
+    Some(match v {
+        sdf::Value::Vec2dVec(v) => v.into_iter().map(|p| [p.x, p.y]).collect(),
+        sdf::Value::Vec2fVec(v) => v.into_iter().map(|p| [p.x, p.y].map(f64::from)).collect(),
+        _ => return None,
+    })
+}
+
 fn floats(v: sdf::Value) -> Option<Vec<f32>> {
     Some(match v {
         sdf::Value::FloatVec(v) => v,
@@ -2200,11 +3386,24 @@ impl Reader<'_> {
         if let Some(&i) = self.image_of.get(asset) {
             return i;
         }
-        let reference = asset.replace("<UDIM>", "1001").replace("<udim>", "1001");
+        let i = if asset.contains("<UDIM>") || asset.contains("<udim>") {
+            // A tiled texture, as its first tile there is.
+            (1001..=1010).find_map(|tile| {
+                let tile = tile.to_string();
+                self.find_image(&asset.replace("<UDIM>", &tile).replace("<udim>", &tile))
+            })
+        } else {
+            self.find_image(asset)
+        };
+        self.image_of.insert(asset.to_owned(), i);
+        i
+    }
+
+    /// An image by its asset path, read when found.
+    fn find_image(&mut self, reference: &str) -> Option<usize> {
         let reference = reference.trim_start_matches("./");
         let assets = self.assets;
-        let i = self
-            .usdz
+        self.usdz
             .as_mut()
             .and_then(|z| z.read(reference))
             .and_then(|(entry, bytes)| {
@@ -2215,9 +3414,7 @@ impl Reader<'_> {
             .or_else(|| {
                 let dir = self.file.parent().unwrap_or(Path::new(""));
                 self.images.file(assets, assets.find(reference, dir)?, reference)
-            });
-        self.image_of.insert(asset.to_owned(), i);
-        i
+            })
     }
 }
 
@@ -2412,6 +3609,7 @@ impl ar::Resolver for MemResolver {
 mod tests {
     use super::*;
     use crate::document::Pose;
+    use std::fmt::Write as _;
 
     fn read(path: &Path, dir: &Path) -> Option<crate::mesh::Mesh> {
         load(Input::file(path), &crate::assets::Folder::new(dir), Keep::ALL)
@@ -2518,5 +3716,687 @@ def Material \"Planks\"
         assert_eq!(mesh.materials[mesh.prims[0].material].color, [0.0, 0.5, 1.0, 1.0]);
         // Default units are centimeters.
         assert_eq!(mesh.prims[0].positions[1], [0.01, 0.0, 0.0]);
+    }
+
+    /// A stage of `usda` text in a folder of its own, beside `images` (each a gray or a color PNG by name).
+    fn stage(usda: &str, images: &[(&str, bool)]) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        for &(name, gray) in images {
+            let path = dir.path().join(name);
+            if gray {
+                image::GrayImage::from_pixel(2, 2, image::Luma([200]))
+                    .save(path)
+                    .unwrap();
+            } else {
+                image::RgbImage::from_pixel(2, 2, image::Rgb([200, 100, 50]))
+                    .save(path)
+                    .unwrap();
+            }
+        }
+        let path = dir.path().join("stage.usda");
+        std::fs::write(&path, usda).unwrap();
+        (dir, path)
+    }
+
+    fn doc(usda: &str, images: &[(&str, bool)]) -> Document<'static> {
+        let (dir, path) = stage(usda, images);
+        load(Input::file(&path), &crate::assets::Folder::new(dir.path()), Keep::ALL).unwrap()
+    }
+
+    fn flat(usda: &str, images: &[(&str, bool)]) -> crate::mesh::Mesh {
+        doc(usda, images).flatten(Pose::Rest).unwrap().unwrap()
+    }
+
+    fn close<const N: usize>(a: [f32; N], b: [f32; N]) -> bool {
+        a.iter().zip(b).all(|(a, b)| (a - b).abs() < 1e-5)
+    }
+
+    /// A unit quad in the XY plane with `body` in it and `rest` after it, in meters, Y up.
+    fn quad(body: &str, rest: &str) -> String {
+        format!(
+            "#usda 1.0\n(\n    upAxis = \"Y\"\n    metersPerUnit = 1\n)\n\ndef Mesh \"Quad\" (prepend apiSchemas = [\"MaterialBindingAPI\"])\n{{\n    point3f[] points = [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)]\n    int[] faceVertexCounts = [4]\n    int[] faceVertexIndices = [0, 1, 2, 3]\n    uniform token subdivisionScheme = \"none\"\n{body}\n}}\n{rest}"
+        )
+    }
+
+    #[test]
+    fn the_color_texture_reads_the_set_its_primvar_reader_names() {
+        let usda = quad(
+            r#"    texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (interpolation = "vertex")
+    texCoord2f[] primvars:st1 = [(0.25, 0.25), (0.75, 0.75)] (interpolation = "faceVarying")
+    int[] primvars:st1:indices = [0, 1, 1, 0]
+    rel material:binding = </Looks/M>"#,
+            r#"def Scope "Looks"
+{
+    def Material "M"
+    {
+        token outputs:surface.connect = </Looks/M/S.outputs:surface>
+        def Shader "S"
+        {
+            uniform token info:id = "UsdPreviewSurface"
+            color3f inputs:diffuseColor.connect = </Looks/M/T.outputs:rgb>
+            token outputs:surface
+        }
+        def Shader "T"
+        {
+            uniform token info:id = "UsdUVTexture"
+            asset inputs:file = @c.png@
+            float2 inputs:st.connect = </Looks/M/R.outputs:result>
+            float3 outputs:rgb
+        }
+        def Shader "R"
+        {
+            uniform token info:id = "UsdPrimvarReader_float2"
+            token inputs:varname = "st1"
+            float2 outputs:result
+        }
+    }
+}
+"#,
+        );
+        let mesh = flat(&usda, &[("c.png", false)]);
+        let prim = &mesh.prims[0];
+        assert!(mesh.materials[prim.material].color_image.is_some());
+        assert_eq!(prim.uvs.len(), prim.positions.len());
+        assert_eq!(prim.uv_sets.len(), 2, "st kept as the second set");
+        assert!(prim.uv_sets[0].is_empty(), "slot 0 is `uvs`");
+        for (i, p) in prim.positions.iter().enumerate() {
+            // The indexed st1 reads 0.25 at x = 0 and 0.75 at x = 1; st is the corner itself.
+            let u = 0.25 + 0.5 * p[0];
+            assert!(close(prim.uvs[i], [u, 1.0 - u]), "{:?} at {p:?}", prim.uvs[i]);
+            assert!(
+                close(prim.uv_sets[1][i], [p[0], 1.0 - p[1]]),
+                "{:?} at {p:?}",
+                prim.uv_sets[1][i]
+            );
+        }
+    }
+
+    #[test]
+    fn vertex_colors_stay_under_a_bound_material() {
+        let usda = quad(
+            r#"    color3f[] primvars:displayColor = [(1, 0, 0), (0, 1, 0), (0, 0, 1), (1, 1, 1)] (interpolation = "vertex")
+    color4f[] primvars:paint = [(0, 0, 0, 0.5), (0, 0, 0, 0.5), (0, 0, 0, 0.5), (0, 0, 0, 0.5)] (interpolation = "vertex")
+    rel material:binding = </Looks/M>"#,
+            r#"def Scope "Looks"
+{
+    def Material "M"
+    {
+        token outputs:surface.connect = </Looks/M/S.outputs:surface>
+        def Shader "S"
+        {
+            uniform token info:id = "UsdPreviewSurface"
+            color3f inputs:diffuseColor = (0.5, 0.5, 0.5)
+            token outputs:surface
+        }
+    }
+}
+"#,
+        );
+        let mesh = flat(&usda, &[]);
+        let prim = &mesh.prims[0];
+        assert_eq!(mesh.materials[prim.material].name, "M");
+        assert!(
+            prim.colors.iter().all(|&c| close(c, [1.0; 4])),
+            "the material reads no color set, so COLOR_0 doesn't tint it"
+        );
+        assert_eq!(prim.color_sets.len(), 3);
+        assert!(prim.color_sets[0].is_empty(), "slot 0 is `colors`");
+        assert_eq!(prim.color_sets[1].len(), prim.positions.len());
+        for (c, p) in prim.color_sets[1].iter().zip(&prim.positions) {
+            let want = match (p[0] > 0.5, p[1] > 0.5) {
+                (false, false) => [1.0, 0.0, 0.0, 1.0],
+                (true, false) => [0.0, 1.0, 0.0, 1.0],
+                (true, true) => [0.0, 0.0, 1.0, 1.0],
+                (false, true) => [1.0, 1.0, 1.0, 1.0],
+            };
+            assert!(close(*c, want), "{c:?} at {p:?}");
+        }
+        assert!(prim.color_sets[2].iter().all(|c| close(*c, [0.0, 0.0, 0.0, 0.5])));
+    }
+
+    #[test]
+    fn authored_tangents_are_kept_with_their_handedness() {
+        let usda = quad(
+            r#"    normal3f[] normals = [(0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1)] (interpolation = "vertex")
+    float3[] primvars:tangents = [(2, 0, 0)] (interpolation = "constant")
+    float3[] primvars:bitangents = [(0, -1, 0)] (interpolation = "constant")"#,
+            "",
+        );
+        let mesh = flat(&usda, &[]);
+        let prim = &mesh.prims[0];
+        assert_eq!(prim.tangents.len(), prim.positions.len());
+        // cross(normal, tangent) is +Y; the bitangent points down, so the frame is mirrored.
+        assert!(
+            prim.tangents.iter().all(|t| close(*t, [1.0, 0.0, 0.0, -1.0])),
+            "{:?}",
+            prim.tangents
+        );
+    }
+
+    #[test]
+    fn emissive_occlusion_and_cutoff_are_read() {
+        let usda = quad(
+            r#"    texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (interpolation = "vertex")
+    rel material:binding = </Looks/M>"#,
+            r#"def Scope "Looks"
+{
+    def Material "M"
+    {
+        token outputs:surface.connect = </Looks/M/S.outputs:surface>
+        def Shader "S"
+        {
+            uniform token info:id = "UsdPreviewSurface"
+            color3f inputs:emissiveColor.connect = </Looks/M/E.outputs:rgb>
+            float inputs:occlusion.connect = </Looks/M/O.outputs:g>
+            float inputs:opacity = 1
+            float inputs:opacityThreshold = 0.4
+            token outputs:surface
+        }
+        def Shader "E"
+        {
+            uniform token info:id = "UsdUVTexture"
+            asset inputs:file = @glow.png@
+            float3 outputs:rgb
+        }
+        def Shader "O"
+        {
+            uniform token info:id = "UsdUVTexture"
+            asset inputs:file = @ao.png@
+            float outputs:g
+        }
+    }
+}
+"#,
+        );
+        let d = doc(&usda, &[("glow.png", false), ("ao.png", true)]);
+        let m = &d.json["materials"][0];
+        assert!(m.get("emissiveTexture").is_some(), "the emissive texture: {m}");
+        assert_eq!(m["emissiveFactor"], json!([1.0, 1.0, 1.0]));
+        assert!(
+            m.get("occlusionTexture").is_some(),
+            "a gray image reads the same in green: {m}"
+        );
+        assert_eq!(m["alphaMode"], "MASK");
+        assert!((m["alphaCutoff"].as_f64().unwrap() - 0.4).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_double_sided_surface_gets_a_double_sided_material() {
+        let looks = r#"def Scope "Looks"
+{
+    def Material "M"
+    {
+        token outputs:surface.connect = </Looks/M/S.outputs:surface>
+        def Shader "S"
+        {
+            uniform token info:id = "UsdPreviewSurface"
+            token outputs:surface
+        }
+    }
+}
+def Mesh "Back" (prepend apiSchemas = ["MaterialBindingAPI"])
+{
+    point3f[] points = [(5, 0, 0), (6, 0, 0), (6, 1, 0)]
+    int[] faceVertexCounts = [3]
+    int[] faceVertexIndices = [0, 1, 2]
+    uniform bool doubleSided = 1
+    rel material:binding = </Looks/M>
+}
+"#;
+        let mesh = flat(&quad("    rel material:binding = </Looks/M>", looks), &[]);
+        assert_eq!(mesh.prims.len(), 2);
+        assert_eq!(mesh.materials.len(), 2, "one material, one- and two-sided");
+        for prim in &mesh.prims {
+            let m = &mesh.materials[prim.material];
+            assert_eq!(m.name, "M");
+            assert_eq!(m.double_sided, prim.positions[0][0] > 4.0);
+        }
+    }
+
+    #[test]
+    fn instances_share_one_mesh() {
+        let mut usda = String::from(
+            r#"#usda 1.0
+def Xform "Root"
+{
+    class Xform "Proto"
+    {
+        def Cube "Box"
+        {
+        }
+    }
+"#,
+        );
+        for i in 0..20 {
+            write!(
+                usda,
+                "    def Xform \"I{i}\" (\n        instanceable = true\n        prepend inherits = </Root/Proto>\n    )\n    {{\n        double3 xformOp:translate = ({i}, 0, 0)\n        uniform token[] xformOpOrder = [\"xformOp:translate\"]\n    }}\n"
+            )
+            .unwrap();
+        }
+        usda.push_str("}\n");
+        let d = doc(&usda, &[]);
+        assert_eq!(d.json["meshes"].as_array().unwrap().len(), 1);
+        let held = d.json["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|n| n.get("mesh").is_some())
+            .count();
+        assert_eq!(held, 20);
+    }
+
+    #[test]
+    fn past_the_node_cap_the_rest_is_left_out() {
+        let mut usda = String::from("#usda 1.0\n");
+        for i in 0..10 {
+            write!(usda, "def Cube \"C{i}\"\n{{\n}}\n").unwrap();
+        }
+        let (dir, path) = stage(&usda, &[]);
+        let d = load_capped(
+            Input::file(&path),
+            &crate::assets::Folder::new(dir.path()),
+            Keep::ALL,
+            4,
+        )
+        .unwrap();
+        assert!(
+            d.json["nodes"].as_array().unwrap().len() <= 5,
+            "4 and a root for the units"
+        );
+        assert!(d.json["asset"]["extras"]["source"]["truncated"].is_string());
+        let mesh = d.flatten(Pose::Rest).unwrap().unwrap();
+        assert_eq!(mesh.triangles(), 4 * 12, "what was made is kept");
+    }
+
+    #[test]
+    fn implicit_shapes_have_texture_coordinates() {
+        let mesh = flat(
+            "#usda 1.0\ndef Cube \"C\"\n{\n}\ndef Sphere \"S\"\n{\n}\ndef Cylinder \"Y\"\n{\n}\ndef Plane \"P\"\n{\n}\n",
+            &[],
+        );
+        assert!(!mesh.prims.is_empty());
+        for prim in &mesh.prims {
+            assert_eq!(prim.uvs.len(), prim.positions.len());
+            assert!(prim.uvs.iter().flatten().all(|v| (0.0..=1.0).contains(v)));
+            assert!(prim.uvs.iter().any(|uv| uv[0] > 0.5) && prim.uvs.iter().any(|uv| uv[0] < 0.5));
+        }
+    }
+
+    #[test]
+    fn a_dome_light_is_noted_on_its_node() {
+        let d = doc(
+            "#usda 1.0\ndef DomeLight \"Sky\"\n{\n    asset inputs:texture:file = @sky.hdr@\n    float inputs:intensity = 2\n}\n",
+            &[],
+        );
+        let sky = d.json["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["name"] == "Sky")
+            .unwrap();
+        assert_eq!(sky["extras"]["domeLight"]["texture"], "sky.hdr");
+        assert_eq!(sky["extras"]["domeLight"]["intensity"], 2.0);
+    }
+
+    #[test]
+    fn a_udim_texture_reads_its_first_tile() {
+        let usda = quad(
+            r#"    texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (interpolation = "vertex")
+    rel material:binding = </Looks/M>"#,
+            r#"def Scope "Looks"
+{
+    def Material "M"
+    {
+        token outputs:surface.connect = </Looks/M/S.outputs:surface>
+        def Shader "S"
+        {
+            uniform token info:id = "UsdPreviewSurface"
+            color3f inputs:diffuseColor.connect = </Looks/M/T.outputs:rgb>
+            token outputs:surface
+        }
+        def Shader "T"
+        {
+            uniform token info:id = "UsdUVTexture"
+            asset inputs:file = @tiles.<UDIM>.png@
+            float3 outputs:rgb
+        }
+    }
+}
+"#,
+        );
+        let mesh = flat(&usda, &[("tiles.1003.png", false)]);
+        assert!(mesh.materials[mesh.prims[0].material].color_image.is_some());
+    }
+
+    #[test]
+    fn blend_shapes_carry_their_normal_offsets() {
+        let usda = quad(
+            r#"    normal3f[] normals = [(0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1)] (interpolation = "vertex")
+    uniform token[] skel:blendShapes = ["lift"]
+    rel skel:blendShapeTargets = </Quad/Lift>
+    def BlendShape "Lift"
+    {
+        uniform vector3f[] offsets = [(0, 0, 1)]
+        uniform vector3f[] normalOffsets = [(0, 1, 0)]
+        uniform int[] pointIndices = [2]
+    }"#,
+            "",
+        )
+        .replace("MaterialBindingAPI", "SkelBindingAPI");
+        let d = doc(&usda, &[]);
+        let target = &d.json["meshes"][0]["primitives"][0]["targets"][0];
+        assert!(
+            target.get("POSITION").is_some() && target.get("NORMAL").is_some(),
+            "{target}"
+        );
+    }
+
+    /// A sample drawn on a curve: its curve, the weight of each control point, and whether it
+    /// starts the curve and closes it.
+    type Drawn = (usize, Vec<f32>, bool, bool);
+
+    /// The samples drawn on curves, and the count sampled on cubic curves.
+    fn samples(
+        counts: &[i32],
+        points: usize,
+        cubic: Option<Basis>,
+        wrap: Option<&str>,
+        budget: usize,
+    ) -> (Vec<Drawn>, usize) {
+        let mut out = Vec::new();
+        let sampled = curve_samples(counts, points, cubic, wrap, budget, &mut |s| {
+            let mut w = vec![0.0; points];
+            for &(i, x) in &s.terms[..s.n] {
+                w[i] += x;
+            }
+            out.push((s.curve, w, s.starts, s.closes));
+        });
+        (out, sampled)
+    }
+
+    #[test]
+    fn curve_samples_by_basis_and_wrap() {
+        let close = |a: &[f32], b: &[f32]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-6);
+        // Linear curves are their control points; a periodic one closes from its last.
+        let (s, n) = samples(&[3, 2], 5, None, Some("periodic"), 0);
+        assert_eq!(n, 0);
+        assert_eq!(
+            s.iter().map(|s| (s.0, s.2, s.3)).collect::<Vec<_>>(),
+            [
+                (0, true, false),
+                (0, false, false),
+                (0, false, true),
+                (1, true, false),
+                (1, false, true)
+            ]
+        );
+        // A uniform B-spline of five points is two segments of eight steps; it starts at
+        // (P0 + 4 P1 + P2) / 6.
+        let (s, n) = samples(&[5], 5, Some(Basis::Bspline), None, usize::MAX);
+        assert_eq!((s.len(), n), (17, 17));
+        assert!(
+            close(&s[0].1, &[1.0 / 6.0, 4.0 / 6.0, 1.0 / 6.0, 0.0, 0.0]),
+            "{:?}",
+            s[0].1
+        );
+        assert!(s[0].2 && !s[1].2 && s.iter().all(|s| !s.3));
+        // Pinned, it runs from its first point to its last.
+        let (s, n) = samples(&[3], 3, Some(Basis::Bspline), Some("pinned"), usize::MAX);
+        assert_eq!((s.len(), n), (17, 17));
+        assert!(close(&s[0].1, &[1.0, 0.0, 0.0]) && close(&s[16].1, &[0.0, 0.0, 1.0]));
+        // A periodic Bezier curve of six points is two segments, back to its first point.
+        let (s, _) = samples(&[6], 6, Some(Basis::Bezier), Some("periodic"), usize::MAX);
+        assert_eq!(s.len(), 17);
+        assert!(close(&s[16].1, &[1.0, 0.0, 0.0, 0.0, 0.0, 0.0]));
+        // Too few points for the basis, or past the budget: drawn through the control points.
+        for (count, basis, budget) in [
+            (5, Basis::Bezier, usize::MAX),
+            (2, Basis::Bspline, usize::MAX),
+            (5, Basis::Bspline, 16),
+        ] {
+            let (s, n) = samples(&[count], 5, Some(basis), None, budget);
+            assert_eq!((s.len(), n), (usize::try_from(count).unwrap(), 0), "{count} {budget}");
+        }
+        // A negative count, or a curve past the points, ends the curves.
+        assert_eq!(samples(&[2, -1, 2], 6, None, None, 0).0.len(), 2);
+        assert_eq!(samples(&[2, 9, 2], 6, None, None, 0).0.len(), 2);
+        assert_eq!(
+            samples(&[i32::MAX], 6, Some(Basis::CatmullRom), None, usize::MAX)
+                .0
+                .len(),
+            0
+        );
+    }
+
+    #[test]
+    fn hermite_curves_leave_each_point_along_its_tangent() {
+        // Three points are two segments; a tangent's index follows the points.
+        let mut out = Vec::new();
+        let n = curve_samples(&[3], 3, Some(Basis::Hermite), None, usize::MAX, &mut |s| {
+            let mut w = [0.0; 6];
+            for &(i, x) in &s.terms[..s.n] {
+                w[i] += x;
+            }
+            out.push((w, s.starts, s.tangents, s.ends));
+        });
+        assert_eq!((out.len(), n), (17, 17));
+        assert_eq!(out[0].0, [1.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        assert_eq!(out[16].0, [0.0, 0.0, 1.0, 0.0, 0.0, 0.0]);
+        // Halfway along the first: half of each end, and an eighth of each tangent, the second's taken away.
+        assert_eq!(out[4].0, [0.5, 0.5, 0.0, 0.125, -0.125, 0.0]);
+        assert!(out[0].1 && out.iter().skip(1).all(|o| !o.1 && o.2 == 3));
+        assert_eq!(out[12].3, (1, 2, 0.5));
+        // Past the budget, through the points.
+        let mut drawn = 0;
+        assert_eq!(
+            curve_samples(&[3], 3, Some(Basis::Hermite), None, 16, &mut |_| drawn += 1),
+            0
+        );
+        assert_eq!(drawn, 3);
+    }
+
+    /// The samples drawn on NURBS curves, each its curve, the weight of each control point and whether it starts
+    /// the curve, and the count sampled.
+    fn nurbs(counts: &[i32], points: usize, nurbs: &Nurbs, budget: usize) -> (Vec<(usize, Vec<f32>, bool)>, usize) {
+        let mut out = Vec::new();
+        let sampled = nurbs_samples(counts, points, nurbs, budget, &mut |s| {
+            let mut w = vec![0.0; points];
+            for &(i, x) in &s.terms[..s.n] {
+                w[i] += x;
+            }
+            out.push((s.curve, w, s.starts));
+        });
+        (out, sampled)
+    }
+
+    #[test]
+    fn nurbs_curves_sample_their_knot_spans_in_range() {
+        let close = |a: &[f32], b: &[f32]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-6);
+        let curve = |orders: &[i32], knots: &[f64]| Nurbs {
+            orders: orders.to_vec(),
+            knots: knots.to_vec(),
+            ranges: Vec::new(),
+            weights: Vec::new(),
+        };
+        // A cubic with clamped knots is a Bezier segment: from its first point to its last, through
+        // (P0 + 3 P1 + 3 P2 + P3) / 8 halfway.
+        let bezier = curve(&[4], &[0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0]);
+        let (s, n) = nurbs(&[4], 4, &bezier, usize::MAX);
+        assert_eq!((s.len(), n), (9, 9));
+        assert!(close(&s[0].1, &[1.0, 0.0, 0.0, 0.0]) && close(&s[8].1, &[0.0, 0.0, 0.0, 1.0]));
+        assert!(close(&s[4].1, &[0.125, 0.375, 0.375, 0.125]), "{:?}", s[4].1);
+        assert!(s[0].2 && s.iter().skip(1).all(|s| !s.2));
+        // Weights make it rational: a quarter circle, its middle control point weighted by cos 45°, is
+        // halfway at (P0 + √2 P1 + P2) / (2 + √2).
+        let mut arc = curve(&[3], &[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]);
+        arc.weights = vec![1.0, std::f64::consts::FRAC_1_SQRT_2, 1.0];
+        let (s, _) = nurbs(&[3], 3, &arc, usize::MAX);
+        let (w, sum) = (std::f32::consts::SQRT_2, 2.0 + std::f32::consts::SQRT_2);
+        assert!(close(&s[4].1, &[1.0 / sum, w / sum, 1.0 / sum]), "{:?}", s[4].1);
+        // A weight that isn't positive leaves the curve not rational.
+        arc.weights[1] = 0.0;
+        assert!(close(&nurbs(&[3], 3, &arc, usize::MAX).0[4].1, &[0.25, 0.5, 0.25]));
+        // Five points of order two with a repeated knot: three spans drawn (an empty one isn't), and the range
+        // cuts off the first half of the first and all of the last.
+        let mut line = curve(&[2], &[0.0, 0.0, 1.0, 2.0, 2.0, 3.0, 3.0]);
+        let (s, n) = nurbs(&[5], 5, &line, usize::MAX);
+        assert_eq!((s.len(), n), (25, 25));
+        line.ranges = vec![[0.5, 2.0]];
+        let (s, _) = nurbs(&[5], 5, &line, usize::MAX);
+        assert_eq!(s.len(), 17);
+        assert!(close(&s[0].1, &[0.5, 0.5, 0.0, 0.0, 0.0]) && close(&s[16].1, &[0.0, 0.0, 1.0, 0.0, 0.0]));
+        // A range that isn't one draws the whole.
+        line.ranges = vec![[2.0, 1.0]];
+        assert_eq!(nurbs(&[5], 5, &line, usize::MAX).0.len(), 25);
+        // Orders, knots and ranges that don't make a curve, or past the budget: through the control points. A
+        // curve whose knots run out leaves every curve after it so.
+        for (orders, knots, ranges, budget) in [
+            (&[1][..], &[0.0, 1.0, 2.0, 3.0, 4.0][..], &[][..], usize::MAX),
+            (&[9], &[0.0; 13], &[], usize::MAX),
+            (&[5], &[0.0; 9], &[], usize::MAX),
+            (&[4], &[0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0], &[], 8),
+            (
+                &[4],
+                &[0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
+                &[[5.0, 6.0]],
+                usize::MAX,
+            ),
+            (&[4], &[0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0][..7], &[], usize::MAX),
+            (&[4], &[1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0], &[], usize::MAX),
+            (&[4], &[0.0, 0.0, 0.0, 0.0, f64::NAN, 1.0, 1.0, 1.0], &[], usize::MAX),
+            (&[4], &[0.0; 8], &[], usize::MAX),
+            (&[-4], &[0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0], &[], usize::MAX),
+            (&[], &[], &[], usize::MAX),
+        ] {
+            let mut c = curve(orders, knots);
+            c.ranges = ranges.to_vec();
+            let (s, n) = nurbs(&[4, 4], 8, &c, budget);
+            assert_eq!((s.len(), n), (8, 0), "{orders:?} {knots:?} {ranges:?}");
+        }
+        // The second curve's knots follow the first's.
+        let two = curve(&[2, 4], &[0.0, 0.0, 1.0, 1.0, 5.0, 5.0, 5.0, 5.0, 6.0, 6.0, 6.0, 6.0]);
+        let (s, n) = nurbs(&[2, 4], 6, &two, usize::MAX);
+        assert_eq!((s.len(), n), (18, 18));
+        assert!(s[9].2 && s[9].0 == 1 && close(&s[9].1, &[0.0, 0.0, 1.0, 0.0, 0.0, 0.0]));
+        // A negative count, or a curve past the points, ends the curves.
+        assert_eq!(nurbs(&[2, -1, 2], 6, &curve(&[], &[]), usize::MAX).0.len(), 2);
+        assert_eq!(nurbs(&[i32::MAX], 6, &bezier, usize::MAX).0.len(), 0);
+    }
+
+    /// A stage holding `prims`, in meters, Y up.
+    fn stage_of(prims: &str) -> String {
+        format!("#usda 1.0\n(\n    upAxis = \"Y\"\n    metersPerUnit = 1\n)\n\n{prims}")
+    }
+
+    #[test]
+    fn nurbs_and_hermite_curves_are_drawn_as_lines() {
+        let usda = stage_of(
+            r#"def NurbsCurves "Arc"
+{
+    int[] curveVertexCounts = [3]
+    point3f[] points = [(1, 0, 0), (1, 1, 0), (0, 1, 0)]
+    int[] order = [3]
+    double[] knots = [0, 0, 0, 1, 1, 1]
+    double[] pointWeights = [1, 0.70710678, 1]
+    color3f[] primvars:displayColor = [(1, 0, 0)]
+}
+
+def HermiteCurves "Wave"
+{
+    int[] curveVertexCounts = [2]
+    point3f[] points = [(0, 0, 5), (1, 0, 5)]
+    vector3f[] tangents = [(0, 4, 0), (0, 4, 0)]
+    color3f[] primvars:displayColor = [(0, 0, 1), (0, 1, 0)] (interpolation = "vertex")
+}
+"#,
+        );
+        let d = doc(&usda, &[]);
+        assert_eq!(d.json["meshes"].as_array().unwrap().len(), 2);
+        let m = d.flatten(Pose::Rest).unwrap().unwrap();
+        assert_eq!((m.triangles(), m.lines()), (0, 16));
+        // The arc lies on the unit circle; the Hermite segment rises and falls between its points.
+        let arc = m
+            .prims
+            .iter()
+            .find(|p| p.positions.iter().all(|q| q[2] == 0.0))
+            .unwrap();
+        assert_eq!(arc.positions.len(), 9);
+        assert!(
+            arc.positions.iter().all(|q| (q[0].hypot(q[1]) - 1.0).abs() < 1e-5),
+            "{:?}",
+            arc.positions
+        );
+        let wave = m
+            .prims
+            .iter()
+            .find(|p| p.positions.iter().all(|q| (q[2] - 5.0).abs() < 1e-6))
+            .unwrap();
+        assert!(close(wave.positions[4], [0.5, 0.0, 5.0]), "{:?}", wave.positions[4]);
+        assert!(
+            close(wave.positions[2], [0.15625, 0.375, 5.0]),
+            "{:?}",
+            wave.positions[2]
+        );
+        // Its colors run between its points', the tangents adding none.
+        let [r, g, b, a] = wave.colors[4];
+        assert!(close([r, g, b, a], [0.0, 0.5, 0.5, 1.0]), "{:?}", wave.colors[4]);
+
+        // Tangents that aren't one a point, and knots that don't make a curve: through the points.
+        let usda = stage_of(
+            r#"def NurbsCurves "Arc"
+{
+    int[] curveVertexCounts = [3]
+    point3f[] points = [(1, 0, 0), (1, 1, 0), (0, 1, 0)]
+    int[] order = [3]
+    double[] knots = [0, 0, 1]
+}
+
+def HermiteCurves "Wave"
+{
+    int[] curveVertexCounts = [2]
+    point3f[] points = [(0, 0, 5), (1, 0, 5)]
+    vector3f[] tangents = [(0, 4, 0)]
+}
+"#,
+        );
+        let m = flat(&usda, &[]);
+        assert_eq!(
+            (m.lines(), m.prims.iter().map(|p| p.positions.len()).sum::<usize>()),
+            (3, 5)
+        );
+    }
+
+    #[test]
+    fn hostile_curves_never_panic() {
+        let attrs = [
+            "int[] curveVertexCounts = [2147483647, -1, 0, 3]",
+            "int[] curveVertexCounts = [0, 0, 0, 0, 0, 0, 4]",
+            "int[] order = [-2147483648, 2147483647, 0, 1]",
+            "int[] order = [4, 4, 4, 4, 4, 4, 4]",
+            "double[] knots = [nan, inf, -inf, 1e308, -1e308, 0, 0, 0]",
+            "double[] knots = [-1e308, -1e308, -1e308, -1e308, 1e308, 1e308, 1e308, 1e308]",
+            "double[] knots = [0, 0, 0, 0, 1e-300, 1e-300, 1e-300, 1e-300]",
+            "double2[] ranges = [(nan, 1), (1, -1), (inf, inf)]",
+            "double2[] ranges = [(-1e308, 1e308)]",
+            "double[] pointWeights = [0, -1, nan, 1e308]",
+            "double[] pointWeights = [1e-308, 1e308, 1e-308, 1e308]",
+            "vector3f[] tangents = [(1e38, 1e38, 1e38), (nan, 0, 0), (0, 0, 0), (1, 1, 1)]",
+            "vector3f[] tangents = []",
+            "color3f[] primvars:displayColor = [(1, 0, 0)] (interpolation = \"varying\")",
+            "color3f[] primvars:displayColor = [(1, 0, 0), (0, 1, 0)] (interpolation = \"vertex\")",
+        ];
+        let points = "point3f[] points = [(0, 0, 0), (1, 0, 0), (1, 1, 0), (1e38, 0, 0)]";
+        for kind in ["NurbsCurves", "HermiteCurves"] {
+            for (i, a) in attrs.iter().enumerate() {
+                for b in &attrs[i..] {
+                    let usda = stage_of(&format!("def {kind} \"C\"\n{{\n    {points}\n    {a}\n    {b}\n}}\n"));
+                    let (dir, path) = stage(&usda, &[]);
+                    if let Ok(d) = load(Input::file(&path), &crate::assets::Folder::new(dir.path()), Keep::ALL) {
+                        let _flat = d.flatten(Pose::Rest);
+                    }
+                }
+            }
+        }
     }
 }

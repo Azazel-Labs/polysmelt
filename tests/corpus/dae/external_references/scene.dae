@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<COLLADA xmlns="http://www.collada.org/2005/11/COLLADASchema" version="1.4.1">
+<asset></asset>
+<library_visual_scenes><visual_scene id="Scene" name="Scene"><node id="Box" name="Box"><instance_geometry url="parts/cube.dae#Cube"><bind_material><technique_common><instance_material symbol="mat" target="parts/cube.dae#M"/></technique_common></bind_material></instance_geometry></node><node id="LampHolder" name="LampHolder"><instance_node url="./parts/lamp.dae#LampNode"/></node><node id="Missing" name="Missing"><instance_node url="nowhere.dae#Thing"/></node></visual_scene></library_visual_scenes><scene><instance_visual_scene url="#Scene"/></scene>
+</COLLADA>

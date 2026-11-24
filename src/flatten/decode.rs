@@ -54,7 +54,8 @@ impl Document<'_> {
     /// points into any more (meshopt fallbacks, buffers that held only compressed data) are
     /// dropped. Decoded data goes into a new buffer; compressed data sharing a buffer with
     /// other views stays where it was. Everything else (animation, skins, materials, unknown
-    /// extensions and extras) is untouched. A document without these is left as it is.
+    /// extensions and extras, required ones too) is untouched. A document without these is left
+    /// as it is.
     ///
     /// # Errors
     ///
@@ -94,7 +95,8 @@ fn has_draco(json: &Map<String, Value>) -> bool {
 /// Decodes everything [`Document::decode`] replaces, changing nothing yet.
 fn read(doc: &Document<'_>) -> Result<Plan> {
     let json = &doc.json;
-    let mut r = Reader::new(doc)?;
+    // Only accessors are read: a required extension decoding leaves alone stays required.
+    let mut r = Reader::bare(doc);
     let mut plan = Plan::default();
     for i in 0..list(json, "bufferViews").len() {
         r.meshopt(i)?;

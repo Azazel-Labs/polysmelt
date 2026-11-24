@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<COLLADA xmlns="http://www.collada.org/2005/11/COLLADASchema" version="1.4.1">
+<asset></asset>
+<library_lights><light id="L" name="Lamp"><technique_common><point><color>1 1 1</color></point></technique_common></light></library_lights><library_nodes><node id="LampNode" name="Lamp"><translate>0 3 0</translate><instance_light url="#L"/></node></library_nodes>
+</COLLADA>

@@ -1,0 +1,4 @@
+#VRML V2.0 utf8
+EXTERNPROTO Post [ field SFVec3f size ] [ "missing.wrl#Post" "parts/lib.wrl#Post" ]
+Post { size 1 4 1 }
+Transform { translation 5 0 0 children Post { } }

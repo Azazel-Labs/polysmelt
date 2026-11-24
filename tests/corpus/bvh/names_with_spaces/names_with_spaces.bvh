@@ -1,0 +1,25 @@
+HIERARCHY
+ROOT Left Up Leg
+{
+  OFFSET 0 0 0
+  CHANNELS 3 Zrotation Xrotation Yrotation
+  JOINT mixamorig:Left_Knee.001 (2)
+  {
+    OFFSET 0 -40 0
+    CHANNELS 3 Zrotation Xrotation Yrotation
+    JOINT Hüfte-Ω
+    {
+      OFFSET 0 -40 0
+      CHANNELS 3 Zrotation Xrotation Yrotation
+      End Site
+      {
+        OFFSET 0 0 10
+      }
+    }
+  }
+}
+MOTION
+Frames: 2
+Frame Time: 0.04
+0 0 0 0 0 0 0 0 0
+10 20 30 10 20 30 10 20 30
