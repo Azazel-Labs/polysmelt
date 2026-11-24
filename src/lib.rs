@@ -26,7 +26,7 @@ pub use bytes::Bytes;
 /// Returns an [`Error::InvalidInput`] built from a format string.
 macro_rules! bail {
     ($($t:tt)*) => {
-        return Err($crate::Error::InvalidInput(format!($($t)*)))
+        return Err($crate::Error::InvalidInput($crate::printable(format!($($t)*))))
     };
 }
 
@@ -43,8 +43,39 @@ macro_rules! ensure {
 #[allow(unused_macros)]
 macro_rules! invalid {
     ($($t:tt)*) => {
-        $crate::Error::InvalidInput(format!($($t)*))
+        $crate::Error::InvalidInput($crate::printable(format!($($t)*)))
     };
+}
+
+/// Text from a file as an error message shows it: quoted, escaped as Rust writes a string
+/// literal (so control characters and NULs come out printable), and cut to 32 characters.
+#[allow(dead_code, reason = "which readers use it depends on the enabled features")]
+pub(crate) fn shown(text: &[u8]) -> String {
+    const MOST: usize = 32;
+    let text = String::from_utf8_lossy(text);
+    let mut cut: String = text.chars().take(MOST).collect();
+    if text.chars().nth(MOST).is_some() {
+        cut.push('…');
+    }
+    format!("{cut:?}")
+}
+
+/// An error message with any control characters escaped, so file content that slipped into
+/// it can't garble a terminal or a report.
+pub(crate) fn printable(message: String) -> String {
+    if !message.chars().any(char::is_control) {
+        return message;
+    }
+    message
+        .chars()
+        .map(|c| {
+            if c.is_control() {
+                c.escape_debug().to_string()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
 }
 
 pub mod assets;
@@ -112,19 +143,19 @@ pub(crate) trait Context<T> {
 
 impl<T> Context<T> for Option<T> {
     fn context(self, what: impl Display) -> Result<T> {
-        self.ok_or_else(|| Error::InvalidInput(what.to_string()))
+        self.ok_or_else(|| Error::InvalidInput(printable(what.to_string())))
     }
     fn with_context<D: Display>(self, what: impl FnOnce() -> D) -> Result<T> {
-        self.ok_or_else(|| Error::InvalidInput(what().to_string()))
+        self.ok_or_else(|| Error::InvalidInput(printable(what().to_string())))
     }
 }
 
 impl<T, E: Display> Context<T> for std::result::Result<T, E> {
     fn context(self, what: impl Display) -> Result<T> {
-        self.map_err(|e| Error::InvalidInput(format!("{what}: {e}")))
+        self.map_err(|e| Error::InvalidInput(printable(format!("{what}: {e}"))))
     }
     fn with_context<D: Display>(self, what: impl FnOnce() -> D) -> Result<T> {
-        self.map_err(|e| Error::InvalidInput(format!("{}: {e}", what())))
+        self.map_err(|e| Error::InvalidInput(printable(format!("{}: {e}", what()))))
     }
 }
 

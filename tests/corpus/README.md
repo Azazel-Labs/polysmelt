@@ -125,7 +125,8 @@ python tools/corpus/obj.py
 - **PLY**: ASCII and binary in both byte orders, and every property type. Covers vertex
   colors in each encoding, the various UV property names, n-gons and triangle strips, point
   clouds and gaussian splats (read as `KHR_gaussian_splatting`, with spherical harmonics of
-  degree 1). Also unknown elements and broken headers.
+  degree 1). Also unknown elements, broken headers, and data shorter than the header says,
+  which keeps the whole faces it holds.
 - **VOX**: palettes (default and off-by-one), materials, and the scene graph: transforms,
   rotations, mirrors, groups, instances and hidden layers or nodes. Also version 150 packs
   and unknown chunks.
@@ -182,7 +183,7 @@ python tools/corpus/obj.py
   buffer with no URI, and a GLB whose buffer is an external file. glTF 1.0, upgraded as it's read: objects keyed by ID,
   binary glTF, `KHR_materials_common` and technique materials, accessor strides, a node's
   several meshes, skins found by joint name with a bind shape matrix, animation parameters,
-  cameras and lights. Errors: Draco, truncation, buffers outside the model's folder, and
+  cameras and lights. Errors: Draco, truncation, buffers named by absolute path, and
   accessors that overrun their views.
 - **SketchUp**: every layout from SketchUp 3 to 2026: the legacy object stream (3 to 6,
   2013 to 2020) and the ZIP container of 2021 on. Covers faces bounded by arcs beside a loose

@@ -73,9 +73,9 @@ Early. What exists today:
   entry, inside the model) and loads it on request, and `Document::embed_images` reads
   them all (a 3DS bump map's image is read regardless, to tell a normal map from a height
   map). Against hostile or runaway files, a load refuses a model of more than
-  `Keep::max_triangles` triangles (4 million by default, `mesh::MAX_TRIANGLES`), and
+  `Keep::max_triangles` triangles (64 million by default, `mesh::MAX_TRIANGLES`), and
   `Document::flatten` draws no more; raise it for big scans, as in
-  `Keep { max_triangles: 12_000_000, ..Keep::ALL }`. Points and lines (point clouds, wireframes,
+  `Keep { max_triangles: 120_000_000, ..Keep::ALL }`. Points and lines (point clouds, wireframes,
   curves) are drawn too, up to `Keep::max_points` of them (16 million by default,
   `mesh::MAX_POINTS`); `Keep { lines_and_points: false, ..Keep::ALL }` leaves them out.
   `Keep::threads` reads large OBJ files on several threads (`0` for one per core) and inflates

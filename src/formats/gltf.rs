@@ -3,8 +3,8 @@
 //!
 //! - A GLB file isn't read whole: its binary chunk stays in the file, read as needed. A GLB in
 //!   memory is used in place.
-//! - External buffers must sit inside the model's folder; for a model in memory they come from
-//!   [`Assets::read`]. A meshopt fallback buffer that isn't there holds nothing: views on it
+//! - External buffers are found relative to the model's file (`..` too, but never an absolute
+//!   path); for a model in memory they come from [`Assets::read`]. A meshopt fallback buffer that isn't there holds nothing: views on it
 //!   decode from their compressed data.
 //! - Images named by URI (a data URI, or a file found as buffers are) move into a buffer, so the
 //!   document stands on its own. One that isn't found keeps its URI.
@@ -37,12 +37,12 @@ const HEAD: usize = 64 * 1024;
 /// Files up to this size are read whole, in one call: the reads and seeks a binary chunk left in
 /// the file costs later outweigh the memory it saves.
 #[cfg(feature = "fs")]
-const WHOLE: u64 = 4 * 1024 * 1024;
+pub(crate) const WHOLE: u64 = 4 * 1024 * 1024;
 
 #[cfg(all(test, feature = "fs"))]
 thread_local! {
     /// [`WHOLE`], which tests lower to read every file's binary chunk in pieces.
-    static WHOLE_AT: std::cell::Cell<u64> = const { std::cell::Cell::new(WHOLE) };
+    pub(crate) static WHOLE_AT: std::cell::Cell<u64> = const { std::cell::Cell::new(WHOLE) };
 }
 
 /// The size up to which a file is read whole.
@@ -216,16 +216,16 @@ fn reference_images(doc: &mut Document<'_>, input: Input<'_>, assets: &dyn Asset
     }
 }
 
-/// `rel` when it's a plain relative path that stays inside the model's folder.
+/// `rel` when it's a relative path: no root, drive, share or URI scheme. It may climb out of the
+/// model's folder (`../shared/scene.bin`), as models that share their buffers do; a model in
+/// memory gets only what its [`Assets`] give, and [`crate::gltf::files_in`] stays inside its
+/// folder.
 fn checked(rel: &str) -> Result<&str> {
     let safe = !rel.contains(':')
         && Path::new(rel)
             .components()
-            .all(|c| matches!(c, Component::Normal(_) | Component::CurDir));
-    ensure!(
-        safe,
-        "refusing to read {rel:?}: not a relative path inside the model's folder"
-    );
+            .all(|c| matches!(c, Component::Normal(_) | Component::CurDir | Component::ParentDir));
+    ensure!(safe, "refusing to read {rel:?}: not a relative path");
     Ok(rel)
 }
 
@@ -462,6 +462,29 @@ mod tests {
         out
     }
 
+    #[cfg(feature = "fs")]
+    #[test]
+    fn a_buffer_in_a_parent_folder_is_read() {
+        let case = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/gltf/gltf_external_bin");
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("model")).unwrap();
+        std::fs::create_dir_all(dir.path().join("data")).unwrap();
+        std::fs::copy(case.join("cube.bin"), dir.path().join("data/cube.bin")).unwrap();
+        let text = std::fs::read_to_string(case.join("cube.gltf")).unwrap();
+        let gltf = dir.path().join("model/cube.gltf");
+        std::fs::write(&gltf, text.replace("\"cube.bin\"", "\"../data/cube.bin\"")).unwrap();
+        let doc = crate::formats::load(&gltf, "gltf", &Folder::new(dir.path()), Keep::ALL).unwrap();
+        assert_eq!(
+            doc.flatten(crate::document::Pose::Rest).unwrap().unwrap().triangles(),
+            12
+        );
+        std::fs::write(&gltf, text.replace("\"cube.bin\"", "\"/data/cube.bin\"")).unwrap();
+        let err = crate::formats::load(&gltf, "gltf", &Folder::new(dir.path()), Keep::ALL)
+            .err()
+            .unwrap();
+        assert!(err.to_string().contains("refusing"), "{err}");
+    }
+
     #[test]
     fn a_binary_chunk_left_in_its_file_reads_as_one_in_memory() {
         // Every file read in pieces, as only big ones are otherwise.
@@ -512,7 +535,10 @@ mod tests {
             let in_files = a["buffers"]
                 .as_array()
                 .is_some_and(|l| l.iter().any(|b| b.get("uri").is_some()));
-            if original[4..8] != 1u32.to_le_bytes() && !in_files {
+            // Nor must one the repair pass rewrites, as it does invalid input.
+            let mut fixed = doc.json.clone();
+            let repaired = crate::flatten::repaired(&doc, &mut fixed).is_some() || fixed != doc.json;
+            if original[4..8] != 1u32.to_le_bytes() && !in_files && !repaired {
                 let (b, bbin) = split(&written);
                 assert_eq!(normalized(a.clone()), normalized(b.clone()), "{name}: the JSON changed");
                 assert!(

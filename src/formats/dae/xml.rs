@@ -878,6 +878,19 @@ fn slow(t: &[u8]) -> f64 {
                 None
             }
         })
+        .or_else(|| {
+            // `1,5`: a decimal comma, as writers set to such a locale put it.
+            let comma = |c: &u8| *c == b',';
+            if t.contains(&b'.')
+                || t.iter()
+                    .position(comma)
+                    .is_none_or(|i| t.iter().rposition(comma) != Some(i))
+            {
+                return None;
+            }
+            let s: String = t.iter().map(|&c| if c == b',' { '.' } else { char::from(c) }).collect();
+            s.parse::<f64>().ok()
+        })
         .unwrap_or(0.0)
 }
 

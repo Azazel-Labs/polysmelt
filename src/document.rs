@@ -162,6 +162,19 @@ impl FileSpan {
     }
 
     /// Copies the bytes from `off` into `out`, which must lie within the span.
+    /// Writes bytes `from..to`, read through `chunk` a MiB at a time.
+    fn write_range(&self, from: u64, to: u64, chunk: &mut Vec<u8>, w: &mut dyn Write) -> Result<()> {
+        let mut at = from;
+        while at < to {
+            let n = usize_of((to - at).min(1 << 20));
+            chunk.resize(n, 0);
+            self.read_at(at, chunk)?;
+            w.write_all(chunk)?;
+            at += n as u64;
+        }
+        Ok(())
+    }
+
     fn read_at(&self, off: u64, out: &mut [u8]) -> Result<()> {
         ensure!(
             off.checked_add(out.len() as u64).is_some_and(|end| end <= self.len),
@@ -410,6 +423,30 @@ impl Blob<'_> {
     }
 
     /// Writes the first `len` bytes.
+    /// [`Blob::write_to`], with `kept` (sorted by offset) holding bytes already read from
+    /// this blob's file, to write instead of reading them again.
+    fn write_keeping(&self, len: u64, w: &mut dyn Write, kept: &[crate::flatten::Kept]) -> Result<()> {
+        #[cfg(feature = "fs")]
+        if let (Blob::File(f), false) = (self, kept.is_empty()) {
+            ensure!(len <= f.len, "glTF buffer holds {} bytes but declares {len}", f.len);
+            let mut chunk = Vec::new();
+            let mut pos = 0;
+            for (_, start, bytes) in kept {
+                let end = (start + bytes.len() as u64).min(len);
+                if end <= pos {
+                    continue;
+                }
+                let from = (*start).max(pos);
+                f.write_range(pos, from, &mut chunk, w)?;
+                w.write_all(&bytes[usize_of(from - start)..usize_of(end - start)])?;
+                pos = end;
+            }
+            return f.write_range(pos, len, &mut chunk, w);
+        }
+        let _ = kept;
+        self.write_to(len, w)
+    }
+
     fn write_to(&self, len: u64, w: &mut dyn Write) -> Result<()> {
         ensure!(
             len <= self.len(),
@@ -420,16 +457,7 @@ impl Blob<'_> {
             Blob::Borrowed(b) => w.write_all(&b[..usize_of(len)])?,
             Blob::Bytes(b) => w.write_all(&b[..usize_of(len)])?,
             #[cfg(feature = "fs")]
-            Blob::File(f) => {
-                let mut chunk = vec![0; usize_of(len.min(1 << 20))];
-                let mut at = 0;
-                while at < len {
-                    let n = usize_of((len - at).min(chunk.len() as u64));
-                    f.read_at(at, &mut chunk[..n])?;
-                    w.write_all(&chunk[..n])?;
-                    at += n as u64;
-                }
-            }
+            Blob::File(f) => f.write_range(0, len, &mut Vec::new(), w)?,
             Blob::Parts(p) => p.write_to(len, w)?,
             Blob::Missing(_) => bail!("a meshopt fallback buffer has no bytes to write"),
         }
@@ -613,7 +641,12 @@ impl<'a> Document<'a> {
         reason = "each chunk is smaller than `total`, which is checked to fit"
     )]
     pub fn write_glb(&self, w: &mut dyn Write) -> Result<()> {
-        let (json, layout, bin_len) = self.glb_json()?;
+        let mut json = self.json.clone();
+        // What repair read from files is written from memory rather than read again.
+        let (extra, mut kept) = crate::flatten::repaired_keeping(self, &mut json);
+        let extra = extra.map(|b| Blob::Bytes(b.into()));
+        kept.sort_unstable_by_key(|k| (k.0, k.1));
+        let (json, layout, bin_len) = self.glb_json(json, extra.as_ref())?;
         let mut text = serde_json::to_vec(&Value::Object(json))?;
         text.resize(text.len().next_multiple_of(4), b' ');
         let padded = bin_len.map(|n| n.next_multiple_of(4));
@@ -633,7 +666,14 @@ impl<'a> Document<'a> {
             let mut pos = 0;
             for (i, at, len) in layout {
                 write_zeros(w, at - pos)?;
-                self.buffers[i].write_to(len, w)?;
+                let blob = self
+                    .buffers
+                    .get(i)
+                    .or(extra.as_ref())
+                    .context("glTF buffer is missing")?;
+                let from = kept.partition_point(|k| k.0 < i);
+                let to = kept.partition_point(|k| k.0 <= i);
+                blob.write_keeping(len, w, &kept[from..to])?;
                 pos = at + len;
             }
             write_zeros(w, padded - pos)?;
@@ -641,17 +681,21 @@ impl<'a> Document<'a> {
         Ok(())
     }
 
-    /// The GLB's JSON, where each buffer with bytes goes in the binary chunk (buffer, offset,
-    /// length), and the binary chunk's length (`None` for none).
+    /// The GLB's JSON (from `json`, the document's, with `extra` its last buffer if given),
+    /// where each buffer with bytes goes in the binary chunk (buffer, offset, length), and the
+    /// binary chunk's length (`None` for none).
     #[allow(clippy::type_complexity, reason = "a private step of write_glb")]
-    fn glb_json(&self) -> Result<(Map<String, Value>, Vec<(usize, u64, u64)>, Option<u64>)> {
-        let mut json = self.json.clone();
+    fn glb_json(
+        &self,
+        mut json: Map<String, Value>,
+        extra: Option<&Blob<'_>>,
+    ) -> Result<(Map<String, Value>, Vec<(usize, u64, u64)>, Option<u64>)> {
         let buffers = list(&json, "buffers");
+        let held = self.buffers.len() + usize::from(extra.is_some());
         ensure!(
-            buffers.len() == self.buffers.len(),
-            "glTF document lists {} buffers but holds {}",
+            buffers.len() == held,
+            "glTF document lists {} buffers but holds {held}",
             buffers.len(),
-            self.buffers.len()
         );
         // Each buffer's new home: (buffer, offset). Buffers with bytes share the binary chunk;
         // missing fallbacks follow as buffers without data.
@@ -659,7 +703,7 @@ impl<'a> Document<'a> {
         let mut layout = Vec::new();
         let mut placeholders = Vec::new();
         let mut bin_len = 0u64;
-        for (i, (b, blob)) in buffers.iter().zip(&self.buffers).enumerate() {
+        for (i, (b, blob)) in buffers.iter().zip(self.buffers.iter().chain(extra)).enumerate() {
             let declared = b.get("byteLength").and_then(Value::as_u64).unwrap_or(0);
             if let Blob::Missing(_) = blob {
                 let mut p = b.as_object().cloned().unwrap_or_default();

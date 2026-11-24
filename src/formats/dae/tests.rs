@@ -522,3 +522,51 @@ fn extras_go_when_not_kept() {
     let d = read_with(text.as_bytes(), "t.dae", &Memory::new(), keep).unwrap();
     assert!(d.json["nodes"][0].get("extras").is_none());
 }
+
+#[test]
+fn bindings_of_one_geometry_share_its_accessors() {
+    let lib = r##"<library_effects><effect id="fx"><profile_COMMON><technique sid="c"><lambert><diffuse><color>1 0 0 1</color></diffuse></lambert></technique></profile_COMMON></effect>
+        <effect id="gx"><profile_COMMON><technique sid="c"><lambert><diffuse><color>0 1 0 1</color></diffuse></lambert></technique></profile_COMMON></effect></library_effects>
+      <library_materials><material id="red"><instance_effect url="#fx"/></material><material id="green"><instance_effect url="#gx"/></material></library_materials>"##;
+    let bound = |m: &str| {
+        format!(
+            r##"<node><instance_geometry url="#quad"><bind_material><technique_common>
+            <instance_material symbol="mat" target="#{m}"/></technique_common></bind_material></instance_geometry></node>"##
+        )
+    };
+    let scene = format!("{}{}", bound("red"), bound("green"));
+    let d = read(&doc("", &format!("{QUAD}{lib}"), &scene));
+    let meshes = d.json["meshes"].as_array().unwrap();
+    assert_eq!(meshes.len(), 2);
+    let (a, b) = (&meshes[0]["primitives"][0], &meshes[1]["primitives"][0]);
+    assert_eq!(a["attributes"], b["attributes"]);
+    assert_eq!(a["indices"], b["indices"]);
+    assert_ne!(a["material"], b["material"]);
+    let m = flat(&d);
+    assert_eq!(m.triangles(), 4);
+    let colors: Vec<f32> = m.prims.iter().map(|p| m.materials[p.material].color[1]).collect();
+    assert!(colors.contains(&0.0) && colors.contains(&1.0), "{colors:?}");
+}
+
+#[test]
+fn a_triangle_with_two_corners_at_one_position_is_dropped() {
+    // The second triangle's first and last corners name one position with different texture
+    // coordinates: it draws nothing.
+    let lib = QUAD
+        .replace(
+            "<vcount>4</vcount><p>0 0 0 1 0 1 2 0 2 3 0 3</p>",
+            "<vcount>3 3</vcount><p>0 0 0 1 0 1 2 0 2 0 0 0 1 0 1 0 0 3</p>",
+        )
+        .replace(r#"<polylist count="1""#, r#"<polylist count="2""#);
+    let d = read(&doc("", &lib, r##"<node><instance_geometry url="#quad"/></node>"##));
+    assert_eq!(flat(&d).triangles(), 1);
+}
+
+#[test]
+fn a_decimal_comma_reads_as_a_point() {
+    let lib = QUAD.replace("0 0 0 1 0 0 1 1 0 0 1 0", "0 0 0 1,5 0 0 1,5 1 0 0 1 0");
+    let d = read(&doc("", &lib, r##"<node><instance_geometry url="#quad"/></node>"##));
+    let m = flat(&d);
+    let x = m.prims[0].positions.iter().map(|p| p[0]).fold(0.0f32, f32::max);
+    assert!((x - 1.5).abs() < 1e-6, "{x}");
+}

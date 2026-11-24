@@ -82,7 +82,7 @@
  "buffers": [
   {
    "byteLength": 648,
-   "uri": "../outside.bin"
+   "uri": "/outside.bin"
   }
  ]
 }

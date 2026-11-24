@@ -607,7 +607,9 @@ impl Corners {
 
     #[inline]
     fn push(&mut self, a: u32, b: u32, c: u32) {
-        if a == b || b == c || a == c {
+        // Two corners at one position (whatever their normals or texture coordinates) make no area.
+        let p = |v: u32| self.points.get(v as usize);
+        if a == b || b == c || a == c || p(a) == p(b) || p(b) == p(c) || p(a) == p(c) {
             return;
         }
         self.triangles += 1;

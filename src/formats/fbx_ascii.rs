@@ -123,9 +123,9 @@ enum Tok<'a> {
 impl Tok<'_> {
     fn what(&self) -> String {
         match self {
-            Tok::Name(s) => format!("{s:?}:"),
-            Tok::Str(s) => format!("{:?}", String::from_utf8_lossy(s)),
-            Tok::Num(s) | Tok::Word(s) => format!("{s:?}"),
+            Tok::Name(s) => format!("{}:", crate::shown(s.as_bytes())),
+            Tok::Str(s) => crate::shown(s),
+            Tok::Num(s) | Tok::Word(s) => crate::shown(s.as_bytes()),
             Tok::Comma => "','".into(),
             Tok::Open => "'{'".into(),
             Tok::Close => "'}'".into(),
