@@ -198,8 +198,8 @@ pub fn load(path: &Path, ext: &str, assets: &dyn Assets, keep: Keep) -> Result<D
     use std::io::Read as _;
     // Opening a file costs more than reading a small one, and readers look at a model more than
     // once (its start, then all of it): a small model is read whole, from one opening. glTF's
-    // reader decides that for itself.
-    if !matches!(ext, "gltf" | "glb" | "vrm" | "vrma")
+    // reader decides that for itself, and USD's opens the layers a file names from beside it.
+    if !matches!(ext, "gltf" | "glb" | "vrm" | "vrma" | "usd" | "usda" | "usdc" | "usdz")
         && let Ok(mut file) = std::fs::File::open(path)
         && let Ok(len) = file.metadata().map(|m| m.len())
         && len <= SMALL_FILE
