@@ -234,8 +234,9 @@ impl Material {
 /// An image ready to embed: PNG or JPEG bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Image {
-    /// The encoded image.
-    pub bytes: Vec<u8>,
+    /// The encoded image. Shared: an image read from a document's buffer points into it, and
+    /// clones point at the same bytes.
+    pub bytes: crate::Bytes,
     /// `image/png` or `image/jpeg`.
     pub mime: &'static str,
 }
@@ -280,12 +281,14 @@ impl Image {
     #[must_use]
     pub fn png_or_jpeg(bytes: &[u8]) -> Option<Self> {
         Self::mime_of(bytes)?;
-        Self::from_png_or_jpeg(bytes.to_vec())
+        Self::from_png_or_jpeg(crate::Bytes::copy_from_slice(bytes))
     }
 
-    /// [`Image::png_or_jpeg`], taking the bytes without a copy.
+    /// [`Image::png_or_jpeg`], taking the bytes (a `Vec<u8>` or [`Bytes`](crate::Bytes))
+    /// without a copy.
     #[must_use]
-    pub fn from_png_or_jpeg(bytes: Vec<u8>) -> Option<Self> {
+    pub fn from_png_or_jpeg(bytes: impl Into<crate::Bytes>) -> Option<Self> {
+        let bytes = bytes.into();
         let mime = Self::mime_of(&bytes)?;
         Some(Self { bytes, mime })
     }
@@ -294,14 +297,16 @@ impl Image {
     /// re-encoded as PNG, each with the feature of its name. TGA has no signature, so only one
     /// with a version 2 footer is found here; [`Image::decode_named`] also goes by its name.
     #[must_use]
-    pub fn decode(bytes: Vec<u8>) -> Option<Self> {
+    pub fn decode(bytes: impl Into<crate::Bytes>) -> Option<Self> {
         Self::decode_named(bytes, std::path::Path::new(""))
     }
 
     /// `bytes`, a file named `name` (a path, or just its extension's worth, as `x.tga`), as an
-    /// image, as [`Image::decode`] makes one; the name finds TGA files without a footer.
+    /// image, as [`Image::decode`] makes one; the name finds TGA files without a footer. PNG and
+    /// JPEG bytes are kept as they are, without a copy.
     #[must_use]
-    pub fn decode_named(bytes: Vec<u8>, name: &std::path::Path) -> Option<Self> {
+    pub fn decode_named(bytes: impl Into<crate::Bytes>, name: &std::path::Path) -> Option<Self> {
+        let bytes = bytes.into();
         if Self::mime_of(&bytes).is_some() {
             return Self::from_png_or_jpeg(bytes);
         }
@@ -334,7 +339,7 @@ impl Image {
         }
         #[cfg(feature = "webp")]
         return Some(Self {
-            bytes: crate::webp::to_png(bytes)?,
+            bytes: crate::webp::to_png(bytes)?.into(),
             mime: "image/png",
         });
         #[cfg(not(feature = "webp"))]

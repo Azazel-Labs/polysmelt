@@ -1030,7 +1030,7 @@ impl Reader<'_> {
                 let set_js = quad(&js, width, set);
                 let set_ws = quad(&ws, width, set);
                 let j = if count <= 256 {
-                    let b = set_js.iter().map(|&j| u8::try_from(j).unwrap_or(0)).collect();
+                    let b: Vec<u8> = set_js.iter().map(|&j| u8::try_from(j).unwrap_or(0)).collect();
                     self.b.accessor(Part::bytes(b), 5121, n, "VEC4", Some(34962))
                 } else {
                     let b = set_js.iter().map(|&j| u16::try_from(j).unwrap_or(0)).collect();

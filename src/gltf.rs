@@ -221,7 +221,7 @@ impl<'a> Doc<'a> {
             return Self::parse_glb(input);
         }
         let text = input.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(input);
-        match serde_json::from_slice(text).context("not a GLB or glTF JSON")? {
+        match crate::json::from_slice(text).context("not a GLB or glTF JSON")? {
             Value::Object(json) => Ok(Doc {
                 json,
                 bin: None,
@@ -262,7 +262,7 @@ impl<'a> Doc<'a> {
         }
         let json = json.context("GLB has no JSON chunk")?;
         let json = json.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(json);
-        match serde_json::from_slice(json).context("bad GLB JSON")? {
+        match crate::json::from_slice(json).context("bad GLB JSON")? {
             Value::Object(json) => Ok(Doc {
                 json,
                 bin,
@@ -1051,7 +1051,7 @@ mod tests {
             prims: vec![prim],
             materials: vec![material],
             images: vec![Image {
-                bytes: png,
+                bytes: png.into(),
                 mime: "image/png",
             }],
             skeleton: Vec::new(),

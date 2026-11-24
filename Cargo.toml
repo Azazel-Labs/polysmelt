@@ -69,6 +69,8 @@ serde_json = "1"
 # Typed vertex data viewed as the bytes a GLB stores, without copying (unsafe is forbidden here).
 bytemuck = "1"
 thiserror = "2"
+# Shared, sliceable bytes: images in a mesh point at the buffer they were read into rather than copying it.
+bytes = { version = "1.10", default-features = false }
 base64 = { version = "0.22", optional = true }
 zip = { version = "9", default-features = false, features = ["deflate"], optional = true }
 quick-xml = { version = "0.41", optional = true }

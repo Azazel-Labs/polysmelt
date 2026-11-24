@@ -605,10 +605,10 @@ impl<'d> Reader<'d> {
         Ok(true)
     }
 
-    /// A buffer view's bytes.
-    fn view_bytes(&mut self, i: usize) -> Result<Vec<u8>> {
+    /// A buffer view's bytes, shared with its buffer when they can be.
+    fn view_shared(&mut self, i: usize) -> Result<crate::Bytes> {
         if self.meshopt(i)? {
-            return Ok(self.meshopt[&i].clone());
+            return Ok(crate::Bytes::copy_from_slice(&self.meshopt[&i]));
         }
         let (buffer, offset, len, _, _) = self.view(i)?;
         let b = self
@@ -620,12 +620,8 @@ impl<'d> Reader<'d> {
             offset.saturating_add(len) <= b.len(),
             "glTF buffer view runs past its buffer"
         );
-        if let Some(s) = b.slice(offset, len) {
-            return Ok(s.to_vec());
-        }
-        let mut out = vec![0; usize::try_from(len).context("glTF buffer view is too big to hold")?];
-        b.read_at(offset, &mut out)?;
-        Ok(out)
+        usize::try_from(len).map_err(|_| invalid!("glTF buffer view is too big to hold"))?;
+        b.shared(offset, len)
     }
 
     fn acc(&self, i: usize) -> Result<Acc> {
@@ -1910,7 +1906,7 @@ impl Reader<'_> {
         use draco_core::mesh_decoder::MeshDecoder;
 
         let view = index(ext, "bufferView").context("glTF Draco primitive has no bufferView")?;
-        let bytes = self.view_bytes(view)?;
+        let bytes = self.view_shared(view)?;
         let limits = DecodeLimits::default()
             .with_max_faces(self.budget as u64)
             .with_max_points(self.max_vertices as u64);
@@ -2449,19 +2445,21 @@ impl Reader<'_> {
         };
         let name = std::path::PathBuf::from(name);
         let bytes = if let Some(v) = index(img, "bufferView") {
-            self.view_bytes(v).ok()
+            self.view_shared(v).ok()
         } else {
             // A file the loader didn't find stays a URI, and isn't drawn.
             img.get("uri")
                 .and_then(Value::as_str)
                 .filter(|u| u.starts_with("data:"))
                 .and_then(|u| container::data_uri(u).ok())
-                .map(|(_, b)| b)
+                .map(|(_, b)| b.into())
         };
-        let out = bytes.and_then(|b| Image::decode_named(b, &name)).map(|i| {
-            mesh.images.push(i);
-            mesh.images.len() - 1
-        });
+        let out = bytes
+            .and_then(|b: crate::Bytes| Image::decode_named(b, &name))
+            .map(|i| {
+                mesh.images.push(i);
+                mesh.images.len() - 1
+            });
         self.images[s] = Some(out);
         out
     }

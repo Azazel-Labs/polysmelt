@@ -16,6 +16,10 @@
 
 use std::fmt::Display;
 
+/// The shared byte buffer [`mesh::Image`] holds, from the `bytes` crate: cloning or slicing one
+/// doesn't copy its bytes.
+pub use bytes::Bytes;
+
 /// Returns an [`Error::InvalidInput`] built from a format string.
 macro_rules! bail {
     ($($t:tt)*) => {
@@ -47,6 +51,7 @@ pub mod formats;
 mod gaussian;
 pub mod gltf;
 pub mod images;
+mod json;
 mod keep;
 mod material;
 pub mod mesh;

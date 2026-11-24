@@ -1302,7 +1302,7 @@ fn unread_images_load_as_read_ones() {
                 bad(format!("unread images don't write: {e}"));
             }
             let unread = less.embed_images(&assets);
-            let read = |d: &Document<'_>| -> Vec<Option<(Vec<u8>, &'static str)>> {
+            let read = |d: &Document<'_>| -> Vec<Option<(polysmelt::Bytes, &'static str)>> {
                 d.images()
                     .map(|h| h.load(&assets).ok().map(|i| (i.bytes, i.mime)))
                     .collect()

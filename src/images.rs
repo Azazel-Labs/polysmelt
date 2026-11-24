@@ -34,6 +34,7 @@ pub enum Location {
 }
 
 static EMBEDDED: Location = Location::Embedded;
+static MISSING: Location = Location::Missing;
 
 /// An image a document names but hasn't read.
 #[cfg_attr(
@@ -58,6 +59,20 @@ pub(crate) struct Reference {
     /// Embedded as it is (a glTF image, whose extensions say its type), rather than turned into
     /// PNG or JPEG by the assets.
     pub raw: bool,
+    /// For a file noted without looking for it: whether it's there, looked up the first time
+    /// [`location`](Self::location) is asked. `None` when `location` is already settled.
+    pub found: Option<std::sync::OnceLock<bool>>,
+}
+
+impl Reference {
+    /// Where the image is. A file noted without looking is looked for the first time this is
+    /// asked, and is [`Location::Missing`] when it isn't there.
+    pub fn location(&self) -> &Location {
+        match (&self.location, &self.found) {
+            (Location::File(p), Some(found)) if !*found.get_or_init(|| p.is_file()) => &MISSING,
+            (l, _) => l,
+        }
+    }
 }
 
 /// An image a reader collected for a material: read, or a reference to read later.
@@ -167,6 +182,7 @@ impl Images {
             location: Location::File(path),
             bytes: None,
             raw: false,
+            found: None,
         };
         Some(self.push(Source::Ref(r, uri)))
     }
@@ -197,6 +213,7 @@ impl Images {
             location,
             bytes: Some(bytes.into_owned()),
             raw: false,
+            found: None,
         };
         Some(self.push(Source::Ref(r, uri)))
     }
@@ -274,7 +291,7 @@ fn encode(s: &str) -> String {
 }
 
 /// An image of one of the MIME types glTF images carry.
-fn image_of(bytes: Vec<u8>, mime: Option<&str>) -> Option<Image> {
+fn image_of(bytes: crate::Bytes, mime: Option<&str>) -> Option<Image> {
     let mime = sniff_mime(&bytes).or_else(|| mime_from_name(&format!("x.{}", mime?.strip_prefix("image/")?)))?;
     Some(Image { bytes, mime })
 }
@@ -315,10 +332,12 @@ impl<'d> ImageHandle<'d> {
         self.reference.map(|r| r.name.as_str())
     }
 
-    /// Where it is.
+    /// Where it is. A file a glTF names is looked for the first time this (or anything that
+    /// needs it: [`path`](Self::path), [`mime`](Self::mime), [`load`](Self::load)) is asked,
+    /// not when the document is loaded.
     #[must_use]
     pub fn location(&self) -> &'d Location {
-        self.reference.map_or(&EMBEDDED, |r| &r.location)
+        self.reference.map_or(&EMBEDDED, Reference::location)
     }
 
     /// Its file, when it's in one.
@@ -355,14 +374,16 @@ impl<'d> ImageHandle<'d> {
         let i = self.index;
         let Some(r) = self.reference else {
             let bytes = if let Some(v) = self.json.get("bufferView").and_then(Value::as_u64) {
-                self.doc.view_bytes(crate::num::usize_of(v))?.into_owned()
+                self.doc.view_shared(crate::num::usize_of(v))?
             } else {
                 let uri = self.json.get("uri").and_then(Value::as_str);
-                data_uri(uri.with_context(|| format!("image {i} has no bytes"))?)?.1
+                data_uri(uri.with_context(|| format!("image {i} has no bytes"))?)?
+                    .1
+                    .into()
             };
             return image_of(bytes, self.mime()).with_context(|| format!("image {i}: unknown image format"));
         };
-        let bytes: Cow<'_, [u8]> = match (&r.location, &r.bytes) {
+        let bytes: Cow<'_, [u8]> = match (r.location(), &r.bytes) {
             (_, Some(b)) => Cow::Borrowed(b),
             (Location::File(p), None) => assets
                 .read(p)
@@ -370,7 +391,7 @@ impl<'d> ImageHandle<'d> {
             _ => bail!("image {i} ({:?}) wasn't found", r.name),
         };
         let img = if r.raw {
-            image_of(bytes.into_owned(), self.mime())
+            image_of(crate::Bytes::from(bytes.into_owned()), self.mime())
         } else {
             let name = self.path().map_or_else(|| PathBuf::from(&r.name), Path::to_path_buf);
             assets.image(&bytes, &name)
