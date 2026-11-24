@@ -20,7 +20,11 @@ use crate::mesh::Image;
 use crate::{Context as _, Result};
 
 /// Where an image is.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Non-exhaustive: other places an image can be may be added, so a `match` on one needs a
+/// wildcard arm.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Location {
     /// A file, found through the [`Assets`].
     File(PathBuf),
