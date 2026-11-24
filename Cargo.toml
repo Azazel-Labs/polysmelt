@@ -79,17 +79,17 @@ usd = ["dep:openusd", "dep:openusd-schemas", "dep:zip"]
 draco = ["gltf", "dep:draco-core"]
 # WebP textures (`EXT_texture_webp`, or a `.webp` file a model names) re-encoded as PNG for
 # the flat mesh, which embeds only PNG and JPEG.
-webp = ["dep:image-webp", "dep:flate2"]
+webp = ["dep:image-webp", "dep:flate2", "dep:fdeflate"]
 # Texture formats glTF can't embed, decoded and re-encoded as PNG the same way: TGA, BMP, a GIF's
 # first frame, TIFF, a PSD's merged image, and DDS (BC1 to BC5, or uncompressed).
-tga = ["dep:flate2"]
-bmp = ["dep:flate2"]
-gif = ["dep:flate2"]
-tiff = ["dep:flate2"]
-psd = ["dep:flate2"]
-dds = ["dep:flate2"]
+tga = ["dep:flate2", "dep:fdeflate"]
+bmp = ["dep:flate2", "dep:fdeflate"]
+gif = ["dep:flate2", "dep:fdeflate"]
+tiff = ["dep:flate2", "dep:fdeflate"]
+psd = ["dep:flate2", "dep:fdeflate"]
+dds = ["dep:flate2", "dep:fdeflate"]
 # SketchUp `.skp`, from SketchUp 3 to the latest, converted through glTF.
-skp = ["gltf", "dep:flate2"]
+skp = ["gltf", "dep:flate2", "dep:fdeflate"]
 # X3D and VRML97 meshes: classic (`.wrl`, `.x3dv`), XML (`.x3d`) and gzipped (`.wrz`, `.x3dz`).
 x3d = ["dep:quick-xml", "dep:flate2"]
 # LAS lidar point clouds, versions 1.0 to 1.4, point formats 0 to 10.
@@ -103,7 +103,7 @@ xyz = []
 # E57 scans: point clouds with their poses, colors and intensity.
 e57 = ["dep:e57"]
 # AMF (Additive Manufacturing File), plain or zipped.
-amf = ["dep:quick-xml", "dep:zip", "dep:base64", "dep:flate2"]
+amf = ["dep:quick-xml", "dep:zip", "dep:base64", "dep:flate2", "dep:fdeflate"]
 # LightWave objects (`.lwo`: LWOB, LWO2 and LWO3).
 lwo = []
 # AC3D `.ac` models.
@@ -126,9 +126,11 @@ quick-xml = { version = "0.41", optional = true }
 openusd = { version = "0.8", optional = true }
 openusd-schemas = { version = "0.8", features = ["geom", "shade"], optional = true }
 image-webp = { version = "0.2", optional = true }
-# zip already brings flate2 on the zlib-rs backend; the PNG writer shares it. Runtime detection lets inflate use
+# zip already brings flate2 on the zlib-rs backend; PNG checksums and reads share it. Runtime detection lets inflate use
 # the CPU's wider instructions (FBX arrays are mostly zlib).
 flate2 = { version = "1.1", default-features = false, features = ["zlib-rs", "runtime_detection"], optional = true }
+# The PNG writer's deflate: made for filtered rows, and much faster than flate2 at its fastest.
+fdeflate = { version = "0.3.7", optional = true }
 laz = { version = "0.14", default-features = false, optional = true }
 e57 = { version = "0.11", default-features = false, optional = true }
 draco-core = { version = "2.3", default-features = false, features = ["decoder", "edgebreaker_valence_decode", "legacy_bitstream_decode"], optional = true }

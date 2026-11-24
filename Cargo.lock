@@ -637,6 +637,7 @@ dependencies = [
  "draco-core",
  "e57",
  "fbxcel",
+ "fdeflate",
  "flate2",
  "gltf",
  "image",
