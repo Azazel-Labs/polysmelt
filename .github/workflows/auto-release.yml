@@ -7,11 +7,11 @@ name: Auto release
 # A tag counts only on a line by itself or with other tags (e.g. "#minor #release");
 # tags mentioned mid-sentence are ignored.
 #
-# Nothing is committed to main. The version is set in a commit of its own that only the version tag
-# points to, so builds from the tag see it in Cargo.toml and there's never a release commit to pull
-# first. That commit and the tag are made as whoever pushed the commit that released, not as a bot,
-# so versions show on GitHub as theirs. main's Cargo.toml keeps whatever version
-# it was last given by hand; the version tags are what count.
+# The version is set on main in a commit of its own ("Release x.y.z"), and the version tag points to
+# it, so main's Cargo.toml always says the version last released. Pull before pushing again. That
+# commit and the tag are made as whoever pushed the commit that released, not as a bot, so versions
+# show on GitHub as theirs. Main and the tag are pushed together or not at all: if main has moved on
+# meanwhile, the newer push's run releases instead.
 #
 # Pushes made with GITHUB_TOKEN don't start workflows, so crates.yml is called from here
 # rather than started by the tag.
@@ -108,11 +108,12 @@ jobs:
           cargo update --offline -p polysmelt --manifest-path bench/Cargo.toml
           git config user.name "$RELEASER"
           git config user.email "$RELEASER_ID+$RELEASER@users.noreply.github.com"
-          # On a commit only the tag points to; main already having the version needs none.
+          # Main already having the version needs no commit.
           git diff --quiet || git commit -qam "Release $VERSION"
           git tag -a "v$VERSION" -m "polysmelt $VERSION"
-          # Only the tag is pushed. It fails rather than replaces a version tag that's already there.
-          git push origin "refs/tags/v$VERSION"
+          # Both or neither. It fails rather than replaces a version tag that's already there, or main
+          # if it has moved past the commit that released.
+          git push --atomic origin HEAD:refs/heads/main "refs/tags/v$VERSION"
 
   crates:
     needs: version

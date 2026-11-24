@@ -1,5 +1,9 @@
 # polysmelt
 
+[![crates.io](https://img.shields.io/crates/v/polysmelt.svg)](https://crates.io/crates/polysmelt)
+[![docs.rs](https://img.shields.io/docsrs/polysmelt)](https://docs.rs/polysmelt)
+[![CI](https://github.com/Azazel-Labs/polysmelt/actions/workflows/ci.yml/badge.svg)](https://github.com/Azazel-Labs/polysmelt/actions/workflows/ci.yml)
+
 Pure-Rust 3D asset interchange, with glTF as the hub. Read what other tools write, keep what
 you don't understand, and write compact or plain files back out.
 
