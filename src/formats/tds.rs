@@ -1634,9 +1634,11 @@ fn add_faces(
         Cow::Borrowed(&t.faces)
     };
 
-    // Each face's unit normal and its angle at each corner.
+    // Each face's unit normal, and its angle at each corner when some face is smoothed (the
+    // angles weight the normals smoothing averages).
+    let smoothed = faces.iter().enumerate().any(|(f, face)| whole(face) && group(f) != 0);
     let mut unit = vec![[0.0f32; 3]; faces.len()];
-    let mut angle = vec![[0.0f32; 3]; faces.len()];
+    let mut angle = vec![[0.0f32; 3]; if smoothed { faces.len() } else { 0 }];
     for (f, face) in faces.iter().enumerate() {
         if !whole(face) {
             continue;
@@ -1646,6 +1648,9 @@ fn add_faces(
         let fnrm = face_normal(p[0], p[1], p[2]);
         if len(fnrm) > 0.0 {
             unit[f] = fnrm.map(|c| c / len(fnrm));
+        }
+        if !smoothed {
+            continue;
         }
         for k in 0..3 {
             let (a, b, c) = (p[k], p[(k + 1) % 3], p[(k + 2) % 3]);
@@ -1658,12 +1663,12 @@ fn add_faces(
 
     // The faces around each position, as (face, corner), in compressed rows, the position named by its first vertex
     // (a texture seam splits a vertex where the surface is smooth); only built when some face is smoothed.
-    let smoothed = faces.iter().enumerate().any(|(f, face)| whole(face) && group(f) != 0);
     let mut start = vec![0u32; n + 1];
     let mut around: Vec<(u32, u8)> = Vec::new();
     let mut canon: Vec<u32> = Vec::new();
     if smoothed {
         let mut first: FastMap<[u32; 3], u32> = FastMap::default();
+        first.reserve(n);
         canon = (pos.iter().enumerate())
             .map(|(i, p)| *first.entry(p.map(|c| (c + 0.0).to_bits())).or_insert(u32_of(i)))
             .collect();
@@ -1692,6 +1697,10 @@ fn add_faces(
     }
 
     let mut seen: FastMap<(usize, u16, [u32; 3]), u32> = FastMap::default();
+    seen.reserve(n);
+    // The primitive of the material faces are using, out of `prims` while it is: faces come in
+    // runs of one material.
+    let mut cur = (usize::MAX, Prim::default());
     for (f, face) in faces.iter().enumerate() {
         if !whole(face) {
             continue;
@@ -1702,10 +1711,17 @@ fn add_faces(
             }
             materials.len() - 1
         });
-        let prim = prims.entry(mat).or_insert_with(|| Prim {
-            material: mat,
-            ..Prim::default()
-        });
+        if cur.0 != mat {
+            let next = prims.remove(&mat).unwrap_or_else(|| Prim {
+                material: mat,
+                ..Prim::default()
+            });
+            let (m, done) = std::mem::replace(&mut cur, (mat, next));
+            if m != usize::MAX {
+                prims.insert(m, done);
+            }
+        }
+        let prim = &mut cur.1;
         let g = group(f);
         for &vi in face {
             let mut nrm = unit[f];
@@ -1743,6 +1759,9 @@ fn add_faces(
             });
             prim.indices.push(idx);
         }
+    }
+    if cur.0 != usize::MAX {
+        prims.insert(cur.0, cur.1);
     }
 }
 
