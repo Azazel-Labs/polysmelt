@@ -48,9 +48,13 @@ Early. What exists today:
   smoothing angles and morph targets), AC3D (`.ac`: the object tree, materials, textures,
   crease angles, lines and triangle strips), OpenFlight (`.flt`: the node tree with levels of
   detail, switches, instances, replication and references to other files, faces and meshes,
-  color, material and texture palettes with SGI images, light sources and animated groups) and
+  color, material and texture palettes with SGI images, light sources and animated groups),
   OpenGEX (`.ogex`: nodes and their transforms, meshes, materials and textures, skins, morph
-  targets, lights, cameras and animation tracks).
+  targets, lights, cameras and animation tracks), Irrlicht meshes and scenes (`.irrmesh`: buffers of
+  each vertex type with their materials; `.irr`: the node tree, cubes, spheres, sky boxes and
+  billboards, mesh nodes naming other files, lights, cameras and animators as animations) and XGL
+  (`.xgl`, zipped `.zgl`: objects and their transforms, meshes placed by reference, materials,
+  lines and points, a directional light). The XML formats read UTF-16 files too.
   Game and animation formats too: MikuMikuDance models (`.pmx` 2.0 and 2.1, `.pmd`, skinned,
   with morph targets, IK and materials) and `.vmd` motions, DirectX `.x` (text, binary and
   compressed, with frames, skins and animation sets), Quake II `.md2` and Quake III `.md3`
@@ -192,10 +196,12 @@ Early. What exists today:
 | `ogre` | OGRE `.mesh` and `.skeleton`, binary (v1.10 to v1.100) and XML, with `.material` scripts | none |
 | `flt` | OpenFlight (`.flt`), with SGI image textures | none |
 | `ogex` | OpenGEX (`.ogex`) | none |
+| `irr` | Irrlicht meshes (`.irrmesh`) and scenes (`.irr`) | none |
+| `xgl` | XGL (`.xgl`) and zipped XGL (`.zgl`) | none |
 | `fs` | Reading files: `formats::load`, `assets::Folder`, `gltf::files_in` | none |
 
 Every reader is on by default, and so are `fs`, `webp` and the six texture decoders. `minimal`
-is the thirty-one readers with no dependencies, plus `fs`, for
+is the thirty-three readers with no dependencies, plus `fs`, for
 `default-features = false, features = ["minimal"]`. Asking
 `formats::load` for a format whose feature is off returns an error that names the feature.
 

@@ -70,6 +70,8 @@ fn binary(head: &[u8], len: Option<u64>) -> Option<&'static str> {
         "skeleton"
     } else if openflight(head) {
         "flt"
+    } else if zgl(head) {
+        "zgl"
     } else if c3d(head) {
         "c3d"
     } else if stl(head, len) {
@@ -241,43 +243,79 @@ fn root(t: &str) -> Option<&'static str> {
             break;
         }
     }
-    let name = rest.strip_prefix('<')?;
-    let name = &name[..name
+    let after = rest.strip_prefix('<')?;
+    let end = after
         .find(|c: char| c.is_whitespace() || c == '>' || c == '/')
-        .unwrap_or(name.len())];
+        .unwrap_or(after.len());
+    let name = &after[..end];
     let name = name.rsplit(':').next().unwrap_or(name);
     Some(match name {
         "COLLADA" => "dae",
         "X3D" => "x3d",
         "amf" => "amf",
+        "mesh" if irrmesh(&after[end..]) => "irrmesh",
         "mesh" => "mesh",
         "skeleton" => "skeleton",
+        "irr_scene" => "irr",
+        n if n.eq_ignore_ascii_case("world") => "xgl",
         _ => return None,
     })
 }
 
-/// The head as text: UTF-16 (with a byte order mark) narrowed to its ASCII, anything else read
-/// as UTF-8, lossily.
-fn narrow(head: &[u8]) -> String {
-    let wide = |first: usize| -> String {
-        head[2..]
-            .chunks_exact(2)
-            .map(|c| {
-                if c[1 - first] == 0 && c[first].is_ascii() {
-                    char::from(c[first])
-                } else {
-                    '?'
-                }
-            })
-            .collect()
-    };
-    if head.starts_with(&[0xFF, 0xFE]) {
-        wide(0)
-    } else if head.starts_with(&[0xFE, 0xFF]) {
-        wide(1)
-    } else {
-        String::from_utf8_lossy(head).into_owned()
+/// Whether a `<mesh>` element, from just past its name, is an Irrlicht mesh rather than an OGRE one: its namespace
+/// says so, or its first child is a `<buffer>`.
+fn irrmesh(t: &str) -> bool {
+    let tag = &t[..t.find('>').unwrap_or(t.len())];
+    if tag.contains("irrlicht") || tag.contains("IRRMESH") {
+        return true;
     }
+    let body = t[tag.len()..].trim_start_matches('>');
+    let mut rest = body.trim_start();
+    while let Some(r) = rest.strip_prefix("<!--") {
+        let Some((_, r)) = r.split_once("-->") else {
+            return false;
+        };
+        rest = r.trim_start();
+    }
+    rest.starts_with("<buffer")
+}
+
+/// Whether `head` starts a zlib stream (RFC 1950) that inflates to an XGL document.
+fn zgl(head: &[u8]) -> bool {
+    let [cmf, flg, ..] = *head else {
+        return false;
+    };
+    if cmf & 0x0F != 8 || cmf >> 4 > 7 || (u16::from(cmf) << 8 | u16::from(flg)) % 31 != 0 || flg & 0x20 != 0 {
+        return false;
+    }
+    #[cfg(feature = "xgl")]
+    {
+        let mut out = Vec::new();
+        // The head is cut short: what inflates before the cut is enough to see the root.
+        let _ = super::inflate::inflate(&head[2..], &mut out, 1024);
+        root(&narrow(&out)) == Some("xgl")
+    }
+    #[cfg(not(feature = "xgl"))]
+    false
+}
+
+/// The head as text: UTF-16 (told as XML tells it, by a byte order mark or the zero bytes of its first `<`)
+/// narrowed to its ASCII, anything else read as UTF-8, lossily.
+fn narrow(head: &[u8]) -> String {
+    let Some((le, bom)) = super::xml::utf16(head) else {
+        return String::from_utf8_lossy(head).into_owned();
+    };
+    let first = usize::from(!le);
+    head[bom..]
+        .chunks_exact(2)
+        .map(|c| {
+            if c[1 - first] == 0 && c[first].is_ascii() {
+                char::from(c[first])
+            } else {
+                '?'
+            }
+        })
+        .collect()
 }
 
 /// `ascii` in UTF-16LE.
@@ -292,6 +330,31 @@ fn contains(hay: &[u8], needle: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(feature = "xgl")]
+    fn zipped_xgl_is_told_by_what_it_inflates_to() {
+        let zlib = |text: &[u8]| {
+            let n = u16::try_from(text.len()).unwrap();
+            let mut z = vec![0x78, 0x01, 0x01];
+            z.extend(n.to_le_bytes());
+            z.extend((!n).to_le_bytes());
+            z.extend(text);
+            z
+        };
+        assert_eq!(
+            sniff(
+                &zlib(
+                    b"<WORLD>
+<MESH ID=\"0\">"
+                ),
+                None
+            ),
+            Some("zgl")
+        );
+        assert_eq!(sniff(&zlib(b"<COLLADA>")[..9], None), None, "cut short, and not XGL");
+        assert_eq!(sniff(&zlib(b"<scene>"), None), None);
+    }
 
     #[test]
     fn binary_signatures_name_their_formats() {
@@ -370,7 +433,34 @@ mod tests {
             Some("x3d")
         );
         assert_eq!(xml(b"<amf unit=\"millimeter\">"), Some("amf"));
-        assert_eq!(xml(b"<irr_scene>"), None);
+        assert_eq!(xml(b"<irr_scene>"), Some("irr"));
+        assert_eq!(
+            xml(b"<WORLD>
+<MESH ID=\"0\">"),
+            Some("xgl")
+        );
+        assert_eq!(xml(b"<world>"), Some("xgl"));
+        assert_eq!(
+            xml(b"<?xml version=\"1.0\"?>
+<mesh xmlns=\"http://irrlicht.sourceforge.net/IRRMESH_09_2007\" version=\"1.0\">"),
+            Some("irrmesh")
+        );
+        assert_eq!(
+            xml(b"<mesh>
+  <!-- made by hand -->
+  <buffer>"),
+            Some("irrmesh")
+        );
+        assert_eq!(
+            xml(b"<mesh>
+  <sharedgeometry>"),
+            Some("mesh")
+        );
+        let mut bare = Vec::new();
+        bare.extend(utf16(b"<?xml version=\"1.0\"?><irr_scene>"));
+        assert_eq!(xml(&bare), Some("irr"), "UTF-16 without a byte order mark");
+        let be: Vec<u8> = b"<?xml version=\"1.0\"?><WORLD>".iter().flat_map(|&b| [0, b]).collect();
+        assert_eq!(xml(&be), Some("xgl"), "big-endian UTF-16 without a byte order mark");
         let mut wide = vec![0xFF, 0xFE];
         wide.extend(utf16(b"<?xml version=\"1.0\" encoding=\"UTF-16\"?><COLLADA>"));
         assert_eq!(xml(&wide), Some("dae"), "UTF-16 with a byte order mark");

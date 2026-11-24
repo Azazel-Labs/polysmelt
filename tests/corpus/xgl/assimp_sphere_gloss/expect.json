@@ -1,0 +1,18 @@
+{
+  "spec": "XGL 1.0 (the XGL file format specification): a real file, a sphere with a glossy material, zipped",
+  "source": "assimp test models (test/models/XGL), BSD license, see ../LICENSE-assimp",
+  "triangles": 528,
+  "bounds": {
+    "min": [
+      -215.000015,
+      -260.0,
+      -209.999985
+    ],
+    "max": [
+      215.000015,
+      250.0,
+      209.999985
+    ]
+  },
+  "tolerance": 0.0001
+}

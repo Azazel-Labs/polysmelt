@@ -1,0 +1,12 @@
+<?xml version="1.0"?>
+<irr_scene>
+<attributes>
+</attributes>
+<node type="mesh">
+<attributes>
+<string name="Name" value="thing" />
+<vector3d name="Position" value="10, 0, 4" />
+<string name="Mesh" value="tri.obj" />
+</attributes>
+</node>
+</irr_scene>

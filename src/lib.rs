@@ -2,7 +2,7 @@
 //!
 //! - [`formats`]: readers for STL, PLY, `MagicaVoxel`, OBJ, FBX, 3DS, 3MF, USD, glTF,
 //!   `SketchUp`, BVH, COLLADA, VRM, OFF, X3D/VRML, DXF, LAS/LAZ, PCD, E57, text point clouds,
-//!   AMF, `LightWave`, AC3D, `OpenFlight` and `OpenGEX`, and for game and animation assets
+//!   AMF, `LightWave`, AC3D, `OpenFlight`, `OpenGEX`, Irrlicht and XGL, and for game and animation assets
 //!   `MikuMikuDance` (PMX, PMD, VMD), `DirectX` `.x`, MD2, MD3, MD5, IQM, SMD, `MilkShape` 3D,
 //!   `Blitz3D`, ASF/AMC, C3D, TRC, HTR and OGRE, each behind a cargo feature, producing a
 //!   [`Document`](document::Document).

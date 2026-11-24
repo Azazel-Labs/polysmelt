@@ -283,7 +283,7 @@ struct State {
 }
 
 fn parse(r: impl BufRead, limit: usize) -> Result<Amf> {
-    let mut reader = quick_xml::Reader::from_reader(r);
+    let mut reader = quick_xml::Reader::from_reader(crate::formats::xml::Utf8Read::new(r)?);
     let mut buf = Vec::new();
     let mut a = Amf::default();
     let mut s = State::default();

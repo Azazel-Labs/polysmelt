@@ -1,0 +1,25 @@
+<WORLD>
+<MESH>
+<P ID="0">0,0,0</P>
+<P ID="1">1,0,0</P>
+<P ID="2">1,1,0</P>
+<P ID="3">0,1,0</P>
+<P ID="4">0,0,2</P>
+<P ID="5">1,0,2</P>
+<P ID="6">1,1,2</P>
+<F>
+<FV1><PREF>0</PREF></FV1>
+<FV2><PREF>1</PREF></FV2>
+<FV3><PREF>2</PREF></FV3>
+</F>
+<F>
+<FV1><PREF>0</PREF></FV1>
+<FV2><PREF>1</PREF></FV2>
+<FV3><PREF>99</PREF></FV3>
+</F>
+<F>
+<FV1><PREF>0</PREF></FV1>
+<FV2><PREF>1</PREF></FV2>
+</F>
+</MESH>
+</WORLD>

@@ -1,0 +1,21 @@
+{
+  "spec": "Irrlicht mesh and scene formats (the Irrlicht Engine's XML formats): a real file, a mesh of five buffers named .xml, told from other XML by its root",
+  "source": "assimp test models (test/models/IRRMesh), BSD license, see ../LICENSE-assimp",
+  "needs": "irr",
+  "triangles": 60,
+  "bounds": {
+    "min": [
+      -856.310974,
+      -268.159119,
+      -1227.140869
+    ],
+    "max": [
+      98.810463,
+      248.437958,
+      55.100883
+    ]
+  },
+  "facts": {
+    "buffers": 5
+  }
+}

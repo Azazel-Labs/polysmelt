@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<irr_scene>
+<attributes>
+</attributes>
+<node type="mesh">
+<attributes>
+<string name="Name" value="a" />
+<string name="Mesh" value="box.irrmesh" />
+</attributes>
+<materials>
+<attributes>
+<enum name="Type" value="solid" />
+<color name="Diffuse" value="ffcc3300" />
+<texture name="Texture1" value="skin.png" />
+<bool name="BackfaceCulling" value="false" />
+</attributes>
+</materials>
+</node>
+</irr_scene>

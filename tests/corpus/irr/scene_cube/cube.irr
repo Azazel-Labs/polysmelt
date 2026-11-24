@@ -1,0 +1,13 @@
+<?xml version="1.0"?>
+<irr_scene>
+<attributes>
+<colorf name="AmbientLight" value="0.25, 0.5, 0.75, 1" />
+</attributes>
+<node type="cube">
+<attributes>
+<string name="Name" value="box" />
+<vector3d name="Position" value="1, 2, 3" />
+<float name="Size" value="2" />
+</attributes>
+</node>
+</irr_scene>

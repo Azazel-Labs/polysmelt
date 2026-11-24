@@ -1014,7 +1014,7 @@ fn root_target(rels: &str) -> Option<String> {
 }
 
 fn parse_part(r: impl Read, triangles: &mut usize, limit: usize) -> Result<Part> {
-    let mut reader = quick_xml::Reader::from_reader(BufReader::new(r));
+    let mut reader = quick_xml::Reader::from_reader(crate::formats::xml::Utf8Read::new(BufReader::new(r))?);
     let mut buf = Vec::new();
     let mut part = Part::default();
     let mut object: Option<(u32, Object)> = None;
