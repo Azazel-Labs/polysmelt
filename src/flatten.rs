@@ -3512,7 +3512,7 @@ mod tests {
         let rig = doc.rig().unwrap();
         let ch = &rig.animations[0].channels;
         assert_eq!(ch.len(), 1);
-        assert_eq!((ch[0].node, ch[0].path), (0, crate::rig::Path::Translation));
+        assert_eq!((ch[0].node, ch[0].property), (0, crate::rig::Property::Translation));
     }
 
     #[test]

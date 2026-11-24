@@ -6,17 +6,50 @@
 //! glTF skin all come out the same way: nodes with their rest transforms, skins naming their
 //! joints and inverse bind matrices, and animations as keyed channels on nodes. Accessors are
 //! read with every component type, normalized and sparse, as the flat mesh reads them.
+//!
+//! Posing goes local transforms ([`Rig::pose`], or a [`Poser`] frame after frame), then world
+//! matrices ([`Rig::world`]), then a skin's joint matrices ([`Rig::skin_matrices`]):
+//!
+//! ```
+//! use polysmelt::rig::{Node, Rig, Trs};
+//!
+//! let mut rig = Rig::default();
+//! rig.nodes.push(Node {
+//!     name: Some("hips".into()),
+//!     parent: None,
+//!     children: vec![1],
+//!     rest: Trs { translation: [0.0, 1.0, 0.0], ..Trs::IDENTITY },
+//!     mesh: None,
+//!     skin: None,
+//! });
+//! rig.nodes.push(Node {
+//!     name: Some("spine".into()),
+//!     parent: Some(0),
+//!     children: Vec::new(),
+//!     rest: Trs { translation: [0.0, 0.5, 0.0], ..Trs::IDENTITY },
+//!     mesh: None,
+//!     skin: None,
+//! });
+//! let local = rig.pose(None, 0.0); // no animation: the rest pose
+//! let world = rig.world(&local);
+//! let spine = rig.find("spine").unwrap();
+//! assert_eq!(&world[spine][12..15], &[0.0, 1.5, 0.0]);
+//! ```
 
 /// A transform as translation, rotation (a unit quaternion, `[x, y, z, w]`) and scale, applied
 /// scale first.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Trs {
+    /// Where the origin moves to.
     pub translation: [f32; 3],
+    /// A unit quaternion, `[x, y, z, w]`.
     pub rotation: [f32; 4],
+    /// Scale along each axis.
     pub scale: [f32; 3],
 }
 
 impl Trs {
+    /// No change: no translation, no rotation, unit scale.
     pub const IDENTITY: Self = Self {
         translation: [0.0; 3],
         rotation: [0.0, 0.0, 0.0, 1.0],
@@ -45,19 +78,24 @@ impl Default for Trs {
 /// One node of the document.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Node {
+    /// Its name, if it has one.
     pub name: Option<String>,
     /// The node that lists it as a child, if any. glTF doesn't order parents before children.
     pub parent: Option<usize>,
+    /// The nodes it lists as children.
     pub children: Vec<usize>,
     /// Its own transform, relative to its parent. A node written as a matrix is decomposed.
     pub rest: Trs,
+    /// The glTF mesh it draws, if any.
     pub mesh: Option<usize>,
+    /// The skin its mesh is bound to, an index into [`Rig::skins`], if any.
     pub skin: Option<usize>,
 }
 
 /// The joints a mesh is skinned to.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Skin {
+    /// Its name, if it has one.
     pub name: Option<String>,
     /// The joints' nodes.
     pub joints: Vec<usize>,
@@ -67,20 +105,31 @@ pub struct Skin {
     pub skeleton: Option<usize>,
 }
 
-/// What a channel animates.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Path {
+/// What a channel animates: the property of its node it sets (glTF's channel target `path`).
+///
+/// Non-exhaustive: properties other extensions animate may be added.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Property {
+    /// [`Trs::translation`], three values a key.
     Translation,
+    /// [`Trs::rotation`], a quaternion a key.
     Rotation,
+    /// [`Trs::scale`], three values a key.
     Scale,
-    /// Morph target weights.
+    /// Morph target weights, one value a target a key.
     Weights,
 }
 
 /// How a channel's values run between keys.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Non-exhaustive: glTF extensions may add interpolations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Interpolation {
+    /// Straight between keys; rotations are spherically interpolated, the short way round.
     Linear,
+    /// Each key's value held until the next key.
     Step,
     /// Hermite splines: each key holds an in-tangent, a value and an out-tangent.
     CubicSpline,
@@ -100,8 +149,11 @@ impl Interpolation {
 /// One animated property of one node.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Channel {
+    /// The node it animates, an index into [`Rig::nodes`].
     pub node: usize,
-    pub path: Path,
+    /// What of the node it animates.
+    pub property: Property,
+    /// How its values run between keys.
     pub interpolation: Interpolation,
     /// Key times in seconds, ascending.
     pub times: Vec<f32>,
@@ -113,16 +165,57 @@ pub struct Channel {
 impl Channel {
     /// The value at `t` seconds: the first key's before it, the last's after. Rotations come
     /// out unit length. `None` for a channel without keys or with values that don't fit them.
+    ///
+    /// Each call allocates the vector it returns; [`Channel::sample_into`] reuses one.
     #[must_use]
     pub fn sample(&self, t: f32) -> Option<Vec<f32>> {
-        crate::flatten::sample(
-            &self.times,
-            &self.values,
-            self.interpolation.name(),
-            t,
-            self.path == Path::Rotation,
-        )
-        .map(|v| v.into_iter().map(crate::num::f32_of).collect())
+        let mut out = Vec::new();
+        self.sample_into(t, &mut out).then_some(out)
+    }
+
+    /// [`Channel::sample`] into `out`, which is cleared first: `false`, leaving it empty, for a
+    /// channel without keys or with values that don't fit them. Sampling time after time into
+    /// the same vector allocates nothing after the first, for a channel up to 64 values wide
+    /// (any transform, and the weights of up to 64 morph targets).
+    ///
+    /// ```
+    /// use polysmelt::rig::{Channel, Interpolation, Property};
+    ///
+    /// let mut channel = Channel {
+    ///     node: 0,
+    ///     property: Property::Translation,
+    ///     interpolation: Interpolation::Linear,
+    ///     times: vec![0.0, 1.0],
+    ///     values: vec![0.0, 0.0, 0.0, 2.0, 4.0, 6.0],
+    /// };
+    /// let mut value = Vec::new();
+    /// assert!(channel.sample_into(0.5, &mut value));
+    /// assert_eq!(value, [1.0, 2.0, 3.0]);
+    /// channel.values.pop(); // values that don't fit the keys
+    /// assert!(!channel.sample_into(0.5, &mut value));
+    /// assert!(value.is_empty());
+    /// ```
+    pub fn sample_into(&self, t: f32, out: &mut Vec<f32>) -> bool {
+        out.clear();
+        let interpolation = self.interpolation.name();
+        let Some(w) = crate::flatten::width(&self.times, &self.values, interpolation) else {
+            return false;
+        };
+        let rotation = self.property == Property::Rotation;
+        let k = self.times.partition_point(|&x| x <= t);
+        let mut small = [0.0f64; 64];
+        let mut large = Vec::new();
+        let v = if w <= small.len() {
+            &mut small[..w]
+        } else {
+            large.resize(w, 0.0);
+            &mut large[..]
+        };
+        if !crate::flatten::sample_after(&self.times, &self.values, interpolation, t, rotation, k, v) {
+            return false;
+        }
+        out.extend(v.iter().map(|&x| crate::num::f32_of(x)));
+        true
     }
 
     /// [`Channel::sample`] for a channel at most four wide, without allocating, given how many of its keys are at or
@@ -131,7 +224,7 @@ impl Channel {
         let interpolation = self.interpolation.name();
         let w = crate::flatten::width(&self.times, &self.values, interpolation)?;
         let mut v = [0.0f64; 4];
-        let rotation = self.path == Path::Rotation;
+        let rotation = self.property == Property::Rotation;
         if w > 4 || !crate::flatten::sample_after(&self.times, &self.values, interpolation, t, rotation, k, &mut v[..w])
         {
             return None;
@@ -141,16 +234,16 @@ impl Channel {
 
     /// Sets what this channel animates of `o` to its value at `t`, given how many of its keys are at or before it.
     fn pose(&self, t: f32, k: usize, o: &mut Trs) {
-        if self.path == Path::Weights {
+        if self.property == Property::Weights {
             return;
         }
         let Some((v, w)) = self.sample_small(t, k) else {
             return;
         };
-        match (self.path, w) {
-            (Path::Translation, 3) => o.translation = [v[0], v[1], v[2]],
-            (Path::Scale, 3) => o.scale = [v[0], v[1], v[2]],
-            (Path::Rotation, 4) => o.rotation = v,
+        match (self.property, w) {
+            (Property::Translation, 3) => o.translation = [v[0], v[1], v[2]],
+            (Property::Scale, 3) => o.scale = [v[0], v[1], v[2]],
+            (Property::Rotation, 4) => o.rotation = v,
             _ => {}
         }
     }
@@ -159,7 +252,9 @@ impl Channel {
 /// An animation: channels keyed on nodes.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Animation {
+    /// Its name, if it has one.
     pub name: Option<String>,
+    /// What it animates, a channel a property of a node.
     pub channels: Vec<Channel>,
     /// The frames per second it was made at, when the file says or its format assumes one:
     /// the animation's own (`extras.frameRate`), else the file's
@@ -214,7 +309,8 @@ pub struct Poser<'a> {
 }
 
 impl Poser<'_> {
-    /// Every node's transform relative to its parent at `time` seconds, into `out`, which is cleared first.
+    /// Every node's transform relative to its parent at `time` seconds, into `out`, which is cleared first. Nodes
+    /// the animation doesn't animate are at rest.
     pub fn pose_into(&mut self, time: f32, out: &mut Vec<Trs>) {
         out.clear();
         out.extend(self.rig.nodes.iter().map(|n| n.rest));
@@ -244,8 +340,11 @@ impl Poser<'_> {
 /// A document's node tree, skins and animations.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Rig {
+    /// Every node, in the document's order: the indices everything else uses.
     pub nodes: Vec<Node>,
+    /// Every skin, in the document's order.
     pub skins: Vec<Skin>,
+    /// Every animation, in the document's order.
     pub animations: Vec<Animation>,
 }
 
@@ -258,7 +357,8 @@ impl Rig {
 
     /// Every node's transform relative to its parent in animation `animation` at `time`
     /// seconds: its rest transform, with what the animation's channels set in place of it.
-    /// `None` (or an animation there isn't) for the rest pose.
+    /// `None` for the rest pose. An index past [`Rig::animations`] poses the rest pose too,
+    /// rather than panicking, and a channel on a node that isn't there is skipped.
     #[must_use]
     pub fn pose(&self, animation: Option<usize>, time: f32) -> Vec<Trs> {
         let mut out = Vec::with_capacity(self.nodes.len());
@@ -281,8 +381,8 @@ impl Rig {
         }
     }
 
-    /// A [`Poser`] for animation `animation`, to pose it at one time after another: the rest
-    /// pose, for an animation there isn't.
+    /// A [`Poser`] for animation `animation`, to pose it at one time after another. An index
+    /// past [`Rig::animations`] gives a poser of the rest pose, rather than panicking.
     #[must_use]
     pub fn poser(&self, animation: usize) -> Poser<'_> {
         let channels = self.animations.get(animation).map_or(&[][..], |a| &a.channels);
@@ -295,7 +395,8 @@ impl Rig {
 
     /// Every node's world transform, as a column-major matrix, given each one's transform
     /// relative to its parent (a pose, as [`Rig::pose`] gives; nodes past its end at rest).
-    /// A node in a cycle, which glTF forbids, is placed by its own transform alone.
+    /// A node in a cycle, which glTF forbids, or whose parent isn't there, is placed by its own
+    /// transform alone.
     #[must_use]
     pub fn world(&self, local: &[Trs]) -> Vec<[f32; 16]> {
         use crate::flatten::{M4, mul};
@@ -309,8 +410,8 @@ impl Rig {
         };
         let mut world: Vec<M4> = (0..self.nodes.len()).map(own).collect();
         for i in self.parents_first() {
-            if let Some(p) = self.nodes[i].parent {
-                world[i] = mul(&world[p], &world[i]);
+            if let Some(p) = self.nodes[i].parent.and_then(|p| world.get(p).copied()) {
+                world[i] = mul(&p, &world[i]);
             }
         }
         world.into_iter().map(|m| m.map(crate::num::f32_of)).collect()
@@ -361,7 +462,7 @@ impl Rig {
 
 #[cfg(test)]
 mod tests {
-    use super::{Animation, Channel, Interpolation, Node, Path, Rig, Trs};
+    use super::{Animation, Channel, Interpolation, Node, Property, Rig, Trs};
 
     fn rig() -> Rig {
         let node = |name: &str, parent| Node {
@@ -372,9 +473,9 @@ mod tests {
             mesh: None,
             skin: None,
         };
-        let channel = |node, path, interpolation, times: &[f32], values: &[f32]| Channel {
+        let channel = |node, property, interpolation, times: &[f32], values: &[f32]| Channel {
             node,
-            path,
+            property,
             interpolation,
             times: times.to_vec(),
             values: values.to_vec(),
@@ -389,21 +490,21 @@ mod tests {
                     // Written twice too long at its first key.
                     channel(
                         0,
-                        Path::Rotation,
+                        Property::Rotation,
                         Interpolation::Linear,
                         &[0.0, 1.0],
                         &[0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 1.0, 0.0],
                     ),
                     channel(
                         0,
-                        Path::Translation,
+                        Property::Translation,
                         Interpolation::Step,
                         &[0.0, 1.0],
                         &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
                     ),
                     channel(
                         1,
-                        Path::Scale,
+                        Property::Scale,
                         Interpolation::CubicSpline,
                         &[0.0, 1.0],
                         &[
@@ -412,7 +513,7 @@ mod tests {
                     ),
                     channel(
                         1,
-                        Path::Weights,
+                        Property::Weights,
                         Interpolation::Linear,
                         &[0.0],
                         &[0.5, 0.5, 0.5, 0.5, 0.5],
@@ -470,7 +571,7 @@ mod tests {
         let values: Vec<f32> = (0..40u8).flat_map(|k| [f32::from(k), 0.0, -f32::from(k)]).collect();
         rig.animations[0].channels.push(Channel {
             node: 1,
-            path: Path::Translation,
+            property: Property::Translation,
             interpolation: Interpolation::Linear,
             times,
             values,

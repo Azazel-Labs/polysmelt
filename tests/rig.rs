@@ -12,7 +12,7 @@ mod armature {
     use std::path::PathBuf;
 
     use polysmelt::assets::Folder;
-    use polysmelt::rig::{Path, Rig, Trs};
+    use polysmelt::rig::{Property, Rig, Trs};
 
     use super::{Keep, formats};
 
@@ -104,7 +104,9 @@ mod armature {
         let (first, last) = a.span();
         assert!(last > first, "{first}..{last}");
         assert!(
-            a.channels.iter().any(|c| c.node == upper && c.path == Path::Rotation),
+            a.channels
+                .iter()
+                .any(|c| c.node == upper && c.property == Property::Rotation),
             "Upper turns"
         );
         let posed = rig.pose(Some(0), last);

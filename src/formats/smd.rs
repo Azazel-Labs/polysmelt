@@ -944,7 +944,7 @@ end
         let c = a
             .channels
             .iter()
-            .find(|c| c.node == arm && c.path == crate::rig::Path::Rotation)
+            .find(|c| c.node == arm && c.property == crate::rig::Property::Rotation)
             .unwrap();
         // Held at frame 1, where the file leaves it out.
         assert_eq!(c.times.len(), 3);

@@ -409,15 +409,15 @@ fn rig(e: &Map<String, Value>, doc: &Document<'_>, tol: f32) -> Result<(), Strin
         }
         for (path, want) in entry.get("keys").and_then(Value::as_object).into_iter().flatten() {
             let target = match path.as_str() {
-                "translation" => polysmelt::rig::Path::Translation,
-                "rotation" => polysmelt::rig::Path::Rotation,
-                "scale" => polysmelt::rig::Path::Scale,
+                "translation" => polysmelt::rig::Property::Translation,
+                "rotation" => polysmelt::rig::Property::Rotation,
+                "scale" => polysmelt::rig::Property::Scale,
                 _ => return Err(format!("{name}: no such path as {path:?}")),
             };
             let channel = rig
                 .animations
                 .get(animation)
-                .and_then(|a| a.channels.iter().find(|c| c.node == node && c.path == target));
+                .and_then(|a| a.channels.iter().find(|c| c.node == node && c.property == target));
             let ok = match (channel, want) {
                 (None, Value::Null) => true,
                 (Some(c), Value::Number(n)) => n.as_u64() == Some(c.times.len() as u64),

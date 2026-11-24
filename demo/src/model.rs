@@ -334,7 +334,7 @@ impl Model {
                     "start": t0,
                     "end": t1,
                     "frameRate": a.frame_rate,
-                    "morph": a.channels.iter().any(|c| c.path == polysmelt::rig::Path::Weights),
+                    "morph": a.channels.iter().any(|c| c.property == polysmelt::rig::Property::Weights),
                 })
             })
             .collect();
@@ -398,10 +398,11 @@ fn gpu_skinnable(doc: &Document<'_>, rig: &Rig, rest: Option<&Mesh>) -> bool {
     let Some(rest) = rest else {
         return false;
     };
-    let morphs = rig
-        .animations
-        .iter()
-        .any(|a| a.channels.iter().any(|c| c.path == polysmelt::rig::Path::Weights));
+    let morphs = rig.animations.iter().any(|a| {
+        a.channels
+            .iter()
+            .any(|c| c.property == polysmelt::rig::Property::Weights)
+    });
     let counts = doc.counts();
     !rig.skins.is_empty()
         && !morphs
