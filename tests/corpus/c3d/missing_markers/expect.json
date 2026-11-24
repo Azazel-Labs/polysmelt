@@ -5,11 +5,8 @@
   "facts": {
     "markers": 3,
     "frames": 3,
-    "frame_rate": 100.0,
-    "frame_time": 0.01,
     "missing_samples": 5,
-    "markers_never_seen": 1,
-    "up_axis_assumed": true
+    "markers_never_seen": 1
   },
   "document": {
     "nodes": 4,
@@ -24,6 +21,8 @@
   },
   "json": {
     "/asset/extras/source/format": "C3D",
+    "/asset/extras/source/frameRate": 100.0,
+    "/asset/extras/source/metersPerUnit": 0.001,
     "/scenes/0/nodes": [
       0
     ],

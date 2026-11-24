@@ -8,7 +8,9 @@
 //! normals, colors (when the brush asks for them) and texture coordinate sets are kept. Bones make a skin over the
 //! mesh they weigh; keys, at frame numbers divided by the animation's frames per second, an animation. `Blitz3D` is Y
 //! up and left-handed, so the scene is mirrored through the XY plane, and its quaternions turn row vectors, so each is
-//! read as its conjugate.
+//! read as its conjugate. In the source info the handedness is declared left (the format defines it) and converted,
+//! the up axis an assumed `+Y`, the units' length unknown; the frame rate is the `ANIM` chunk's, or an assumed 60
+//! when keys need one and it gives none.
 
 use std::collections::HashMap;
 
@@ -21,6 +23,7 @@ use crate::document::{Document, Keep};
 use crate::images::Images;
 use crate::mesh::{Material, srgb_to_linear};
 use crate::num::{f32_of, u32_of};
+use crate::source::{Axis, Fact, Handedness};
 
 /// How deep nodes may nest.
 const MAX_DEPTH: usize = 256;
@@ -350,14 +353,19 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         facts.insert("unsupported_settings".into(), json!(f.unsupported));
     }
     let mut source = serde_json::Map::new();
-    source.insert("format".into(), json!("B3D"));
-    source.insert("version".into(), json!(f.version));
-    source.insert("handedness".into(), json!("left"));
+    scene.info.format = Some("B3D".into());
+    scene.info.version = Some(f.version.to_string());
+    scene.info.up_axis = Fact::Assumed(Axis::PosY);
+    scene.info.handedness = Fact::Declared(Handedness::Left);
     if let Some((_, frames, rate)) = f.anim {
         source.insert("frames".into(), json!(frames));
-        if rate.is_finite() && rate > 0.0 {
-            source.insert("frameRate".into(), json!(rate));
-        }
+        scene.info.frame_rate = if rate.is_finite() && rate > 0.0 {
+            Fact::Declared(f64::from(rate))
+        } else {
+            Fact::Assumed(f64::from(DEFAULT_FPS))
+        };
+    } else if !scene.animations.is_empty() {
+        scene.info.frame_rate = Fact::Assumed(f64::from(DEFAULT_FPS));
     }
     scene.source = source;
     scene.facts = facts;
@@ -731,6 +739,14 @@ mod tests {
         // Mirrored: the file's normal toward -Z faces +Z, and the winding turns with it.
         let mesh = doc.flatten(crate::document::Pose::Rest).unwrap().unwrap();
         assert!(mesh.prims[0].normals.iter().all(|n| n[2] > 0.99));
+        let info = doc.source_info();
+        assert_eq!(info.format.as_deref(), Some("B3D"));
+        assert_eq!(info.version.as_deref(), Some("1"));
+        assert_eq!(info.handedness, Fact::Declared(Handedness::Left));
+        assert!(info.converted.handedness && !info.converted.up_axis && !info.converted.units);
+        assert_eq!(info.up_axis, Fact::Assumed(Axis::PosY));
+        assert_eq!(info.meters_per_unit, Fact::Unknown);
+        assert_eq!(info.frame_rate, Fact::Declared(10.0));
     }
 
     #[test]

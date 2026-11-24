@@ -69,7 +69,7 @@
   },
   "json": {
     "/asset/extras/source/format": "MS3D",
-    "/asset/extras/source/version": 4,
+    "/asset/extras/source/version": "4",
     "/asset/extras/source/frameRate": 24.0,
     "/asset/extras/source/alphamaps": [
       "mask.png"

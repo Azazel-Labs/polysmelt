@@ -5,9 +5,7 @@
   "facts": {
     "bones": 5,
     "channels": 15,
-    "frames": 3,
-    "frame_time": 0.008333333333333333,
-    "frame_time_guessed": true
+    "frames": 3
   },
   "document": {
     "nodes": 8,
@@ -24,9 +22,15 @@
   },
   "json": {
     "/asset/extras/source/format": "AMC",
-    "/asset/extras/source/upAxis": "Y",
+    "/asset/extras/source/upAxis": "+Y",
+    "/asset/extras/source/metersPerUnit": 0.05644444444444444,
     "/scenes/0/nodes": [
       0
+    ],
+    "/asset/extras/source/frameRate": 120.0,
+    "/asset/extras/source/assumed": [
+      "upAxis",
+      "frameRate"
     ]
   },
   "rig": [

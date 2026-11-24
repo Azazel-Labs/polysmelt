@@ -5,7 +5,9 @@
 //! materials (diffuse color with the transparency as alpha, emissive color, shininess as roughness, the texture as
 //! the color image), and the joints nodes posed by Euler angles in radians applied X, then Y, then Z. Each vertex
 //! moves with its joint, or with up to four joints by the weights the format's later versions add. Keyframes, in
-//! seconds, turn and move a joint from where it stands at rest. `MilkShape` is Y up and right-handed, as glTF is.
+//! seconds, turn and move a joint from where it stands at rest. `MilkShape` is Y up and right-handed, as glTF is
+//! (assumed in the source info, as the format's convention); its units' length is unknown. The model's comment is
+//! the source info's `comments`; the groups', materials' and joints' comments are skipped.
 
 use std::collections::HashMap;
 
@@ -18,6 +20,7 @@ use crate::document::{Document, Keep};
 use crate::images::Images;
 use crate::mesh::{Material, srgb_to_linear};
 use crate::num::u32_of;
+use crate::source::{Axis, Fact, Handedness};
 
 const MAGIC: &[u8; 10] = b"MS3D000000";
 
@@ -80,6 +83,8 @@ struct Ms3d {
     alpha_ref: f32,
     /// The extra weights' version, when the file has them.
     weights_version: Option<i32>,
+    /// The model's comment, from the extra data.
+    comment: Option<String>,
 }
 
 /// Reads a `.ms3d` file.
@@ -276,11 +281,14 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
     facts.insert("joints".into(), json!(joints));
     facts.insert("groups".into(), json!(m.groups.len()));
     let mut source = serde_json::Map::new();
-    source.insert("format".into(), json!("MS3D"));
-    source.insert("version".into(), json!(m.version));
+    scene.info.format = Some("MS3D".into());
+    scene.info.version = Some(m.version.to_string());
+    scene.info.up_axis = Fact::Assumed(Axis::PosY);
+    scene.info.handedness = Fact::Assumed(Handedness::Right);
     if m.fps.is_finite() && m.fps > 0.0 {
-        source.insert("frameRate".into(), json!(m.fps));
+        scene.info.frame_rate = Fact::Declared(f64::from(m.fps));
     }
+    scene.info.comments.extend(m.comment);
     source.insert("frames".into(), json!(m.frames));
     if let Some(v) = m.weights_version {
         source.insert("weightsVersion".into(), json!(v));
@@ -419,6 +427,7 @@ fn parse(data: &[u8]) -> Result<Ms3d> {
         transparency_mode: 0,
         alpha_ref: 0.0,
         weights_version: None,
+        comment: None,
     };
     // A file may end after its groups or its materials.
     if b.left() == 0 {
@@ -510,7 +519,12 @@ fn extras(b: &mut Bin<'_>, m: &mut Ms3d) -> Result<()> {
     }
     if b.i32()? != 0 {
         let len = b.i32()?;
-        b.skip(usize::try_from(len).unwrap_or(usize::MAX))?;
+        let text = b.bytes(usize::try_from(len).unwrap_or(usize::MAX))?;
+        let text = scene::text(text.split(|&c| c == 0).next().unwrap_or_default());
+        let text = text.trim();
+        if !text.is_empty() {
+            m.comment = Some(text.to_owned());
+        }
     }
     if b.left() < 4 {
         return Ok(());
@@ -672,6 +686,22 @@ mod tests {
         let w = p.skin_weights[0];
         assert!((w[0] - 0.5).abs() < 1e-3 && (w[1] - 0.5).abs() < 1e-3, "{w:?}");
         assert_eq!(doc.json["asset"]["extras"]["source"]["weightsVersion"], json!(1));
+    }
+
+    #[test]
+    fn source_info_has_the_rate_and_the_model_comment() {
+        let mut w = Writer { out: sample(false) };
+        w.i32(1).i32(0).i32(0).i32(0).i32(1).i32(12);
+        w.out.extend(b"made by hand");
+        let doc = read(&w.out).unwrap();
+        let info = doc.source_info();
+        assert_eq!(info.format.as_deref(), Some("MS3D"));
+        assert_eq!(info.version.as_deref(), Some("4"));
+        assert_eq!(info.frame_rate, Fact::Declared(24.0));
+        assert_eq!(info.up_axis, Fact::Assumed(Axis::PosY));
+        assert_eq!(info.meters_per_unit, Fact::Unknown);
+        assert_eq!(info.comments, ["made by hand"]);
+        assert_eq!(info.converted, crate::source::Converted::default());
     }
 
     #[test]

@@ -6,9 +6,7 @@
     "bones": 2,
     "channels": 12,
     "length_dofs_dropped": 1,
-    "frames": 2,
-    "frame_time": 0.008333333333333333,
-    "frame_time_guessed": true
+    "frames": 2
   },
   "document": {
     "nodes": 4,
@@ -21,9 +19,15 @@
   },
   "json": {
     "/asset/extras/source/format": "AMC",
-    "/asset/extras/source/upAxis": "Y",
+    "/asset/extras/source/upAxis": "+Y",
+    "/asset/extras/source/metersPerUnit": 0.0254,
     "/scenes/0/nodes": [
       0
+    ],
+    "/asset/extras/source/frameRate": 120.0,
+    "/asset/extras/source/assumed": [
+      "upAxis",
+      "frameRate"
     ]
   },
   "rig": [

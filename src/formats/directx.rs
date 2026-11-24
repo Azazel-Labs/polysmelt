@@ -36,6 +36,11 @@
 //! scene is mirrored through the XY plane, and faces (clockwise in front, as Direct3D draws them) keep facing out.
 //! Texture coordinates start at the top left, as glTF's do.
 //!
+//! The source info gives the header's version, Direct3D's left-handed, Y up convention (assumed: the file doesn't
+//! say), its handedness converted, and units of unknown length. Its `frameRate` is `AnimTicksPerSecond`, or an assumed
+//! 4800 when the file has animations and doesn't say. The encoding and float size are kept as `encoding` and
+//! `floatSize`.
+//!
 //! Nothing is allocated from a count the file gives without the data to back it, objects can nest only so deep,
 //! and inflating stops at the size the file declares and at a gigabyte. A file that doesn't parse is an error.
 
@@ -51,6 +56,7 @@ use crate::document::{Document, Keep};
 use crate::images::Images;
 use crate::mesh::{Material, srgb_to_linear};
 use crate::num::{f32_of, u32_of};
+use crate::source::{Axis, Fact, Handedness};
 use crate::{Context, Result};
 
 /// How deep data objects may nest.
@@ -73,6 +79,7 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         images,
         stats,
         ticks,
+        animated,
         ..
     } = b;
     ensure!(
@@ -81,16 +88,19 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
     );
     scene.images = images.list;
     scene.mirror_z();
-    scene.source.insert("format".into(), json!("DirectX"));
-    scene.source.insert("version".into(), json!(file.version));
+    scene.info.format = Some("DirectX".into());
+    scene.info.version = Some(file.version);
+    scene.info.up_axis = Fact::Assumed(Axis::PosY);
+    scene.info.handedness = Fact::Assumed(Handedness::Left);
+    scene.info.frame_rate = match ticks {
+        Some(t) => Fact::Declared(t),
+        None if animated => Fact::Assumed(DEFAULT_TICKS),
+        None => Fact::Unknown,
+    };
     scene.source.insert("encoding".into(), json!(file.encoding));
     scene
         .source
         .insert("floatSize".into(), json!(if file.double { 64 } else { 32 }));
-    if let Some(t) = ticks {
-        let t = whole(t).map_or_else(|| json!(t), |n| json!(n));
-        scene.source.insert("ticksPerSecond".into(), t);
-    }
     scene.facts.insert("frames".into(), json!(stats.frames));
     scene.facts.insert("meshes".into(), json!(stats.meshes));
     if stats.skinned > 0 {
@@ -856,6 +866,8 @@ struct Build<'a> {
     referenced: Vec<usize>,
     triangles: usize,
     ticks: Option<f64>,
+    /// Whether the file has animations, kept or not.
+    animated: bool,
     stats: Stats,
 }
 
@@ -876,6 +888,7 @@ impl<'a> Build<'a> {
             referenced: Vec::new(),
             triangles: 0,
             ticks: None,
+            animated: false,
             stats: Stats::default(),
         }
     }
@@ -917,6 +930,7 @@ impl<'a> Build<'a> {
         for (m, frame) in std::mem::take(&mut self.pending) {
             self.place(m, frame)?;
         }
+        self.animated = !sets.is_empty() || !loose.is_empty();
         if self.keep.animations {
             let ticks = self.ticks.unwrap_or(DEFAULT_TICKS);
             for s in sets {

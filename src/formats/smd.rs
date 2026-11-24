@@ -6,7 +6,8 @@
 //! parent bone, or with the bones its links weight, the parent taking whatever weight they leave. A file with more
 //! than one frame becomes an animation at 30 frames a second. A `.vta` file becomes a point cloud, its first frame
 //! the points and each later frame a morph target. Rotations are Euler angles in radians, applied X, then Y, then
-//! Z. SMD is Z up and right-handed: the scene is turned to Y up.
+//! Z. SMD is Z up and right-handed: the scene is turned to Y up. In the source info, the up axis (`+Z`), handedness
+//! and frame rate are assumed, as the format's convention; game units are kept unscaled, and their length unknown.
 
 use std::collections::HashMap;
 
@@ -21,6 +22,7 @@ use crate::document::{Document, Keep};
 use crate::images::Images;
 use crate::mesh::Material;
 use crate::num::{f32_of, u32_of};
+use crate::source::{Axis, Fact, Handedness};
 
 /// Frames a second: the compilers' default.
 const FPS: f64 = 30.0;
@@ -114,10 +116,10 @@ pub(crate) fn load(input: super::Input<'_>, ext: &str, assets: &dyn Assets, keep
     let bones = smd.bones.len();
 
     let mut facts = serde_json::Map::new();
-    let mut source = serde_json::Map::new();
-    source.insert("format".into(), json!(if vta { "VTA" } else { "SMD" }));
-    source.insert("version".into(), json!(smd.version));
-    source.insert("upAxis".into(), json!("Z"));
+    scene.info.format = Some((if vta { "VTA" } else { "SMD" }).into());
+    scene.info.version = Some(smd.version.to_string());
+    scene.info.up_axis = Fact::Assumed(Axis::PosZ);
+    scene.info.handedness = Fact::Assumed(Handedness::Right);
     facts.insert("bones".into(), json!(bones));
     facts.insert("frames".into(), json!(frames.len()));
 
@@ -145,7 +147,8 @@ pub(crate) fn load(input: super::Input<'_>, ext: &str, assets: &dyn Assets, keep
     if !vta && frames.len() > 1 {
         let channels = animation(&frames, bones);
         if !channels.is_empty() {
-            source.insert("frameRate".into(), json!(FPS));
+            // The rate is the compiler script's to give; the file has none.
+            scene.info.frame_rate = Fact::Assumed(FPS);
             scene.animations.push(Animation {
                 name: stem,
                 channels,
@@ -158,7 +161,6 @@ pub(crate) fn load(input: super::Input<'_>, ext: &str, assets: &dyn Assets, keep
         "SMD file has no skeleton, triangles or vertex animation"
     );
     scene.rotate_roots(scene::Z_UP_TO_Y_UP);
-    scene.source = source;
     scene.facts = facts;
     scene.finish(keep)
 }
@@ -862,7 +864,13 @@ end
         // Held at frame 1, where the file leaves it out.
         assert_eq!(c.times.len(), 3);
         assert!((c.times[2] - 2.0 / 30.0).abs() < 1e-6);
-        assert_eq!(doc.json["asset"]["extras"]["source"]["frameRate"], json!(30.0));
+        let info = doc.source_info();
+        assert_eq!(info.format.as_deref(), Some("SMD"));
+        assert_eq!(info.version.as_deref(), Some("1"));
+        assert_eq!(info.frame_rate, crate::source::Fact::Assumed(30.0));
+        assert_eq!(info.up_axis, crate::source::Fact::Assumed(crate::source::Axis::PosZ));
+        assert_eq!(info.meters_per_unit, crate::source::Fact::Unknown);
+        assert!(info.converted.up_axis);
     }
 
     #[test]

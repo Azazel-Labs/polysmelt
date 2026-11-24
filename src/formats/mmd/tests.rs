@@ -177,7 +177,7 @@ fn a_pmx_model_in_every_encoding_and_index_size() {
             assert_eq!(doc.facts["triangles"], json!(2), "{utf8} {size}");
             assert_eq!(doc.facts["bones"], json!(2));
             assert_eq!(doc.facts["sdef_vertices"], json!(1));
-            assert_eq!(j["asset"]["extras"]["source"]["name"], "モデル");
+            assert_eq!(doc.source_info().title.as_deref(), Some("モデル"));
             assert_eq!(j["meshes"][0]["primitives"].as_array().unwrap().len(), 2);
             let names = &j["meshes"][0]["extras"]["targetNames"];
             assert_eq!(names, &json!(["smile", "half"]));
@@ -219,7 +219,14 @@ fn pmx_materials_and_extras() {
     assert_eq!(j["materials"][1]["alphaMode"], "BLEND");
     let src = &j["asset"]["extras"]["source"];
     assert_eq!(src["materials"][0]["toon"], "toon03.bmp");
-    assert_eq!(src["metersPerUnit"], json!(UNIT));
+    assert_eq!(src["metersPerUnit"], json!(0.08));
+    let info = doc.source_info();
+    assert_eq!(info.format.as_deref(), Some("PMX"));
+    assert_eq!(info.version.as_deref(), Some("2.0"));
+    assert_eq!(info.meters_per_unit, Fact::Assumed(0.08));
+    assert_eq!(info.up_axis, Fact::Assumed(Axis::PosY));
+    assert_eq!(info.handedness, Fact::Declared(Handedness::Left));
+    assert!(info.converted.units && info.converted.handedness && !info.converted.up_axis);
     let morphs = j["meshes"][0]["extras"]["morphs"].as_array().unwrap();
     assert_eq!(morphs.len(), 2);
     assert_eq!(morphs[1]["type"], "bone");
@@ -312,7 +319,8 @@ fn a_pmd_model() {
     let doc = read(&pmd_sample(), "m.pmd").unwrap();
     let j = &doc.json;
     let src = &j["asset"]["extras"]["source"];
-    assert_eq!(src["name"], "モデル");
+    assert_eq!(doc.source_info().title.as_deref(), Some("モデル"));
+    assert_eq!(doc.source_info().version.as_deref(), Some("1.0"));
     assert_eq!(src["englishName"], "Model");
     assert_eq!(src["materials"][0]["sphereMode"], "multiply");
     assert_eq!(j["materials"][0]["doubleSided"], true);
@@ -355,6 +363,10 @@ fn a_vmd_motion() {
     assert_eq!(doc.facts["camera_keys"], json!(1));
     let src = &j["asset"]["extras"]["source"];
     assert_eq!(src["morphKeys"]["smile"]["times"], json!([1.0]));
+    let info = doc.source_info();
+    assert_eq!(info.format.as_deref(), Some("VMD"));
+    assert_eq!(info.frame_rate, Fact::Declared(30.0));
+    assert_eq!(info.handedness, Fact::Declared(Handedness::Left));
     let rig = doc.rig().unwrap();
     let a = &rig.animations[0];
     // The translation's span from 10 to 20 is straight; the rotation's is bent and sampled every frame.

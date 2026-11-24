@@ -21,14 +21,15 @@
 //! ignored.
 //!
 //! Values stay as written: BVH is Y up, as glTF is, and doesn't record its units (centimeters or inches, mostly), so
-//! nothing is scaled.
+//! nothing is scaled. The source info has the up axis `+Y` assumed, the units unknown, and `frameRate` one over the
+//! `Frame Time:`, declared, or assumed when the time is taken as a thirtieth.
 //!
 //! Rows are lines. A row with fewer numbers than there are channels, or with anything among them that isn't a finite
 //! number (a damaged frame, or the last one cut short by the end of the file), is left out, and the frames around it
 //! keep their times. Numbers past the channels are ignored, and so are rows past the `Frames:` count; a file with fewer
 //! rows than it declares keeps the ones it has. A header without a `Frames:` line reads rows to the end of the file. A
 //! `Frame Time:` that isn't a positive number of seconds, or is missing, is taken as a thirtieth of a second (some
-//! writers put 0), and noted in the facts. A hierarchy that doesn't parse is an error. Nothing is allocated from a
+//! writers put 0). A hierarchy that doesn't parse is an error. Nothing is allocated from a
 //! count the file gives: the nodes are capped, and the rows take room as they're read. Nesting is followed with a
 //! stack of open joints, not recursion, so any depth parses.
 
@@ -39,6 +40,7 @@ use super::stream::{self, f32_from, f64_from};
 use crate::Result;
 use crate::document::{Builder, Document, Keep};
 use crate::num::{f32_of, usize_of};
+use crate::source::{Axis, Fact, SourceInfo};
 
 /// Nodes (joints and end sites) a file may have: far past any skeleton.
 const MAX_NODES: usize = 65_536;
@@ -660,23 +662,30 @@ pub(super) fn load(input: Input<'_>, keep: Keep) -> Result<Document<'static>> {
     let mut facts = Map::new();
     facts.insert("joints".into(), json!(joints.iter().filter(|j| !j.end).count()));
     facts.insert("channels".into(), json!(h.columns));
-    let mut source = json!({ "format": "BVH", "upAxis": "Y" });
+    let mut info = SourceInfo {
+        format: Some("BVH".into()),
+        // Y up by the format's convention; the file doesn't say.
+        up_axis: Fact::Assumed(Axis::PosY),
+        ..SourceInfo::default()
+    };
+    let mut source = Map::new();
     if let Some(m) = &motion {
         facts.insert("frames".into(), json!(m.kept.len()));
         if let Some(t) = m.frame_time {
-            facts.insert("frame_time".into(), json!(t));
-            source["frameTime"] = json!(t);
+            info.frame_rate = if m.guessed_time {
+                Fact::Assumed(1.0 / t)
+            } else {
+                Fact::Declared(1.0 / t)
+            };
         }
         if m.dropped > 0 {
             facts.insert("dropped_frames".into(), json!(m.dropped));
         }
-        if m.guessed_time {
-            facts.insert("frame_time_guessed".into(), json!(true));
-        }
         if let Some(n) = m.frames {
-            source["frames"] = json!(n);
+            source.insert("frames".into(), json!(n));
         }
     }
+    info.write(&mut source);
     let mut json = Map::new();
     json.insert("asset".into(), json!({ "extras": { "source": source } }));
     json.insert("scene".into(), json!(0));
@@ -757,7 +766,12 @@ Frame Time: 0.5
         assert_eq!(doc.facts["joints"], json!(2));
         assert_eq!(doc.facts["channels"], json!(9));
         assert_eq!(doc.facts["frames"], json!(2));
-        assert_eq!(doc.facts["frame_time"], json!(0.5));
+        let info = doc.source_info();
+        assert_eq!(info.format.as_deref(), Some("BVH"));
+        assert_eq!(info.frame_rate, Fact::Declared(2.0));
+        assert_eq!(info.up_axis, Fact::Assumed(Axis::PosY));
+        assert_eq!(info.meters_per_unit, Fact::Unknown);
+        assert_eq!(info.converted, crate::source::Converted::default());
 
         let rig = doc.rig().unwrap();
         assert_eq!(rig.animations.len(), 1);
@@ -890,10 +904,9 @@ Frame Time: 0.5
         }
         for time in ["0", "-1", "inf", "soon"] {
             let doc = read(&TWO.replace("Frame Time: 0.5", &format!("Frame Time: {time}"))).unwrap();
-            assert_eq!(doc.facts["frame_time"], json!(DEFAULT_FRAME_TIME), "{time}");
-            assert_eq!(doc.facts["frame_time_guessed"], json!(true));
+            assert_eq!(doc.source_info().frame_rate, Fact::Assumed(30.0), "{time}");
         }
-        assert!(read(TWO).unwrap().facts.get("frame_time_guessed").is_none());
+        assert_eq!(read(TWO).unwrap().source_info().frame_rate, Fact::Declared(2.0));
     }
 
     #[test]
@@ -957,8 +970,7 @@ Frame Time: 0.5
         // No Frame Time line: a thirtieth of a second, noted.
         let doc = read(&format!("{hierarchy}MOTION\nFrames: 2\n{rows}")).unwrap();
         assert_eq!(doc.facts["frames"], json!(2));
-        assert_eq!(doc.facts["frame_time"], json!(DEFAULT_FRAME_TIME));
-        assert_eq!(doc.facts["frame_time_guessed"], json!(true));
+        assert_eq!(doc.source_info().frame_rate, Fact::Assumed(30.0));
         // Neither: the rows alone.
         let doc = read(&format!("{hierarchy}MOTION\n{rows}")).unwrap();
         assert_eq!(doc.facts["frames"], json!(2));

@@ -208,9 +208,6 @@ def expect(spec, sk, extra=(), motion=None, frame_time=None, amc_file=None, fact
         f["unattached_bones"] = unattached
     if motion is not None:
         f["frames"] = len(motion)
-        f["frame_time"] = frame_time if frame_time else 1 / 120
-        if not frame_time:
-            f["frame_time_guessed"] = True
     f.update(facts or {})
     e = {
         "spec": SPEC + ": " + spec,
@@ -218,8 +215,8 @@ def expect(spec, sk, extra=(), motion=None, frame_time=None, amc_file=None, fact
         "no_mesh": True,
         "facts": f,
         "document": {"nodes": len(nodes), "node_names": [n[0] for n in nodes]},
-        "json": {"/asset/extras/source/format": "AMC" if amc_file else "ASF", "/asset/extras/source/upAxis": "Y",
-                 "/scenes/0/nodes": [0]},
+        "json": {"/asset/extras/source/format": "AMC" if amc_file else "ASF", "/asset/extras/source/upAxis": "+Y",
+                 "/asset/extras/source/metersPerUnit": sk.scale, "/scenes/0/nodes": [0]},
         "rig": [{"node": n, "parent": p, "translation": [r(v * sk.scale) for v in t], "rotation": [0, 0, 0, 1],
                  "scale": [1, 1, 1]} for n, p, t, _ in nodes],
     }
@@ -227,7 +224,11 @@ def expect(spec, sk, extra=(), motion=None, frame_time=None, amc_file=None, fact
         e["file"] = amc_file
     if motion is None:
         e["json"]["/animations"] = None
+        e["json"]["/asset/extras/source/frameRate"] = None
         e["document"]["animations"] = 0
+    else:
+        e["json"]["/asset/extras/source/frameRate"] = 1 / frame_time if frame_time else 120.0
+        e["json"]["/asset/extras/source/assumed"] = ["upAxis"] if frame_time else ["upAxis", "frameRate"]
     e["rig"] += list(extra)
     for k, v in more.items():
         if isinstance(v, dict) and isinstance(e.get(k), dict):
@@ -272,7 +273,7 @@ case(FMT, "skeleton", {"skeleton.asf": sk.text()},
                   "/nodes/2/extras/limits": [[-160, 20], [-70, 70], [-60, 70]], "/nodes/1/extras/id": "1",
                   "/nodes/0/extras/order": ["TX", "TY", "TZ", "RX", "RY", "RZ"],
                   "/asset/extras/source/length": 0.45, "/asset/extras/source/angle": "deg",
-                  "/asset/extras/source/name": "test", "/asset/extras/source/version": "1.10",
+                  "/asset/extras/source/title": "test", "/asset/extras/source/version": "1.10",
                   "/asset/extras/source/mass": 1}))
 
 FRAMES = [

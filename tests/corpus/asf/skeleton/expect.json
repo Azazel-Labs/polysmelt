@@ -22,11 +22,13 @@
   },
   "json": {
     "/asset/extras/source/format": "ASF",
-    "/asset/extras/source/upAxis": "Y",
+    "/asset/extras/source/upAxis": "+Y",
+    "/asset/extras/source/metersPerUnit": 0.05644444444444444,
     "/scenes/0/nodes": [
       0
     ],
     "/animations": null,
+    "/asset/extras/source/frameRate": null,
     "/nodes/2/extras/dof": [
       "rx",
       "ry",
@@ -58,7 +60,7 @@
     ],
     "/asset/extras/source/length": 0.45,
     "/asset/extras/source/angle": "deg",
-    "/asset/extras/source/name": "test",
+    "/asset/extras/source/title": "test",
     "/asset/extras/source/version": "1.10",
     "/asset/extras/source/mass": 1
   },

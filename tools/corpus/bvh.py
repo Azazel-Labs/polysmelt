@@ -198,7 +198,6 @@ def expect(spec, roots, rows, frame_time, extra=None, **more):
     facts = {"joints": len(joints), "channels": channels}
     if rows is not None:
         facts["frames"] = len(rows)
-        facts["frame_time"] = frame_time
     e = {
         "spec": SPEC + ": " + spec,
         "source": SRC,
@@ -209,6 +208,9 @@ def expect(spec, roots, rows, frame_time, extra=None, **more):
         "json": {"/asset/extras/source/format": "BVH", "/scenes/0/nodes": [i for i, n in enumerate(nodes) if n[1] is None]},
         "rig": [rest(n, p, o) for n, p, o, _ in nodes],
     }
+    if rows is not None:
+        e["json"]["/asset/extras/source/frameRate"] = 1 / frame_time
+        e["json"]["/asset/extras/source/assumed"] = ["upAxis"]
     if anim:
         e["json"]["/animations/0/name"] = "motion"
         e["json"]["/animations/0/samplers/0/interpolation"] = "LINEAR"
@@ -246,7 +248,7 @@ write("basic_two_joint", "a ROOT with six channels, a JOINT with three, and an E
           "rotation": rq(slerp(pose(roots, TWO_ROWS[1])["Hips"][1], pose(roots, TWO_ROWS[2])["Hips"][1], 0.5))}],
       json={"/nodes/0/translation": [0, 90, 0], "/nodes/1/translation": [0, 10, 0], "/nodes/2/translation": [0, 15, 0],
             "/nodes/0/children": [1], "/nodes/1/children": [2], "/nodes/2/children": None,
-            "/nodes/1/rotation": None, "/asset/extras/source/upAxis": "Y", "/asset/extras/source/frames": 3,
+            "/nodes/1/rotation": None, "/asset/extras/source/upAxis": "+Y", "/asset/extras/source/frames": 3,
             "/animations/0/name": "motion", "/scenes/0/nodes": [0], "/asset/extras/source/format": "BVH"})
 
 # --- Six channels on every joint, positions after rotations on some. ---
@@ -435,9 +437,9 @@ e["json"]["/asset/extras/source/frames"] = None
 case(FMT, "no_frames_line", {"no_frames_line.bvh": body}, e)
 
 body = hierarchy(roots) + motion(TWO_ROWS, 0.04).replace("Frame Time: 0.04\n", "")
-e = expect("no Frame Time line: a thirtieth of a second, noted in the facts", roots, TWO_ROWS, 1 / 30,
+e = expect("no Frame Time line: a thirtieth of a second, assumed", roots, TWO_ROWS, 1 / 30,
            [posed(roots, TWO_ROWS, 2, 1 / 30, "Spine")])
-e["facts"]["frame_time_guessed"] = True
+e["json"]["/asset/extras/source/assumed"] = ["upAxis", "frameRate"]
 case(FMT, "no_frame_time_line", {"no_frame_time_line.bvh": body}, e)
 
 # --- A humanoid: 25 joints and 480 frames at 120 frames a second. ---
@@ -512,14 +514,15 @@ case(FMT, "short_offset", {"offset.bvh": h.replace("OFFSET 0 10 0", "OFFSET 0 10
 case(FMT, "nan_value", {"nan.bvh": h + motion(TWO_ROWS, 0.04).replace("1 91 2", "1 NaN 2")},
      {"spec": SPEC + ": a NaN in a motion row drops that row; the frames after it keep their times", "source": SRC,
       "no_mesh": True,
-      "facts": {"joints": 2, "channels": 9, "frames": 2, "frame_time": 0.04, "dropped_frames": 1}})
+      "facts": {"joints": 2, "channels": 9, "frames": 2, "dropped_frames": 1}})
 case(FMT, "junk_value", {"junk.bvh": h + motion(TWO_ROWS, 0.04).replace("1 91 2", "1 9x1 2")},
      {"spec": SPEC + ": junk in a motion row drops that row; the frames after it keep their times", "source": SRC,
       "no_mesh": True,
-      "facts": {"joints": 2, "channels": 9, "frames": 2, "frame_time": 0.04, "dropped_frames": 1}})
+      "facts": {"joints": 2, "channels": 9, "frames": 2, "dropped_frames": 1}})
 case(FMT, "bad_frame_time", {"time.bvh": h + motion(TWO_ROWS, 0.04).replace("Frame Time: 0.04", "Frame Time: 0")},
      {"spec": SPEC + ": a Frame Time of zero is taken as a thirtieth of a second", "source": SRC, "no_mesh": True,
-      "facts": {"joints": 2, "channels": 9, "frames": 3, "frame_time": 1 / 30, "frame_time_guessed": True}})
+      "facts": {"joints": 2, "channels": 9, "frames": 3},
+      "json": {"/asset/extras/source/frameRate": 30, "/asset/extras/source/assumed": ["upAxis", "frameRate"]}})
 case(FMT, "bad_frame_count", {"count.bvh": h + motion(TWO_ROWS, 0.04).replace("Frames: 3", "Frames: 3.5")},
      {"spec": SPEC + ": a fractional Frames count", "source": SRC, "error": "isn't a whole number"})
 case(FMT, "not_bvh", {"text.bvh": "this is not a BVH file\n"},

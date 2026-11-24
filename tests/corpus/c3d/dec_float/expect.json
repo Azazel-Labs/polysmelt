@@ -5,10 +5,7 @@
   "facts": {
     "markers": 3,
     "frames": 4,
-    "frame_rate": 100.0,
-    "frame_time": 0.01,
-    "missing_samples": 1,
-    "up_axis_assumed": true
+    "missing_samples": 1
   },
   "document": {
     "nodes": 4,
@@ -23,6 +20,8 @@
   },
   "json": {
     "/asset/extras/source/format": "C3D",
+    "/asset/extras/source/frameRate": 100,
+    "/asset/extras/source/metersPerUnit": 0.001,
     "/scenes/0/nodes": [
       0
     ],
@@ -30,13 +29,16 @@
     "/animations/0/samplers/0/interpolation": "LINEAR",
     "/asset/extras/source/processor": "DEC",
     "/asset/extras/source/storage": "float",
-    "/asset/extras/source/units": "mm",
+    "/asset/extras/source/unit": "mm",
     "/asset/extras/source/upAxis": "+Z",
-    "/asset/extras/source/frameRate": 100,
+    "/asset/extras/source/assumed": [
+      "metersPerUnit",
+      "upAxis"
+    ],
     "/asset/extras/source/firstFrame": 1,
     "/asset/extras/source/scale": -1.0,
     "/asset/extras/source/company": "Test Lab",
-    "/asset/extras/source/software": "corpus 1.0",
+    "/asset/extras/source/tool": "corpus 1.0",
     "/asset/extras/source/subject": "Subject A",
     "/nodes/1/extras/description": "left hip"
   },

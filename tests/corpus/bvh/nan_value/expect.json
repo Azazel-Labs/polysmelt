@@ -6,7 +6,6 @@
     "joints": 2,
     "channels": 9,
     "frames": 2,
-    "frame_time": 0.04,
     "dropped_frames": 1
   }
 }

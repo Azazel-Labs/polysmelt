@@ -179,7 +179,8 @@ case(FMT, "textured_quad", {
     }],
     "json": {
         "/asset/extras/source/format": "B3D",
-        "/asset/extras/source/version": 1,
+        "/asset/extras/source/version": "1",
+        "/asset/extras/source/handedness": "left",
         "/materials/0/doubleSided": True,
         "/meshes/0/primitives/0/attributes/TEXCOORD_1": 3,
     },

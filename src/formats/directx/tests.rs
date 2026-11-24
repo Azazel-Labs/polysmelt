@@ -105,8 +105,17 @@ fn reads_the_header() {
     assert_eq!(source["version"], "3.3");
     assert_eq!(source["encoding"], "text");
     assert_eq!(source["floatSize"], 32);
-    assert_eq!(source["ticksPerSecond"], 24);
     assert_eq!(doc.facts["triangles"], 12);
+    let info = doc.source_info();
+    assert_eq!(info.version.as_deref(), Some("3.3"));
+    assert_eq!(info.frame_rate, crate::source::Fact::Declared(24.0));
+    assert_eq!(info.up_axis, crate::source::Fact::Assumed(crate::source::Axis::PosY));
+    assert_eq!(
+        info.handedness,
+        crate::source::Fact::Assumed(crate::source::Handedness::Left)
+    );
+    assert!(info.converted.handedness && !info.converted.up_axis && !info.converted.units);
+    assert_eq!(info.meters_per_unit, crate::source::Fact::Unknown);
     assert_eq!(doc.facts["meshes"], 1);
 }
 
@@ -440,7 +449,7 @@ fn animation_keys_and_ticks() {
          AnimationKey {{ 2; 2; 0;3;0,0,0;;, 24;3;1,0,2;;; }} \
          AnimationKey {{ 1; 2; 0;3;1,1,1;;, 48;3;2,2,2;;; }} }} }}"
     ));
-    assert_eq!(doc.json["asset"]["extras"]["source"]["ticksPerSecond"], 24);
+    assert_eq!(doc.json["asset"]["extras"]["source"]["frameRate"], 24.0);
     assert_eq!(doc.json["animations"][0]["name"], "Go");
     assert_eq!(
         doc.json["animations"][0]["extras"]["animationOptions"][0]["closed"],

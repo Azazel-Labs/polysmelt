@@ -134,7 +134,7 @@ case(FMT, "reference_skinned", {
     "winding_matches_normals": True,
     "uvs_include": [[0, 1], [1, 1], [0, 0]],
     "facts": {"bones": 2, "frames": 1, "triangles": 2},
-    "json": {"/asset/extras/source/format": "SMD", "/asset/extras/source/upAxis": "Z", "/materials/1/name": "metal"},
+    "json": {"/asset/extras/source/format": "SMD", "/asset/extras/source/upAxis": "+Z", "/materials/1/name": "metal"},
 })
 
 # Weights and an animation: a vertex linked half to the arm (its parent, the root, takes the other half), one
