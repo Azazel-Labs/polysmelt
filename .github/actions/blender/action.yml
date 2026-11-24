@@ -1,0 +1,27 @@
+name: blender
+description: Blender (the LTS that still has its COLLADA importer) at ~/blender, cached, checked against its SHA-256
+runs:
+  using: composite
+  steps:
+    - id: cache
+      uses: actions/cache@v4
+      with:
+        path: ~/blender
+        key: blender-${{ env.BLENDER_VERSION }}-linux-x64
+    - if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        f=blender-$BLENDER_VERSION-linux-x64.tar.xz
+        minor=${BLENDER_VERSION%.*}
+        # download.blender.org answers scripts with a challenge page: its official mirrors don't.
+        for m in https://mirrors.ocf.berkeley.edu/blender https://ftp.nluug.nl/pub/graphics/blender https://mirror.clarkson.edu/blender; do
+          curl -fsSL --retry 2 -o "/tmp/$f" "$m/release/Blender$minor/$f" && break
+        done
+        echo "$BLENDER_SHA256  /tmp/$f" | sha256sum -c -
+        mkdir -p ~/blender
+        tar -xJf "/tmp/$f" -C ~/blender --strip-components=1
+        rm "/tmp/$f"
+    - shell: bash
+      run: |
+        sudo apt-get install -y libxi6 libxxf86vm1 libxfixes3 libxrender1 libgl1 libxkbcommon0 libsm6 libegl1 > /dev/null 2>&1 || true
+        ~/blender/blender --version | head -1

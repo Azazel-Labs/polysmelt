@@ -14,6 +14,33 @@ description = "Load speed and peak memory of Polysmelt's readers against the lea
 baseline = []
 # The baseline commit has the Document API (set by the workflow).
 base-document = []
+# The evidence binaries (`corpus`, `parity`, `files`, `resilience`): every Polysmelt reader, and a
+# competitor crate for each format one exists for. See evidence.yml.
+evidence = [
+    "polysmelt/default",
+    "gltf/KHR_lights_punctual",
+    "gltf/KHR_materials_emissive_strength",
+    "gltf/KHR_materials_ior",
+    "gltf/KHR_materials_pbrSpecularGlossiness",
+    "gltf/KHR_materials_specular",
+    "gltf/KHR_materials_transmission",
+    "gltf/KHR_materials_unlit",
+    "gltf/KHR_materials_variants",
+    "gltf/KHR_materials_volume",
+    "gltf/KHR_texture_transform",
+    "gltf/extras",
+    "gltf/allow_empty_texture",
+    "gltf/guess_mime_type",
+    "dep:fbxcel-dom",
+    "dep:threemf",
+    "dep:dot_vox",
+    "dep:collada",
+    "dep:bvh_anim",
+    "dep:libc",
+]
+# Assimp, the C++ library, as one more competitor in the evidence binaries, through a small C++
+# shim (shim/assimp_shim.cpp). Needs an assimp install: `ASSIMP_DIR` names its prefix.
+assimp = ["evidence", "dep:cc"]
 
 [dependencies]
 polysmelt = { path = "..", default-features = false, features = ["minimal"] }
@@ -22,8 +49,38 @@ tobj = "4.0.5"
 stl_io = "0.11"
 ply-rs = "0.1.3"
 gltf = "1.4"
+fbxcel-dom = { version = "0.0.10", optional = true }
+threemf = { version = "0.8", optional = true }
+dot_vox = { version = "5.2", optional = true }
+collada = { version = "0.17", optional = true }
+bvh_anim = { version = "0.4", optional = true }
+libc = { version = "0.2", optional = true }
+
+[build-dependencies]
+cc = { version = "1.2", optional = true }
+
+[[bin]]
+name = "corpus"
+required-features = ["evidence"]
+
+[[bin]]
+name = "parity"
+required-features = ["evidence"]
+
+[[bin]]
+name = "files"
+required-features = ["evidence"]
+
+[[bin]]
+name = "resilience"
+required-features = ["evidence"]
 
 [profile.release]
 lto = "fat"
 codegen-units = 1
 debug = false
+
+# Release with symbols, for `perf record` (the evidence workflow's `profile` input).
+[profile.profiling]
+inherits = "release"
+debug = true

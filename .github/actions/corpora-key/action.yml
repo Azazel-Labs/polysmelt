@@ -1,0 +1,9 @@
+name: corpora key
+description: Sets CORPORA_KEY, the cache key of the evidence corpora, and CORPORA, the sweep's arguments
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        echo "CORPORA_KEY=evidence-corpora-v1-${{ hashFiles('tools/evidence/fetch_corpora.sh', 'tools/evidence/corpora.txt', 'bench/export_real.py') }}" >> "$GITHUB_ENV"
+        echo "CORPORA=$(sed "s|^|--corpus |; s|=|=$HOME/corpora/|" tools/evidence/corpora.txt | tr '\n' ' ')" >> "$GITHUB_ENV"

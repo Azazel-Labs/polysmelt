@@ -1,0 +1,9 @@
+khronos=khronos/Models
+khronos-dae=khronos-dae/sourceModels
+assimp=assimp/test
+threejs=threejs/examples/models
+3mf=3mf
+vox=vox
+stanford=stanford
+mcguire=mcguire
+blender-real=blender-real

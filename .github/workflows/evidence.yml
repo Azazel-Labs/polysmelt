@@ -1,0 +1,318 @@
+# The evidence suite: Polysmelt against assimp, Blender's importers and the leading Rust crate for
+# each format, over whole public corpora, in one run. Completeness and count parity, the Khronos
+# validator on every GLB written, damaged files, speed and memory, and (optionally) flamegraphs.
+# The `report` job turns it all into EVIDENCE.md, the run summary and an `evidence` artifact.
+#
+# Corpora are fetched at run time from where their authors publish them, pinned and cached; none
+# of them is committed here (see tools/evidence/fetch_corpora.sh).
+name: evidence
+
+on:
+  workflow_dispatch:
+    inputs:
+      budget:
+        description: Seconds of timing rounds per file, beyond the minimum rounds
+        default: "0.25"
+      flips:
+        description: Byte-flip cases per file in the resilience run (plus the truncations)
+        default: "40"
+      profile:
+        description: Files to profile with perf (paths under the corpora folder, or bare file names), comma-separated; "none" to skip
+        default: "rungholt.obj,khronos/Models/Sponza/glTF/Sponza.gltf,khronos/Models/ABeautifulGame/glTF/ABeautifulGame.gltf"
+  push:
+    branches: ["cloud-bench/**"]
+
+concurrency:
+  group: evidence-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: never
+  ASSIMP_REV: a79ff6bbce54d3e01186a918dc6374ed55317426 # v6.0.6
+  BLENDER_VERSION: "4.5.16"
+  BLENDER_SHA256: 23432b064977908beb1ab4b7f32f024e7331105c875c187dce002aff84b10c11
+  BUDGET: ${{ inputs.budget || '0.25' }}
+  FLIPS: ${{ inputs.flips || '40' }}
+  PROFILE: ${{ inputs.profile || 'rungholt.obj,khronos/Models/Sponza/glTF/Sponza.gltf,khronos/Models/ABeautifulGame/glTF/ABeautifulGame.gltf' }}
+
+jobs:
+  corpora:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/corpora-key
+      - id: cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/corpora
+          key: ${{ env.CORPORA_KEY }}
+          lookup-only: true
+      - name: Fetch
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: tools/evidence/fetch_corpora.sh ~/corpora
+      - name: Blender
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: ./.github/actions/blender
+      - name: Blender's own exports of real models
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          m=~/corpora/khronos/Models
+          for x in "Sponza/glTF/Sponza.gltf sponza" "BrainStem/glTF-Binary/BrainStem.glb brainstem" \
+                   "ABeautifulGame/glTF/ABeautifulGame.gltf abeautifulgame"; do
+            set -- $x
+            ~/blender/blender -b --factory-startup --python-exit-code 1 --python bench/export_real.py -- \
+              "$m/$1" ~/corpora/blender-real/$2 $2 > /dev/null
+          done
+          du -sh ~/corpora/blender-real/*
+      - if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/corpora
+          key: ${{ env.CORPORA_KEY }}
+
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - id: assimp
+        uses: actions/cache@v4
+        with:
+          path: ~/assimp
+          key: assimp-${{ env.ASSIMP_REV }}-${{ runner.os }}-v1
+      - name: Build assimp
+        if: steps.assimp.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get install -y ninja-build > /dev/null
+          git init -q /tmp/assimp-src
+          git -C /tmp/assimp-src fetch -q --depth 1 https://github.com/assimp/assimp.git "$ASSIMP_REV"
+          git -C /tmp/assimp-src checkout -q FETCH_HEAD
+          cmake -S /tmp/assimp-src -B /tmp/assimp-build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$HOME/assimp" -DASSIMP_BUILD_TESTS=OFF -DASSIMP_BUILD_ASSIMP_TOOLS=OFF \
+            -DASSIMP_BUILD_SAMPLES=OFF -DASSIMP_WARNINGS_AS_ERRORS=OFF -DASSIMP_INSTALL_PDB=OFF
+          cmake --build /tmp/assimp-build
+          cmake --install /tmp/assimp-build > /dev/null
+      - name: Toolchain
+        run: rustup toolchain install || rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bench
+          key: evidence
+      - name: Build
+        env:
+          ASSIMP_DIR: /home/runner/assimp
+        run: cargo build --release --manifest-path bench/Cargo.toml --features assimp --bins
+      - name: Build for profiling
+        env:
+          ASSIMP_DIR: /home/runner/assimp
+          RUSTFLAGS: -C force-frame-pointers=yes
+          CARGO_TARGET_DIR: bench/target-profiling
+        run: cargo build --profile profiling --manifest-path bench/Cargo.toml --features assimp --bin corpus
+      - name: Stage
+        run: |
+          mkdir -p dist/profiling
+          cp bench/target/release/{corpus,parity,files,resilience,polysmelt-bench} dist/
+          cp bench/target-profiling/profiling/corpus dist/profiling/
+          cp -P ~/assimp/lib/libassimp.so* dist/
+          cp -P ~/assimp/lib/libassimp.so* dist/profiling/
+          {
+            echo "{"
+            echo "\"polysmelt commit\": \"${GITHUB_SHA::7}\","
+            echo "\"polysmelt version\": \"$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)\","
+            echo "\"rustc\": \"$(rustc --version)\","
+            echo "\"assimp\": \"$(dist/corpus info | python3 -c 'import json,sys; print(json.load(sys.stdin)["assimp"])') ($ASSIMP_REV)\","
+            echo "\"Blender\": \"$BLENDER_VERSION LTS\""
+            echo "}"
+          } > dist/env-build.json
+          cat dist/env-build.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin
+          path: dist
+          retention-days: 3
+
+  speed:
+    needs: [corpora, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+      - name: Machine
+        run: |
+          mkdir -p results/speed results/env
+          cp bin/env-build.json results/env/
+          cat > results/env/speed.json <<EOF
+          {"runner": "$(nproc) CPUs, $(lscpu | sed -n 's/^Model name: *//p'), $(free -g | awk '/Mem:/ {print $2}') GB RAM, $(uname -r)"}
+          EOF
+      - name: Sweep (every file, every library, a process each)
+        run: bin/corpus sweep $CORPORA --out results/speed/sweep.jsonl --jobs 4 --timeout 60
+      - name: Time (pinned to one core, rotating rounds)
+        run: taskset -c 1 bin/corpus time --sweep results/speed/sweep.jsonl $CORPORA --budget "$BUDGET" --json results/speed/time.json
+      - name: Time OBJ with Polysmelt's threads on
+        run: |
+          bin/corpus time --sweep results/speed/sweep.jsonl $CORPORA --ext obj --min-bytes 2000000 \
+            --loaders "polysmelt,polysmelt (threads: 0, all cores),tobj,assimp" --json results/speed/time-mt.json
+      - name: Generated tori
+        run: taskset -c 1 bin/polysmelt-bench --budget 1 --markdown results/speed/torus.md --json results/speed/torus.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-speed
+          path: results
+
+  quality:
+    needs: [corpora, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci --prefix tools/validate --no-audit --no-fund
+      - name: glTF deep parity with the gltf crate
+        run: |
+          mkdir -p results/quality
+          bin/parity ~/corpora/khronos/Models --json results/quality/parity.json 2> /dev/null
+      - name: Convert every file to GLB (Polysmelt and assimp)
+        run: |
+          sudo mkdir -p /mnt/glb && sudo chown "$USER" /mnt/glb
+          bin/corpus sweep $CORPORA --loaders "polysmelt → GLB,assimp → GLB" --glb /mnt/glb \
+            --out results/quality/glb-sweep.jsonl --jobs 4 --timeout 90
+          du -sh /mnt/glb/*
+      - name: Khronos validator
+        run: |
+          node --max-old-space-size=6144 tools/validate/report.mjs /mnt/glb/polysmelt results/quality/validate-polysmelt.json &
+          node --max-old-space-size=6144 tools/validate/report.mjs /mnt/glb/assimp results/quality/validate-assimp.json &
+          wait
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-quality
+          path: results
+
+  resilience:
+    needs: [corpora, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+      - name: Damaged files
+        run: |
+          mkdir -p results/resilience
+          python3 tools/evidence/pick_resilience.py ~/corpora tools/evidence/corpora.txt ${{ matrix.shard }} 4 > files.txt
+          echo "$(wc -l < files.txt) files"
+          # Two workers' worth of files per shard, in parallel halves.
+          split -n l/2 -d files.txt part-
+          for p in part-00 part-01; do
+            xargs -a $p -d '\n' bin/resilience --root ~/corpora --flips "$FLIPS" --timeout 10 --limit-mb 3072 \
+              --json results/resilience/resilience-${{ matrix.shard }}-$p.json > /dev/null 2> $p.log &
+          done
+          wait
+          tail -3 part-*.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-resilience-${{ matrix.shard }}
+          path: results
+
+  blender:
+    needs: corpora
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/corpora-key
+      - uses: actions/cache/restore@v4
+        with:
+          path: ~/corpora
+          key: ${{ env.CORPORA_KEY }}
+          fail-on-cache-miss: true
+      - uses: ./.github/actions/blender
+      - name: Blender's importers over the corpora
+        run: |
+          mkdir -p results/blender
+          python3 tools/evidence/blender_sweep.py --blender ~/blender/blender --out results/blender/blender.jsonl \
+            --jobs 4 --timeout 90 $(sed "s|=|=$HOME/corpora/|" tools/evidence/corpora.txt)
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-blender
+          path: results
+
+  profile:
+    needs: [corpora, build]
+    if: (inputs.profile || 'default') != 'none'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+      - name: perf and inferno
+        run: |
+          sudo apt-get install -y linux-tools-common "linux-tools-$(uname -r)" > /dev/null 2>&1 \
+            || sudo apt-get install -y linux-tools-common linux-tools-azure > /dev/null
+          sudo sysctl -q kernel.perf_event_paranoid=-1 kernel.kptr_restrict=0
+          cargo install inferno --locked --quiet
+      - name: Flamegraphs
+        run: |
+          mkdir -p results/profile
+          IFS=',' read -ra files <<< "$PROFILE"
+          for f in "${files[@]}"; do
+            p=~/corpora/$f
+            [ -f "$p" ] || p=$(find ~/corpora -name "$(basename "$f")" -type f | head -1)
+            [ -f "$p" ] || { echo "not found: $f"; continue; }
+            name=$(basename "$p" | tr '.' '_')
+            for loader in polysmelt "polysmelt → GLB"; do
+              tag=$(echo "$loader" | tr -cd '[:alnum:]')
+              perf record -q -F 1999 -g -o perf.data -- bin/profiling/corpus one "$loader" "$p" --repeat 4
+              perf script -i perf.data 2> /dev/null | inferno-collapse-perf > stacks.txt
+              inferno-flamegraph --title "$loader: $(basename "$p")" < stacks.txt > "results/profile/${name}-${tag}.svg"
+              echo "$loader $(basename "$p"): $(wc -l < stacks.txt) stacks"
+            done
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: flamegraphs
+          path: results/profile
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-profile
+          path: results
+
+  report:
+    needs: [speed, quality, resilience, blender, profile]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: results-*
+          path: results
+          merge-multiple: true
+      - name: Report
+        run: |
+          python3 tools/evidence/report.py --in results --out report \
+            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          cat report/summary.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: evidence
+          path: |
+            report
+            results
