@@ -876,7 +876,9 @@ mod triangulate_tests {
     feature = "off",
     feature = "x3d",
     feature = "dxf",
-    feature = "md2"
+    feature = "md2",
+    feature = "flt",
+    feature = "ogex"
 ))]
 #[derive(Default, Clone, Copy)]
 pub(crate) struct FxHasher(u64);
@@ -892,7 +894,9 @@ pub(crate) struct FxHasher(u64);
     feature = "off",
     feature = "x3d",
     feature = "dxf",
-    feature = "md2"
+    feature = "md2",
+    feature = "flt",
+    feature = "ogex"
 ))]
 impl std::hash::Hasher for FxHasher {
     #[inline]
@@ -931,7 +935,9 @@ impl std::hash::Hasher for FxHasher {
     feature = "off",
     feature = "x3d",
     feature = "dxf",
-    feature = "md2"
+    feature = "md2",
+    feature = "flt",
+    feature = "ogex"
 ))]
 pub(crate) type FastMap<K, V> = std::collections::HashMap<K, V, std::hash::BuildHasherDefault<FxHasher>>;
 

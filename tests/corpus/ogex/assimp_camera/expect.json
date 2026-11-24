@@ -1,0 +1,23 @@
+{
+  "spec": "OpenGEX 3.0 (the OpenGEX specification): a real file, a cube, a light and a camera",
+  "source": "assimp test models (test/models/OpenGEX), BSD license, see ../LICENSE-assimp",
+  "triangles": 12,
+  "bounds": {
+    "min": [
+      -1.0,
+      -1.0,
+      -1.0
+    ],
+    "max": [
+      1.0,
+      1.0,
+      1.000001
+    ]
+  },
+  "area": 23.999999,
+  "tolerance": 0.0001,
+  "document": {
+    "lights": 1,
+    "cameras": 1
+  }
+}

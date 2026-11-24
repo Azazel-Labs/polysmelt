@@ -5,7 +5,7 @@
 //! (`.x3d`, `.x3dv`, `.wrl`, and gzipped `.x3dz`, `.wrz`), DXF meshes, gaussian splats
 //! (`.splat`, `.spz`, and PLY's own, as `KHR_gaussian_splatting`), point clouds (LAS and LAZ
 //! lidar, PCD, E57 scans, and text: `.xyz`, `.pts`, `.ptx`, `.asc`), AMF, `LightWave` objects
-//! (`.lwo`) and AC3D (`.ac`). Game and animation formats: `MikuMikuDance` (`.pmx`, `.pmd`,
+//! (`.lwo`), AC3D (`.ac`), `OpenFlight` (`.flt`) and `OpenGEX` (`.ogex`). Game and animation formats: `MikuMikuDance` (`.pmx`, `.pmd`,
 //! `.vmd`), `DirectX` `.x`, MD2, MD3, MD5 (`.md5mesh`, `.md5anim`), IQM, SMD (`.smd`, `.vta`),
 //! `MilkShape` 3D (`.ms3d`), `Blitz3D` (`.b3d`), OGRE (`.mesh`, `.skeleton`, and their `.xml` forms, with
 //! `.material` scripts), and motion capture: ASF/AMC, C3D, TRC and HTR.
@@ -58,6 +58,8 @@ mod fbx;
 pub mod fbx_ascii;
 #[cfg(feature = "fbx")]
 mod fbx_tree;
+#[cfg(feature = "flt")]
+mod flt;
 #[cfg(feature = "gltf")]
 pub(crate) mod gltf;
 #[cfg(feature = "gltf")]
@@ -86,6 +88,8 @@ mod nurbs;
 mod obj;
 #[cfg(feature = "off")]
 mod off;
+#[cfg(feature = "ogex")]
+mod ogex;
 #[cfg(feature = "ogre")]
 mod ogre;
 #[cfg(feature = "pcd")]
@@ -150,7 +154,8 @@ mod stl;
     feature = "dxf",
     feature = "pcd",
     feature = "xyz",
-    feature = "ac3d"
+    feature = "ac3d",
+    feature = "ogex"
 ))]
 #[cfg_attr(
     not(all(feature = "obj", feature = "ply", feature = "stl", feature = "bvh")),
@@ -183,7 +188,8 @@ pub const EXTENSIONS: &[&str] = &[
     "stl", "ply", "vox", "obj", "fbx", "3ds", "3mf", "usd", "usda", "usdc", "usdz", "gltf", "glb", "skp", "bvh", "dae",
     "zae", "kmz", "off", "vrm", "vrma", "x3d", "x3dv", "x3dz", "wrl", "wrz", "dxf", "splat", "spz", "las", "laz",
     "pcd", "xyz", "pts", "ptx", "asc", "e57", "amf", "lwo", "ac", "pmx", "pmd", "vmd", "x", "md2", "md3", "md5mesh",
-    "md5anim", "iqm", "smd", "vta", "ms3d", "b3d", "asf", "amc", "c3d", "trc", "htr", "mesh", "skeleton", "xml",
+    "md5anim", "iqm", "smd", "vta", "ms3d", "b3d", "asf", "amc", "c3d", "trc", "htr", "mesh", "skeleton", "xml", "flt",
+    "ogex",
 ];
 
 /// Reads the model at `path`, whose format is named by `ext` (lowercase, without the dot),
@@ -500,6 +506,10 @@ fn convert<'a>(input: Input<'a>, ext: &str, assets: &'a dyn Assets, keep: Keep) 
         "ac" => ac3d::load(input, assets, keep),
         #[cfg(feature = "ogre")]
         "mesh" | "skeleton" | "xml" => ogre::load(input, assets, keep),
+        #[cfg(feature = "flt")]
+        "flt" => flt::load(input, assets, keep),
+        #[cfg(feature = "ogex")]
+        "ogex" => ogex::load(input, assets, keep),
         e if EXTENSIONS.contains(&e) => bail!("built without the `{}` feature", feature_for(e)),
         _ => bail!("not a model format handled here: .{ext}"),
     }

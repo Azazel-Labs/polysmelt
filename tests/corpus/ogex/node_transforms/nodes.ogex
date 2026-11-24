@@ -1,0 +1,21 @@
+Metric (key = "angle") { float { 0.017453292519943295 } }
+Metric (key = "up") { string { "z" } }
+Node $parent {
+  Name { string { "Parent" } }
+  Translation (kind = "xyz") { float[3] { {1, 2, 3} } }
+  Rotation (kind = "z") { float { 90 } }
+  Scale { float[3] { {2, 2, 2} } }
+  GeometryNode $child {
+    Name { string { "Child" } }
+    ObjectRef { ref { $t } }
+    Transform { float[16] { {1.0, 0, 0, 0, 0, 1.0, 0, 0, 0, 0, 1.0, 0, 0.0, 0.0, 1.0, 1.0} } }
+    Rotation (kind = "axis") { float[4] { {30, 0, 0.6, 0.8} } }
+    Rotation (kind = "quaternion") { float[4] { {0.0, 0.0, 0.25881904510252074, 0.9659258262890683} } }
+  }
+}
+GeometryObject $t {
+Mesh (primitive = "triangles") {
+  VertexArray (attrib = "position") { float[3] { {0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}, {0.0, 1.0, 0.0} } }
+  IndexArray { unsigned_int16[3] { {0, 1, 2} } }
+}
+}

@@ -1,0 +1,2 @@
+Metric (key = "up") { string { "z" } }
+Material $m { Name { string { "unused" } } }

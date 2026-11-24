@@ -1,0 +1,5 @@
+{
+  "spec": "OpenGEX 3.0 (the OpenGEX specification): a real file, light objects no node places",
+  "source": "assimp test models (test/models/OpenGEX), BSD license, see ../LICENSE-assimp",
+  "error": "no geometry"
+}

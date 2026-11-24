@@ -1,0 +1,22 @@
+Metric (key = "up") { string { "y" } }
+BoneNode $root {
+  Name { string { "root" } }
+  Translation %x (kind = "x") { float { 1 } }
+  BoneNode $tip { Name { string { "tip" } } Rotation (kind = "z") { float { 1.5707963267948966 } } }
+  Animation { Track (target = %x) { Time { Key { float { 0, 1 } } } Value { Key { float { 1, 3 } } } } }
+}
+GeometryNode { ObjectRef { ref { $g } } Translation { float[3] { {50, 50, 50} } } }
+GeometryObject $g { Mesh {
+  VertexArray (attrib = "position") { float[3] { {0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}, {1.0, 1.0, 0.0}, {0.0, 1.0, 0.0} } }
+  IndexArray { unsigned_int16[3] { {0, 1, 2}, {0, 2, 3} } }
+  Skin {
+    Transform { float[16] { {1.0, 0, 0, 0, 0, 1.0, 0, 0, 0, 0, 1.0, 0, 0.0, 2.0, 0.0, 1.0} } }
+    Skeleton {
+      BoneRefArray { ref { $root, $tip } }
+      Transform { float[16] { {1.0, 0, 0, 0, 0, 1.0, 0, 0, 0, 0, 1.0, 0, 0, 0, 0, 1.0}, {1.0, 0, 0, 0, 0, 1.0, 0, 0, 0, 0, 1.0, 0, 1.0, 0.0, 0.0, 1.0} } }
+    }
+    BoneCountArray { unsigned_int16 { 1, 1, 2, 1 } }
+    BoneIndexArray { unsigned_int16 { 0, 0, 0, 1, 1 } }
+    BoneWeightArray { float { 1.0, 1.0, 0.5, 0.5, 1.0 } }
+  }
+} }

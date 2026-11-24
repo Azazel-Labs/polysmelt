@@ -1,0 +1,26 @@
+{
+  "spec": "OpenGEX 3.0 (the OpenGEX specification): a real file, two boxes sharing a mesh, written as float bit patterns, their texture missing",
+  "source": "assimp test models (test/models/OpenGEX), BSD license, see ../LICENSE-assimp",
+  "triangles": 24,
+  "bounds": {
+    "min": [
+      -52.494061,
+      0.0,
+      -60.570074
+    ],
+    "max": [
+      184.09798,
+      93.111633,
+      41.567698
+    ]
+  },
+  "area": 119294.290868,
+  "tolerance": 0.0001,
+  "document": {
+    "lights": 0,
+    "cameras": 0,
+    "source": {
+      "missingTextures": 1
+    }
+  }
+}

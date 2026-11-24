@@ -1,0 +1,16 @@
+Metric (key = "up") { string { "y" } }
+Metric (key = "angle") { float { 0.017453292519943295 } }
+GeometryNode {
+  Name { string { "mover" } }
+  ObjectRef { ref { $t } }
+  Rotation %r (kind = "z") { float { 0 } }
+  Animation {
+Track (target = %r) { Time { Key { float { 0, 2 } } } Value { Key { float { 0, 360 } } } }
+  }
+}
+GeometryObject $t {
+Mesh (primitive = "triangles") {
+  VertexArray (attrib = "position") { float[3] { {1.0, 0.0, 0.0}, {1.0, 1.0, 0.0}, {1.0, 0.0, 1.0} } }
+  IndexArray { unsigned_int16[3] { {0, 1, 2} } }
+}
+}

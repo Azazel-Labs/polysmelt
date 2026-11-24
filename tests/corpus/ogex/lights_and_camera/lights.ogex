@@ -1,0 +1,18 @@
+Metric (key = "up") { string { "y" } }
+GeometryNode { ObjectRef { ref { $t } } }
+LightNode { Name { string { "Sun" } } ObjectRef { ref { $sun } } }
+LightNode { ObjectRef { ref { $lamp } } Translation { float[3] { {0, 3, 0} } } }
+CameraNode { Name { string { "Eye" } } ObjectRef { ref { $cam } } }
+LightObject $sun (type = "infinite") { Color (attrib = "light") { float[3] { {1, 0.5, 0.25} } } }
+LightObject $lamp (type = "point") { Param (attrib = "intensity") { float { 2 } } }
+CameraObject $cam {
+  Param (attrib = "fov") { float { 1 } }
+  Param (attrib = "near") { float { 0.5 } }
+  Param (attrib = "far") { float { 50 } }
+}
+GeometryObject $t {
+Mesh (primitive = "triangles") {
+  VertexArray (attrib = "position") { float[3] { {0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}, {0.0, 1.0, 0.0} } }
+  IndexArray { unsigned_int16[3] { {0, 1, 2} } }
+}
+}

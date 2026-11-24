@@ -71,6 +71,8 @@ fn enabled(ext: &str) -> bool {
         "lwo" => cfg!(feature = "lwo"),
         "ac" => cfg!(feature = "ac3d"),
         "mesh" | "skeleton" | "xml" => cfg!(feature = "ogre"),
+        "flt" => cfg!(feature = "flt"),
+        "ogex" => cfg!(feature = "ogex"),
         _ => false,
     }
 }
@@ -107,7 +109,8 @@ const ALL_EXTENSIONS: &[&str] = &[
     "stl", "ply", "vox", "obj", "3ds", "fbx", "3mf", "usd", "usda", "usdc", "usdz", "gltf", "glb", "skp", "bvh", "dae",
     "zae", "kmz", "off", "vrm", "vrma", "x3d", "x3dv", "x3dz", "wrl", "wrz", "dxf", "splat", "spz", "las", "laz",
     "pcd", "xyz", "pts", "ptx", "asc", "e57", "amf", "lwo", "ac", "pmx", "pmd", "vmd", "x", "md2", "md3", "md5mesh",
-    "md5anim", "iqm", "smd", "vta", "ms3d", "b3d", "asf", "amc", "c3d", "trc", "htr", "mesh", "skeleton", "xml",
+    "md5anim", "iqm", "smd", "vta", "ms3d", "b3d", "asf", "amc", "c3d", "trc", "htr", "mesh", "skeleton", "xml", "flt",
+    "ogex",
 ];
 
 fn ext_of(p: &Path) -> String {
@@ -1231,6 +1234,14 @@ fn ac3d() {
 #[test]
 fn ogre() {
     check("ogre");
+}
+#[test]
+fn flt() {
+    check("flt");
+}
+#[test]
+fn ogex() {
+    check("ogex");
 }
 
 /// Every extension `formats::load` takes has cases, and every format a corpus folder.

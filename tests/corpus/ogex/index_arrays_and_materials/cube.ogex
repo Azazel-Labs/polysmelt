@@ -1,0 +1,17 @@
+Metric (key = "up") { string { "y" } }
+GeometryNode { ObjectRef { ref { $box } }
+  MaterialRef (index = 0) { ref { $m0 } }
+  MaterialRef (index = 1) { ref { $m1 } }
+  MaterialRef (index = 2) { ref { $m2 } }
+}
+GeometryObject $box {
+Mesh {
+  VertexArray (attrib = "position") { float[3] { {0, 0, 0}, {0, 1, 0}, {1, 1, 0}, {1, 0, 0}, {0, 0, 1}, {1, 0, 1}, {1, 1, 1}, {0, 1, 1}, {0, 0, 0}, {1, 0, 0}, {1, 0, 1}, {0, 0, 1}, {0, 1, 0}, {0, 1, 1}, {1, 1, 1}, {1, 1, 0}, {0, 0, 0}, {0, 0, 1}, {0, 1, 1}, {0, 1, 0}, {1, 0, 0}, {1, 1, 0}, {1, 1, 1}, {1, 0, 1} } }
+  IndexArray (material = 0) { unsigned_int8[3] { {0, 1, 2}, {0, 2, 3}, {4, 5, 6}, {4, 6, 7} } }
+  IndexArray (material = 1) { unsigned_int16[3] { {8, 9, 10}, {8, 10, 11}, {12, 13, 14}, {12, 14, 15} } }
+  IndexArray (material = 2) { unsigned_int32[3] { {16, 17, 18}, {16, 18, 19}, {20, 21, 22}, {20, 22, 23} } }
+}
+}
+Material $m0 { Name { string { "paint0" } } Color (attrib = "diffuse") { float[3] { {1.0, 0.0, 0.0} } } }
+Material $m1 { Name { string { "paint1" } } Color (attrib = "diffuse") { float[3] { {0.0, 1.0, 0.0} } } }
+Material $m2 { Name { string { "paint2" } } Color (attrib = "diffuse") { float[3] { {0.0, 0.0, 1.0} } } }

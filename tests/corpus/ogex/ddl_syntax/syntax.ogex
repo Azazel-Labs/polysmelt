@@ -1,0 +1,12 @@
+// A comment, /* and a block comment */ before the metrics.
+Metric (key = "up") { string { "y" } }
+/* A block comment
+   over two lines. */
+GeometryNode {
+  Name { string { "Caf\u00E9 " "au lait" } }
+  ObjectRef { ref { $t } }
+}
+GeometryObject $t { Mesh {
+  VertexArray (attrib = "position") { float[3] { {0, 0, 0}, {0x3F800000, 0, 0}, {0, 0b01000000000000000000000000000000, 0} } }
+  IndexArray { unsigned_int16[3] { {0x0, 0b1, 0o2} } }
+} }

@@ -1,0 +1,9 @@
+Metric (key = "up") { string { "y" } }
+GeometryNode { ObjectRef { ref { $t } } }
+GeometryNode { ObjectRef { ref { $t } } Translation { float[3] { {3, 0, 0} } } }
+GeometryObject $t {
+Mesh (primitive = "triangles") {
+  VertexArray (attrib = "position") { float[3] { {0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}, {0.0, 1.0, 0.0} } }
+  IndexArray { unsigned_int16[3] { {0, 1, 2} } }
+}
+}
