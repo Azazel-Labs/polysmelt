@@ -602,9 +602,7 @@ def main():
                 ratios = [oo / pp for _, pp, oo in xs if pp > 0]
                 w = sum(1 for r in ratios if r > 1)
                 tp, to = sum(x[1] for x in xs), sum(x[2] for x in xs)
-                label = code(o) + (" †" if o in PARTIAL else "")
-                if side == PNI:
-                    label += f" vs {code(PNI)}"
+                label = f"{code(o)} vs {code(PNI)}" if side == PNI else code(o) + (" †" if o in PARTIAL else "")
                 rows.append([label, ext, len(xs), fmt_ratio(geomean(ratios)),
                              fmt_ratio(min(ratios) if ratios else None),
                              fmt_ratio(max(ratios) if ratios else None), f"{w}/{len(xs)}", fmt_ms(tp), fmt_ms(to)])
