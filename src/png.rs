@@ -23,7 +23,7 @@ pub(crate) fn encode(w: u32, h: u32, channels: usize, pixels: &[u8]) -> Option<V
         let mut best_score = u64::MAX;
         for kind in 0..5 {
             filter(kind, channels, line, &prev, &mut cand);
-            let score = cand.iter().map(|&b| u64::from(b.cast_signed().unsigned_abs())).sum();
+            let score = score(&cand, best_score);
             if score < best_score {
                 (best_kind, best_score) = (kind, score);
                 std::mem::swap(&mut best, &mut cand);
@@ -50,28 +50,69 @@ pub(crate) fn encode(w: u32, h: u32, channels: usize, pixels: &[u8]) -> Option<V
     Some(out)
 }
 
-/// One row through PNG filter `kind` (none, sub, up, average, Paeth) into `out`.
+/// A filtered row's bytes summed as signed magnitudes, the smallest sum being the best guess at
+/// what compresses best. Counting stops at `limit`, the best so far, which this row can't beat.
+fn score(row: &[u8], limit: u64) -> u64 {
+    let mut total = 0;
+    // Sums of 256 bytes fit in 16 bits, which vectorize twice as wide as 32.
+    for c in row.chunks(256) {
+        total += u64::from(
+            c.iter()
+                .map(|&b| u16::from(b.cast_signed().unsigned_abs()))
+                .sum::<u16>(),
+        );
+        if total >= limit {
+            break;
+        }
+    }
+    total
+}
+
+/// One row through PNG filter `kind` (none, sub, up, average, Paeth) into `out`. A loop for
+/// each filter, the first pixel apart: one loop testing both per byte cost most of an encode.
 fn filter(kind: u8, bpp: usize, line: &[u8], prev: &[u8], out: &mut [u8]) {
-    for (x, o) in out.iter_mut().enumerate() {
-        let a = if x >= bpp { line[x - bpp] } else { 0 };
-        let b = prev[x];
-        let c = if x >= bpp { prev[x - bpp] } else { 0 };
-        let predict = match kind {
-            0 => 0,
-            1 => a,
-            2 => b,
-            3 => a.midpoint(b),
-            _ => paeth(a, b, c),
-        };
-        *o = line[x].wrapping_sub(predict);
+    let k = bpp.min(line.len());
+    let (head, tail) = out.split_at_mut(k);
+    // The first pixel has no left neighbors: they count as 0.
+    let rest = line[k..].iter().zip(&line[..line.len() - k]);
+    match kind {
+        0 => out.copy_from_slice(line),
+        1 => {
+            head.copy_from_slice(&line[..k]);
+            for (o, (&x, &a)) in tail.iter_mut().zip(rest) {
+                *o = x.wrapping_sub(a);
+            }
+        }
+        2 => {
+            for (o, (&x, &b)) in out.iter_mut().zip(line.iter().zip(prev)) {
+                *o = x.wrapping_sub(b);
+            }
+        }
+        3 => {
+            for (o, (&x, &b)) in head.iter_mut().zip(line.iter().zip(prev)) {
+                *o = x.wrapping_sub(b / 2);
+            }
+            for ((o, (&x, &a)), &b) in tail.iter_mut().zip(rest).zip(&prev[k..]) {
+                *o = x.wrapping_sub(a.midpoint(b));
+            }
+        }
+        _ => {
+            for (o, (&x, &b)) in head.iter_mut().zip(line.iter().zip(prev)) {
+                *o = x.wrapping_sub(paeth(0, b, 0));
+            }
+            for (((o, (&x, &a)), &b), &c) in tail.iter_mut().zip(rest).zip(&prev[k..]).zip(prev) {
+                *o = x.wrapping_sub(paeth(a, b, c));
+            }
+        }
     }
 }
 
 /// Whichever of left, up and up-left is nearest `left + up - up_left`.
+#[inline]
 fn paeth(a: u8, b: u8, c: u8) -> u8 {
     let (ia, ib, ic) = (i16::from(a), i16::from(b), i16::from(c));
-    let p = ia + ib - ic;
-    let (pa, pb, pc) = ((p - ia).abs(), (p - ib).abs(), (p - ic).abs());
+    // `p - a` is `b - c`, and so on: one subtraction each, nothing to branch on until the pick.
+    let (pa, pb, pc) = ((ib - ic).abs(), (ia - ic).abs(), (ia + ib - 2 * ic).abs());
     if pa <= pb && pa <= pc {
         a
     } else if pb <= pc {

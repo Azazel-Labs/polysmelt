@@ -35,7 +35,7 @@
 mod decode;
 mod rig;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use serde_json::{Map, Value};
@@ -177,17 +177,16 @@ fn counts(json: &Map<String, Value>) -> Counts {
     };
     let nodes = list(json, "nodes");
     // A skinned mesh is drawn once per skin and weights, wherever its nodes are.
-    let mut skinned: Vec<(usize, usize, Vec<u32>)> = Vec::new();
+    let mut skinned: HashSet<(usize, usize, Vec<u32>)> = HashSet::new();
     for i in order {
         let n = &nodes[i];
         let Some(m) = index(n, "mesh") else { continue };
         let Some(mesh) = meshes.get(m) else { continue };
         let k = if let Some(skin) = index(n, "skin") {
             let w: Vec<u32> = default_weights(n, mesh).iter().map(|x| x.to_bits()).collect();
-            if skinned.iter().any(|s| s.0 == m && s.1 == skin && s.2 == w) {
+            if !skinned.insert((m, skin, w)) {
                 continue;
             }
-            skinned.push((m, skin, w));
             1
         } else {
             match instancing(n) {
@@ -359,6 +358,9 @@ struct Use {
 struct Reader<'d> {
     doc: &'d Document<'d>,
     json: &'d Map<String, Value>,
+    /// The accessors and buffer views, looked up once: every attribute read names one of each.
+    accessors: &'d [Value],
+    views: &'d [Value],
     scratch: Vec<u8>,
     /// Meshopt-compressed buffer views, decoded once read.
     meshopt: HashMap<usize, Vec<u8>>,
@@ -404,6 +406,11 @@ struct Posed {
 
 fn list<'v>(obj: &'v Map<String, Value>, key: &str) -> &'v [Value] {
     obj.get(key).and_then(Value::as_array).map_or(&[], Vec::as_slice)
+}
+
+/// `v[k0][k1]...`: a JSON pointer without the allocation `Value::pointer` makes per lookup.
+fn at<'v>(v: &'v Value, path: &[&str]) -> Option<&'v Value> {
+    path.iter().try_fold(v, |v, k| v.get(k))
 }
 
 /// `v[key]` as a list.
@@ -489,6 +496,8 @@ impl<'d> Reader<'d> {
         Self {
             doc,
             json,
+            accessors: list(json, "accessors"),
+            views: list(json, "bufferViews"),
             scratch: Vec::new(),
             meshopt: HashMap::new(),
             materials: vec![None; n("materials")],
@@ -510,21 +519,40 @@ impl<'d> Reader<'d> {
     }
 
     fn get(&self, key: &str, i: usize) -> Result<&'d Value> {
-        list(self.json, key)
-            .get(i)
-            .with_context(|| format!("glTF {key}[{i}] doesn't exist"))
+        let all = match key {
+            "accessors" => self.accessors,
+            "bufferViews" => self.views,
+            _ => list(self.json, key),
+        };
+        all.get(i).with_context(|| format!("glTF {key}[{i}] doesn't exist"))
     }
 
-    /// A buffer view as (buffer, offset, length, stride).
-    fn view(&self, i: usize) -> Result<(usize, u64, u64, Option<usize>)> {
+    /// A buffer view as (buffer, offset, length, stride), and whether it has extensions (as a
+    /// meshopt-compressed one does).
+    fn view(&self, i: usize) -> Result<(usize, u64, u64, Option<usize>, bool)> {
         let v = self.get("bufferViews", i)?;
-        let buffer = index(v, "buffer").context("glTF buffer view has no buffer")?;
-        let offset = v.get("byteOffset").and_then(Value::as_u64).unwrap_or(0);
-        let len = v
-            .get("byteLength")
+        // One pass over its members rather than a lookup for each: these are read for every
+        // accessor.
+        let (mut buffer, mut offset, mut len, mut stride, mut ext) = (None, None, None, None, false);
+        for (k, x) in v.as_object().into_iter().flatten() {
+            match k.as_str() {
+                "buffer" => buffer = Some(x),
+                "byteOffset" => offset = Some(x),
+                "byteLength" => len = Some(x),
+                "byteStride" => stride = Some(x),
+                "extensions" => ext = true,
+                _ => {}
+            }
+        }
+        let buffer = buffer
+            .and_then(Value::as_u64)
+            .map(usize_of)
+            .context("glTF buffer view has no buffer")?;
+        let offset = offset.and_then(Value::as_u64).unwrap_or(0);
+        let len = len
             .and_then(Value::as_u64)
             .context("glTF buffer view has no byteLength")?;
-        Ok((buffer, offset, len, index(v, "byteStride")))
+        Ok((buffer, offset, len, stride.and_then(Value::as_u64).map(usize_of), ext))
     }
 
     /// Whether buffer view `i` is meshopt-compressed, decoding it (once) if so.
@@ -582,7 +610,7 @@ impl<'d> Reader<'d> {
         if self.meshopt(i)? {
             return Ok(self.meshopt[&i].clone());
         }
-        let (buffer, offset, len, _) = self.view(i)?;
+        let (buffer, offset, len, _, _) = self.view(i)?;
         let b = self
             .doc
             .buffers
@@ -616,12 +644,27 @@ impl<'d> Reader<'d> {
             });
         }
         let a = self.get("accessors", i)?;
-        let ctype = a.get("componentType").and_then(Value::as_u64).unwrap_or(0);
+        // One pass over its members, as for a view.
+        let (mut ctype, mut kind, mut view, mut offset, mut count, mut normalized, mut sparse) =
+            (None, None, None, None, None, None, None);
+        for (k, x) in a.as_object().into_iter().flatten() {
+            match k.as_str() {
+                "componentType" => ctype = Some(x),
+                "type" => kind = Some(x),
+                "bufferView" => view = Some(x),
+                "byteOffset" => offset = Some(x),
+                "count" => count = Some(x),
+                "normalized" => normalized = Some(x),
+                "sparse" => sparse = Some(x),
+                _ => {}
+            }
+        }
+        let ctype = ctype.and_then(Value::as_u64).unwrap_or(0);
         ensure!(
             matches!(ctype, 5120..=5123 | 5125 | 5126),
             "glTF accessor {i} has component type {ctype}"
         );
-        let (n, rows) = match a.get("type").and_then(Value::as_str) {
+        let (n, rows) = match kind.and_then(Value::as_str) {
             Some("SCALAR") => (1, 1),
             Some("VEC2") => (2, 2),
             Some("VEC3") => (3, 3),
@@ -631,15 +674,16 @@ impl<'d> Reader<'d> {
             Some("MAT4") => (16, 4),
             t => bail!("glTF accessor {i} has type {t:?}, not one read here"),
         };
+        let u = |x: Option<&Value>| x.and_then(Value::as_u64).map(usize_of);
         Ok(Acc {
-            view: index(a, "bufferView"),
-            offset: a.get("byteOffset").and_then(Value::as_u64).unwrap_or(0),
-            count: index(a, "count").context("glTF accessor has no count")?,
+            view: u(view),
+            offset: offset.and_then(Value::as_u64).unwrap_or(0),
+            count: u(count).context("glTF accessor has no count")?,
             ctype,
             n,
             rows,
-            normalized: a.get("normalized").and_then(Value::as_bool).unwrap_or(false),
-            sparse: a.get("sparse").cloned(),
+            normalized: normalized.and_then(Value::as_bool).unwrap_or(false),
+            sparse: sparse.cloned(),
             decoded: None,
         })
     }
@@ -662,7 +706,7 @@ impl<'d> Reader<'d> {
         if a.count == 0 {
             return Ok(());
         }
-        let (buffer, voff, vlen, stride) = self.view(view)?;
+        let (buffer, voff, vlen, stride, ext) = self.view(view)?;
         let esize = a.esize();
         let stride = stride.filter(|&s| s > 0).unwrap_or(esize);
         ensure!(
@@ -675,7 +719,8 @@ impl<'d> Reader<'d> {
             .and_then(|s| s.checked_add(esize as u64))
             .filter(|&s| a.offset.checked_add(s).is_some_and(|end| end <= vlen))
             .with_context(|| format!("glTF accessor's {} elements run past their buffer view", a.count))?;
-        if self.meshopt(view)? {
+        // Only a view with extensions can be meshopt-compressed.
+        if ext && self.meshopt(view)? {
             let bytes = &self.meshopt[&view];
             let s = bytes
                 .get(usize_of(a.offset)..usize_of(a.offset + span))
@@ -962,6 +1007,9 @@ impl<'d> Reader<'d> {
         };
 
         let mut uses: Vec<Use> = Vec::new();
+        // Each use by (mesh, skin, weights' bits): a scan of every use per node is quadratic
+        // in a scene of many meshes.
+        let mut seen: HashMap<(usize, Option<usize>, Vec<u32>), usize> = HashMap::new();
         for i in order {
             let n = &nodes[i];
             let Some(mesh) = index(n, "mesh") else { continue };
@@ -977,23 +1025,19 @@ impl<'d> Reader<'d> {
             } else {
                 self.instances(n, &w)?
             };
-            let same = uses.iter_mut().find(|u| {
-                u.mesh == mesh
-                    && u.skin == skin
-                    && u.weights
-                        .iter()
-                        .map(|x| x.to_bits())
-                        .eq(weights.iter().map(|x| x.to_bits()))
-            });
-            match same {
+            let key = (mesh, skin, weights.iter().map(|x| x.to_bits()).collect());
+            match seen.get(&key) {
                 Some(_) if skin.is_some() => {}
-                Some(u) => u.transforms.extend(transforms),
-                None => uses.push(Use {
-                    mesh,
-                    weights,
-                    skin,
-                    transforms,
-                }),
+                Some(&u) => uses[u].transforms.extend(transforms),
+                None => {
+                    seen.insert(key, uses.len());
+                    uses.push(Use {
+                        mesh,
+                        weights,
+                        skin,
+                        transforms,
+                    });
+                }
             }
         }
         // Joints need every node's transform, in the scene or not.
@@ -1381,7 +1425,7 @@ impl Draws {
 /// Whether glTF primitive `p` is drawn on the same vertices as `q`: the same attributes,
 /// material, morph targets and extensions, and no Draco stream of its own.
 fn same_vertices(p: &Value, q: &Value) -> bool {
-    let draco = |v: &Value| v.pointer("/extensions/KHR_draco_mesh_compression").is_some();
+    let draco = |v: &Value| at(v, &["extensions", "KHR_draco_mesh_compression"]).is_some();
     ["attributes", "material", "targets", "extensions"]
         .iter()
         .all(|k| p.get(k) == q.get(k))
@@ -1687,7 +1731,7 @@ impl Reader<'_> {
     /// asks for a `COLOR_0`, but doesn't require one): each splat's base color and opacity, as
     /// the extension works them out. Empty for other primitives.
     fn splat_colors(&mut self, p: &Value, attrs: &Value) -> Result<Vec<[f32; 4]>> {
-        let Some(ext) = p.pointer("/extensions/KHR_gaussian_splatting") else {
+        let Some(ext) = at(p, &["extensions", "KHR_gaussian_splatting"]) else {
             return Ok(Vec::new());
         };
         let (Some(dc), Some(opacity)) = (
@@ -1708,8 +1752,8 @@ impl Reader<'_> {
 
     fn primitive(&mut self, p: &Value, u: &Use, mesh: &mut Mesh) -> Result<()> {
         let mode = mode(p);
-        let attrs = p.get("attributes").cloned().unwrap_or(Value::Null);
-        let Some(pos) = index(&attrs, "POSITION") else {
+        let attrs = p.get("attributes").unwrap_or(&Value::Null);
+        let Some(pos) = index(attrs, "POSITION") else {
             return Ok(());
         };
         if !self.drawn(mode) {
@@ -1723,7 +1767,7 @@ impl Reader<'_> {
                 return Ok(());
             }
             #[cfg(feature = "draco")]
-            self.decode_draco(ext, &attrs, index(p, "indices"))?;
+            self.decode_draco(ext, attrs, index(p, "indices"))?;
             #[cfg(not(feature = "draco"))]
             {
                 // Files may carry uncompressed data beside the Draco stream, for readers without it.
@@ -1747,7 +1791,7 @@ impl Reader<'_> {
 
         let material = index(p, "material");
         let (set, uv_matrix) = self.uv_set(material);
-        let attr = |name: &str| index(&attrs, name);
+        let attr = |name: &str| index(attrs, name);
         let mut normals = match attr("NORMAL") {
             Some(a) => self.read(a, [0.0; 3])?,
             None => Vec::new(),
@@ -1758,7 +1802,7 @@ impl Reader<'_> {
         };
         let colors = match attr("COLOR_0") {
             Some(a) => self.read(a, [0.0, 0.0, 0.0, 1.0])?,
-            None => self.splat_colors(p, &attrs)?,
+            None => self.splat_colors(p, attrs)?,
         };
         // Attributes that don't match the positions are dropped rather than trusted.
         if normals.len() != n {
@@ -1777,9 +1821,9 @@ impl Reader<'_> {
             tangents = Vec::new();
         }
         // The other sets: one that can't be read, or doesn't fit, is dropped, not the model.
-        let uv_sets = numbered(&attrs, "TEXCOORD_", |k| k != set, |a| self.read(a, [0.0; 2]).ok(), n);
+        let uv_sets = numbered(attrs, "TEXCOORD_", |k| k != set, |a| self.read(a, [0.0; 2]).ok(), n);
         let color_sets = numbered(
-            &attrs,
+            attrs,
             "COLOR_",
             |k| k != 0,
             |a| self.read(a, [0.0, 0.0, 0.0, 1.0]).ok(),
@@ -1827,7 +1871,7 @@ impl Reader<'_> {
         let mut skinned = Skinned::default();
         let morphed = !u.weights.is_empty();
         if let Some(skin) = u.skin {
-            skinned = self.skin(skin, &attrs, &mut positions, &mut normals, &mut tangents, morphed)?;
+            skinned = self.skin(skin, attrs, &mut positions, &mut normals, &mut tangents, morphed)?;
         } else if morphed {
             normals.iter_mut().for_each(normalize);
             for t in &mut tangents {
@@ -2166,15 +2210,14 @@ impl Reader<'_> {
             roughness: 1.0,
             ..Material::plain("", [1.0; 4])
         };
-        let def = i.and_then(|i| list(self.json, "materials").get(i)).cloned();
-        if let Some(d) = &def {
+        let json = self.json;
+        if let Some(d) = i.and_then(|i| list(json, "materials").get(i)) {
             d.get("name")
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .clone_into(&mut m.name);
-            let sg = d
-                .get("extensions")
-                .and_then(|e| e.get("KHR_materials_pbrSpecularGlossiness"));
+            let ext = d.get("extensions");
+            let sg = ext.and_then(|e| e.get("KHR_materials_pbrSpecularGlossiness"));
             match (d.get("pbrMetallicRoughness"), sg) {
                 (None, Some(sg)) => {
                     m.color = f32s(sg.get("diffuseFactor"), [1.0; 4]);
@@ -2182,14 +2225,14 @@ impl Reader<'_> {
                     m.roughness = 1.0 - f32_of(sg.get("glossinessFactor").and_then(Value::as_f64).unwrap_or(1.0));
                 }
                 (pbr, _) => {
-                    let pbr = pbr.cloned().unwrap_or(Value::Null);
+                    let pbr = pbr.unwrap_or(&Value::Null);
                     m.color = f32s(pbr.get("baseColorFactor"), [1.0; 4]);
                     m.metallic = f32_of(pbr.get("metallicFactor").and_then(Value::as_f64).unwrap_or(1.0));
                     m.roughness = f32_of(pbr.get("roughnessFactor").and_then(Value::as_f64).unwrap_or(1.0));
                 }
             }
-            let strength = d
-                .pointer("/extensions/KHR_materials_emissive_strength/emissiveStrength")
+            let strength = ext
+                .and_then(|e| at(e, &["KHR_materials_emissive_strength", "emissiveStrength"]))
                 .and_then(Value::as_f64)
                 .map_or(1.0, f32_of);
             m.emissive = f32s(d.get("emissiveFactor"), [0.0; 3]).map(|e| e * strength);
@@ -2202,11 +2245,12 @@ impl Reader<'_> {
                 }
                 _ => m.color[3] = 1.0,
             }
-            m.unlit = d.pointer("/extensions/KHR_materials_unlit").is_some();
+            m.unlit = ext.and_then(|e| e.get("KHR_materials_unlit")).is_some();
             // `Prim::uvs` are the color texture's coordinates with its transform baked in: the
             // other textures read them through what's left of their own transform, or read
             // another set.
-            let uv = color_texture(d).map_or((0, None), mapping);
+            let color = color_texture(d);
+            let uv = color.map_or((0, None), mapping);
             let mut take = |info: Option<&Value>| self.texture_info(info?, uv, mesh);
             let mut slot = |info: Option<&Value>, image: &mut Option<usize>, sampling: &mut Sampling| {
                 if let Some(t) = take(info) {
@@ -2215,28 +2259,26 @@ impl Reader<'_> {
                 }
             };
             let s = &mut m.sampling;
-            slot(color_texture(d), &mut m.color_image, &mut s.color);
+            slot(color, &mut m.color_image, &mut s.color);
             slot(d.get("normalTexture"), &mut m.normal_image, &mut s.normal);
             slot(d.get("occlusionTexture"), &mut m.occlusion_image, &mut s.occlusion);
             slot(d.get("emissiveTexture"), &mut m.emissive_image, &mut s.emissive);
             slot(
-                d.pointer("/pbrMetallicRoughness/metallicRoughnessTexture"),
+                at(d, &["pbrMetallicRoughness", "metallicRoughnessTexture"]),
                 &mut m.metallic_roughness_image,
                 &mut s.metallic_roughness,
             );
             if m.normal_image.is_some() {
-                m.normal_scale = d
-                    .pointer("/normalTexture/scale")
+                m.normal_scale = at(d, &["normalTexture", "scale"])
                     .and_then(Value::as_f64)
                     .map_or(1.0, f32_of);
             }
             if m.occlusion_image.is_some() {
-                m.occlusion_strength = d
-                    .pointer("/occlusionTexture/strength")
+                m.occlusion_strength = at(d, &["occlusionTexture", "strength"])
                     .and_then(Value::as_f64)
                     .map_or(1.0, f32_of);
             }
-            if let Some(ext) = d.get("extensions") {
+            if let Some(ext) = ext {
                 m.extensions = self.extensions(ext, uv, mesh).map(Box::new);
             }
         }
@@ -2381,8 +2423,8 @@ impl Reader<'_> {
     /// The mesh image for glTF texture `t`: its source, or failing that one an extension
     /// names (`EXT_texture_webp`, `KHR_texture_basisu`, ...), if an image can be made of it.
     fn texture(&mut self, t: usize, mesh: &mut Mesh) -> Option<usize> {
-        let tex = list(self.json, "textures").get(t)?.clone();
-        let mut sources: Vec<usize> = index(&tex, "source").into_iter().collect();
+        let tex = list(self.json, "textures").get(t)?;
+        let mut sources: Vec<usize> = index(tex, "source").into_iter().collect();
         if let Some(ext) = tex.get("extensions").and_then(Value::as_object) {
             sources.extend(ext.values().filter_map(|e| index(e, "source")));
         }
@@ -2433,9 +2475,7 @@ pub(crate) fn node_target(target: &Value) -> Option<(usize, &str)> {
     {
         return Some((node, path));
     }
-    let pointer = target
-        .pointer("/extensions/KHR_animation_pointer/pointer")
-        .and_then(Value::as_str)?;
+    let pointer = at(target, &["extensions", "KHR_animation_pointer", "pointer"]).and_then(Value::as_str)?;
     let (node, path) = pointer.strip_prefix("/nodes/")?.split_once('/')?;
     // An index the way JSON pointers write them: no sign, no leading zeros.
     if node.is_empty() || !node.bytes().all(|b| b.is_ascii_digit()) || (node.len() > 1 && node.starts_with('0')) {
@@ -2571,10 +2611,30 @@ fn numbered<T>(
 
 /// A primitive's geometry at each of `transforms`, as one primitive.
 #[allow(clippy::float_cmp_const, reason = "only the exact identity may skip the transform")]
-fn place(g: Geometry, transforms: &[M4], material: usize) -> Prim {
-    if let [t] = transforms
-        && *t == IDENTITY
-    {
+fn place(mut g: Geometry, transforms: &[M4], material: usize) -> Prim {
+    if let [t] = transforms {
+        // One transform: in place, rather than into new buffers.
+        if *t != IDENTITY {
+            for v in &mut g.positions {
+                *v = apply_point(t, *v);
+            }
+            let nm = normal_matrix(t);
+            for v in &mut g.normals {
+                *v = apply_normal(&nm, *v);
+            }
+            let flip = det3(t) < 0.0;
+            for v in &mut g.tangents {
+                *v = apply_tangent(t, *v, flip);
+            }
+            // As `extend` writes them: whole triangles, wound back when mirrored.
+            let whole = g.draws.triangles.len() / 3 * 3;
+            g.draws.triangles.truncate(whole);
+            if flip {
+                for tri in g.draws.triangles.chunks_exact_mut(3) {
+                    tri.swap(1, 2);
+                }
+            }
+        }
         return Prim {
             positions: g.positions,
             normals: g.normals,
