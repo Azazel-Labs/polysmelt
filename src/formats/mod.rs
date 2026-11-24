@@ -195,8 +195,30 @@ pub const EXTENSIONS: &[&str] = &[
 /// model doesn't parse.
 #[cfg(feature = "fs")]
 pub fn load(path: &Path, ext: &str, assets: &dyn Assets, keep: Keep) -> Result<Document<'static>> {
+    use std::io::Read as _;
+    // Opening a file costs more than reading a small one, and readers look at a model more than
+    // once (its start, then all of it): a small model is read whole, from one opening. glTF's
+    // reader decides that for itself.
+    if !matches!(ext, "gltf" | "glb" | "vrm" | "vrma")
+        && let Ok(mut file) = std::fs::File::open(path)
+        && let Ok(len) = file.metadata().map(|m| m.len())
+        && len <= SMALL_FILE
+    {
+        let mut bytes = Vec::with_capacity(usize::try_from(len).unwrap_or(0));
+        file.read_to_end(&mut bytes)?;
+        let input = Input {
+            path,
+            data: Data::Bytes(&bytes),
+            limit: MAX_TRIANGLES,
+        };
+        return read(input, ext, assets, keep).map(Document::into_owned);
+    }
     read(Input::file(path), ext, assets, keep).map(Document::into_owned)
 }
+
+/// The largest model [`load`] reads whole before parsing, rather than streaming it from the file.
+#[cfg(feature = "fs")]
+const SMALL_FILE: u64 = 1 << 20;
 
 /// Reads a model already in memory, whose format is named by `ext` (lowercase, without the
 /// dot), keeping what `keep` says. `name` is the model's path among `assets`: the files it
