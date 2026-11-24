@@ -1,4 +1,4 @@
-//! A structural GLB validator and decoder: what `mesh::to_glb` writes must be a GLB any viewer accepts, so every
+//! A structural GLB validator and decoder: what `Mesh::to_glb` writes must be a GLB any viewer accepts, so every
 //! conformance case is checked against the glTF 2.0 rules that matter for a mesh (container layout, buffer and
 //! accessor bounds, index ranges, attribute counts, unit normals, finite values, valid references, embedded images
 //! that are what their MIME type says), then decoded so its expectations can be checked on what was written.

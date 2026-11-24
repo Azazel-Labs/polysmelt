@@ -701,7 +701,7 @@ pub(super) fn load(input: Input<'_>, keep: Keep) -> Result<Document<'static>> {
 mod tests {
     use super::*;
     use crate::assets::Memory;
-    use crate::rig::Path;
+    use crate::rig::Property;
 
     fn read(text: &str) -> Result<Document<'static>> {
         load(Input::memory(text.as_bytes(), "t.bvh"), Keep::ALL)
@@ -776,10 +776,14 @@ Frame Time: 0.5
         let rig = doc.rig().unwrap();
         assert_eq!(rig.animations.len(), 1);
         let channels = &rig.animations[0].channels;
-        let paths: Vec<_> = channels.iter().map(|c| (c.node, c.path)).collect();
+        let paths: Vec<_> = channels.iter().map(|c| (c.node, c.property)).collect();
         assert_eq!(
             paths,
-            [(0, Path::Translation), (0, Path::Rotation), (1, Path::Rotation)]
+            [
+                (0, Property::Translation),
+                (0, Property::Rotation),
+                (1, Property::Rotation)
+            ]
         );
         assert_eq!(channels[0].times, [0.0, 0.5]);
         assert_eq!(channels[0].values, [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
@@ -926,15 +930,15 @@ Frame Time: 0.5
         let doc = read(text).unwrap();
         let rig = doc.rig().unwrap();
         let channels = &rig.animations[0].channels;
-        let paths: Vec<_> = channels.iter().map(|c| (c.node, c.path)).collect();
+        let paths: Vec<_> = channels.iter().map(|c| (c.node, c.property)).collect();
         assert_eq!(
             paths,
             [
-                (0, Path::Translation),
-                (0, Path::Rotation),
-                (0, Path::Scale),
-                (1, Path::Rotation),
-                (1, Path::Scale)
+                (0, Property::Translation),
+                (0, Property::Rotation),
+                (0, Property::Scale),
+                (1, Property::Rotation),
+                (1, Property::Scale)
             ]
         );
         assert_eq!(channels[2].values, [1.0, 1.0, 1.0, 2.0, 3.0, 0.5]);

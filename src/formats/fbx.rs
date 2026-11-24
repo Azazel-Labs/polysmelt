@@ -4092,7 +4092,7 @@ mod tests {
         assert_eq!(mat.name, "Stone");
         assert_eq!(mat.color_image, Some(0));
         assert_eq!(mesh.images.len(), 1);
-        let glb = crate::mesh::to_glb(&mesh).unwrap();
+        let glb = mesh.to_glb().unwrap();
         let doc: serde_json::Value = {
             let len = u32::from_le_bytes(glb[12..16].try_into().unwrap()) as usize;
             serde_json::from_slice(&glb[20..20 + len]).unwrap()
@@ -4271,7 +4271,7 @@ Connections:  {{
             assert!(nrm[1] > 0.99);
         }
         // Written out, every set survives, numbered from 0 without gaps.
-        let glb = crate::mesh::to_glb(&mesh).unwrap();
+        let glb = mesh.to_glb().unwrap();
         let memory = crate::assets::Memory::new();
         let doc = crate::formats::load_bytes(&glb, "x.glb", "glb", &memory, Keep::ALL).unwrap();
         let again = doc.flatten(Pose::Rest).unwrap().unwrap();

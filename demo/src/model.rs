@@ -160,7 +160,7 @@ impl Model {
         if animated && gpu_skinnable(&doc, &rig, mesh.as_ref()) {
             let bind = doc.flatten(Pose::Bind).map_err(|e| format!("{e:#}"))?;
             if let Some(b) =
-                bind.filter(|b| b.skeleton.len() <= MAX_BONES && b.prims.iter().all(polysmelt::mesh::Prim::skinned))
+                bind.filter(|b| b.skeleton.len() <= MAX_BONES && b.prims.iter().all(polysmelt::mesh::Prim::is_skinned))
             {
                 mesh = Some(b);
                 motion = Motion::Gpu;
@@ -334,7 +334,7 @@ impl Model {
                     "start": t0,
                     "end": t1,
                     "frameRate": a.frame_rate,
-                    "morph": a.channels.iter().any(|c| c.path == polysmelt::rig::Path::Weights),
+                    "morph": a.channels.iter().any(|c| c.property == polysmelt::rig::Property::Weights),
                 })
             })
             .collect();
@@ -398,17 +398,18 @@ fn gpu_skinnable(doc: &Document<'_>, rig: &Rig, rest: Option<&Mesh>) -> bool {
     let Some(rest) = rest else {
         return false;
     };
-    let morphs = rig
-        .animations
-        .iter()
-        .any(|a| a.channels.iter().any(|c| c.path == polysmelt::rig::Path::Weights));
+    let morphs = rig.animations.iter().any(|a| {
+        a.channels
+            .iter()
+            .any(|c| c.property == polysmelt::rig::Property::Weights)
+    });
     let counts = doc.counts();
     !rig.skins.is_empty()
         && !morphs
         && counts.points == 0
         && counts.lines == 0
         && !rest.prims.is_empty()
-        && rest.prims.iter().all(polysmelt::mesh::Prim::skinned)
+        && rest.prims.iter().all(polysmelt::mesh::Prim::is_skinned)
 }
 
 /// Whether a mesh draws nothing.

@@ -8,7 +8,7 @@ use serde_json::Value;
 use super::{Reader, floats, index, items, list, list_of};
 use crate::document::Document;
 use crate::num::f32_of;
-use crate::rig::{Animation, Channel, Interpolation, Node, Path, Rig, Skin, Trs};
+use crate::rig::{Animation, Channel, Interpolation, Node, Property, Rig, Skin, Trs};
 use crate::{Context as _, Result};
 
 impl Document<'_> {
@@ -83,11 +83,11 @@ impl Document<'_> {
                     // A channel for another extension's target, or none.
                     continue;
                 };
-                let path = match path {
-                    "translation" => Path::Translation,
-                    "rotation" => Path::Rotation,
-                    "scale" => Path::Scale,
-                    "weights" => Path::Weights,
+                let property = match path {
+                    "translation" => Property::Translation,
+                    "rotation" => Property::Rotation,
+                    "scale" => Property::Scale,
+                    "weights" => Property::Weights,
                     _ => continue,
                 };
                 ensure!(
@@ -109,14 +109,14 @@ impl Document<'_> {
                     Entry::Occupied(t) => t.get().clone(),
                     Entry::Vacant(v) => v.insert(r.read::<1>(input, [0.0])?.into_flattened()).clone(),
                 };
-                let values = match path {
-                    Path::Translation | Path::Scale => r.read::<3>(output, [0.0; 3])?.into_flattened(),
-                    Path::Rotation => r.read::<4>(output, [0.0, 0.0, 0.0, 1.0])?.into_flattened(),
-                    Path::Weights => r.read::<1>(output, [0.0])?.into_flattened(),
+                let values = match property {
+                    Property::Translation | Property::Scale => r.read::<3>(output, [0.0; 3])?.into_flattened(),
+                    Property::Rotation => r.read::<4>(output, [0.0, 0.0, 0.0, 1.0])?.into_flattened(),
+                    Property::Weights => r.read::<1>(output, [0.0])?.into_flattened(),
                 };
                 channels.push(Channel {
                     node,
-                    path,
+                    property,
                     interpolation,
                     times,
                     values,

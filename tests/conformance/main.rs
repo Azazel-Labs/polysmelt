@@ -409,15 +409,15 @@ fn rig(e: &Map<String, Value>, doc: &Document<'_>, tol: f32) -> Result<(), Strin
         }
         for (path, want) in entry.get("keys").and_then(Value::as_object).into_iter().flatten() {
             let target = match path.as_str() {
-                "translation" => polysmelt::rig::Path::Translation,
-                "rotation" => polysmelt::rig::Path::Rotation,
-                "scale" => polysmelt::rig::Path::Scale,
+                "translation" => polysmelt::rig::Property::Translation,
+                "rotation" => polysmelt::rig::Property::Rotation,
+                "scale" => polysmelt::rig::Property::Scale,
                 _ => return Err(format!("{name}: no such path as {path:?}")),
             };
             let channel = rig
                 .animations
                 .get(animation)
-                .and_then(|a| a.channels.iter().find(|c| c.node == node && c.path == target));
+                .and_then(|a| a.channels.iter().find(|c| c.node == node && c.property == target));
             let ok = match (channel, want) {
                 (None, Value::Null) => true,
                 (Some(c), Value::Number(n)) => n.as_u64() == Some(c.times.len() as u64),
@@ -682,7 +682,7 @@ fn bind_pose(doc: &Document<'_>, rest: Option<&Mesh>) -> Result<(), String> {
         if r.indices != b.indices || r.skin_joints != b.skin_joints || r.skin_weights != b.skin_weights {
             return Err(format!("bind pose primitive {k}: different triangles or joints"));
         }
-        if !r.skinned() && (r.positions != b.positions || r.normals != b.normals) {
+        if !r.is_skinned() && (r.positions != b.positions || r.normals != b.normals) {
             return Err(format!("bind pose moved unskinned primitive {k}"));
         }
     }
@@ -762,7 +762,7 @@ fn run(case: &Case) -> Result<(), String> {
         };
     }
     let mesh = mesh.ok_or("produced no mesh")?;
-    let bytes = polysmelt::mesh::to_glb(&mesh).map_err(|err| format!("to_glb failed: {err}"))?;
+    let bytes = mesh.to_glb().map_err(|err| format!("to_glb failed: {err}"))?;
     keep_mesh_glb(case, &bytes);
     round_trip(&mesh, &bytes, tol)?;
     // `flat_json`: the same, in the JSON of the flat mesh's GLB.

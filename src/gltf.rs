@@ -92,7 +92,10 @@ pub fn compress(input: &[u8]) -> Result<Vec<u8>> {
 }
 
 /// Which meshopt extension [`compress_with`] writes.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+///
+/// Non-exhaustive: later meshopt extensions may be added.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum MeshoptExtension {
     /// `EXT_meshopt_compression`: attribute codec version 0 and no `COLOR` filter, so every
     /// meshopt-aware reader takes it.
@@ -104,9 +107,9 @@ pub enum MeshoptExtension {
 }
 
 impl MeshoptExtension {
-    /// The extension's name, as it appears in the glTF.
+    /// The extension's name, as it appears in the glTF: `"EXT_meshopt_compression"`.
     #[must_use]
-    pub fn name(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             MeshoptExtension::Ext => MESHOPT_EXTENSIONS[0],
             MeshoptExtension::Khr => MESHOPT_EXTENSIONS[1],
@@ -114,8 +117,28 @@ impl MeshoptExtension {
     }
 }
 
-/// How [`compress_with`] compresses.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+impl std::fmt::Display for MeshoptExtension {
+    /// [`MeshoptExtension::as_str`].
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// How [`compress_with`] compresses: start from [`CompressOptions::EXT`] or
+/// [`CompressOptions::KHR`] (or [`CompressOptions::default`], which is `EXT`) and change what
+/// you need. Non-exhaustive, so that options can be added; the fields stay readable.
+///
+/// ```
+/// use polysmelt::gltf::{CompressOptions, MeshoptExtension};
+///
+/// let smallest = CompressOptions::KHR.level(3).color_filter(true);
+/// assert_eq!(smallest.extension, MeshoptExtension::Khr);
+/// assert_eq!(smallest.level, 3);
+/// let compatible = CompressOptions::default();
+/// assert_eq!(compatible, CompressOptions::EXT);
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct CompressOptions {
     /// The extension written, and with it the attribute codec version.
     pub extension: MeshoptExtension,
@@ -145,6 +168,29 @@ impl CompressOptions {
         level: 2,
         color_filter: false,
     };
+
+    /// These options writing `extension`, and with it its attribute codec version.
+    #[must_use]
+    pub const fn extension(mut self, extension: MeshoptExtension) -> Self {
+        self.extension = extension;
+        self
+    }
+
+    /// These options at attribute codec level `level`, 0 (fastest) to 3 (smallest); see
+    /// [`CompressOptions::level`](#structfield.level).
+    #[must_use]
+    pub const fn level(mut self, level: u8) -> Self {
+        self.level = level;
+        self
+    }
+
+    /// These options with the `COLOR` filter on or off; see
+    /// [`CompressOptions::color_filter`](#structfield.color_filter).
+    #[must_use]
+    pub const fn color_filter(mut self, on: bool) -> Self {
+        self.color_filter = on;
+        self
+    }
 }
 
 impl Default for CompressOptions {
@@ -460,7 +506,7 @@ impl<'a> Doc<'a> {
     fn compress(mut self, options: CompressOptions) -> Result<Vec<u8>> {
         let bin = self.bin.unwrap_or_default();
         let plans = plan_compression(&self, options.color_filter)?;
-        let name = options.extension.name();
+        let name = options.extension.as_str();
         let version = u8::from(options.extension == MeshoptExtension::Khr);
         let level = options.level.min(3);
         let views = self.list("bufferViews").to_vec();
@@ -740,7 +786,7 @@ pub(crate) fn decode_view(ext: &Map<String, Value>, src: &[u8], out: &mut [u8]) 
         "ATTRIBUTES" => {
             ensure!(out.len() / 1024 <= src.len(), "meshopt data is truncated");
             meshopt::decode_vertex_buffer_into(src, out, stride)?;
-            return meshopt::apply_filter(filter, out, stride);
+            return meshopt::apply_filter(filter.parse()?, out, stride);
         }
         "TRIANGLES" => meshopt::decode_index_buffer(src, count)?,
         "INDICES" => meshopt::decode_index_sequence(src, count)?,
@@ -1024,7 +1070,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::mesh::{Image, Material, Mesh, Prim, to_glb};
+    use crate::mesh::{Image, Material, Mesh, Prim};
 
     /// A grid with normals, UVs and a (fake) PNG texture, as a GLB.
     fn grid_glb(n: u32) -> Vec<u8> {
@@ -1056,7 +1102,7 @@ mod tests {
             }],
             skeleton: Vec::new(),
         };
-        to_glb(&mesh).unwrap()
+        mesh.to_glb().unwrap()
     }
 
     fn u(v: &Value) -> usize {
@@ -1192,7 +1238,8 @@ mod tests {
             ..CompressOptions::EXT
         };
         assert!(compress_with(&plain, colors).is_err());
-        assert_eq!(MeshoptExtension::Khr.name(), "KHR_meshopt_compression");
+        assert_eq!(MeshoptExtension::Khr.as_str(), "KHR_meshopt_compression");
+        assert_eq!(MeshoptExtension::Ext.to_string(), "EXT_meshopt_compression");
         assert_eq!(CompressOptions::default(), CompressOptions::EXT);
     }
 

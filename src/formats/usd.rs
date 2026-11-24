@@ -4118,7 +4118,7 @@ def Xform "Root"
             "#usda 1.0\ndef Cube \"C\"\n{\n}\ndef Sphere \"S\"\n{\n}\ndef Cylinder \"Y\"\n{\n}\ndef Plane \"P\"\n{\n}\n",
             &[],
         );
-        assert!(!mesh.prims.is_empty());
+        assert_ne!(mesh.prims.len(), 0);
         for prim in &mesh.prims {
             assert_eq!(prim.uvs.len(), prim.positions.len());
             assert!(prim.uvs.iter().flatten().all(|v| (0.0..=1.0).contains(v)));

@@ -374,13 +374,13 @@ fn a_vmd_motion() {
     let rot = a
         .channels
         .iter()
-        .find(|c| c.node == bone && c.path == crate::rig::Path::Rotation)
+        .find(|c| c.node == bone && c.property == crate::rig::Property::Rotation)
         .unwrap();
     assert_eq!(rot.times.len(), 2 + 10);
     let tr = a
         .channels
         .iter()
-        .find(|c| c.node == bone && c.path == crate::rig::Path::Translation)
+        .find(|c| c.node == bone && c.property == crate::rig::Property::Translation)
         .unwrap();
     assert_eq!(tr.times.len(), 3);
 }

@@ -488,7 +488,7 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document<'static>> {
         (_, None) => Fact::Unknown,
     };
     info.unit = Some(units.clone().unwrap_or_else(|| "mm".into()));
-    info.up_axis = match y_screen.as_deref().and_then(Axis::parse) {
+    info.up_axis = match y_screen.as_deref().and_then(|s| s.parse().ok()) {
         Some(up) if screen.is_some() => Fact::Declared(up),
         _ => Fact::Assumed(Axis::PosZ),
     };

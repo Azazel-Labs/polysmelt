@@ -1953,7 +1953,7 @@ mod tests {
         assert_eq!(mesh.materials[wall.material].name, "default");
         assert_eq!(wall.positions.len(), 3);
         assert!(wall.normals.iter().all(|n| n[2].abs() > 0.99), "{:?}", wall.normals);
-        assert!(crate::mesh::to_glb(&mesh).unwrap().starts_with(b"glTF"));
+        assert!(mesh.to_glb().unwrap().starts_with(b"glTF"));
     }
 
     fn track(id: u16, keys: &[(u32, &[f32])]) -> Vec<u8> {
