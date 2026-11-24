@@ -1322,7 +1322,14 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         prims.sort_by_key(|p| p.material);
         prims_of.push(Some(prims).filter(|p| !p.is_empty()));
     }
-    ensure!(triangles > 0, "this 3DS file has no meshes");
+    // A scene of cameras or lights alone is one still.
+    ensure!(
+        triangles > 0
+            || objects
+                .iter()
+                .any(|o| matches!(o.body, Body::Camera(_) | Body::Light(_))),
+        "this 3DS file has no meshes, cameras or lights"
+    );
     let mut textured = vec![false; materials.len()];
     for p in prims_of.iter().flatten().flatten().filter(|p| !p.uvs.is_empty()) {
         textured[p.material] = true;

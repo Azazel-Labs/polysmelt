@@ -53,13 +53,20 @@ struct Array {
     ddl: u32,
 }
 
-/// Builds the meshes of the geometry nodes and puts them on their nodes.
+/// Builds the meshes of the geometry nodes (or of geometry objects placed by themselves) and puts them on their
+/// nodes.
 pub(super) fn meshes(c: &mut Ctx<'_>) -> Result<()> {
     let t = c.t;
     let mut uses = Vec::new();
     let mut need: FastMap<u32, usize> = FastMap::default();
     for (n, holder) in std::mem::take(&mut c.geometry_nodes) {
-        let Some(g) = referenced(t, n, "ObjectRef").filter(|&g| t.ident(g) == "GeometryObject") else {
+        // A geometry object no node places is placed by itself (see `objects`).
+        let g = if t.ident(n) == "GeometryObject" {
+            Some(n)
+        } else {
+            referenced(t, n, "ObjectRef").filter(|&g| t.ident(g) == "GeometryObject")
+        };
+        let Some(g) = g else {
             c.stats.missing_objects += 1;
             continue;
         };
