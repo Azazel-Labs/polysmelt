@@ -1,0 +1,41 @@
+{
+  "spec": "PCD 0.7 (PCL's file format documentation): a real file, fields x y z normal_x normal_y normal_z curvature",
+  "source": "PCL test data (test/), BSD license, see ../LICENSE-PCL",
+  "points": 397,
+  "triangles": 0,
+  "bounds": {
+    "min": [
+      -0.093938,
+      0.03742,
+      -0.055026
+    ],
+    "max": [
+      0.059562,
+      0.1845,
+      0.057803
+    ]
+  },
+  "positions_include": [
+    [
+      0.005422,
+      0.11349,
+      0.040749
+    ],
+    [
+      0.01097,
+      0.11058,
+      0.039648
+    ],
+    [
+      -0.07793,
+      0.17516,
+      -0.0444
+    ]
+  ],
+  "document": {
+    "attributes": [
+      "NORMAL",
+      "_CURVATURE"
+    ]
+  }
+}

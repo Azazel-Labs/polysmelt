@@ -33,7 +33,24 @@ Early. What exists today:
   and splines, and block inserts, text or binary), and gaussian splats (3D gaussian splatting's
   PLY files, `.splat` and gzipped `.spz`, versions 1 to 3) as `KHR_gaussian_splatting`, which
   the glTF reader also reads: `to_glb` keeps every splat's spherical harmonics, scale and
-  rotation, and `flatten` draws the splats as points in their base color.
+  rotation, and `flatten` draws the splats as points in their base color. Point clouds:
+  LAS lidar (1.0 to 1.4, point formats 0 to 10) and LAZ, PCD (ascii, binary and
+  binary_compressed), E57 scans (each scan placed by its pose) and text clouds (`.xyz`, `.pts`,
+  `.ptx` with its scanner transforms, `.asc`, ESRI ASCII grids), as point primitives with their colors, the other
+  fields (intensity, classification, return numbers, GPS time...) as vertex attributes, and the
+  coordinate system in `extras`. AMF (plain or zipped: objects, volumes and their materials,
+  vertex and triangle colors, textures, constellations; curved triangles stay flat), LightWave objects (`.lwo`: LWOB,
+  LWO2 and LWO3, with layers and pivots, surfaces and their image maps, UV and color maps,
+  smoothing angles and morph targets) and AC3D (`.ac`: the object tree, materials, textures,
+  crease angles, lines and triangle strips).
+  Game and animation formats too: MikuMikuDance models (`.pmx` 2.0 and 2.1, `.pmd`, skinned,
+  with morph targets, IK and materials) and `.vmd` motions, DirectX `.x` (text, binary and
+  compressed, with frames, skins and animation sets), Quake II `.md2` and Quake III `.md3`
+  (frames as morph targets, MD3 tags as nodes), Doom 3 `.md5mesh` and `.md5anim`, Inter-Quake
+  Model `.iqm`, Valve `.smd` and `.vta`, MilkShape 3D `.ms3d` and Blitz3D `.b3d` (skinned and
+  animated), and motion capture: Acclaim `.asf` skeletons with `.amc` motions, HTR, and C3D
+  and TRC marker tracks (each marker an animated node). Left-handed and Z-up sources are turned
+  to glTF's axes, and keys are kept as the file gives them.
   `formats::load` reads a file and `formats::load_bytes` a model already in memory; both
   dispatch on the extension and return a `document::Document`.
 - **`document`**: the common form, a glTF 2.0 document (its JSON and its buffers' bytes).
@@ -64,7 +81,7 @@ Early. What exists today:
   `Keep::threads` reads large OBJ files on several threads (`0` for one per core) and inflates
   SPZ files on one thread while unpacking them on another, with the same result as one thread;
   it is `1`, one thread, by default.
-- **Conformance corpus**: 879 cases under `tests/corpus`, each a file and the GLB it must
+- **Conformance corpus**: 1155 cases under `tests/corpus`, each a file and the GLB it must
   become. They cover every format above and the variants exporters really write: OBJ's face
   forms and MTL dialects, both PLY byte orders, every FBX version and axis system, and USD's
   three encodings and its composition, glTF's accessor types, node hierarchy, skins and extensions, BVH's rotation orders and
@@ -128,6 +145,19 @@ Early. What exists today:
 | `dxf` | DXF meshes, lines and points | none |
 | `splat` | Gaussian splats in the 32-byte `.splat` layout | none |
 | `spz` | Gaussian splats in SPZ, versions 1 to 3 (gzip) | `flate2` |
+| `mmd` | MikuMikuDance `.pmx` (2.0 and 2.1) and `.pmd` models, `.vmd` motions | none |
+| `directx` | DirectX `.x` (text, binary, MSZIP-compressed; 32- and 64-bit floats) | none |
+| `md2` | Quake II `.md2`, frames as morph targets | none |
+| `md3` | Quake III `.md3`, frames as morph targets, tags as nodes | none |
+| `md5` | Doom 3 `.md5mesh` and `.md5anim` | none |
+| `iqm` | Inter-Quake Model `.iqm` | none |
+| `smd` | Valve `.smd` (reference and animation) and `.vta` | none |
+| `ms3d` | MilkShape 3D `.ms3d` | none |
+| `b3d` | Blitz3D `.b3d` | none |
+| `asf` | Acclaim `.asf` skeletons and `.amc` motions | none |
+| `c3d` | C3D motion capture markers | none |
+| `trc` | TRC motion capture markers | none |
+| `htr` | HTR motion capture | none |
 | `fbx` | FBX | `base64`, `flate2` |
 | `3mf` | 3MF | `zip`, `quick-xml` |
 | `usd` | USD | `openusd`, `openusd-schemas`, `zip` |
@@ -142,10 +172,18 @@ Early. What exists today:
 | `tiff` | TIFF textures (strips or tiles; uncompressed, LZW, Deflate or PackBits; 1 to 16 bits), re-encoded as PNG | `flate2` |
 | `psd` | Photoshop `.psd` and `.psb` textures (the merged image, raw or RLE), re-encoded as PNG | `flate2` |
 | `dds` | DDS textures (BC1 to BC5 and uncompressed), re-encoded as PNG | `flate2` |
+| `las` | LAS lidar point clouds, 1.0 to 1.4 | none |
+| `laz` | LAZ, compressed LAS (turns on `las`) | `laz` |
+| `pcd` | PCD point clouds | none |
+| `xyz` | Text point clouds: `.xyz`, `.pts`, `.ptx`, `.asc` | none |
+| `e57` | E57 scans | `e57` |
+| `amf` | AMF, plain or zipped | `quick-xml`, `zip`, `base64`, `flate2` |
+| `lwo` | LightWave objects (`.lwo`) | none |
+| `ac3d` | AC3D (`.ac`) | none |
 | `fs` | Reading files: `formats::load`, `assets::Folder`, `gltf::files_in` | none |
 
 Every reader is on by default, and so are `fs`, `webp` and the six texture decoders. `minimal`
-is the ten readers with no dependencies, plus `fs`, for
+is the twenty-eight readers with no dependencies, plus `fs`, for
 `default-features = false, features = ["minimal"]`. Asking
 `formats::load` for a format whose feature is off returns an error that names the feature.
 

@@ -107,7 +107,7 @@ pub(crate) fn load<'a>(input: Input<'a>, assets: &'a dyn Assets, keep: Keep) -> 
         let declared = b.get("byteLength").and_then(Value::as_u64).unwrap_or(0);
         let fallback = container::is_fallback(b);
         let blob = match b.get("uri").and_then(Value::as_str) {
-            Some(uri) if uri.starts_with("data:") => Blob::Bytes(Cow::Owned(container::data_uri(uri)?.1)),
+            Some(uri) if uri.starts_with("data:") => Blob::Bytes(container::data_uri(uri)?.1.into()),
             Some(uri) => match external(input, assets, uri) {
                 Ok(blob) => blob,
                 Err(_) if fallback => Blob::Missing(declared),
@@ -116,7 +116,7 @@ pub(crate) fn load<'a>(input: Input<'a>, assets: &'a dyn Assets, keep: Keep) -> 
             None if i == 0 && bin.is_some() => bin.take().expect("checked"),
             None if fallback => Blob::Missing(declared),
             // An empty buffer needs no data (a placeholder some writers leave).
-            None if declared == 0 => Blob::Bytes(Cow::Borrowed(&[])),
+            None if declared == 0 => Blob::Borrowed(&[]),
             None => bail!("glTF buffer {i} has no data"),
         };
         ensure!(
@@ -183,7 +183,8 @@ fn embed_images(doc: &mut Document<'_>, input: Input<'_>, assets: &dyn Assets) {
     }
 }
 
-/// Notes where each image named by URI (other than a `data:` one) is, without reading it.
+/// Notes where each image named by URI (other than a `data:` one) is, without reading it. A file
+/// on disk is only looked for when the image's location is first asked.
 fn reference_images(doc: &mut Document<'_>, input: Input<'_>, assets: &dyn Assets) {
     let images = doc.json.get("images").and_then(Value::as_array);
     for (i, img) in images.into_iter().flatten().enumerate() {
@@ -196,15 +197,16 @@ fn reference_images(doc: &mut Document<'_>, input: Input<'_>, assets: &dyn Asset
         };
         let name = container::percent_decode(uri);
         let path = checked(&name).ok().map(|rel| input.dir().join(rel));
-        let found = path.filter(|p| {
-            #[cfg(feature = "fs")]
-            if input.bytes().is_none() {
-                return p.is_file();
-            }
-            assets.read(p).is_some()
-        });
+        // A model read from disk has its image files looked for when they're first asked about,
+        // since a lookup per image adds up; one read from memory asks its assets now.
+        #[cfg(feature = "fs")]
+        let later = input.bytes().is_none();
+        #[cfg(not(feature = "fs"))]
+        let later = false;
+        let found = path.filter(|p| later || assets.read(p).is_some());
         let location = found.map_or(Location::Missing, Location::File);
         let r = Reference {
+            found: (later && matches!(location, Location::File(_))).then(std::sync::OnceLock::new),
             name,
             location,
             bytes: None,
@@ -243,11 +245,14 @@ fn external<'a>(input: Input<'a>, assets: &'a dyn Assets, uri: &str) -> Result<B
                 .map_err(|_| invalid!("glTF buffer {rel:?} of {len} bytes"))?;
             file.read_to_end(&mut all)
                 .map_err(|e| invalid!("glTF buffer {rel:?}: {e}"))?;
-            return Ok(Blob::Bytes(Cow::Owned(all)));
+            return Ok(Blob::Bytes(all.into()));
         }
         return Ok(Blob::File(FileSpan::new(file, 0, len, 0)));
     }
-    read_external(input, assets, uri).map(Blob::Bytes)
+    Ok(match read_external(input, assets, uri)? {
+        Cow::Borrowed(b) => Blob::Borrowed(b),
+        Cow::Owned(v) => Blob::Bytes(v.into()),
+    })
 }
 
 /// An external file the model names by URI, whole: from the model's folder, or for a model in
@@ -271,9 +276,9 @@ type Span = (u64, u64);
 
 /// A GLB's JSON and where its binary chunk is, from its first bytes. `read(off, len)` reads
 /// the container.
-fn glb_layout(
+fn glb_layout<'b>(
     total: u64,
-    mut read: impl FnMut(u64, usize) -> Result<Vec<u8>>,
+    mut read: impl FnMut(u64, usize) -> Result<Cow<'b, [u8]>>,
 ) -> Result<(Map<String, Value>, Option<Span>)> {
     let head = read(0, 20).context("GLB is truncated")?;
     let u32_at = |b: &[u8], at: usize| u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]]);
@@ -310,22 +315,18 @@ fn glb_layout(
 /// without a copy.
 fn glb_in_memory(bytes: Cow<'_, [u8]>) -> Result<(Map<String, Value>, Option<Blob<'_>>)> {
     let total = bytes.len() as u64;
+    let all: &[u8] = &bytes;
     let (json, bin) = glb_layout(total, |off, len| {
-        bytes
-            .get(usize_of(off)..usize_of(off).saturating_add(len))
-            .map(<[u8]>::to_vec)
+        all.get(usize_of(off)..usize_of(off).saturating_add(len))
+            .map(Cow::Borrowed)
             .context("GLB is truncated")
     })?;
     let bin = bin.map(|(base, len)| {
         let (base, end) = (usize_of(base), usize_of(base + len));
-        Blob::Bytes(match bytes {
-            Cow::Borrowed(b) => Cow::Borrowed(&b[base..end]),
-            Cow::Owned(mut v) => {
-                v.truncate(end);
-                v.drain(..base);
-                Cow::Owned(v)
-            }
-        })
+        match bytes {
+            Cow::Borrowed(b) => Blob::Borrowed(&b[base..end]),
+            Cow::Owned(v) => Blob::Bytes(crate::Bytes::from(v).slice(base..end)),
+        }
     });
     Ok((json, bin))
 }
@@ -335,7 +336,7 @@ fn glb_json(text: &[u8]) -> Result<Map<String, Value>> {
     let text = text.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(text);
     // The chunk is padded with spaces, or by some writers with zeros.
     let end = text.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
-    let Value::Object(json) = serde_json::from_slice(&text[..end]).context("GLB JSON doesn't parse")? else {
+    let Value::Object(json) = crate::json::from_slice(&text[..end]).context("GLB JSON doesn't parse")? else {
         bail!("glTF JSON is not an object")
     };
     Ok(json)
@@ -344,7 +345,7 @@ fn glb_json(text: &[u8]) -> Result<Map<String, Value>> {
 /// glTF JSON (a `.gltf`), after any byte-order mark.
 fn gltf_json(bytes: &[u8]) -> Result<Map<String, Value>> {
     let text = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
-    match serde_json::from_slice(text) {
+    match crate::json::from_slice(text) {
         Ok(Value::Object(m)) => Ok(m),
         _ => bail!("not a glTF file: neither GLB nor glTF JSON"),
     }
@@ -377,15 +378,16 @@ fn open_file(path: &Path) -> Result<(Map<String, Value>, Option<Blob<'static>>)>
         return Ok((gltf_json(&head)?, None));
     }
     let mut pos = head.len() as u64;
+    let read: &[u8] = &head;
     let (json, bin) = glb_layout(total, |off, len| {
-        if let Some(b) = head.get(usize_of(off)..usize_of(off).saturating_add(len)) {
-            return Ok(b.to_vec());
+        if let Some(b) = read.get(usize_of(off)..usize_of(off).saturating_add(len)) {
+            return Ok(Cow::Borrowed(b));
         }
         let mut b = vec![0; len];
         file.seek(SeekFrom::Start(off))?;
         file.read_exact(&mut b).context("GLB is truncated")?;
         pos = off + len as u64;
-        Ok(b)
+        Ok(Cow::Owned(b))
     })?;
     drop(head);
     let bin = bin.map(|(base, len)| Blob::File(FileSpan::new(file, base, len, pos.wrapping_sub(base))));

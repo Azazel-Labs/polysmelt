@@ -91,6 +91,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f1fe948ff07f4bd06c30984e69f5b4899c516a3ef74f34df92a2df2ab535495"
 
 [[package]]
+name = "bytes"
+version = "1.12.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "776dfebd015e2d8732c684a2c71003674ccb49457b539b9e82151ba38e96dd7c"
+
+[[package]]
 name = "cfg-if"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -154,6 +160,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2d384c03a3090e54e7840f9f08d0bfb0860d58a527bfb78bd96cc5b921d4ba2e"
 dependencies = [
  "bytemuck",
+]
+
+[[package]]
+name = "e57"
+version = "0.11.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "24d81940bab8d2040f5175030abe9ba15df7a9d4f582209ebe13c9e10d0422b7"
+dependencies = [
+ "roxmltree",
 ]
 
 [[package]]
@@ -387,6 +402,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "laz"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0dccd63a9175618371557b3e92b61ab4e7cffb459d8d2d32ec4e39feaddc61b2"
+dependencies = [
+ "byteorder",
+ "num-traits",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -608,12 +633,15 @@ version = "0.13.2"
 dependencies = [
  "base64",
  "bytemuck",
+ "bytes",
  "draco-core",
+ "e57",
  "fbxcel",
  "flate2",
  "gltf",
  "image",
  "image-webp",
+ "laz",
  "openusd",
  "openusd-schemas",
  "quick-xml",
@@ -706,6 +734,15 @@ name = "rle-decode-fast"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3582f63211428f83597b51b2ddb88e2a91a9d52d12831f9d08f5e624e8977422"
+
+[[package]]
+name = "roxmltree"
+version = "0.21.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9da7f59328b09405b181fee1018925fad50f157afb43c0c0f5c522c256dd5907"
+dependencies = [
+ "memchr",
+]
 
 [[package]]
 name = "rustc_version"

@@ -1,0 +1,7 @@
+{
+  "spec": "AC3D (the AC3D file format): a real file, a closed line",
+  "source": "assimp test models (test/models/AC), BSD license, see ../LICENSE-assimp",
+  "triangles": 0,
+  "lines": 4,
+  "tolerance": 1e-05
+}

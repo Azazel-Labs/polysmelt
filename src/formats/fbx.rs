@@ -302,8 +302,14 @@ const MAX_STEP_DEGREES: f64 = 10.0;
 
 /// Reads an FBX file (binary 7.x, or ASCII) as a glTF document.
 pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document<'static>> {
-    let data = input.read()?;
-    let tree = super::fbx_tree::Tree::parse(&data)?;
+    // A file read is held as shared bytes, so that a big texture embedded in it can point into
+    // it rather than be copied.
+    let (borrowed, file) = match input.read()? {
+        Cow::Borrowed(b) => (b, None),
+        Cow::Owned(v) => (&[][..], Some(crate::Bytes::from(v))),
+    };
+    let data: &[u8] = file.as_deref().unwrap_or(borrowed);
+    let tree = super::fbx_tree::Tree::parse(data)?;
     let version = tree.version();
     let rootnode = tree.root();
     let creator = |n: Option<NodeHandle<'_>>| {
@@ -320,6 +326,7 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
     .unwrap_or_default();
     let objects_node = rootnode.first_child_by_name("Objects").context("FBX has no Objects")?;
     let mut objs = Objects {
+        file: file.clone(),
         nodes: HashMap::new(),
         order: Vec::new(),
         parents: HashMap::new(),
@@ -581,6 +588,8 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
 
 /// Object id → (node, class), and how objects connect.
 struct Objects<'a> {
+    /// The file's bytes, when it was read from disk.
+    file: Option<crate::Bytes>,
     nodes: HashMap<i64, (NodeHandle<'a>, String)>,
     /// Object ids in file order.
     order: Vec<i64>,
@@ -3121,7 +3130,10 @@ fn texture_image(id: i64, objs: &Objects<'_>, dir: &Path, assets: &dyn Assets, i
                 |n| Path::new(&n.replace('\\', "/")).to_path_buf(),
             );
             let name = hint.to_string_lossy().into_owned();
-            let convert = |b: &[u8]| assets.image(b, &hint);
+            let convert = |b: &[u8]| match objs.file.as_ref().and_then(|f| shared_part(f, b)) {
+                Some(part) => assets.image_shared(part, &hint),
+                None => assets.image(b, &hint),
+            };
             if let Some(i) = images.bytes(Cow::Borrowed(&bytes[..]), &name, Location::Embedded, convert) {
                 return Some(i);
             }
@@ -3129,6 +3141,14 @@ fn texture_image(id: i64, objs: &Objects<'_>, dir: &Path, assets: &dyn Assets, i
     }
     let (name, path) = names.iter().find_map(|n| Some((n, assets.find(n, dir)?)))?;
     images.file(assets, path, name)
+}
+
+/// `part` of `file`, sharing its bytes, when it lies inside them and is at least a quarter of them: a small texture
+/// is copied instead, so that it doesn't keep a big file's bytes alive.
+fn shared_part(file: &crate::Bytes, part: &[u8]) -> Option<crate::Bytes> {
+    let (start, at) = (file.as_ptr().addr(), part.as_ptr().addr());
+    let inside = at >= start && at - start + part.len() <= file.len();
+    (inside && part.len() >= file.len() / 4).then(|| file.slice_ref(part))
 }
 
 /// Vertices already emitted at a crowded control point, by primitive, control point and what else they're matched on.

@@ -47,9 +47,30 @@ cases.
 | DXF | 34 | 34 | none |
 | Gaussian splats (`.splat`) | 7 | 7 | none |
 | SPZ | 19 | 19 | none |
+| MikuMikuDance (`mmd/`: PMX, PMD, VMD) | 21 | 21 | none |
+| DirectX (`x/`) | 48 | 42 | none |
+| MD2 | 13 | 13 | none |
+| MD3 | 15 | 15 | none |
+| MD5 | 13 | 13 | none |
+| IQM | 16 | 16 | none |
+| SMD | 9 | 9 | none |
+| MilkShape 3D | 12 | 12 | none |
+| Blitz3D | 11 | 11 | none |
+| ASF/AMC (`asf/`) | 26 | 26 | none |
+| C3D | 26 | 26 | none |
+| TRC | 19 | 19 | none |
+| HTR | 31 | 31 | none |
+| LAS and LAZ | 17 | 15 | none |
+| PCD | 25 | 23 | none |
+| Text point clouds (`xyz/`) | 21 | 21 | none |
+| E57 | 3 | 1 | none |
+| AMF | 23 | 21 | none |
+| LightWave (`lwo/`) | 18 | 15 | none |
+| AC3D (`ac/`) | 15 | 11 | none |
 
 - **Generated** cases are written byte by byte by `tools/corpus/<format>.py` (3DS is
-  `tds.py`, 3MF is `threemf.py`, COLLADA is `dae.py`). Each one targets one clause of the format's specification,
+  `tds.py`, 3MF is `threemf.py`, COLLADA is `dae.py`, PMX, PMD and VMD are `mmd.py`, DirectX
+  is `x.py`, ASF/AMC is `asf.py`). Each one targets one clause of the format's specification,
   or one variant that real exporters write. The expectations come from what the generator
   wrote, never from reading the file back with Polysmelt, so a case tests the reader against
   the standard rather than against itself.
@@ -63,8 +84,27 @@ cases.
   openskp's test fixtures (MIT, `skp/LICENSE-openskp`). `tools/corpus/skp.py` copies them and
   writes their expectations from what openskp's tests assert about each file and what was
   drawn in it, and the application fact from each file's header.
+- **DirectX**'s other 6 cases are real files: three cubes (text, binary and compressed
+  binary) and two malformed files from the Open Asset Import Library's test models
+  (BSD-3-Clause, `x/LICENSE-assimp`), and a cube kW Xport exported (MIT, its notice in
+  `x/kwxport_cube/LICENSE.txt`). `tools/corpus/x.py` copies them and writes their
+  expectations from what the files hold, read by hand.
+- **ASF/AMC, HTR, C3D, SMD, MilkShape 3D, Blitz3D, IQM, MD3 and MD5** poses come from 3×3 or
+  4×4 rotation matrices multiplied with numpy (or plain matrix code) in the order each format
+  defines, converted to quaternions; the readers' own quaternion products aren't used.
+  **MikuMikuDance** motions sampled along their Bézier curves are worked out in `mmd.py` by
+  bisection, apart from the reader's solver.
 - **Blender** cases (`blender_*` folders) are real exporter output, from
   `tools/corpus/blender_export.py`.
+- **Real files** from other projects' test data sit in their case folders, with the
+  project's license beside them: PDAL's `simple.las` and `simple.laz` (BSD,
+  `las/LICENSE-PDAL`), PCL's `bun0.pcd` and `car6.pcd` (BSD, `pcd/LICENSE-PCL`), two scans
+  from the e57 crate's test data (MIT, `e57/LICENSE-e57`), and assimp's AMF, LWO and AC test
+  models (BSD, `LICENSE-assimp` in each). The generator reads each file with its own small
+  parser, written from the specification, and writes the expectations from that, so these
+  too are checked against the standard rather than against Polysmelt. A generator keeps
+  these files when it empties its folder (or takes them from the folder given as its first
+  argument).
 
 Regenerate a format from the repository root:
 
@@ -229,6 +269,80 @@ python tools/corpus/obj.py
   antialiased flag, and the coordinate system record (axes flipped, or turned on the node)
   among other records or without the flag that says records follow. Errors: truncation, a
   count past `Keep::max_points`, version 4, an unknown version, an unzipped stream.
+- **MikuMikuDance** (`mmd/`): PMX 2.0 with UTF-16 and UTF-8 text and index sizes 1, 2 and 4,
+  and PMX 2.1 with every deform (BDEF1, BDEF2, BDEF4, SDEF, QDEF), additional UVs, vertex
+  colors and a translucent material. Covers bones with IK and inherited rotation, vertex,
+  group and bone morphs (named targets), and PMD with its sphere maps, toon list, English
+  names and controlled IK. VMD motions with keys out of order, straight and bent Bézier spans,
+  two keys on one frame, morph and camera keys, and the old header. Errors: wrong magic,
+  version, encoding and index size, huge and negative counts, and truncation.
+- **DirectX** (`x/`): text, binary and MSZIP-compressed files with 32- and 64-bit floats.
+  Covers the frame hierarchy (mirrored frames too), meshes with n-gons, several meshes in a
+  frame and instances, normals per face corner and per vertex, two UV sets, vertex colors,
+  `DeclData` and `FVFData`, materials and textures (missing ones too), skins (partial, and a
+  bone with no frame), and animation sets with rotation, scale, translation and matrix keys.
+  Errors: unknown encodings, broken tokens, deep nesting, huge counts and truncation.
+- **MD2** and **MD3**: frames as morph targets with their weights animations, frame names
+  grouped into actions, unnamed frames, a single frame, skins and shaders found by name (and
+  MD3's `_default.skin`), and MD3 tags as animated nodes. Errors: offsets and indices out of
+  range, negative and huge counts, missing signatures and truncation.
+- **MD5**: a skinned `.md5mesh` with weights in joint space and its texture by the shader's
+  name, and `.md5anim` motions alone, without a frame rate and with short base frames.
+  Errors: indices out of range, too few components, numbers that aren't, and truncation.
+- **IQM**: static and skinned meshes with several number formats (half floats, doubles,
+  integer fractions), two UV and color sets, joints and animated poses.
+  Errors: version, names outside the text, joints out of order, mismatched poses and frames,
+  and truncation.
+- **SMD**: a skinned reference file, an animation-only file, links with weights, and `.vta`
+  vertex animation. Errors: bad vertex lines, cut-short triangles and files that aren't SMD.
+- **MilkShape 3D** and **Blitz3D**: groups and materials, textures, skeletons with keys, and
+  MilkShape's extra weights and comments; Blitz3D's brushes, vertex colors and node hierarchy.
+  Errors: indices out of range, chunks too big or nested too deep, and truncation.
+- **ASF/AMC**: skeletons in degrees and radians, root orders and orientations, translation
+  and length dofs, limits in their spellings, unattached bones, and motions found by their
+  `#!OML:ASF` line, their name or their subject number, with `:SAMPLES-PER-SECOND`. Also bad
+  and missing motion lines, a byte order mark, CRLF and comments. Errors: no skeleton, bad
+  units, axes and directions.
+- **C3D**: Intel, DEC and MIPS files with integer and float data, labels continued, missing
+  markers, screen axes along each axis, units, frame counts from the parameters, and analog
+  data and events (counted). Errors: unknown processors and truncation.
+- **TRC** and **HTR**: units, missing cells, dropped and cut-short rows, files without frame
+  rates, times or frame lines; HTR's Euler orders, gravity and bone length axes, unit
+  fractions, the global form and scale factors.
+
+- **LAS and LAZ**: versions 1.0, 1.2, 1.3 and 1.4 and point formats 0, 1, 2, 3, 6, 7 and 8,
+  with colors (16-bit, and 8-bit as some writers store them), near infrared, intensity,
+  returns, classification, GPS time and point source as attributes. Also scale and offset per
+  axis far from the origin, GeoKeyDirectory units (feet, and meters across with feet up),
+  truncation, an unknown point format and files that aren't LAS; a real LAS file and its LAZ
+  copy.
+- **PCD**: `ascii`, `binary` and `binary_compressed` (LZF), positions only, packed `rgb` and
+  `rgba`, normals and other fields, multi-count and padding fields, double and integer
+  positions, organized clouds with NaN holes, version 0.5 without a viewpoint, a viewpoint
+  kept in `extras`, and CRLF. Errors: truncation, no x y z, unknown data and files that
+  aren't PCD; two real PCL clouds.
+- **Text point clouds**: `.xyz` with spaces, commas, tabs or semicolons (with decimal commas),
+  comments and blank lines, 8- and 16-bit colors, normals, intensity, named columns and
+  coordinates far from the origin; Leica PTS (with several count blocks) and PTX (missing
+  returns, several scans placed by their matrices, colors, a broken header); `.asc` point
+  lists, and Esri ASCII grids from their corner or center with NODATA cells. Also files with
+  no points.
+- **E57**: two real files, a Cartesian scan of single-precision floats with 8-bit colors and a
+  spherical scan of doubles with invalid points left out; a file that isn't E57.
+- **AMF**: units (millimeters when unsaid, the standard's others and an unknown one), vertex
+  and triangle colors, volume, object and material colors in order of precedence, composite
+  materials, constellations (nested, turned about x, y and z, an instance of a missing
+  object), zipped files, metadata, curved edges kept flat, textures, bad indices, truncation
+  and files that aren't AMF or have no triangles; two real assimp models.
+- **LightWave**: LWO2 and LWOB cubes (left-handed points and clockwise polygons turned to
+  glTF's), z mirrored, surfaces (diffuse, luminosity, transparency, two sides), two surfaces,
+  UV maps with an image map, vertex color maps, layers with pivots and parents, lines and
+  points, concave polygons, morph maps and descriptions. Errors: other IFF files, no
+  polygons, indices past the points; three real assimp models.
+- **AC3D**: a cube of shaded quads, CRLF and a byte order mark, materials (color, emission,
+  transparency), two-sided surfaces, `loc` and `rot` in nested objects, textures with `texrep`
+  and `texoff`, closed and open lines, triangle strips and concave polygons. Errors: files
+  that aren't AC3D or have no geometry; four real assimp models.
 
 ## `expect.json`
 

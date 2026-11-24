@@ -1,0 +1,18 @@
+version 1
+nodes
+0 "root" -1
+1 "arm" 0
+end
+skeleton
+time 0
+0 0 0 0 0 0 0
+1 0 0 2 0 0 1.570796
+end
+triangles
+skin.png
+0 0 0 0 0 0 1 0 0
+0 1 0 0 0 0 1 1 0
+0 0 1 0 0 0 1 0 1
+metal
+1 0 0 2 0 0 1 0 0
+1 1 0 2 0 0 1 1 0

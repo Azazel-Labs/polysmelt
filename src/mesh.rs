@@ -231,12 +231,18 @@ impl Material {
     }
 }
 
-/// An image ready to embed: PNG or JPEG bytes.
+/// An image ready to embed: PNG or JPEG bytes, or a WebP image a glTF document holds, which is
+/// re-encoded as PNG only when it's written.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Image {
-    /// The encoded image.
-    pub bytes: Vec<u8>,
-    /// `image/png` or `image/jpeg`.
+    /// The encoded image. Shared: an image read from a document's buffer points into it, and
+    /// clones point at the same bytes.
+    pub bytes: crate::Bytes,
+    /// `image/png` or `image/jpeg`; or `image/webp` for a WebP image [`Document::flatten`]
+    /// took from a glTF document as it is, which [`to_glb`] writes as PNG and
+    /// [`Image::into_png_or_jpeg`] turns into PNG.
+    ///
+    /// [`Document::flatten`]: crate::document::Document::flatten
     pub mime: &'static str,
 }
 
@@ -280,12 +286,14 @@ impl Image {
     #[must_use]
     pub fn png_or_jpeg(bytes: &[u8]) -> Option<Self> {
         Self::mime_of(bytes)?;
-        Self::from_png_or_jpeg(bytes.to_vec())
+        Self::from_png_or_jpeg(crate::Bytes::copy_from_slice(bytes))
     }
 
-    /// [`Image::png_or_jpeg`], taking the bytes without a copy.
+    /// [`Image::png_or_jpeg`], taking the bytes (a `Vec<u8>` or [`Bytes`](crate::Bytes))
+    /// without a copy.
     #[must_use]
-    pub fn from_png_or_jpeg(bytes: Vec<u8>) -> Option<Self> {
+    pub fn from_png_or_jpeg(bytes: impl Into<crate::Bytes>) -> Option<Self> {
+        let bytes = bytes.into();
         let mime = Self::mime_of(&bytes)?;
         Some(Self { bytes, mime })
     }
@@ -294,14 +302,16 @@ impl Image {
     /// re-encoded as PNG, each with the feature of its name. TGA has no signature, so only one
     /// with a version 2 footer is found here; [`Image::decode_named`] also goes by its name.
     #[must_use]
-    pub fn decode(bytes: Vec<u8>) -> Option<Self> {
+    pub fn decode(bytes: impl Into<crate::Bytes>) -> Option<Self> {
         Self::decode_named(bytes, std::path::Path::new(""))
     }
 
     /// `bytes`, a file named `name` (a path, or just its extension's worth, as `x.tga`), as an
-    /// image, as [`Image::decode`] makes one; the name finds TGA files without a footer.
+    /// image, as [`Image::decode`] makes one; the name finds TGA files without a footer. PNG and
+    /// JPEG bytes are kept as they are, without a copy.
     #[must_use]
-    pub fn decode_named(bytes: Vec<u8>, name: &std::path::Path) -> Option<Self> {
+    pub fn decode_named(bytes: impl Into<crate::Bytes>, name: &std::path::Path) -> Option<Self> {
+        let bytes = bytes.into();
         if Self::mime_of(&bytes).is_some() {
             return Self::from_png_or_jpeg(bytes);
         }
@@ -327,14 +337,38 @@ impl Image {
         image
     }
 
+    /// [`Image::decode_named`], except that a WebP image whose header reads is kept as it is,
+    /// as `image/webp`: decoding and re-encoding it waits until it's written.
+    pub(crate) fn kept_named(bytes: crate::Bytes, name: &std::path::Path) -> Option<Self> {
+        #[cfg(feature = "webp")]
+        if is_webp(&bytes) && crate::webp::header_reads(&bytes) {
+            return Some(Self {
+                bytes,
+                mime: "image/webp",
+            });
+        }
+        Self::decode_named(bytes, name)
+    }
+
+    /// The image as PNG or JPEG: PNG and JPEG as they are, and a WebP image (see
+    /// [`Image::mime`]) re-encoded as PNG. `None` for a WebP image that doesn't decode.
+    #[must_use]
+    pub fn into_png_or_jpeg(self) -> Option<Self> {
+        if self.mime == "image/webp" {
+            Self::webp(&self.bytes)
+        } else {
+            Some(self)
+        }
+    }
+
     /// WebP `bytes` re-encoded as PNG, with the `webp` feature.
     pub(crate) fn webp(bytes: &[u8]) -> Option<Self> {
-        if !(bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP") {
+        if !is_webp(bytes) {
             return None;
         }
         #[cfg(feature = "webp")]
         return Some(Self {
-            bytes: crate::webp::to_png(bytes)?,
+            bytes: crate::webp::to_png(bytes)?.into(),
             mime: "image/png",
         });
         #[cfg(not(feature = "webp"))]
@@ -350,6 +384,11 @@ impl Image {
             None
         }
     }
+}
+
+/// Whether `bytes` start as a WebP file does.
+fn is_webp(bytes: &[u8]) -> bool {
+    bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP"
 }
 
 /// An sRGB-encoded color channel in linear light.
@@ -607,6 +646,11 @@ pub(crate) fn triangulate(corners: &[[f32; 3]], out: &mut Vec<[u32; 3]>) {
                     return false;
                 }
                 let pq = p[q as usize];
+                // A corner on top of one of the ear's (where a hole's bridge comes back) doesn't block it.
+                let bits = |v: [f64; 2]| v.map(f64::to_bits);
+                if [pa, pb, pc].iter().any(|&v| bits(v) == bits(pq)) {
+                    return false;
+                }
                 cross(pa, pb, pq) >= 0.0 && cross(pb, pc, pq) >= 0.0 && cross(pc, pa, pq) >= 0.0
             })
         });
@@ -824,6 +868,8 @@ mod triangulate_tests {
 #[cfg(any(
     feature = "ply",
     feature = "3ds",
+    feature = "lwo",
+    feature = "ac3d",
     feature = "fbx",
     feature = "vox",
     feature = "3mf",
@@ -837,6 +883,8 @@ pub(crate) struct FxHasher(u64);
 #[cfg(any(
     feature = "ply",
     feature = "3ds",
+    feature = "lwo",
+    feature = "ac3d",
     feature = "fbx",
     feature = "vox",
     feature = "3mf",
@@ -875,6 +923,8 @@ impl std::hash::Hasher for FxHasher {
 #[cfg(any(
     feature = "ply",
     feature = "3ds",
+    feature = "lwo",
+    feature = "ac3d",
     feature = "fbx",
     feature = "off",
     feature = "x3d",

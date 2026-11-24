@@ -1,0 +1,17 @@
+#!made for a test
+:FULLY-SPECIFIED
+:DEGREES
+lfemur 1 2 3
+1
+root 1 17 -2 0 0 0
+lfemur 0 0 0
+ltibia 0
+lowerback 0 0 0
+head 0 0
+2
+root 2 17.5 -1 10 20 -5
+lfemur -30 10 5
+ltibia nan
+lowerback 1 2
+wings 1 2 3
+head 20 -10

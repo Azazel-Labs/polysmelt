@@ -54,6 +54,13 @@ pub trait Assets {
         image
     }
 
+    /// [`Assets::image`] for bytes already held as [`Bytes`](crate::Bytes) (a file read, or
+    /// part of one). By default the same as `image`; [`Folder`] keeps PNG and JPEG bytes as they
+    /// are, without a copy.
+    fn image_shared(&self, bytes: crate::Bytes, name: &Path) -> Option<Image> {
+        self.image(&bytes, name)
+    }
+
     /// A texture file read as an embeddable image.
     fn load_image(&self, path: &Path) -> Option<Image> {
         self.image(&self.read(path)?, path)
@@ -94,6 +101,16 @@ impl Folder {
 impl Assets for Folder {
     fn find(&self, reference: &str, model_dir: &Path) -> Option<PathBuf> {
         find_texture(reference, model_dir, &self.root)
+    }
+
+    fn image_shared(&self, bytes: crate::Bytes, name: &Path) -> Option<Image> {
+        Image::from_png_or_jpeg(bytes.clone()).or_else(|| self.image(&bytes, name))
+    }
+
+    fn load_image(&self, path: &Path) -> Option<Image> {
+        // The file as read becomes the image's bytes, rather than a copy of them.
+        let bytes = self.read(path)?.into_owned();
+        self.image_shared(bytes.into(), path)
     }
 
     fn color_texture_for(&self, model: &Path) -> Option<PathBuf> {

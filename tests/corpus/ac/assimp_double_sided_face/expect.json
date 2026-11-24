@@ -1,0 +1,20 @@
+{
+  "spec": "AC3D (the AC3D file format): a real file, a two-sided face",
+  "source": "assimp test models (test/models/AC), BSD license, see ../LICENSE-assimp",
+  "triangles": 2,
+  "lines": 0,
+  "tolerance": 1e-05,
+  "bounds": {
+    "min": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "max": [
+      2.0,
+      1.0,
+      0.0
+    ]
+  },
+  "area": 2.0
+}

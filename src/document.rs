@@ -26,6 +26,7 @@ use std::sync::Mutex;
 
 use serde_json::{Map, Value, json};
 
+use crate::Bytes;
 use crate::gltf as container;
 use crate::images::{Refs, Source};
 use crate::material::{Full, Writer};
@@ -97,8 +98,11 @@ pub struct Counts {
 
 /// Where a buffer's bytes are.
 pub(crate) enum Blob<'a> {
-    /// In memory: borrowed from the input (a GLB's binary chunk, an asset), or owned.
-    Bytes(Cow<'a, [u8]>),
+    /// In memory, borrowed from the input (a GLB's binary chunk, an asset).
+    #[cfg_attr(not(feature = "gltf"), allow(dead_code, reason = "only the glTF reader makes one"))]
+    Borrowed(&'a [u8]),
+    /// In memory, owned and shareable: images slice it rather than copy it.
+    Bytes(Bytes),
     /// A stretch of a file, read as needed.
     #[cfg(feature = "fs")]
     #[cfg_attr(not(feature = "gltf"), allow(dead_code, reason = "only the glTF reader makes one"))]
@@ -119,21 +123,27 @@ pub(crate) struct FileSpan {
     len: u64,
 }
 
-/// A [`FileSpan`]'s file and what was last read ahead of it.
+/// A [`FileSpan`]'s file and the blocks of it last read.
 #[cfg(feature = "fs")]
 struct Cursor {
     file: File,
     /// Where the file's cursor is relative to the span's base, to skip needless seeks.
     at: u64,
-    /// Bytes read ahead from `ahead_at`: small reads (animation keys, a skin's matrices, little meshes' accessors), one
-    /// after another through the file, come from here rather than each its own system call.
-    ahead: Vec<u8>,
-    ahead_at: u64,
+    /// Up to [`BLOCKS`] blocks of [`BLOCK`] bytes, each by its start (a multiple of `BLOCK` from
+    /// the span's base), the most recently used last. Small reads (animation keys, a skin's
+    /// matrices, little meshes' accessors) come from here rather than each its own system call,
+    /// and since the blocks don't overlap, reads that hop between a few places in the file (a
+    /// mesh's vertices and its indices) read each part of it once.
+    blocks: Vec<(u64, Vec<u8>)>,
 }
 
-/// How far a small read reads ahead.
+/// The size of the blocks small reads go through; reads this big or bigger go to the file.
 #[cfg(feature = "fs")]
-const AHEAD: usize = 64 * 1024;
+const BLOCK: usize = 64 * 1024;
+
+/// How many blocks a [`FileSpan`] keeps.
+#[cfg(feature = "fs")]
+const BLOCKS: usize = 8;
 
 #[cfg(feature = "fs")]
 impl FileSpan {
@@ -144,8 +154,7 @@ impl FileSpan {
             file: Mutex::new(Cursor {
                 file,
                 at,
-                ahead: Vec::new(),
-                ahead_at: 0,
+                blocks: Vec::new(),
             }),
             base,
             len,
@@ -154,29 +163,38 @@ impl FileSpan {
 
     /// Copies the bytes from `off` into `out`, which must lie within the span.
     fn read_at(&self, off: u64, out: &mut [u8]) -> Result<()> {
+        ensure!(
+            off.checked_add(out.len() as u64).is_some_and(|end| end <= self.len),
+            "read past the end of a file's glTF data"
+        );
         let mut c = self.file.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let end = off + out.len() as u64;
-        if off >= c.ahead_at && end <= c.ahead_at + c.ahead.len() as u64 {
-            let from = usize_of(off - c.ahead_at);
-            out.copy_from_slice(&c.ahead[from..from + out.len()]);
-            return Ok(());
-        }
-        if out.len() >= AHEAD / 2 {
+        if out.len() >= BLOCK {
             return self.read_file(&mut c, off, out);
         }
-        let n = usize_of((self.len - off).min(AHEAD as u64));
-        let mut ahead = std::mem::take(&mut c.ahead);
-        ahead.resize(n, 0);
-        c.ahead_at = 0;
-        let read = self.read_file(&mut c, off, &mut ahead);
-        if read.is_ok() {
-            out.copy_from_slice(&ahead[..out.len()]);
-            c.ahead_at = off;
-        } else {
-            ahead.clear();
+        let mut done = 0;
+        while done < out.len() {
+            let at = off + done as u64;
+            let start = at - at % BLOCK as u64;
+            let block = if let Some(i) = c.blocks.iter().position(|(s, _)| *s == start) {
+                c.blocks.remove(i)
+            } else {
+                // Reuse the least recently used block's buffer once all are in use.
+                let mut b = if c.blocks.len() >= BLOCKS {
+                    c.blocks.remove(0).1
+                } else {
+                    Vec::new()
+                };
+                b.resize(usize_of((self.len - start).min(BLOCK as u64)), 0);
+                self.read_file(&mut c, start, &mut b)?;
+                (start, b)
+            };
+            let from = usize_of(at - start);
+            let n = (out.len() - done).min(block.1.len() - from);
+            out[done..done + n].copy_from_slice(&block.1[from..from + n]);
+            done += n;
+            c.blocks.push(block);
         }
-        c.ahead = ahead;
-        read
+        Ok(())
     }
 
     fn read_file(&self, c: &mut Cursor, off: u64, out: &mut [u8]) -> Result<()> {
@@ -206,7 +224,7 @@ pub(crate) enum Part {
     F32(Vec<f32>),
     U32(Vec<u32>),
     U16(Vec<u16>),
-    Bytes(Vec<u8>),
+    Bytes(Bytes),
 }
 
 #[allow(dead_code, reason = "readers use the part types their formats need")]
@@ -216,7 +234,7 @@ impl Part {
         if cfg!(target_endian = "little") {
             Part::F32(v)
         } else {
-            Part::Bytes(v.iter().flat_map(|x| x.to_le_bytes()).collect())
+            Part::Bytes(v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>().into())
         }
     }
 
@@ -224,7 +242,7 @@ impl Part {
         if cfg!(target_endian = "little") {
             Part::U32(v)
         } else {
-            Part::Bytes(v.iter().flat_map(|x| x.to_le_bytes()).collect())
+            Part::Bytes(v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>().into())
         }
     }
 
@@ -232,12 +250,12 @@ impl Part {
         if cfg!(target_endian = "little") {
             Part::U16(v)
         } else {
-            Part::Bytes(v.iter().flat_map(|x| x.to_le_bytes()).collect())
+            Part::Bytes(v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>().into())
         }
     }
 
-    pub(crate) fn bytes(v: Vec<u8>) -> Self {
-        Part::Bytes(v)
+    pub(crate) fn bytes(v: impl Into<Bytes>) -> Self {
+        Part::Bytes(v.into())
     }
 
     /// The part as a GLB stores it. Typed parts exist only on little-endian targets, where
@@ -273,6 +291,16 @@ impl Parts {
         let bytes = part.as_bytes();
         let start = usize_of(off - at);
         bytes.get(start..start.checked_add(usize_of(len))?)
+    }
+
+    /// `len` bytes from `off`, shared without a copy, when they lie in one byte part.
+    fn shared(&self, off: u64, len: u64) -> Option<Bytes> {
+        let (at, Part::Bytes(bytes)) = &self.list[self.part_at(off)?] else {
+            return None;
+        };
+        let start = usize_of(off - at);
+        let end = start.checked_add(usize_of(len)).filter(|&e| e <= bytes.len())?;
+        Some(bytes.slice(start..end))
     }
 
     fn read_at(&self, off: u64, out: &mut [u8]) {
@@ -317,6 +345,7 @@ fn write_zeros(w: &mut dyn Write, n: u64) -> Result<()> {
 impl Blob<'_> {
     pub(crate) fn len(&self) -> u64 {
         match self {
+            Blob::Borrowed(b) => b.len() as u64,
             Blob::Bytes(b) => b.len() as u64,
             #[cfg(feature = "fs")]
             Blob::File(f) => f.len,
@@ -328,12 +357,39 @@ impl Blob<'_> {
     /// `len` bytes from `off`, in place, when they are in memory in one piece.
     pub(crate) fn slice(&self, off: u64, len: u64) -> Option<&[u8]> {
         match self {
+            Blob::Borrowed(b) => b.get(usize_of(off)..usize_of(off.checked_add(len)?)),
             Blob::Bytes(b) => b.get(usize_of(off)..usize_of(off.checked_add(len)?)),
             Blob::Parts(p) => p.slice(off, len),
             #[cfg(feature = "fs")]
             Blob::File(_) => None,
             Blob::Missing(_) => None,
         }
+    }
+
+    /// `len` bytes from `off`: shared without a copy when the buffer owns them in one piece,
+    /// copied otherwise.
+    pub(crate) fn shared(&self, off: u64, len: u64) -> Result<Bytes> {
+        let end = off
+            .checked_add(len)
+            .filter(|&e| e <= self.len())
+            .context("glTF data runs past the end of its buffer")?;
+        let shared = match self {
+            Blob::Bytes(b) => Some(b.slice(usize_of(off)..usize_of(end))),
+            Blob::Parts(p) => p.shared(off, len),
+            _ => None,
+        };
+        if let Some(b) = shared {
+            return Ok(b);
+        }
+        if let Some(s) = self.slice(off, len) {
+            return Ok(Bytes::copy_from_slice(s));
+        }
+        let mut out = Vec::new();
+        out.try_reserve_exact(usize_of(len))
+            .map_err(|_| invalid!("glTF data of {len} bytes"))?;
+        out.resize(usize_of(len), 0);
+        self.read_at(off, &mut out)?;
+        Ok(out.into())
     }
 
     /// Copies the bytes from `off` into `out`.
@@ -343,6 +399,7 @@ impl Blob<'_> {
             .filter(|&e| e <= self.len())
             .context("glTF data runs past the end of its buffer")?;
         match self {
+            Blob::Borrowed(b) => out.copy_from_slice(&b[usize_of(off)..usize_of(end)]),
             Blob::Bytes(b) => out.copy_from_slice(&b[usize_of(off)..usize_of(end)]),
             #[cfg(feature = "fs")]
             Blob::File(f) => f.read_at(off, out)?,
@@ -360,6 +417,7 @@ impl Blob<'_> {
             self.len()
         );
         match self {
+            Blob::Borrowed(b) => w.write_all(&b[..usize_of(len)])?,
             Blob::Bytes(b) => w.write_all(&b[..usize_of(len)])?,
             #[cfg(feature = "fs")]
             Blob::File(f) => {
@@ -380,7 +438,8 @@ impl Blob<'_> {
 
     fn into_owned(self) -> Blob<'static> {
         match self {
-            Blob::Bytes(b) => Blob::Bytes(Cow::Owned(b.into_owned())),
+            Blob::Borrowed(b) => Blob::Bytes(Bytes::copy_from_slice(b)),
+            Blob::Bytes(b) => Blob::Bytes(b),
             #[cfg(feature = "fs")]
             Blob::File(f) => Blob::File(f),
             Blob::Parts(p) => Blob::Parts(p),
@@ -483,32 +542,28 @@ impl<'a> Document<'a> {
         Ok(Cow::Owned(out))
     }
 
-    /// Buffer view `i`'s bytes.
-    pub(crate) fn view_bytes(&self, i: usize) -> Result<Cow<'_, [u8]>> {
+    /// Buffer view `i`'s bytes, shared without a copy when its buffer owns them in one piece.
+    pub(crate) fn view_shared(&self, i: usize) -> Result<Bytes> {
         let v = list(&self.json, "bufferViews")
             .get(i)
             .with_context(|| format!("glTF bufferViews[{i}] doesn't exist"))?;
         let num = |k: &str| v.get(k).and_then(Value::as_u64).unwrap_or(0);
-        let (offset, len) = (num("byteOffset"), num("byteLength"));
         let b = self
             .buffers
             .get(usize_of(num("buffer")))
             .context("glTF buffer view names a missing buffer")?;
+        let (offset, len) = (num("byteOffset"), num("byteLength"));
         ensure!(
             offset.saturating_add(len) <= b.len(),
             "glTF buffer view runs past its buffer"
         );
-        if let Some(s) = b.slice(offset, len) {
-            return Ok(Cow::Borrowed(s));
-        }
-        let mut out = vec![0; usize_of(len)];
-        b.read_at(offset, &mut out)?;
-        Ok(Cow::Owned(out))
+        b.shared(offset, len)
     }
 
-    /// Adds a buffer holding `bytes`; returns its index.
-    pub fn push_buffer(&mut self, bytes: Vec<u8>) -> usize {
-        self.push_blob(Blob::Bytes(Cow::Owned(bytes)))
+    /// Adds a buffer holding `bytes` (a `Vec<u8>` or [`Bytes`], neither copied); returns its
+    /// index.
+    pub fn push_buffer(&mut self, bytes: impl Into<Bytes>) -> usize {
+        self.push_blob(Blob::Bytes(bytes.into()))
     }
 
     pub(crate) fn push_blob(&mut self, blob: Blob<'a>) -> usize {
@@ -1052,7 +1107,7 @@ impl Builder {
         {
             let (joints, weights) = skin_attributes(&p.skin_joints, &p.skin_weights, offset, count);
             let j = if count <= 256 {
-                let b = joints.iter().map(|&j| u8::try_from(j).unwrap_or(0)).collect();
+                let b: Vec<u8> = joints.iter().map(|&j| u8::try_from(j).unwrap_or(0)).collect();
                 self.accessor(Part::bytes(b), 5121, n, "VEC4", Some(34962))
             } else {
                 let b = joints.iter().map(|&j| u16::try_from(j).unwrap_or(0)).collect();
@@ -1172,7 +1227,27 @@ impl Builder {
         images: Vec<Source>,
         json: &mut Map<String, Value>,
     ) {
-        let mut w = Writer::new(images.len());
+        // A WebP image a flattened glTF kept is re-encoded as PNG now; one that doesn't decode is
+        // left out, with the textures that use it.
+        let images: Vec<Option<Source>> = images
+            .into_iter()
+            .map(|s| match s {
+                Source::Image(i) => i.into_png_or_jpeg().map(Source::Image),
+                r @ Source::Ref(..) => Some(r),
+            })
+            .collect();
+        let mut next = 0;
+        let written = images
+            .iter()
+            .map(|s| {
+                s.as_ref().map(|_| {
+                    next += 1;
+                    next - 1
+                })
+            })
+            .collect();
+        let images = images.into_iter().flatten();
+        let mut w = Writer::new(written);
         let materials: Vec<Value> = materials.into_iter().map(|m| w.material(&m.into())).collect();
         let images: Vec<Value> = images
             .into_iter()
@@ -1259,11 +1334,11 @@ impl Builder {
 mod tests {
     use std::io::Write as _;
 
-    use super::{AHEAD, FileSpan};
+    use super::{BLOCK, FileSpan};
 
     #[test]
     fn a_file_span_reads_what_the_file_holds_however_it_is_read() {
-        let bytes: Vec<u8> = (0..3 * AHEAD + 77)
+        let bytes: Vec<u8> = (0..12 * BLOCK + 77)
             .map(|i| (i * 7 + i / 251).to_le_bytes()[0])
             .collect();
         let mut file = tempfile::tempfile().unwrap();
@@ -1271,16 +1346,19 @@ mod tests {
         file.write_all(&bytes).unwrap();
         let span = FileSpan::new(file, 4, bytes.len() as u64, u64::MAX);
         let len = bytes.len();
-        // Forward in small steps, backward, across the read-ahead's end, big reads, the very end.
+        // Forward in small steps, hopping around more blocks than are kept, backward, across a
+        // block's end, big reads, the very end.
         let mut reads: Vec<(usize, usize)> = (0..200).map(|k| (k * 997 % len, 1 + k % 300)).collect();
+        reads.extend((0..100).map(|k| (k * 104_729 % len, 1 + k * 389 % BLOCK)));
         reads.extend([
-            (AHEAD - 3, 10),
-            (5, AHEAD),
+            (BLOCK - 3, 10),
+            (5, BLOCK),
+            (BLOCK - 1, BLOCK - 1),
             (0, len),
             (len - 1, 1),
             (len - 40, 40),
             (100, 0),
-            (AHEAD, 2),
+            (BLOCK, 2),
         ]);
         reads.extend((0..50).rev().map(|k| (k * 3989, 64)));
         for (off, n) in reads {

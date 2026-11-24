@@ -213,18 +213,67 @@ fn instancing(node: &Value) -> Option<&Value> {
 
 /// A node's morph weights: its own, else its mesh's.
 fn default_weights(node: &Value, mesh: &Value) -> Vec<f32> {
-    node.get("weights")
-        .or_else(|| mesh.get("weights"))
-        .and_then(Value::as_array)
+    weights_of(node.get("weights").or_else(|| mesh.get("weights")))
+}
+
+/// Morph weights, as listed.
+fn weights_of(w: Option<&Value>) -> Vec<f32> {
+    w.and_then(Value::as_array)
         .map(|w| w.iter().map(|x| f32_of(x.as_f64().unwrap_or(0.0))).collect())
         .unwrap_or_default()
+}
+
+/// The members of a node that place it and say what it draws, found in one pass over it rather
+/// than a lookup for each: a scene can have many thousands of nodes.
+#[derive(Default, Clone, Copy)]
+struct NodeView<'v> {
+    mesh: Option<&'v Value>,
+    skin: Option<&'v Value>,
+    children: Option<&'v Value>,
+    matrix: Option<&'v Value>,
+    translation: Option<&'v Value>,
+    rotation: Option<&'v Value>,
+    scale: Option<&'v Value>,
+    weights: Option<&'v Value>,
+    extensions: Option<&'v Value>,
+}
+
+impl<'v> NodeView<'v> {
+    fn of(node: &'v Value) -> Self {
+        let mut v = Self::default();
+        for (k, x) in node.as_object().into_iter().flatten() {
+            let slot = match k.as_str() {
+                "mesh" => &mut v.mesh,
+                "skin" => &mut v.skin,
+                "children" => &mut v.children,
+                "matrix" => &mut v.matrix,
+                "translation" => &mut v.translation,
+                "rotation" => &mut v.rotation,
+                "scale" => &mut v.scale,
+                "weights" => &mut v.weights,
+                "extensions" => &mut v.extensions,
+                _ => continue,
+            };
+            *slot = Some(x);
+        }
+        v
+    }
+
+    fn children(&self) -> impl Iterator<Item = usize> + 'v {
+        self.children
+            .and_then(Value::as_array)
+            .map_or(&[][..], Vec::as_slice)
+            .iter()
+            .filter_map(Value::as_u64)
+            .map(usize_of)
+    }
 }
 
 /// Whether each node is some node's child.
 fn children(nodes: &[Value]) -> Vec<bool> {
     let mut child = vec![false; nodes.len()];
     for n in nodes {
-        for c in list_of(n, "children") {
+        for c in ids(n, "children") {
             if let Some(f) = child.get_mut(c) {
                 *f = true;
             }
@@ -361,6 +410,13 @@ struct Reader<'d> {
     /// The accessors and buffer views, looked up once: every attribute read names one of each.
     accessors: &'d [Value],
     views: &'d [Value],
+    /// The other top-level lists read for each mesh, node or material, looked up once too.
+    meshes: &'d [Value],
+    nodes: &'d [Value],
+    materials_json: &'d [Value],
+    textures: &'d [Value],
+    samplers: &'d [Value],
+    images_json: &'d [Value],
     scratch: Vec<u8>,
     /// Meshopt-compressed buffer views, decoded once read.
     meshopt: HashMap<usize, Vec<u8>>,
@@ -498,6 +554,12 @@ impl<'d> Reader<'d> {
             json,
             accessors: list(json, "accessors"),
             views: list(json, "bufferViews"),
+            meshes: list(json, "meshes"),
+            nodes: list(json, "nodes"),
+            materials_json: list(json, "materials"),
+            textures: list(json, "textures"),
+            samplers: list(json, "samplers"),
+            images_json: list(json, "images"),
             scratch: Vec::new(),
             meshopt: HashMap::new(),
             materials: vec![None; n("materials")],
@@ -522,6 +584,7 @@ impl<'d> Reader<'d> {
         let all = match key {
             "accessors" => self.accessors,
             "bufferViews" => self.views,
+            "meshes" => self.meshes,
             _ => list(self.json, key),
         };
         all.get(i).with_context(|| format!("glTF {key}[{i}] doesn't exist"))
@@ -605,10 +668,10 @@ impl<'d> Reader<'d> {
         Ok(true)
     }
 
-    /// A buffer view's bytes.
-    fn view_bytes(&mut self, i: usize) -> Result<Vec<u8>> {
+    /// A buffer view's bytes, shared with its buffer when they can be.
+    fn view_shared(&mut self, i: usize) -> Result<crate::Bytes> {
         if self.meshopt(i)? {
-            return Ok(self.meshopt[&i].clone());
+            return Ok(crate::Bytes::copy_from_slice(&self.meshopt[&i]));
         }
         let (buffer, offset, len, _, _) = self.view(i)?;
         let b = self
@@ -620,12 +683,8 @@ impl<'d> Reader<'d> {
             offset.saturating_add(len) <= b.len(),
             "glTF buffer view runs past its buffer"
         );
-        if let Some(s) = b.slice(offset, len) {
-            return Ok(s.to_vec());
-        }
-        let mut out = vec![0; usize::try_from(len).context("glTF buffer view is too big to hold")?];
-        b.read_at(offset, &mut out)?;
-        Ok(out)
+        usize::try_from(len).map_err(|_| invalid!("glTF buffer view is too big to hold"))?;
+        b.shared(offset, len)
     }
 
     fn acc(&self, i: usize) -> Result<Acc> {
@@ -864,11 +923,16 @@ impl<'d> Reader<'d> {
     /// An index accessor's values.
     fn read_indices(&mut self, i: usize) -> Result<Vec<u32>> {
         let a = self.acc(i)?;
+        self.read_index_acc(i, &a)
+    }
+
+    /// Index accessor `i`'s values, `a` being that accessor.
+    fn read_index_acc(&mut self, i: usize, a: &Acc) -> Result<Vec<u32>> {
         ensure!(
             a.n == 1 && matches!(a.ctype, 5121 | 5123 | 5125),
             "glTF index accessor {i} isn't unsigned integer scalars"
         );
-        self.read_u32s(&a)
+        self.read_u32s(a)
     }
 
     fn read_u32s(&mut self, a: &Acc) -> Result<Vec<u32>> {
@@ -977,18 +1041,26 @@ impl<'d> Reader<'d> {
 
     /// The scene's meshes, where they are drawn.
     fn uses(&mut self) -> Result<Vec<Use>> {
-        let nodes = list(self.json, "nodes");
+        let nodes = self.nodes;
+        let views: Vec<NodeView<'_>> = nodes.iter().map(NodeView::of).collect();
         let mut world = vec![None::<M4>; nodes.len()];
         // Parents first: every node reachable from a root takes its parent's transform.
-        let child = children(nodes);
+        let mut child = vec![false; nodes.len()];
+        for v in &views {
+            for c in v.children() {
+                if let Some(f) = child.get_mut(c) {
+                    *f = true;
+                }
+            }
+        }
         let mut stack: Vec<(usize, M4)> = (0..nodes.len()).filter(|&i| !child[i]).map(|i| (i, IDENTITY)).collect();
         while let Some((i, parent)) = stack.pop() {
             if world[i].is_some() {
                 continue;
             }
-            let m = mul(&parent, &self.local(i, &nodes[i]));
+            let m = mul(&parent, &self.local(i, &views[i]));
             world[i] = Some(m);
-            for c in list_of(&nodes[i], "children") {
+            for c in views[i].children() {
                 if c < nodes.len() && world[c].is_none() {
                     stack.push((c, m));
                 }
@@ -996,7 +1068,7 @@ impl<'d> Reader<'d> {
         }
         let Some(order) = scene_order(self.json)? else {
             // No nodes at all: every mesh, as it is.
-            return Ok((0..list(self.json, "meshes").len())
+            return Ok((0..self.meshes.len())
                 .map(|mesh| Use {
                     mesh,
                     weights: Vec::new(),
@@ -1011,19 +1083,24 @@ impl<'d> Reader<'d> {
         // in a scene of many meshes.
         let mut seen: HashMap<(usize, Option<usize>, Vec<u32>), usize> = HashMap::new();
         for i in order {
-            let n = &nodes[i];
-            let Some(mesh) = index(n, "mesh") else { continue };
-            let skin = index(n, "skin");
+            let n = &views[i];
+            let Some(mesh) = n.mesh.and_then(Value::as_u64).map(usize_of) else {
+                continue;
+            };
+            let skin = n.skin.and_then(Value::as_u64).map(usize_of);
             let weights = match &self.posed[i].weights {
                 Some(w) => w.clone(),
-                None => default_weights(n, list(self.json, "meshes").get(mesh).unwrap_or(&Value::Null)),
+                None => weights_of(
+                    n.weights
+                        .or_else(|| self.meshes.get(mesh).and_then(|m| m.get("weights"))),
+                ),
             };
             let w = world[i].unwrap_or(IDENTITY);
             let transforms = if skin.is_some() {
                 // A skinned mesh is placed by its joints, not its node.
                 vec![IDENTITY]
             } else {
-                self.instances(n, &w)?
+                self.instances(n.extensions, &w)?
             };
             let key = (mesh, skin, weights.iter().map(|x| x.to_bits()).collect());
             match seen.get(&key) {
@@ -1046,8 +1123,11 @@ impl<'d> Reader<'d> {
     }
 
     /// A node's transforms: its own, or one per `EXT_mesh_gpu_instancing` instance.
-    fn instances(&mut self, node: &Value, world: &M4) -> Result<Vec<M4>> {
-        let Some(attrs) = instancing(node) else {
+    fn instances(&mut self, extensions: Option<&Value>, world: &M4) -> Result<Vec<M4>> {
+        let Some(attrs) = extensions
+            .and_then(|e| e.get("EXT_mesh_gpu_instancing"))
+            .and_then(|e| e.get("attributes"))
+        else {
             return Ok(vec![*world]);
         };
         let get = |k: &str| index(attrs, k);
@@ -1077,6 +1157,11 @@ impl<'d> Reader<'d> {
     }
 }
 
+/// `v[key]`'s indices, without collecting them.
+fn ids<'v>(v: &'v Value, key: &str) -> impl Iterator<Item = usize> + 'v {
+    items(v, key).iter().filter_map(Value::as_u64).map(usize_of)
+}
+
 /// `node[key]` as indices.
 fn list_of(v: &Value, key: &str) -> Vec<usize> {
     v.get(key)
@@ -1097,6 +1182,17 @@ fn put<const N: usize>(
     zero: [f32; N],
     conv: impl Fn(&[u8]) -> f32,
 ) {
+    if m == N && stride == N * csize {
+        // Every component given, packed tightly (joint indices, colors): whole elements only,
+        // so the loop has no length check. A short element at the end is `zero`, as below.
+        let elements = bytes.chunks_exact(stride);
+        let short = !elements.remainder().is_empty();
+        out.extend(elements.map(|e| std::array::from_fn(|c| conv(&e[c * csize..]))));
+        if short {
+            out.push(zero);
+        }
+        return;
+    }
     if m == N {
         // Every component given (the usual case): a loop the compiler unrolls.
         out.extend(bytes.chunks(stride).map(|e| {
@@ -1308,7 +1404,23 @@ fn transform(
             ]
         };
         let fits = |len2: f32| len2 > 0.0 && len2.is_finite();
-        for block in normals[range.start..end].chunks_mut(64) {
+        let normals = &mut normals[range.start..end];
+        if normals.len() < 8 {
+            // A few normals, as a skinned vertex's often are: one at a time, each with the same
+            // operations the blocks below make.
+            for nv in normals {
+                let [x, y, z] = turn(*nv);
+                let len2 = x * x + y * y + z * z;
+                *nv = if fits(len2) {
+                    let inv = 1.0 / len2.sqrt();
+                    [x * inv, y * inv, z * inv]
+                } else {
+                    apply_normal(nm, *nv)
+                };
+            }
+            return;
+        }
+        for block in normals.chunks_mut(64) {
             let mut kept = [[0.0; 3]; 64];
             kept[..block.len()].copy_from_slice(block);
             let mut all = true;
@@ -1514,6 +1626,14 @@ impl Reader<'_> {
     fn mesh(&mut self) -> Result<Option<Mesh>> {
         let uses = self.uses()?;
         let mut mesh = Mesh::default();
+        // Room for every primitive and material up front: a scene of thousands of meshes
+        // otherwise copies these, a primitive or material at a time, as they grow.
+        let prims: usize = uses
+            .iter()
+            .map(|u| self.meshes.get(u.mesh).map_or(0, |m| items(m, "primitives").len()))
+            .sum();
+        mesh.prims.reserve(prims);
+        mesh.materials.reserve(self.materials.len().min(prims) + 1);
         for u in &uses {
             // The primitive last drawn, and its place in the mesh: points and lines on the same
             // vertices join it.
@@ -1541,13 +1661,13 @@ impl Reader<'_> {
         matches!(mode, 4..=6) || (mode < 4 && self.doc.lines_and_points)
     }
 
-    /// Checks that primitive `p`, in `mode`, drawn `k` times, stays within what may still be
-    /// drawn, before anything is read: what its accessors declare is counted.
-    fn afford(&self, p: &Value, pos: usize, mode: u64, k: usize) -> Result<()> {
-        let corners = match index(p, "indices") {
-            Some(i) => self.acc(i)?.count,
-            None => self.acc(pos)?.count,
-        };
+    /// Checks that a primitive with index accessor `indices` and position accessor `pos`, in
+    /// `mode`, drawn `k` times, stays within what may still be drawn, before anything is read:
+    /// what its accessors declare is counted. Gives the accessor it counted, to be read next
+    /// rather than looked up again: the indices', or else the positions'.
+    fn afford(&self, indices: Option<usize>, pos: usize, mode: u64, k: usize) -> Result<Acc> {
+        let counted = self.acc(indices.unwrap_or(pos))?;
+        let corners = counted.count;
         let n = match mode {
             0 | 2 => corners,
             1 => corners / 2,
@@ -1569,15 +1689,15 @@ impl Reader<'_> {
                 self.doc.max_triangles
             );
         }
-        Ok(())
+        Ok(counted)
     }
 
     /// What primitive `p` draws in `mode` on its `n` vertices: triangles, line segments or
     /// points. Those that name a vertex that doesn't exist are dropped, and segments from a
     /// vertex to itself.
-    fn draws(&mut self, p: &Value, mode: u64, n: usize) -> Result<Draws> {
-        let idx = match index(p, "indices") {
-            Some(i) => self.read_indices(i)?,
+    fn draws(&mut self, indices: Option<(usize, &Acc)>, mode: u64, n: usize) -> Result<Draws> {
+        let idx = match indices {
+            Some((i, a)) => self.read_index_acc(i, a)?,
             None => (0..u32_of(n)).collect(),
         };
         let fits = |i: u32| (i as usize) < n;
@@ -1619,9 +1739,10 @@ impl Reader<'_> {
             return Ok(());
         }
         let k = u.transforms.len();
-        self.afford(p, pos, mode, k)?;
+        let indices = index(p, "indices");
+        let counted = self.afford(indices, pos, mode, k)?;
         let n = prim.positions.len() / k.max(1);
-        let d = self.draws(p, mode, n)?;
+        let d = self.draws(indices.map(|i| (i, &counted)), mode, n)?;
         self.charge(&d, k);
         extend(prim, &d, n, &u.transforms);
         Ok(())
@@ -1630,7 +1751,7 @@ impl Reader<'_> {
     /// The mesh's skeleton: every node a vertex is bound to, and their ancestors, parents first,
     /// where they are in the pose drawn. Each primitive's joints, nodes until now, become bones.
     fn skeleton(&self, mesh: &mut Mesh) {
-        let nodes = list(self.json, "nodes");
+        let nodes = self.nodes;
         let mut used = vec![false; nodes.len()];
         for p in mesh.prims.iter().filter(|p| p.skinned()) {
             for &j in p.skin_joints.as_flattened() {
@@ -1642,7 +1763,7 @@ impl Reader<'_> {
         // Each node's parent: the first node listing it as a child, as `Document::rig` has it.
         let mut parent = vec![None; nodes.len()];
         for (i, n) in nodes.iter().enumerate() {
-            for c in list_of(n, "children") {
+            for c in ids(n, "children") {
                 if c < nodes.len() && c != i && parent[c].is_none() {
                     parent[c] = Some(i);
                 }
@@ -1780,11 +1901,15 @@ impl Reader<'_> {
         }
 
         // Check the count before reading any vertices.
-        self.afford(p, pos, mode, u.transforms.len())?;
+        let indices = index(p, "indices");
+        let counted = self.afford(indices, pos, mode, u.transforms.len())?;
 
-        let mut positions = self.read(pos, [0.0; 3])?;
+        let mut positions = match indices {
+            Some(_) => self.read(pos, [0.0; 3])?,
+            None => self.read_acc(&counted, [0.0; 3])?,
+        };
         let n = positions.len();
-        let draws = self.draws(p, mode, n)?;
+        let draws = self.draws(indices.map(|i| (i, &counted)), mode, n)?;
         if draws.is_empty() {
             return Ok(());
         }
@@ -1796,7 +1921,7 @@ impl Reader<'_> {
             Some(a) => self.read(a, [0.0; 3])?,
             None => Vec::new(),
         };
-        let mut uvs = match attr(&format!("TEXCOORD_{set}")) {
+        let mut uvs = match attr(&texcoord(set)) {
             Some(a) => self.read(a, [0.0; 2])?,
             None => Vec::new(),
         };
@@ -1910,7 +2035,7 @@ impl Reader<'_> {
         use draco_core::mesh_decoder::MeshDecoder;
 
         let view = index(ext, "bufferView").context("glTF Draco primitive has no bufferView")?;
-        let bytes = self.view_bytes(view)?;
+        let bytes = self.view_shared(view)?;
         let limits = DecodeLimits::default()
             .with_max_faces(self.budget as u64)
             .with_max_points(self.max_vertices as u64);
@@ -2190,7 +2315,7 @@ impl Reader<'_> {
     /// `KHR_texture_transform` as a 2x3 matrix (row-major).
     fn uv_set(&self, material: Option<usize>) -> (u64, Option<[f32; 6]>) {
         material
-            .and_then(|m| list(self.json, "materials").get(m))
+            .and_then(|m| self.materials_json.get(m))
             .and_then(color_texture)
             .map_or((0, None), mapping)
     }
@@ -2210,8 +2335,7 @@ impl Reader<'_> {
             roughness: 1.0,
             ..Material::plain("", [1.0; 4])
         };
-        let json = self.json;
-        if let Some(d) = i.and_then(|i| list(json, "materials").get(i)) {
+        if let Some(d) = i.and_then(|i| self.materials_json.get(i)) {
             d.get("name")
                 .and_then(Value::as_str)
                 .unwrap_or("")
@@ -2309,10 +2433,11 @@ impl Reader<'_> {
             (None, Some(uv_decompose(relative)?))
         };
         let image = self.texture(t, mesh)?;
-        let sampler = list(self.json, "textures")
+        let sampler = self
+            .textures
             .get(t)
             .and_then(|tex| index(tex, "sampler"))
-            .and_then(|s| list(self.json, "samplers").get(s));
+            .and_then(|s| self.samplers.get(s));
         let num = |k: &str| {
             sampler
                 .and_then(|s| s.get(k))
@@ -2423,7 +2548,7 @@ impl Reader<'_> {
     /// The mesh image for glTF texture `t`: its source, or failing that one an extension
     /// names (`EXT_texture_webp`, `KHR_texture_basisu`, ...), if an image can be made of it.
     fn texture(&mut self, t: usize, mesh: &mut Mesh) -> Option<usize> {
-        let tex = list(self.json, "textures").get(t)?;
+        let tex = self.textures.get(t)?;
         let mut sources: Vec<usize> = index(tex, "source").into_iter().collect();
         if let Some(ext) = tex.get("extensions").and_then(Value::as_object) {
             sources.extend(ext.values().filter_map(|e| index(e, "source")));
@@ -2432,12 +2557,13 @@ impl Reader<'_> {
     }
 
     /// The mesh image for glTF image `s`, when it's PNG or JPEG, or a format a feature
-    /// re-encodes (WebP, TGA, BMP, GIF, TIFF, PSD, DDS).
+    /// re-encodes (WebP, TGA, BMP, GIF, TIFF, PSD, DDS). A WebP image is kept as it is, and
+    /// re-encoded only when the mesh is written.
     fn image(&mut self, s: usize, mesh: &mut Mesh) -> Option<usize> {
         if let Some(done) = *self.images.get(s)? {
             return done;
         }
-        let img = list(self.json, "images").get(s)?;
+        let img = self.images_json.get(s)?;
         // TGA has no signature: its MIME type, or a file name, says what it is.
         let name = match img.get("mimeType").and_then(Value::as_str) {
             Some("image/x-tga" | "image/tga" | "image/x-targa" | "image/targa") => "image.tga",
@@ -2449,16 +2575,16 @@ impl Reader<'_> {
         };
         let name = std::path::PathBuf::from(name);
         let bytes = if let Some(v) = index(img, "bufferView") {
-            self.view_bytes(v).ok()
+            self.view_shared(v).ok()
         } else {
             // A file the loader didn't find stays a URI, and isn't drawn.
             img.get("uri")
                 .and_then(Value::as_str)
                 .filter(|u| u.starts_with("data:"))
                 .and_then(|u| container::data_uri(u).ok())
-                .map(|(_, b)| b)
+                .map(|(_, b)| b.into())
         };
-        let out = bytes.and_then(|b| Image::decode_named(b, &name)).map(|i| {
+        let out = bytes.and_then(|b: crate::Bytes| Image::kept_named(b, &name)).map(|i| {
             mesh.images.push(i);
             mesh.images.len() - 1
         });
@@ -2708,6 +2834,15 @@ fn extend(p: &mut Prim, d: &Draws, n: usize, transforms: &[M4]) {
     }
 }
 
+/// The name of texture coordinate set `set`'s attribute.
+fn texcoord(set: u64) -> std::borrow::Cow<'static, str> {
+    const NAMES: [&str; 4] = ["TEXCOORD_0", "TEXCOORD_1", "TEXCOORD_2", "TEXCOORD_3"];
+    match usize::try_from(set).ok().and_then(|s| NAMES.get(s)) {
+        Some(name) => (*name).into(),
+        None => format!("TEXCOORD_{set}").into(),
+    }
+}
+
 /// A glTF primitive's mode: 4 (triangles) when it doesn't say.
 fn mode(p: &Value) -> u64 {
     p.get("mode").and_then(Value::as_u64).unwrap_or(4)
@@ -2761,11 +2896,11 @@ impl Reader<'_> {
     }
 
     /// Node `i`'s own transform, as posed.
-    fn local(&self, i: usize, node: &Value) -> M4 {
+    fn local(&self, i: usize, node: &NodeView<'_>) -> M4 {
         let p = &self.posed[i];
         // A node with a matrix can't be animated.
         if let Some(m) = node
-            .get("matrix")
+            .matrix
             .and_then(Value::as_array)
             .filter(|m| m.len() == 16 && !p.given)
         {
@@ -2776,11 +2911,10 @@ impl Reader<'_> {
             return out;
         }
         trs(
-            p.translation
-                .unwrap_or_else(|| floats(node.get("translation"), [0.0; 3])),
+            p.translation.unwrap_or_else(|| floats(node.translation, [0.0; 3])),
             p.rotation
-                .unwrap_or_else(|| floats(node.get("rotation"), [0.0, 0.0, 0.0, 1.0])),
-            p.scale.unwrap_or_else(|| floats(node.get("scale"), [1.0; 3])),
+                .unwrap_or_else(|| floats(node.rotation, [0.0, 0.0, 0.0, 1.0])),
+            p.scale.unwrap_or_else(|| floats(node.scale, [1.0; 3])),
         )
     }
 }

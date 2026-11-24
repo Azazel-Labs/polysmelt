@@ -1,0 +1,33 @@
+{
+  "spec": "DirectX .x (X File Format Reference, DirectX 9 SDK): a cube exported as binary, skinned to its own frame",
+  "source": "test/models/X/test_cube_binary.x from the Open Asset Import Library's test models (BSD-3-Clause)",
+  "triangles": 12,
+  "bounds": {
+    "min": [
+      -1,
+      -1,
+      -1
+    ],
+    "max": [
+      1,
+      1,
+      1
+    ]
+  },
+  "tolerance": 0.001,
+  "area": 24.0,
+  "faces_outward": true,
+  "material_count": 1,
+  "document": {
+    "skins": 1,
+    "joints": 1,
+    "node_names": [
+      "Root",
+      "Cube"
+    ]
+  },
+  "json": {
+    "/asset/extras/source/encoding": "binary",
+    "/asset/extras/source/ticksPerSecond": 24
+  }
+}

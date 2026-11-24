@@ -56,6 +56,27 @@ jobs:
           - --no-default-features --features dds
           - --no-default-features --features splat
           - --no-default-features --features spz
+          - --no-default-features --features mmd
+          - --no-default-features --features directx
+          - --no-default-features --features md2
+          - --no-default-features --features md3
+          - --no-default-features --features md5
+          - --no-default-features --features iqm
+          - --no-default-features --features smd
+          - --no-default-features --features ms3d
+          - --no-default-features --features b3d
+          - --no-default-features --features asf
+          - --no-default-features --features c3d
+          - --no-default-features --features trc
+          - --no-default-features --features htr
+          - --no-default-features --features las
+          - --no-default-features --features laz
+          - --no-default-features --features pcd
+          - --no-default-features --features xyz
+          - --no-default-features --features e57
+          - --no-default-features --features amf
+          - --no-default-features --features lwo
+          - --no-default-features --features ac3d
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install && rustup component add clippy
@@ -84,7 +105,7 @@ jobs:
       - uses: actions/checkout@v4
       - run: rustup toolchain install && rustup target add wasm32-unknown-unknown && rustup component add clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --target wasm32-unknown-unknown --no-default-features --features stl,ply,obj,gltf,draco,vox,3ds,webp,skp,bvh,off,dxf,fbx,3mf,dae,x3d,tga,bmp,gif,tiff,psd,dds,splat,spz -- -D warnings
+      - run: cargo clippy --target wasm32-unknown-unknown --no-default-features --features stl,ply,obj,gltf,draco,vox,3ds,webp,skp,bvh,off,dxf,fbx,3mf,dae,x3d,tga,bmp,gif,tiff,psd,dds,splat,spz,mmd,directx,md2,md3,md5,iqm,smd,ms3d,b3d,asf,c3d,trc,htr,las,laz,pcd,xyz,e57,amf,lwo,ac3d -- -D warnings
 
   msrv:
     runs-on: ubuntu-latest
@@ -93,7 +114,7 @@ jobs:
       matrix:
         include:
           - rust: "1.88"
-            features: --no-default-features --features minimal,fbx,3mf,draco,webp,skp,dae,x3d,tga,bmp,gif,tiff,psd,dds,spz
+            features: --no-default-features --features minimal,fbx,3mf,draco,webp,skp,dae,x3d,tga,bmp,gif,tiff,psd,dds,spz,mmd,directx,md2,md3,md5,iqm,smd,ms3d,b3d,asf,c3d,trc,htr,laz,e57,amf
           - rust: "1.96"
             features: ""
     steps:

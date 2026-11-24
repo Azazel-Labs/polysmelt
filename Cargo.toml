@@ -19,9 +19,9 @@ include = ["/src", "/examples", "/README.md", "/LICENSE", "/Cargo.toml"]
 all-features = true
 
 [features]
-default = ["minimal", "fbx", "3mf", "usd", "draco", "webp", "skp", "dae", "x3d", "tga", "bmp", "gif", "tiff", "psd", "dds", "spz"]
+default = ["minimal", "fbx", "3mf", "usd", "draco", "webp", "skp", "dae", "x3d", "tga", "bmp", "gif", "tiff", "psd", "dds", "spz", "laz", "e57", "amf"]
 # The readers with no dependencies, and file access: `default-features = false, features = ["minimal"]`.
-minimal = ["fs", "stl", "ply", "vox", "obj", "3ds", "gltf", "bvh", "off", "dxf", "splat"]
+minimal = ["fs", "stl", "ply", "vox", "obj", "3ds", "gltf", "bvh", "off", "dxf", "splat", "mmd", "directx", "md2", "md3", "md5", "iqm", "smd", "ms3d", "b3d", "asf", "c3d", "trc", "htr", "las", "pcd", "xyz", "lwo", "ac3d"]
 # Reading from the file system: `formats::load`, `assets::Folder` and `gltf::files_in`. Without
 # it (for wasm, say), models load from memory with `formats::load_bytes` and `assets::Memory`.
 fs = []
@@ -37,6 +37,32 @@ bvh = []
 off = []
 # DXF meshes: 3D faces, polyface and polygon meshes, and MESH entities, with blocks.
 dxf = []
+# MikuMikuDance models (PMX 2.0 and 2.1, PMD) and motions (VMD).
+mmd = []
+# DirectX `.x` models: text, binary and compressed, with frames, skins and animation sets.
+directx = []
+# Quake II `.md2` models, their frames as morph targets.
+md2 = []
+# Quake III `.md3` models: surfaces, tags and frames.
+md3 = []
+# Doom 3 `.md5mesh` skeletal models and `.md5anim` animations.
+md5 = []
+# Inter-Quake Model `.iqm`: meshes, joints and animations.
+iqm = []
+# Valve `.smd` reference and animation files, and `.vta` vertex animation.
+smd = []
+# MilkShape 3D `.ms3d` models, skinned and animated.
+ms3d = []
+# Blitz3D `.b3d` models: nodes, meshes, bones, keys and brushes.
+b3d = []
+# Acclaim `.asf` skeletons and `.amc` motions.
+asf = []
+# C3D motion capture: markers as animated points.
+c3d = []
+# TRC marker motion capture.
+trc = []
+# HTR (Hierarchical Translation-Rotation) motion capture.
+htr = []
 # Gaussian splats in the 32-byte `.splat` layout (KHR_gaussian_splatting).
 splat = []
 # Gaussian splats in gzipped `.spz`, versions 1 to 3 (KHR_gaussian_splatting).
@@ -63,12 +89,30 @@ dds = ["dep:flate2"]
 skp = ["gltf", "dep:flate2"]
 # X3D and VRML97 meshes: classic (`.wrl`, `.x3dv`), XML (`.x3d`) and gzipped (`.wrz`, `.x3dz`).
 x3d = ["dep:quick-xml", "dep:flate2"]
+# LAS lidar point clouds, versions 1.0 to 1.4, point formats 0 to 10.
+las = []
+# LAZ, compressed LAS.
+laz = ["las", "dep:laz"]
+# PCD point clouds (ascii, binary and binary_compressed).
+pcd = []
+# Text point clouds: `.xyz`, `.pts`, `.ptx` and `.asc`.
+xyz = []
+# E57 scans: point clouds with their poses, colors and intensity.
+e57 = ["dep:e57"]
+# AMF (Additive Manufacturing File), plain or zipped.
+amf = ["dep:quick-xml", "dep:zip", "dep:base64", "dep:flate2"]
+# LightWave objects (`.lwo`: LWOB, LWO2 and LWO3).
+lwo = []
+# AC3D `.ac` models.
+ac3d = []
 
 [dependencies]
 serde_json = "1"
 # Typed vertex data viewed as the bytes a GLB stores, without copying (unsafe is forbidden here).
 bytemuck = "1"
 thiserror = "2"
+# Shared, sliceable bytes: images in a mesh point at the buffer they were read into rather than copying it.
+bytes = { version = "1.10", default-features = false }
 base64 = { version = "0.22", optional = true }
 zip = { version = "9", default-features = false, features = ["deflate"], optional = true }
 quick-xml = { version = "0.41", optional = true }
@@ -78,6 +122,8 @@ image-webp = { version = "0.2", optional = true }
 # zip already brings flate2 on the zlib-rs backend; the PNG writer shares it. Runtime detection lets inflate use
 # the CPU's wider instructions (FBX arrays are mostly zlib).
 flate2 = { version = "1.1", default-features = false, features = ["zlib-rs", "runtime_detection"], optional = true }
+laz = { version = "0.14", default-features = false, optional = true }
+e57 = { version = "0.11", default-features = false, optional = true }
 draco-core = { version = "2.3", default-features = false, features = ["decoder", "edgebreaker_valence_decode", "legacy_bitstream_decode"], optional = true }
 
 [dev-dependencies]

@@ -1,0 +1,57 @@
+{
+  "spec": "E57 (ASTM E2807): a real file, one scan, Cartesian single-precision floats and 8-bit colors",
+  "source": "e57 crate test data (testdata/), MIT license, see ../LICENSE-e57",
+  "tolerance": 0.0002,
+  "points": 2090,
+  "triangles": 0,
+  "bounds": {
+    "min": [
+      -9.77953,
+      295.524689,
+      -7.51546
+    ],
+    "max": [
+      -6.774238,
+      298.532166,
+      -4.513879
+    ]
+  },
+  "positions_include": [
+    [
+      -8.67363,
+      295.549469,
+      -4.575418
+    ],
+    [
+      -8.012591,
+      295.820282,
+      -6.710814
+    ],
+    [
+      -7.901746,
+      298.020081,
+      -6.786065
+    ]
+  ],
+  "colors": true,
+  "colors_include": [
+    [
+      0.708376,
+      0.701102,
+      0.730461,
+      1.0
+    ],
+    [
+      0.104616,
+      0.043735,
+      0.007499,
+      1.0
+    ],
+    [
+      0.730461,
+      0.730461,
+      0.83077,
+      1.0
+    ]
+  ]
+}

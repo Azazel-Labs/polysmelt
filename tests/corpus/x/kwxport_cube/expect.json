@@ -1,0 +1,39 @@
+{
+  "spec": "DirectX .x (X File Format Reference, DirectX 9 SDK): a cube with vertex colors and three materials, as kW Xport exports it (DeclData, texture files not included)",
+  "source": "test/models/X/kwxport_test_cubewithvcolors.x from the Open Asset Import Library's test models, exported by kW Xport (MIT)",
+  "triangles": 12,
+  "material_count": 3,
+  "primitives": 3,
+  "colors": true,
+  "uvs": true,
+  "image_count": 0,
+  "bounds": {
+    "min": [
+      -0.492126,
+      -0.492126,
+      -0.492126
+    ],
+    "max": [
+      0.492126,
+      0.492126,
+      0.492126
+    ]
+  },
+  "tolerance": 0.001,
+  "winding_matches_normals": true,
+  "faces_outward": true,
+  "colors_include": [
+    [
+      1,
+      0,
+      0,
+      1
+    ],
+    [
+      0,
+      1,
+      0,
+      1
+    ]
+  ]
+}

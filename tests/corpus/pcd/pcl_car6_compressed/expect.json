@@ -1,0 +1,35 @@
+{
+  "spec": "PCD 0.7 (PCL's file format documentation): a real file, fields x y z",
+  "source": "PCL test data (test/), BSD license, see ../LICENSE-PCL",
+  "points": 10031,
+  "triangles": 0,
+  "bounds": {
+    "min": [
+      -40.168999,
+      -68.559998,
+      -6.99
+    ],
+    "max": [
+      -33.950001,
+      -61.880001,
+      -5.43
+    ]
+  },
+  "positions_include": [
+    [
+      -36.639999,
+      -61.93,
+      -6.34
+    ],
+    [
+      -34.580002,
+      -65.040001,
+      -6.14
+    ],
+    [
+      -39.509998,
+      -65.470001,
+      -6.95
+    ]
+  ]
+}

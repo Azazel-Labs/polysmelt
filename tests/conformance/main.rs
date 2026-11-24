@@ -49,6 +49,27 @@ fn enabled(ext: &str) -> bool {
         "dxf" => cfg!(feature = "dxf"),
         "splat" => cfg!(feature = "splat"),
         "spz" => cfg!(feature = "spz"),
+        "pmx" | "pmd" | "vmd" => cfg!(feature = "mmd"),
+        "x" => cfg!(feature = "directx"),
+        "md2" => cfg!(feature = "md2"),
+        "md3" => cfg!(feature = "md3"),
+        "md5mesh" | "md5anim" => cfg!(feature = "md5"),
+        "iqm" => cfg!(feature = "iqm"),
+        "smd" | "vta" => cfg!(feature = "smd"),
+        "ms3d" => cfg!(feature = "ms3d"),
+        "b3d" => cfg!(feature = "b3d"),
+        "asf" | "amc" => cfg!(feature = "asf"),
+        "c3d" => cfg!(feature = "c3d"),
+        "trc" => cfg!(feature = "trc"),
+        "htr" => cfg!(feature = "htr"),
+        "las" => cfg!(feature = "las"),
+        "laz" => cfg!(feature = "laz"),
+        "pcd" => cfg!(feature = "pcd"),
+        "xyz" | "pts" | "ptx" | "asc" => cfg!(feature = "xyz"),
+        "e57" => cfg!(feature = "e57"),
+        "amf" => cfg!(feature = "amf"),
+        "lwo" => cfg!(feature = "lwo"),
+        "ac" => cfg!(feature = "ac3d"),
         _ => false,
     }
 }
@@ -83,7 +104,9 @@ fn has_feature(name: &str) -> bool {
 /// Every model extension a full build reads, so cases are found in builds without some readers.
 const ALL_EXTENSIONS: &[&str] = &[
     "stl", "ply", "vox", "obj", "3ds", "fbx", "3mf", "usd", "usda", "usdc", "usdz", "gltf", "glb", "skp", "bvh", "dae",
-    "zae", "kmz", "off", "vrm", "vrma", "x3d", "x3dv", "x3dz", "wrl", "wrz", "dxf", "splat", "spz",
+    "zae", "kmz", "off", "vrm", "vrma", "x3d", "x3dv", "x3dz", "wrl", "wrz", "dxf", "splat", "spz", "las", "laz",
+    "pcd", "xyz", "pts", "ptx", "asc", "e57", "amf", "lwo", "ac", "pmx", "pmd", "vmd", "x", "md2", "md3", "md5mesh",
+    "md5anim", "iqm", "smd", "vta", "ms3d", "b3d", "asf", "amc", "c3d", "trc", "htr",
 ];
 
 fn ext_of(p: &Path) -> String {
@@ -1124,6 +1147,86 @@ fn splat() {
 fn spz() {
     check("spz");
 }
+#[test]
+fn mmd() {
+    check("mmd");
+}
+#[test]
+fn directx() {
+    check("x");
+}
+#[test]
+fn md2() {
+    check("md2");
+}
+#[test]
+fn md3() {
+    check("md3");
+}
+#[test]
+fn md5() {
+    check("md5");
+}
+#[test]
+fn iqm() {
+    check("iqm");
+}
+#[test]
+fn smd() {
+    check("smd");
+}
+#[test]
+fn ms3d() {
+    check("ms3d");
+}
+#[test]
+fn b3d() {
+    check("b3d");
+}
+#[test]
+fn asf() {
+    check("asf");
+}
+#[test]
+fn c3d() {
+    check("c3d");
+}
+#[test]
+fn trc() {
+    check("trc");
+}
+#[test]
+fn htr() {
+    check("htr");
+}
+#[test]
+fn las() {
+    check("las");
+}
+#[test]
+fn pcd() {
+    check("pcd");
+}
+#[test]
+fn xyz() {
+    check("xyz");
+}
+#[test]
+fn e57() {
+    check("e57");
+}
+#[test]
+fn amf() {
+    check("amf");
+}
+#[test]
+fn lwo() {
+    check("lwo");
+}
+#[test]
+fn ac3d() {
+    check("ac");
+}
 
 /// Every extension `formats::load` takes has cases, and every format a corpus folder.
 #[test]
@@ -1302,7 +1405,7 @@ fn unread_images_load_as_read_ones() {
                 bad(format!("unread images don't write: {e}"));
             }
             let unread = less.embed_images(&assets);
-            let read = |d: &Document<'_>| -> Vec<Option<(Vec<u8>, &'static str)>> {
+            let read = |d: &Document<'_>| -> Vec<Option<(polysmelt::Bytes, &'static str)>> {
                 d.images()
                     .map(|h| h.load(&assets).ok().map(|i| (i.bytes, i.mime)))
                     .collect()

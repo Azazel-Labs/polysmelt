@@ -1,0 +1,9 @@
+PathFileType	4	(X/Y/Z)	t.trc
+DataRate	CameraRate	NumFrames	NumMarkers	Units	OrigDataRate	OrigDataStartFrame	OrigNumFrames
+10	10	3	1	mm	10	1	3
+Frame#	Time	a		
+		X1	Y1	Z1
+
+1		1	2	3
+2		2	3	4
+4		4	5	6
