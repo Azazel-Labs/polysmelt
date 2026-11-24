@@ -249,7 +249,8 @@ case(FMT, "gaussian_splats_sh_degree_1",
 
 cut = ply("binary_little_endian", [CUBE_VERTS, CUBE_FACES])
 case(FMT, "truncated", {"cut.ply": cut[:-10]},
-     {"spec": SPEC + ": data shorter than the header says", "source": SRC, "error": "ends early"})
+     {"spec": SPEC + ": data shorter than the header says keeps the faces it holds whole", "source": SRC,
+      "triangles": 10, "json": {"/asset/extras/source/truncated": True}})
 
 case(FMT, "no_end_header", {"bad.ply": b"ply\nformat ascii 1.0\nelement vertex 1\nproperty float x\n"},
      {"spec": SPEC + ": header without end_header", "source": SRC, "error": "end_header"})

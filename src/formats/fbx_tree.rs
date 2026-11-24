@@ -517,13 +517,14 @@ fn attributes<'a>(mut data: &'a [u8], count: usize, out: &mut Vec<Attr<'a>>) -> 
                     Attr::Binary(Cow::Borrowed(bytes))
                 }
             }
-            b'b' | b'i' | b'l' | b'f' | b'd' => {
+            // `c`: an array of bytes, as some writers store flags; read as `b`'s.
+            b'b' | b'c' | b'i' | b'l' | b'f' | b'd' => {
                 let len = u32_at(&mut data)? as usize;
                 let encoding = u32_at(&mut data)?;
                 let n = u32_at(&mut data)? as usize;
                 let bytes = take(&mut data, n)?;
                 match kind {
-                    b'b' => Attr::ArrBool(Array::raw(len, encoding, bytes)),
+                    b'b' | b'c' => Attr::ArrBool(Array::raw(len, encoding, bytes)),
                     b'i' => Attr::ArrI32(Array::raw(len, encoding, bytes)),
                     b'l' => Attr::ArrI64(Array::raw(len, encoding, bytes)),
                     b'f' => Attr::ArrF32(Array::raw(len, encoding, bytes)),
@@ -819,6 +820,14 @@ mod tests {
             // An ASCII array declaring four billion values and holding one.
             let text = b"FBXHeaderExtension: {\n}\nVertices: *4294967295 {\n a: 1\n}\n";
             assert!(Tree::parse(text).is_err());
+        });
+    }
+
+    #[test]
+    fn a_byte_array_reads_as_booleans_bytes() {
+        with_attr(&array(b'c', 3, 0, &[1, 0, 2]), |a| {
+            let Attr::ArrBool(a) = a else { panic!("{a:?}") };
+            assert_eq!(a.to_vec(), Some(vec![1, 0, 2]));
         });
     }
 

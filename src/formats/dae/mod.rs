@@ -158,6 +158,7 @@ pub(super) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
         meshes: Vec::new(),
         mesh_triangles: Vec::new(),
         mesh_of: HashMap::new(),
+        drawn_as: HashMap::new(),
         points_of: HashMap::new(),
         normals_of: HashMap::new(),
         materials: Vec::new(),
@@ -451,6 +452,10 @@ type MaterialKey = (usize, Vec<(String, u32)>, bool);
 /// What a mesh is shared by: what's instanced (geometry or controller) and how its symbols are bound.
 type MeshKey = (usize, Vec<(String, Option<usize>, Vec<(String, u32)>)>);
 
+/// A mesh drawn for a static geometry, and each of its primitives' material symbol and texture
+/// coordinate sets.
+type Drawn = (usize, Vec<(Option<String>, Vec<u32>)>);
+
 pub(super) struct Reader<'a> {
     dom: &'a Dom<'a>,
     assets: &'a dyn Assets,
@@ -470,6 +475,9 @@ pub(super) struct Reader<'a> {
     meshes: Vec<Value>,
     mesh_triangles: Vec<usize>,
     mesh_of: HashMap<MeshKey, Option<usize>>,
+    /// A static geometry's first mesh and each of its primitives' material symbol and coordinate sets: another
+    /// binding of the geometry is a mesh on the same accessors.
+    drawn_as: HashMap<usize, Drawn>,
     /// Each skinned or morphed mesh's primitives' vertices, as indices into its geometry's `<vertices>`.
     points_of: HashMap<usize, Vec<Vec<u32>>>,
     /// Each morphed mesh's primitives' normals (empty for one without), which its targets' normals are taken from.
@@ -717,7 +725,11 @@ impl Reader<'_> {
         let mesh = if let Some(&m) = self.mesh_of.get(&key) {
             m
         } else {
-            let m = self.build_mesh(geometry, binds, skin, morph)?;
+            let m = if skin.is_none() && morph.is_none() && self.drawn_as.contains_key(&geometry) {
+                Some(self.rebind(geometry, binds))
+            } else {
+                self.build_mesh(geometry, binds, skin, morph)?
+            };
             self.mesh_of.insert(key, m);
             m
         };
@@ -782,6 +794,7 @@ impl Reader<'_> {
         let mut prims = Vec::new();
         let mut points = Vec::new();
         let mut normals = Vec::new();
+        let mut symbols = Vec::new();
         let mut triangles = 0;
         let morphed = morph.is_some() && self.keep.morph_targets;
         for p in pieces {
@@ -801,6 +814,7 @@ impl Reader<'_> {
             let Some(mut prim) = self.b.primitives(p.prim).pop() else {
                 continue;
             };
+            symbols.push((p.symbol, p.sets));
             normals.push(base);
             if let Some(m) = material {
                 prim["material"] = json!(m);
@@ -822,6 +836,9 @@ impl Reader<'_> {
         self.meshes.push(mesh);
         self.mesh_triangles.push(triangles);
         let m = self.meshes.len() - 1;
+        if skin.is_none() && morph.is_none() {
+            self.drawn_as.insert(geometry, (m, symbols));
+        }
         let morph = morph.filter(|_| self.keep.morph_targets);
         if (skin.is_some() && self.keep.skins) || morph.is_some() {
             self.points_of.insert(m, points);
@@ -831,6 +848,28 @@ impl Reader<'_> {
             self.normals_of.insert(m, normals);
         }
         Ok(Some(m))
+    }
+
+    /// Static `geometry`, drawn already, as a mesh on the same accessors with the materials `binds` give.
+    fn rebind(&mut self, geometry: usize, binds: &[Binding]) -> usize {
+        let (first, symbols) = self.drawn_as[&geometry].clone();
+        let mut mesh = self.meshes[first].clone();
+        if let Some(prims) = mesh.get_mut("primitives").and_then(Value::as_array_mut) {
+            for (prim, (symbol, sets)) in prims.iter_mut().zip(&symbols) {
+                let material = symbol
+                    .as_deref()
+                    .filter(|_| self.keep.materials)
+                    .and_then(|s| self.material_for(geometry, s, binds, sets));
+                match (material, prim.as_object_mut()) {
+                    (Some(m), Some(o)) => drop(o.insert("material".into(), json!(m))),
+                    (None, Some(o)) => drop(o.remove("material")),
+                    _ => {}
+                }
+            }
+        }
+        self.meshes.push(mesh);
+        self.mesh_triangles.push(self.mesh_triangles[first]);
+        self.meshes.len() - 1
     }
 
     /// The material bound to `symbol`, its textures reading the primitive's coordinate sets (`sets`, in the

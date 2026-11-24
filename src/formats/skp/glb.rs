@@ -917,7 +917,7 @@ mod tests {
         let err = write(&model, 1).unwrap_err();
         assert!(format!("{err:#}").contains("too large"), "{err:#}");
         assert!(write(&model, 2).unwrap().is_some());
-        assert_eq!(max_vertices(MAX_TRIANGLES), 16_000_000);
+        assert_eq!(max_vertices(MAX_TRIANGLES), 4 * MAX_TRIANGLES);
         assert_eq!(max_vertices(crate::mesh::TRIANGLE_CEILING), u32::MAX as usize);
     }
 

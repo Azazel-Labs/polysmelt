@@ -25,7 +25,8 @@ use crate::material::{Factor, Full};
 use crate::mesh::{Material, Prim, srgb_to_linear};
 use crate::{Context as _, Result};
 
-/// The most voxels a file may hold, unless [`Keep::max_triangles`] allows more triangles than this.
+/// The most voxels a file may hold, unless [`Keep::max_triangles`] is raised past its default,
+/// which raises this in proportion.
 const MAX_VOXELS: usize = 4_000_000;
 
 /// The palette `MagicaVoxel` uses when a file has no `RGBA` chunk, indexed by color index (0 is
@@ -277,7 +278,8 @@ struct Vox {
 /// `MagicaVoxel`: each model a mesh of the faces between its voxels and empty space, one
 /// primitive per color; the scene graph as nodes, hidden ones kept but hidden.
 pub(crate) fn vox(data: &[u8], keep: Keep) -> Result<Document<'static>> {
-    let v = read(data, keep.triangles().max(MAX_VOXELS))?;
+    let per_voxel = crate::mesh::MAX_TRIANGLES / MAX_VOXELS;
+    let v = read(data, (keep.triangles() / per_voxel).max(MAX_VOXELS))?;
     let scene = v.nodes.contains_key(&0);
     let models = &v.models;
 
@@ -896,9 +898,85 @@ impl Rect {
     }
 }
 
-/// A lattice point (each coordinate at most 1024) as one number.
-fn lattice(p: [usize; 3]) -> u64 {
-    p[0] as u64 | (p[1] as u64) << 11 | (p[2] as u64) << 22
+/// The lattice points of a model `size` voxels across that are some rectangle's corner, one bit
+/// each.
+struct Corners {
+    bits: Vec<u64>,
+    side: [usize; 2],
+}
+
+impl Corners {
+    fn new(size: [usize; 3]) -> Self {
+        let side = [size[0] + 1, size[1] + 1];
+        let bits = vec![0; (side[0] * side[1] * (size[2] + 1)).div_ceil(64)];
+        Self { bits, side }
+    }
+
+    fn at(&self, p: [usize; 3]) -> usize {
+        (p[2] * self.side[1] + p[1]) * self.side[0] + p[0]
+    }
+
+    fn insert(&mut self, p: [usize; 3]) {
+        let i = self.at(p);
+        self.bits[i / 64] |= 1 << (i % 64);
+    }
+
+    fn contains(&self, p: [usize; 3]) -> bool {
+        let i = self.at(p);
+        self.bits[i / 64] >> (i % 64) & 1 == 1
+    }
+}
+
+/// The vertex of each color at each point of one plane at a time: the first color to reach a
+/// point keeps it in a dense table, which is marked with the plane's turn so moving to the next
+/// plane clears nothing; others, at points where colors meet, go in a map.
+struct Shared {
+    /// The turn, color and vertex at each point, `u` fastest.
+    slots: Vec<(u32, u8, u32)>,
+    others: HashMap<u32, u32, Fast>,
+    turn: u32,
+    width: usize,
+}
+
+impl Shared {
+    /// Room for every plane of a model `size` voxels across.
+    fn new(size: [usize; 3]) -> Self {
+        let most = DIRS.iter().map(|&(_, _, ua, va)| (size[ua] + 1) * (size[va] + 1)).max();
+        Self {
+            slots: vec![(0, 0, 0); most.unwrap_or(0)],
+            others: HashMap::default(),
+            turn: 0,
+            width: 0,
+        }
+    }
+
+    /// Starts a plane whose `u` runs to `width - 1`.
+    fn plane(&mut self, width: usize) {
+        self.turn += 1;
+        self.width = width;
+        self.others.clear();
+    }
+
+    /// The vertex of `color` at `(u, v)`, made by `make` the first time.
+    #[allow(clippy::cast_possible_truncation, reason = "plane coordinates are at most 1024")]
+    fn get(&mut self, color: u8, u: usize, v: usize, make: impl FnOnce() -> Result<u32>) -> Result<u32> {
+        let slot = &mut self.slots[v * self.width + u];
+        if slot.0 != self.turn {
+            let id = make()?;
+            *slot = (self.turn, color, id);
+            return Ok(id);
+        }
+        if slot.1 == color {
+            return Ok(slot.2);
+        }
+        let key = u32::from(color) | (u as u32) << 8 | (v as u32) << 19;
+        if let Some(&id) = self.others.get(&key) {
+            return Ok(id);
+        }
+        let id = make()?;
+        self.others.insert(key, id);
+        Ok(id)
+    }
 }
 
 /// Triangles between two chains of `ring` points on parallel sides, `a` and `b`, both in order
@@ -956,7 +1034,7 @@ fn mesh_model(model: &Model, centered: bool, prims: &mut HashMap<u8, Prim>) -> R
 
     // Every exposed face as one number: its bucket (direction and plane), row, column and color,
     // so sorting gathers each plane's faces row by row.
-    let mut faces: Vec<u64> = Vec::new();
+    let mut faces: Vec<u64> = Vec::with_capacity(model.voxels.len());
     let mut seen = vec![0u64; occupied.len()];
     for v in model.voxels.iter().filter(|v| inside(v)) {
         // A voxel listed twice draws once.
@@ -1028,13 +1106,21 @@ fn mesh_model(model: &Model, centered: bool, prims: &mut HashMap<u8, Prim>) -> R
         }
     }
 
-    let mut corners: std::collections::HashSet<u64, Fast> = std::collections::HashSet::default();
-    corners.reserve(rects.len() * 2);
+    let mut corners = Corners::new(size);
+    let mut per_color = [0usize; 256];
     for r in &rects {
         let (u0, u1, v0, v1) = (r.u0.into(), r.u1.into(), r.v0.into(), r.v1.into());
         for (u, v) in [(u0, v0), (u1, v0), (u1, v1), (u0, v1)] {
-            corners.insert(lattice(r.point(u, v)));
+            corners.insert(r.point(u, v));
         }
+        per_color[usize::from(r.color)] += 1;
+    }
+    // Most rectangles are two triangles on four corners, half of them shared.
+    for (color, &n) in per_color.iter().enumerate().filter(|(_, n)| **n > 0) {
+        let p = prims.entry(color as u8).or_default();
+        p.positions.reserve(n * 2);
+        p.normals.reserve(n * 2);
+        p.indices.reserve(n * 6);
     }
 
     let pivot = if centered {
@@ -1046,7 +1132,7 @@ fn mesh_model(model: &Model, centered: bool, prims: &mut HashMap<u8, Prim>) -> R
     let to_gltf = |p: [f32; 3]| [p[0] - pivot[0], p[2] - pivot[2], pivot[1] - p[1]];
     let on_box = |axis: usize, c: usize| c == 0 || c == size[axis];
     // The current plane's vertices, by color and point.
-    let mut shared: HashMap<u32, u32, Fast> = HashMap::default();
+    let mut shared = Shared::new(size);
     let mut current = u16::MAX;
     // A rectangle's outline counter-clockwise from (u0, v0), each point's vertex, and two chains
     // of outline points to strip between.
@@ -1054,11 +1140,11 @@ fn mesh_model(model: &Model, centered: bool, prims: &mut HashMap<u8, Prim>) -> R
     let mut ids: Vec<u32> = Vec::new();
     let (mut a, mut b): (Vec<usize>, Vec<usize>) = (Vec::new(), Vec::new());
     for r in &rects {
+        let (axis, positive, ua, va) = DIRS[usize::from(r.bucket) / 1025];
         if r.bucket != current {
-            shared.clear();
+            shared.plane(size[ua] + 1);
             current = r.bucket;
         }
-        let (axis, positive, ua, va) = DIRS[usize::from(r.bucket) / 1025];
         let plane = usize::from(r.bucket) % 1025;
         let (u0, u1, v0, v1) = (r.u0.into(), r.u1.into(), r.v0.into(), r.v1.into());
         // The sides, counter-clockwise: from, to, and whether it runs along `u`.
@@ -1083,7 +1169,7 @@ fn mesh_model(model: &Model, centered: bool, prims: &mut HashMap<u8, Prim>) -> R
             for t in 1..a.abs_diff(b) {
                 let c = if b > a { a + t } else { a - t };
                 let q = if along_u { [c, fixed] } else { [fixed, c] };
-                if every || corners.contains(&lattice(r.point(q[0], q[1]))) {
+                if every || corners.contains(r.point(q[0], q[1])) {
                     ring.push(q);
                     clean[s] = false;
                 }
@@ -1095,16 +1181,12 @@ fn mesh_model(model: &Model, centered: bool, prims: &mut HashMap<u8, Prim>) -> R
         let normal = [normal[0], normal[2], -normal[1]];
         ids.clear();
         for q in &ring {
-            let key = u32::from(r.color) | (q[0] as u32) << 8 | (q[1] as u32) << 19;
-            let id = if let Some(&id) = shared.get(&key) {
-                id
-            } else {
+            let id = shared.get(r.color, q[0], q[1], || {
                 let id = u32::try_from(p.positions.len())?;
                 p.positions.push(to_gltf(r.point(q[0], q[1]).map(|c| c as f32)));
                 p.normals.push(normal);
-                shared.insert(key, id);
-                id
-            };
+                Ok(id)
+            })?;
             ids.push(id);
         }
         let n = ids.len();
@@ -1564,7 +1646,7 @@ mod tests {
         };
         assert!(err(lower).contains("too many voxels"), "{}", err(lower));
         let higher = Keep {
-            max_triangles: MAX_VOXELS * 2,
+            max_triangles: crate::mesh::MAX_TRIANGLES * 2,
             ..Keep::ALL
         };
         assert!(err(higher).contains("end early"), "{}", err(higher));

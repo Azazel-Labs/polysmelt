@@ -56,6 +56,29 @@ const FLAT: u32 = MADE;
 /// The bytes UTF-8 text may start with.
 const BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
 
+/// Whether text starting with `head` is UTF-16 by its byte order mark: little-endian or not.
+fn utf16(head: &[u8]) -> Option<bool> {
+    match head {
+        [0xFF, 0xFE, ..] => Some(true),
+        [0xFE, 0xFF, ..] => Some(false),
+        _ => None,
+    }
+}
+
+/// UTF-16 code units from their bytes.
+fn units(bytes: &[u8], le: bool) -> Vec<u16> {
+    let pairs = bytes.as_chunks::<2>().0.iter();
+    pairs
+        .map(|&b| {
+            if le {
+                u16::from_le_bytes(b)
+            } else {
+                u16::from_be_bytes(b)
+            }
+        })
+        .collect()
+}
+
 /// One face corner: position, texture coordinate and normal indices (the last two may be
 /// [`NONE`]).
 type Corner = [u32; 3];
@@ -2838,6 +2861,17 @@ fn loose_prim(b: &mut Builder, at: &[u32], lines: bool, v: &[[f32; 3]], colors: 
 /// and without texture coordinates or normals. The file is read a block at a time, and each
 /// corner becomes a vertex of its part's primitive in its material as it's read.
 pub(crate) fn obj(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document<'static>> {
+    // UTF-16, as some Windows tools save text: read as the UTF-8 it says.
+    if let Some(text) = utf16(&input.head(2)?)
+        .map(|le| input.read().map(|all| String::from_utf16_lossy(&units(&all[2..], le))))
+        .transpose()?
+    {
+        let utf8 = super::Input {
+            data: super::Data::Bytes(text.as_bytes()),
+            ..input
+        };
+        return obj(utf8, assets, keep);
+    }
     let mut blocks = input.blocks()?;
     let size = blocks.size_hint();
     let dir = input.dir();
@@ -2875,7 +2909,13 @@ pub(crate) fn obj(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<D
             r.line(&joined, read, size);
         }
     }
-    ensure!(r.triangles + r.points + r.lines > 0, "OBJ has no faces");
+    if r.triangles + r.points + r.lines == 0 && !r.v.is_empty() {
+        // Positions and nothing drawn with them: a point cloud, as scanners write it.
+        let g = r.group();
+        r.groups[g].points.extend(0..u32_of(r.v.len()));
+        r.points = r.v.len();
+    }
+    ensure!(r.triangles + r.points + r.lines > 0, "OBJ has no faces or vertices");
     ensure!(
         r.triangles <= r.limit,
         "too many triangles to convert (more than {})",
@@ -3280,6 +3320,35 @@ mod tests {
     use crate::assets::Memory;
     use crate::mesh::Mesh;
     use std::fmt::Write as _;
+
+    #[test]
+    fn positions_alone_are_a_point_cloud() {
+        let doc = read_in(b"# scan\nv 0 0 0\nv 1 0 0\nv 0 1 0 1 0 0\n", &Memory::new());
+        let m = doc.flatten(crate::document::Pose::Rest).unwrap().unwrap();
+        assert_eq!(m.triangles(), 0);
+        assert_eq!(doc.facts["points"], 3);
+        let err = obj(
+            Input::memory(b"# nothing\nvn 0 0 1\n", "t.obj"),
+            &Memory::new(),
+            Keep::ALL,
+        );
+        assert!(err.err().unwrap().to_string().contains("no faces"));
+    }
+
+    #[test]
+    fn utf16_with_a_byte_order_mark_reads_as_utf8() {
+        let text = "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
+        for le in [true, false] {
+            let mut bytes = if le { vec![0xFF, 0xFE] } else { vec![0xFE, 0xFF] };
+            for u in text.encode_utf16() {
+                bytes.extend(if le { u.to_le_bytes() } else { u.to_be_bytes() });
+            }
+            let m = read_in(&bytes, &Memory::new())
+                .flatten(crate::document::Pose::Rest)
+                .unwrap();
+            assert_eq!(m.unwrap().triangles(), 1, "{le}");
+        }
+    }
 
     fn read_in(bytes: &[u8], assets: &Memory) -> Document<'static> {
         obj(Input::memory(bytes, "t.obj"), assets, Keep::ALL).unwrap()

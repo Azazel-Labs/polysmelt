@@ -26,8 +26,8 @@ use crate::mesh::{MAX_POINTS, MAX_TRIANGLES, TRIANGLE_CEILING};
 /// // Static meshes for an engine that animates nothing, but still skins them.
 /// let keep = Keep { animations: false, ..Keep::ALL };
 /// # assert!(keep.skins);
-/// // A 10-million-triangle scan, past the default limit.
-/// let keep = Keep { max_triangles: 12_000_000, ..Keep::ALL };
+/// // A 100-million-triangle scan, past the default limit.
+/// let keep = Keep { max_triangles: 120_000_000, ..Keep::ALL };
 /// // A 40-million-point lidar scan, drawn as points.
 /// let keep = Keep { max_points: 40_000_000, ..Keep::ALL };
 /// // Only the surfaces: no points or lines in the flattened mesh.

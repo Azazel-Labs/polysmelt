@@ -66,7 +66,7 @@ impl Ty {
             b"uint" | b"uint32" => Ty::U32,
             b"float" | b"float32" => Ty::F32,
             b"double" | b"float64" => Ty::F64,
-            t => bail!("unknown PLY type {}", String::from_utf8_lossy(t)),
+            t => bail!("unknown PLY type {}", crate::shown(t)),
         })
     }
 
@@ -246,6 +246,24 @@ impl Cursor<'_> {
         Ok(())
     }
 
+    /// A list's length, or none for a list an ASCII line leaves out: the item's values so far
+    /// share a line, and it ends before the list (as writers that declare a list they don't
+    /// write leave it).
+    #[inline]
+    fn list_len(&mut self, ty: Ty, item: usize) -> Got<usize> {
+        if self.format == Format::Ascii {
+            let line = |c: &u8| matches!(c, b'\n' | b'\r');
+            let so_far = &self.d[item..self.pos];
+            if let Some(first) = so_far.iter().position(|&c| !stream::space(c))
+                && !so_far[first..].iter().any(line)
+                && self.d[self.pos..].iter().take_while(|&&c| stream::space(c)).any(line)
+            {
+                return Ok(0);
+            }
+        }
+        self.len(ty)
+    }
+
     /// A list's length.
     #[inline]
     fn len(&mut self, ty: Ty) -> Got<usize> {
@@ -347,7 +365,7 @@ fn header(data: &[u8]) -> Result<(Header, Vec<Element>, usize)> {
                     b"ascii" => Format::Ascii,
                     b"binary_little_endian" => Format::Le,
                     b"binary_big_endian" => Format::Be,
-                    f => bail!("unknown PLY format {}", String::from_utf8_lossy(f)),
+                    f => bail!("unknown PLY format {}", crate::shown(f)),
                 });
             }
             [b"comment", kind, ..] if kind.eq_ignore_ascii_case(b"texturefile") => {
@@ -606,6 +624,7 @@ impl Plan {
 
 /// Everything read from the elements.
 #[derive(Default)]
+#[allow(clippy::struct_excessive_bools, reason = "independent facts about what was read")]
 struct Body {
     verts: Vertices,
     /// Whether the vertices have been read (faces after them become triangles at once).
@@ -634,6 +653,8 @@ struct Body {
     extra_names: Vec<String>,
     /// Elements read past.
     skipped: Vec<String>,
+    /// Whether the data ends before the header's counts do.
+    cut: bool,
     // Scratch, reused from record to record.
     vals: Vec<f64>,
     idx: Vec<u32>,
@@ -647,7 +668,7 @@ pub(crate) fn ply(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<D
     let mut blocks = input.blocks()?;
     // The header, whole.
     let mut want = 4096;
-    let (head, elements, start) = loop {
+    let (head, mut elements, start) = loop {
         blocks.need(want)?;
         let d = blocks.data();
         let ended = d
@@ -670,20 +691,31 @@ pub(crate) fn ply(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<D
         max_splats: keep.points(),
         ..Body::default()
     };
-    // Every item takes at least its smallest record, so counts the file can't hold are refused
-    // before anything is reserved for them (the last ASCII value needs no separator).
+    // Every item takes at least its smallest record, so counts are cut to what the file can
+    // hold before anything is reserved for them (the last ASCII value needs no separator).
     let mut least = 0usize;
-    for el in &elements {
-        least = least.saturating_add(el.count.saturating_mul(el.min_size(head.format)));
-        ensure!(
-            el.count <= room && least <= room.saturating_add(1),
-            "PLY data ends early: element {} counts more items than the file holds",
-            el.name
-        );
+    for el in &mut elements {
+        let size = el.min_size(head.format);
+        let fits = room
+            .saturating_add(1)
+            .saturating_sub(least)
+            .checked_div(size)
+            .unwrap_or(room)
+            .min(room);
+        if el.count > fits {
+            el.count = fits;
+            body.cut = true;
+        }
+        least = least.saturating_add(el.count.saturating_mul(size));
     }
     for el in &elements {
         read_element(&mut blocks, head.format, el, &mut body)?;
     }
+    // A file cut short keeps the items it holds whole, if it holds any vertices.
+    ensure!(
+        !body.cut || !body.verts.pos.is_empty(),
+        "PLY data ends early: the file holds fewer items than its header counts"
+    );
     let mut source = json!({
         "format": "PLY",
         "encoding": match head.format {
@@ -693,6 +725,9 @@ pub(crate) fn ply(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<D
         },
         "version": head.version,
     });
+    if body.cut {
+        source["truncated"] = json!(true);
+    }
     for (key, list) in [
         ("comments", &head.comments),
         ("objInfo", &head.obj_info),
@@ -1073,7 +1108,10 @@ fn read_element(blocks: &mut Blocks<'_>, format: Format, el: &Element, body: &mu
         let buffered = all.len();
         blocks.consume(kept);
         if done == before {
-            ensure!(!blocks.at_end(), "PLY data ends early");
+            if blocks.at_end() {
+                body.cut = true;
+                break;
+            }
             // One record is longer than what's buffered.
             blocks.need(buffered * 2 + 64)?;
         }
@@ -1183,6 +1221,7 @@ fn record(
         cur.pos += size;
         return Ok(());
     }
+    let item = cur.pos;
     idx.clear();
     tc.clear();
     if let Some(ty) = plan.lone_list {
@@ -1204,7 +1243,7 @@ fn record(
             None if plan.wanted[k] => vals[k] = cur.value(p.ty)?,
             None => cur.skip(p.ty, 1)?,
             Some(cty) => {
-                let n = cur.len(cty)?;
+                let n = cur.list_len(cty, item)?;
                 if Some(k) == plan.index_list {
                     for _ in 0..n {
                         idx.push(cur.index(p.ty)?);
@@ -1350,10 +1389,11 @@ fn other(cur: &mut Cursor, el: &Element, plan: &Plan) -> Got<()> {
         cur.pos += size;
         return Ok(());
     }
+    let item = cur.pos;
     for p in &el.props {
         let n = match p.count {
             None => 1,
-            Some(cty) => cur.len(cty)?,
+            Some(cty) => cur.list_len(cty, item)?,
         };
         cur.skip(p.ty, n)?;
     }
@@ -1580,8 +1620,18 @@ mod tests {
         prim.as_object().unwrap().keys().cloned().collect()
     }
 
+    /// How many vertices the first primitive has.
+    fn vertex_count(doc: &Document<'_>) -> u64 {
+        let pos = doc.json["meshes"][0]["primitives"][0]["attributes"]["POSITION"]
+            .as_u64()
+            .unwrap();
+        doc.json["accessors"][usize::try_from(pos).unwrap()]["count"]
+            .as_u64()
+            .unwrap()
+    }
+
     #[test]
-    fn counts_times_record_size_past_the_file_are_refused_before_reserving() {
+    fn counts_times_record_size_past_the_file_are_cut_to_it_before_reserving() {
         // A thousand one-byte properties times ten million vertices in a file of a few bytes.
         let mut head = String::from("ply\nformat binary_little_endian 1.0\nelement vertex 10000000\n");
         head.push_str("property float x\nproperty float y\nproperty float z\n");
@@ -1593,12 +1643,56 @@ mod tests {
         head.push_str("end_header\n");
         let mut bytes = head.into_bytes();
         bytes.extend(std::iter::repeat_n(0u8, 20_000_000));
-        let err = load(&bytes).err().unwrap().to_string();
-        assert!(err.contains("ends early"), "{err}");
-        // As ASCII: each property needs a character and a separator.
+        let doc = load(&bytes).unwrap();
+        assert_eq!(vertex_count(&doc), 20_000_000 / 1012);
+        assert_eq!(doc.json["asset"]["extras"]["source"]["truncated"], true);
+        // As ASCII: each property needs a character and a separator; two whole vertices.
         let text = "ply\nformat ascii 1.0\nelement vertex 3\nproperty float x\nproperty float y\n\
                     property float z\nend_header\n0 0 0 1 0 0 0 1";
-        assert!(load(text.as_bytes()).is_err());
+        assert_eq!(vertex_count(&load(text.as_bytes()).unwrap()), 2);
+        // Nothing at all where the header counts vertices.
+        let text = b"ply\nformat ascii 1.0\nelement vertex 9\nproperty float x\nproperty float y\nproperty float z\n\
+                     end_header\n";
+        let err = load(text).err().unwrap().to_string();
+        assert!(err.contains("ends early"), "{err}");
+    }
+
+    #[test]
+    fn a_file_cut_short_keeps_its_whole_items() {
+        // Four faces counted, two and a half there.
+        let text = "ply\nformat ascii 1.0\nelement vertex 4\nproperty float x\nproperty float y\n\
+                    property float z\nelement face 4\nproperty list uchar int vertex_indices\n\
+                    end_header\n0 0 0\n1 0 0\n0 1 0\n1 1 0\n3 0 1 2\n3 1 3 2\n3 0 1";
+        let doc = read(text);
+        assert_eq!(doc.json["asset"]["extras"]["source"]["truncated"], true);
+        assert_eq!(mesh(text).triangles(), 2);
+    }
+
+    #[test]
+    fn a_list_an_ascii_line_leaves_out_is_empty() {
+        // Vertices declaring a list, written without it: a point cloud, one vertex a line.
+        let text = "ply\nformat ascii 1.0\nelement vertex 3\nproperty float x\nproperty float y\n\
+                    property float z\nproperty list uchar uint vertex_indices\nend_header\n\
+                    7.5 -2.25 0\r\n-1 2 3\r\n4 5 6\r\n";
+        let doc = read(text);
+        assert_eq!(vertex_count(&doc), 3);
+        assert!(doc.json["asset"]["extras"]["source"].get("truncated").is_none());
+        // Items written a value a line still read, and a list on its item's line does.
+        let faces = "ply\nformat ascii 1.0\nelement vertex 3\nproperty float x\nproperty float y\n\
+                     property float z\nelement face 1\nproperty uchar flags\n\
+                     property list uchar int vertex_indices\nend_header\n0\n0\n0\n1 0 0\n0 1 0\n7 3 0 1 2\n";
+        assert_eq!(mesh(faces).triangles(), 1);
+    }
+
+    #[test]
+    fn errors_show_file_text_printably() {
+        let text = b"ply\nformat ascii 1.0\nelement vertex 1\nproperty \0\0\0 x\nend_header\n0\n";
+        let err = load(text).err().unwrap().to_string();
+        assert!(err.contains(r#""\0\0\0""#), "{err}");
+        assert!(!err.chars().any(char::is_control), "{err}");
+        let long = format!("ply\nformat {}\nend_header\n", "x".repeat(1000));
+        let err = load(long.as_bytes()).err().unwrap().to_string();
+        assert!(err.len() < 100, "{err}");
     }
 
     const TRIANGLE: &str = "format ascii 1.0\nelement vertex 3\nproperty float x\nproperty float y\n\

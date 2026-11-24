@@ -33,7 +33,12 @@
 //! file, so the peak is little more than the mesh.
 
 mod decode;
+mod repair;
 mod rig;
+
+#[cfg(all(test, feature = "gltf", feature = "fs"))]
+pub(crate) use repair::repaired;
+pub(crate) use repair::{Kept, repaired_keeping};
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -513,6 +518,8 @@ fn drawable(extension: &str) -> bool {
         "MSFT_texture_",
         "MSFT_packing_",
         "ADOBE_materials_",
+        // Shader programs for a material (`KHR_techniques_webgl`); its own values stand in.
+        "KHR_technique",
     ];
     // Levels of detail: the node itself is the finest, which is what's drawn.
     // VRM 0.x names its extension plainly, without a vendor prefix.
@@ -3586,8 +3593,10 @@ mod tests {
     #[test]
     fn a_required_extension_it_cant_draw_is_an_error() {
         let mut doc = crate::document::Document::from_mesh(grid(2), serde_json::Map::new());
-        doc.json
-            .insert("extensionsRequired".into(), serde_json::json!(["KHR_materials_unlit"]));
+        doc.json.insert(
+            "extensionsRequired".into(),
+            serde_json::json!(["KHR_materials_unlit", "KHR_techniques_webgl"]),
+        );
         assert!(
             doc.flatten(Pose::Rest).unwrap().is_some(),
             "a look is drawn as best it can be"

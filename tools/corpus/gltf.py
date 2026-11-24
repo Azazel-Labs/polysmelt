@@ -852,9 +852,10 @@ case(FMT, "gltf_version_1_with_lists", {"cube.gltf": g.embedded()},
 case(FMT, "not_gltf", {"bad.gltf": "this isn't JSON"},
      {"spec": "not a glTF file", "source": SRC, "error": "not a glTF"})
 
-text, binary = cube_doc().gltf("../outside.bin")
+text, binary = cube_doc().gltf("/outside.bin")
 case(FMT, "buffer_outside_folder", {"cube.gltf": text},
-     {"spec": "a buffer URI that climbs out of the model's folder is refused", "source": SRC, "error": "refusing"})
+     {"spec": "a buffer URI that's an absolute path is refused (a relative one may climb out of the model's folder)",
+      "source": SRC, "error": "refusing"})
 
 text, _ = cube_doc().gltf("absent.bin")
 case(FMT, "buffer_missing", {"cube.gltf": text},

@@ -7,7 +7,7 @@ use crate::num::u32_of;
 
 /// The most triangles a load accepts by default, against hostile or runaway files:
 /// [`Keep::max_triangles`](crate::document::Keep::max_triangles) raises or lowers it.
-pub const MAX_TRIANGLES: usize = 4_000_000;
+pub const MAX_TRIANGLES: usize = 64_000_000;
 
 /// The most triangles any load accepts, whatever
 /// [`Keep::max_triangles`](crate::document::Keep::max_triangles) says: three vertices to each

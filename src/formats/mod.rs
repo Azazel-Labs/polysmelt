@@ -58,7 +58,7 @@ pub mod fbx_ascii;
 #[cfg(feature = "fbx")]
 mod fbx_tree;
 #[cfg(feature = "gltf")]
-mod gltf;
+pub(crate) mod gltf;
 #[cfg(feature = "gltf")]
 mod gltf1;
 #[cfg(feature = "htr")]
@@ -1273,8 +1273,8 @@ f 1/1 3/3 4/4
         assert!(default.contains("too many triangles"), "{default}");
         let past = err(MAX_TRIANGLES + 1);
         assert!(!past.contains("too many triangles") && past.contains("past"), "{past}");
-        let doc = limited("big.gltf", gltf.as_bytes(), 12_000_000).unwrap();
-        assert_eq!(doc.max_triangles(), 12_000_000);
+        let doc = limited("big.gltf", gltf.as_bytes(), 120_000_000).unwrap();
+        assert_eq!(doc.max_triangles(), 120_000_000);
     }
 
     #[test]
