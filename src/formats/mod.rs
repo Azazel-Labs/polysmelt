@@ -46,6 +46,7 @@ mod c3d;
 mod crease;
 #[cfg(feature = "dae")]
 mod dae;
+mod detect;
 #[cfg(feature = "directx")]
 mod directx;
 #[cfg(feature = "dxf")]
@@ -192,8 +193,43 @@ pub const EXTENSIONS: &[&str] = &[
     "ogex",
 ];
 
-/// Reads the model at `path`, whose format is named by `ext` (lowercase, without the dot),
-/// keeping what `keep` says.
+/// Reads the model at `path`, keeping what `keep` says: the format is told by the path's
+/// extension (in any case), or, when that names none, by the file's first bytes; the files it
+/// refers to are found from its folder, as a [`Folder`](crate::assets::Folder) rooted there
+/// finds them.
+///
+/// ```no_run
+/// use polysmelt::document::Keep;
+/// let doc = polysmelt::formats::open("models/Duck.DAE", Keep::ALL)?;
+/// std::fs::write("Duck.glb", doc.to_glb()?)?;
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+///
+/// # Errors
+///
+/// When the file can't be read, its format is none [`load`] reads (or one whose feature is off),
+/// or the model doesn't parse.
+#[cfg(feature = "fs")]
+pub fn open(path: impl AsRef<Path>, keep: Keep) -> Result<Document<'static>> {
+    // A bare file name's folder is the current one, which its references are found from.
+    let path = std::path::absolute(path.as_ref())?;
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    let folder = crate::assets::Folder::new(path.parent().unwrap_or(&path));
+    load(&path, ext, &folder, keep)
+}
+
+/// The format of a model whose bytes (all of them, or its start) are `bytes`, told from its
+/// signature or first words and named by the extension [`load`] reads it under; `None` when
+/// they don't say. A binary STL, which has no signature, is told only from all of its bytes.
+#[must_use]
+pub fn detect(bytes: &[u8]) -> Option<&'static str> {
+    detect::sniff(&bytes[..bytes.len().min(detect::HEAD)], Some(bytes.len() as u64))
+}
+
+/// Reads the model at `path`, whose format is named by `ext` (without the dot, in any case),
+/// keeping what `keep` says. An `ext` that names no format (or is empty) has the format told
+/// from the file's first bytes, and an `.xml` file is read as the format its root element
+/// names (COLLADA, X3D, AMF or OGRE).
 ///
 /// # Errors
 ///
@@ -226,8 +262,8 @@ pub fn load(path: &Path, ext: &str, assets: &dyn Assets, keep: Keep) -> Result<D
 #[cfg(feature = "fs")]
 const SMALL_FILE: u64 = 1 << 20;
 
-/// Reads a model already in memory, whose format is named by `ext` (lowercase, without the
-/// dot), keeping what `keep` says. `name` is the model's path among `assets`: the files it
+/// Reads a model already in memory, whose format is named by `ext` (without the dot, in any
+/// case, or told from the bytes as [`load`] tells it), keeping what `keep` says. `name` is the model's path among `assets`: the files it
 /// refers to (MTL libraries, textures, glTF buffers, USD layers) are found from its folder and
 /// read through [`Assets::read`]. A model that refers to nothing reads with any name and an
 /// empty [`Memory`](crate::assets::Memory). The document may borrow from `bytes` and `assets`
@@ -308,6 +344,19 @@ impl<'a> Input<'a> {
             path: Path::new(name),
             data: Data::Bytes(bytes),
             limit: MAX_TRIANGLES,
+        }
+    }
+
+    /// The model's length in bytes, when it can be told.
+    #[cfg_attr(
+        not(feature = "fs"),
+        allow(clippy::unnecessary_wraps, reason = "only a file's length can't be told")
+    )]
+    pub fn len(&self) -> Option<u64> {
+        match self.data {
+            Data::Bytes(b) => Some(b.len() as u64),
+            #[cfg(feature = "fs")]
+            Data::File => std::fs::metadata(self.path).ok().map(|m| m.len()),
         }
     }
 
@@ -394,6 +443,26 @@ impl<'a> Input<'a> {
 }
 
 fn read<'a>(input: Input<'a>, ext: &str, assets: &'a dyn Assets, keep: Keep) -> Result<Document<'a>> {
+    let lower;
+    let mut ext = if ext.bytes().any(|b| b.is_ascii_uppercase()) {
+        lower = ext.to_ascii_lowercase();
+        lower.as_str()
+    } else {
+        ext
+    };
+    if ext == "xml" || !EXTENSIONS.contains(&ext) {
+        let head = input.head(detect::HEAD)?;
+        let found = if ext == "xml" {
+            detect::xml(&head)
+        } else {
+            detect::sniff(&head, input.len())
+        };
+        match found {
+            Some(e) => ext = e,
+            None if ext.is_empty() => bail!("can't tell this model's format from its first bytes"),
+            None => {}
+        }
+    }
     let limit = keep.triangles();
     let mut doc = convert(Input { limit, ..input }, ext, assets, keep)?;
     doc.max_triangles = limit;
@@ -1345,5 +1414,32 @@ f 1/1 3/3 4/4
         assert_eq!(m.materials[m.prims[0].material].color_image, Some(0));
         assert_eq!(m.prims[0].uvs[0], [0.0, 1.0], "V flipped");
         assert!(to_glb(&m).unwrap().starts_with(b"glTF"));
+    }
+
+    #[cfg(all(feature = "dae", feature = "stl"))]
+    #[test]
+    fn a_format_is_told_from_the_bytes_when_the_extension_does_not_say() {
+        let corpus = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus");
+        let dae = std::fs::read(corpus.join("dae/accessor_stride_offset_unnamed/cube.dae")).unwrap();
+        let stl = std::fs::read(corpus.join("stl/binary_cube/cube.stl")).unwrap();
+        assert_eq!(super::detect(&dae), Some("dae"));
+        assert_eq!(super::detect(&stl), Some("stl"));
+        let triangles = |bytes: &[u8], ext: &str| {
+            let none = Memory::new();
+            let doc = super::load_bytes(bytes, "m", ext, &none, Keep::ALL).unwrap();
+            doc.counts().triangles
+        };
+        let want = triangles(&dae, "dae");
+        assert!(want > 0);
+        for ext in ["DAE", "xml", "XML", "", "model"] {
+            assert_eq!(triangles(&dae, ext), want, ".{ext}");
+        }
+        assert_eq!(triangles(&stl, ""), triangles(&stl, "stl"));
+        let err = super::load_bytes(b"1 2 3", "m", "", &Memory::new(), Keep::ALL).unwrap_err();
+        assert!(err.to_string().contains("can't tell"), "{err}");
+        let dir = tempfile::tempdir().unwrap();
+        let upper = dir.path().join("Cube.DAE");
+        std::fs::write(&upper, &dae).unwrap();
+        assert_eq!(super::open(&upper, Keep::ALL).unwrap().counts().triangles, want);
     }
 }
