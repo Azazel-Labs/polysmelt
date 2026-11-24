@@ -1,15 +1,15 @@
 {
   "spec": "SketchUp .skp (closed; as openskp reads it): a group in a component in a group, a face at each level, as SketchUp 6 saves it",
   "source": "saved by SketchUp, from openskp's test fixtures (packages/cpp/tests/fixtures)",
-  "facts": {
-    "application": "SketchUp 6"
-  },
-  "primitives": 3,
   "document": {
     "node_names": [
       "Outer",
       "Shelf",
       "Inner"
-    ]
-  }
+    ],
+    "source": {
+      "tool": "SketchUp 6"
+    }
+  },
+  "primitives": 3
 }

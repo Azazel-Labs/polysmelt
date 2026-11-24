@@ -242,19 +242,25 @@ impl<'d> Parser<'d> {
                 }
             }
             b"META" => {
+                let mut pair = Vec::new();
                 for _ in 0..2 {
-                    if matches!(self.lx.peek(), Tok::Str(_)) {
+                    if let Tok::Str(s) = self.lx.peek() {
                         self.lx.next();
+                        pair.push(unescape(s));
                     }
+                }
+                if let Ok([name, content]) = <[String; 2]>::try_from(pair) {
+                    self.g.meta.push((name, content));
                 }
             }
             b"UNIT" => {
                 let category = self.word();
-                self.lx.next();
+                let name = self.word();
                 if let Some(f) = self.word()
                     && category == Some(b"length")
                 {
                     self.g.unit = Some(number(f));
+                    self.g.unit_name = name.map(text);
                 }
                 return true;
             }

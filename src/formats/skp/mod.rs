@@ -14,6 +14,9 @@
 //!   its back gets single-sided front and back faces; otherwise it is one double-sided face.
 //! - BMP and TGA textures are re-encoded as PNG; GIF and TIFF textures are dropped.
 //! - Lengths are turned from inches to meters, and Z up to glTF's Y up.
+//!
+//! The asset's `extras.source` records the header's version, `SketchUp` and its version as the
+//! tool, and the inches and Z up the file is in, both converted.
 
 mod glb;
 mod image;
@@ -29,22 +32,45 @@ use serde_json::{Map, json};
 use super::Input;
 use crate::assets::Memory;
 use crate::document::{Document, Keep};
+use crate::source::{Axis, Converted, Fact, Handedness, SourceInfo};
 use crate::{Context, Result};
 
 /// Reads the `SketchUp` model `input`, with what it holds in a glTF document.
 pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document<'static>> {
     let bytes = input.read()?;
     let (glb, major) = convert(&bytes, input.limit)?;
-    let mut facts = Map::new();
-    facts.insert("application".into(), json!(format!("SketchUp {}", version_name(major))));
     // An empty model, or one of only edges, guides and text, has nothing to draw.
-    let Some(glb) = glb else {
-        return Ok(Document::empty(facts));
+    let mut doc = match glb {
+        Some(glb) => {
+            let name = input.path.to_string_lossy();
+            super::gltf::load(Input::memory(&glb, &name), &Memory::new(), keep)?.into_owned()
+        }
+        None => Document::empty(Map::new()),
     };
-    let name = input.path.to_string_lossy();
-    let mut doc = super::gltf::load(Input::memory(&glb, &name), &Memory::new(), keep)?.into_owned();
-    doc.facts = facts;
+    let mut source = Map::new();
+    source_info(&bytes, major).write(&mut source);
+    doc.json.entry("asset").or_insert_with(|| json!({ "version": "2.0" }))["extras"] = json!({ "source": source });
     Ok(doc)
+}
+
+/// What the file says of itself: only its header's version, and the inches and Z up every
+/// `SketchUp` model is in.
+fn source_info(bytes: &[u8], major: u32) -> SourceInfo {
+    SourceInfo {
+        format: Some("SketchUp".into()),
+        version: header_version(bytes),
+        meters_per_unit: Fact::Declared(0.0254),
+        unit: Some("inch".into()),
+        up_axis: Fact::Declared(Axis::PosZ),
+        handedness: Fact::Declared(Handedness::Right),
+        converted: Converted {
+            units: true,
+            up_axis: true,
+            handedness: false,
+        },
+        tool: Some(format!("SketchUp {}", version_name(major))),
+        ..SourceInfo::default()
+    }
 }
 
 /// Every `SketchUp` file opens with a string record (`FF FE FF`) holding the 14 characters `SketchUp Model`.
@@ -91,19 +117,24 @@ fn version_name(major: u32) -> String {
     }
 }
 
-/// The major version from the header's `{major.minor.build}` string, which follows `SketchUp Model` in UTF-16.
-fn major_version(bytes: &[u8]) -> Option<u32> {
+/// The header's `{major.minor.build}` string, which follows `SketchUp Model` in UTF-16, without
+/// its braces.
+fn header_version(bytes: &[u8]) -> Option<String> {
     let ascii: Vec<u8> = bytes.iter().take(96).copied().filter(|&b| b != 0).collect();
     let open = ascii.iter().position(|&b| b == b'{')?;
-    let digits: Vec<u8> = ascii[open + 1..]
+    let inside: Vec<u8> = ascii[open + 1..]
         .iter()
         .copied()
-        .take_while(u8::is_ascii_digit)
+        .take_while(|&b| b.is_ascii_digit() || b == b'.')
         .collect();
-    if digits.is_empty() || ascii.get(open + 1 + digits.len()) != Some(&b'.') {
-        return None;
-    }
-    std::str::from_utf8(&digits).ok()?.parse().ok()
+    (ascii.get(open + 1 + inside.len()) == Some(&b'}')).then(|| String::from_utf8_lossy(&inside).into_owned())
+}
+
+/// The major version from the header's version string.
+fn major_version(bytes: &[u8]) -> Option<u32> {
+    let version = header_version(bytes)?;
+    let (major, _) = version.split_once('.')?;
+    major.parse().ok()
 }
 
 #[cfg(test)]
@@ -126,6 +157,19 @@ mod tests {
         assert_eq!(major_version(&header("{15.0.9350}")), Some(15));
         assert_eq!(major_version(&header("{23.1.340}")), Some(23));
         assert_eq!(major_version(&header("{x}")), None);
+        assert_eq!(header_version(&header("{23.1.340}")).as_deref(), Some("23.1.340"));
+    }
+
+    #[test]
+    fn the_source_is_in_inches_and_z_up() {
+        let info = source_info(&header("{23.1.340}"), 23);
+        assert_eq!(info.format.as_deref(), Some("SketchUp"));
+        assert_eq!(info.version.as_deref(), Some("23.1.340"));
+        assert_eq!(info.tool.as_deref(), Some("SketchUp 2023"));
+        assert_eq!(info.meters_per_unit, Fact::Declared(0.0254));
+        assert_eq!(info.up_axis, Fact::Declared(Axis::PosZ));
+        assert_eq!(info.output_meters_per_unit(), Fact::Declared(1.0));
+        assert!(info.converted.units && info.converted.up_axis);
     }
 
     #[test]

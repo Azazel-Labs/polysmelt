@@ -18,7 +18,7 @@
   "faces_outward": true,
   "document": {
     "source": {
-      "upAxis": "Y",
+      "upAxis": "+Y",
       "metersPerUnit": 0.01
     }
   }

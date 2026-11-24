@@ -574,8 +574,8 @@ fn local(name: &[u8]) -> &[u8] {
     }
 }
 
-/// An attribute value with its references resolved.
-fn unescape(v: &[u8]) -> Cow<'_, str> {
+/// An attribute value, or text, with its references resolved.
+pub(super) fn unescape(v: &[u8]) -> Cow<'_, str> {
     if !v.contains(&b'&') {
         return String::from_utf8_lossy(v);
     }

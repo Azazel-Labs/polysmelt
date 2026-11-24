@@ -1,8 +1,10 @@
 {
   "spec": "SketchUp .skp (closed; as openskp reads it): an empty SketchUp 2020 model: no faces, instances, definitions or materials; no faces (no CFace class in its object stream)",
   "source": "saved by SketchUp, from openskp's test fixtures (packages/cpp/tests/fixtures)",
-  "facts": {
-    "application": "SketchUp 2020"
+  "document": {
+    "source": {
+      "tool": "SketchUp 2020"
+    }
   },
   "no_mesh": true
 }

@@ -507,16 +507,16 @@ impl Db {
         }
     }
 
-    /// The units' name.
-    pub fn unit_name(&self) -> &'static str {
-        match self.units {
-            0 => "m",
-            1 => "km",
-            4 => "ft",
-            5 => "in",
-            8 => "nmi",
-            _ => "unknown",
-        }
+    /// The units' name; `None` for a code the format doesn't define.
+    pub fn unit_name(&self) -> Option<&'static str> {
+        Some(match self.units {
+            0 => "meter",
+            1 => "kilometer",
+            4 => "foot",
+            5 => "inch",
+            8 => "nautical mile",
+            _ => return None,
+        })
     }
 
     /// The version as written: 16.4 for 1640, 15.4.1 for 1541.

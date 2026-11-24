@@ -51,6 +51,6 @@
   "faces_outward": true,
   "json": {
     "/asset/extras/source/version": "1.5.0",
-    "/asset/extras/source/authoringTool": "Hand written 1.0"
+    "/asset/extras/source/tool": "Hand written 1.0"
   }
 }

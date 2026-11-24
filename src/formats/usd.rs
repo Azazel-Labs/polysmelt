@@ -2,7 +2,10 @@
 //! stage (references, payloads, variants and instances resolved) becomes the node hierarchy, each prim a node with its
 //! local transform. Meshes are in their prim's own space and shared between instances; a point instancer places its
 //! prototypes under a node per instance. The stage's up axis and units become a root node that carries them to glTF's
-//! Y-up meters, and are recorded in `asset.extras.source`.
+//! Y-up meters, and are recorded in `asset.extras.source` (see [`crate::source`]; USD's 0.01 meters and Y up are
+//! assumed when the stage doesn't say), with its frame rate (`framesPerSecond`, else `timeCodesPerSecond`), its `doc`
+//! as the description and its `comment`. `startTimeCode`, `endTimeCode`, `defaultPrim` and `customLayerData` are
+//! kept as the stage gives them, and `timeCodesPerSecond` when the frame rate is `framesPerSecond`.
 //!
 //! Meshes keep their polygons' outlines (concave faces are ear-clipped, `holeIndices` faces left out) and their
 //! normals, texture coordinates and display colors in any interpolation; with no normals a subdivision surface is
@@ -56,6 +59,7 @@ use crate::images::{Images, Location, gray};
 use crate::material::{self, Alpha, Clearcoat, Factor, Full, Specular, Tex, UvTransform};
 use crate::mesh::{GRAY, Material, Prim, triangulate};
 use crate::num::f32_of;
+use crate::source::{Axis, Fact, Handedness, SourceInfo};
 
 /// Prim types that are no node: shading networks, and what the prims using them read (subsets, blend shapes,
 /// skeletal animations).
@@ -205,24 +209,34 @@ fn load_capped(input: Input<'_>, assets: &dyn Assets, keep: Keep, max_nodes: usi
     }
     scene_nodes.append(&mut r.skinned_roots);
 
-    let mut source = json!({
-        "format": "USD",
-        "upAxis": if z_up { "Z" } else { "Y" },
-        "metersPerUnit": meters,
-        "timeCodesPerSecond": tcps,
-    });
+    let mut source = Map::new();
     if r.truncated {
-        source["truncated"] = json!(format!("over {max_nodes} nodes: the rest are left out"));
+        source.insert(
+            "truncated".into(),
+            json!(format!("over {max_nodes} nodes: the rest are left out")),
+        );
     }
     if stage.has_authored_time_code_range() {
-        source["startTimeCode"] = json!(stage.start_time_code());
-        source["endTimeCode"] = json!(stage.end_time_code());
+        source.insert("startTimeCode".into(), json!(stage.start_time_code()));
+        source.insert("endTimeCode".into(), json!(stage.end_time_code()));
     }
     if let Some(p) = stage.default_prim() {
-        source["defaultPrim"] = json!(p.as_str());
+        source.insert("defaultPrim".into(), json!(p.as_str()));
+    }
+    if authored(&stage, "framesPerSecond") {
+        // The frame rate is the frames', and time codes count at their own rate.
+        source.insert("timeCodesPerSecond".into(), json!(tcps));
+    }
+    stage_info(&stage, z_up, meters, tcps).write(&mut source);
+    if let Some(Value::Object(data)) = stage_metadata_json(&stage, "customLayerData") {
+        source.insert("customLayerData".into(), Value::Object(data));
     }
     let mut json = Map::new();
-    json.insert("asset".into(), json!({ "extras": { "source": source } }));
+    let mut asset = json!({ "extras": { "source": source } });
+    if let Some(c) = asset["extras"]["source"].get("copyright").cloned() {
+        asset["copyright"] = c;
+    }
+    json.insert("asset".into(), asset);
     json.insert("scene".into(), json!(0));
     json.insert("scenes".into(), json!([{ "nodes": scene_nodes }]));
     json.insert("nodes".into(), Value::Array(std::mem::take(&mut r.nodes)));
@@ -249,6 +263,82 @@ fn load_capped(input: Input<'_>, assets: &dyn Assets, keep: Keep, max_nodes: usi
     let mut b = r.b;
     b.materials(&materials, images.list, &mut json);
     Ok(b.finish(json, Map::new()))
+}
+
+/// Whether the stage's root or session layer authors the metadata `field`.
+fn authored(stage: &usd::Stage, field: &str) -> bool {
+    let has = |layer: &sdf::Layer| layer.pseudo_root().is_some_and(|r| r.has_field(field));
+    has(&stage.root_layer()) || stage.session_layer().is_some_and(|l| has(&l))
+}
+
+/// The stage metadata `field` as JSON, when it's authored.
+fn stage_metadata_json(stage: &usd::Stage, field: &str) -> Option<Value> {
+    if !authored(stage, field) {
+        return None;
+    }
+    let value = stage.stage_metadata(field).ok().flatten()?;
+    json_of(&value)
+}
+
+/// What the stage says of itself: its up axis (USD's Y when it doesn't say), its `metersPerUnit` (0.01 when it
+/// doesn't), its frame rate (`framesPerSecond`, else `timeCodesPerSecond`, else USD's 24), its `doc` as the
+/// description and its `comment`.
+fn stage_info(stage: &usd::Stage, z_up: bool, meters: f64, tcps: f64) -> SourceInfo {
+    let fact = |field: &str, v: f64| {
+        if authored(stage, field) {
+            Fact::Declared(v)
+        } else {
+            Fact::Assumed(v)
+        }
+    };
+    let up = if z_up { Axis::PosZ } else { Axis::PosY };
+    let up_given = matches!(stage.stage_metadata("upAxis"), Ok(Some(v)) if matches!(v.as_str(), Some("Y" | "Z")));
+    let text = |field: &str| match stage_metadata_json(stage, field) {
+        Some(Value::String(s)) if !s.trim().is_empty() => Some(s.trim().to_owned()),
+        _ => None,
+    };
+    let fps = Some(stage.frames_per_second()).filter(|f| f.is_finite() && *f > 0.0);
+    let mut info = SourceInfo {
+        format: Some("USD".into()),
+        meters_per_unit: fact("metersPerUnit", meters),
+        unit: unit_name(meters).map(str::to_owned),
+        up_axis: if up_given && authored(stage, "upAxis") {
+            Fact::Declared(up)
+        } else {
+            Fact::Assumed(up)
+        },
+        // USD's coordinate system is right-handed by definition.
+        handedness: Fact::Declared(Handedness::Right),
+        frame_rate: match fps {
+            Some(f) if authored(stage, "framesPerSecond") => Fact::Declared(f),
+            _ => fact("timeCodesPerSecond", tcps),
+        },
+        description: text("documentation").or_else(|| text("doc")),
+        comments: text("comment").into_iter().collect(),
+        ..SourceInfo::default()
+    };
+    info.converted.units = (meters - 1.0).abs() > 1e-12;
+    info.converted.up_axis = z_up;
+    info
+}
+
+/// The name of a unit `meters` long, for the lengths USD names (`UsdGeomLinearUnits`).
+fn unit_name(meters: f64) -> Option<&'static str> {
+    [
+        ("nanometer", 1e-9),
+        ("micrometer", 1e-6),
+        ("millimeter", 0.001),
+        ("centimeter", 0.01),
+        ("meter", 1.0),
+        ("kilometer", 1000.0),
+        ("inch", 0.0254),
+        ("foot", 0.3048),
+        ("yard", 0.9144),
+        ("mile", 1609.344),
+    ]
+    .into_iter()
+    .find(|(_, m)| ((meters - m) / m).abs() < 1e-6)
+    .map(|(name, _)| name)
 }
 
 /// The paths of the stage's prims, composed (which reads the layers they reference), parents before children.
@@ -3716,6 +3806,67 @@ def Material \"Planks\"
 
     fn flat(usda: &str, images: &[(&str, bool)]) -> crate::mesh::Mesh {
         doc(usda, images).flatten(Pose::Rest).unwrap().unwrap()
+    }
+
+    #[test]
+    fn what_the_stage_says_of_itself() {
+        use crate::source::{Axis, Fact, Handedness};
+        let mesh = "def Mesh \"Quad\"
+{
+    point3f[] points = [(0, 0, 0), (1, 0, 0), (1, 1, 0)]
+    int[] faceVertexCounts = [3]
+    int[] faceVertexIndices = [0, 1, 2]
+}
+";
+        let usda = format!(
+            "#usda 1.0
+(
+    doc = \"A crate\"
+    comment = \"first pass\"
+    upAxis = \"Z\"
+    metersPerUnit = 0.0254
+    framesPerSecond = 30
+    timeCodesPerSecond = 60
+    customLayerData = {{
+        string creator = \"someone\"
+    }}
+)
+
+{mesh}"
+        );
+        let d = doc(&usda, &[]);
+        let info = d.source_info();
+        assert_eq!(info.format.as_deref(), Some("USD"));
+        assert_eq!(info.meters_per_unit, Fact::Declared(0.0254));
+        assert_eq!(info.unit.as_deref(), Some("inch"));
+        assert_eq!(info.up_axis, Fact::Declared(Axis::PosZ));
+        assert_eq!(info.handedness, Fact::Declared(Handedness::Right));
+        assert_eq!(info.frame_rate, Fact::Declared(30.0));
+        assert!(info.converted.units && info.converted.up_axis);
+        assert_eq!(info.description.as_deref(), Some("A crate"));
+        assert_eq!(info.comments, ["first pass"]);
+        assert_eq!(
+            d.json["asset"]["extras"]["source"]["customLayerData"]["creator"],
+            "someone"
+        );
+        assert_eq!(d.json["asset"]["extras"]["source"]["timeCodesPerSecond"], 60.0);
+
+        // A stage that says nothing: USD's centimeters, Y up and 24 time codes a second, assumed.
+        let d = doc(
+            &format!(
+                "#usda 1.0
+
+{mesh}"
+            ),
+            &[],
+        );
+        let info = d.source_info();
+        assert_eq!(info.meters_per_unit, Fact::Assumed(0.01));
+        assert_eq!(info.unit.as_deref(), Some("centimeter"));
+        assert_eq!(info.up_axis, Fact::Assumed(Axis::PosY));
+        assert_eq!(info.frame_rate, Fact::Assumed(24.0));
+        assert!(info.converted.units && !info.converted.up_axis);
+        assert_eq!(info.description, None);
     }
 
     fn close<const N: usize>(a: [f32; N], b: [f32; N]) -> bool {

@@ -117,8 +117,45 @@ fn z_up_centimeters_become_y_up_meters() {
     let m = flat(&d);
     let ys: Vec<f32> = m.prims[0].positions.iter().map(|p| p[1]).collect();
     assert!(ys.iter().all(|y| (y - 1.0).abs() < 1e-5), "{ys:?}");
-    assert_eq!(d.json["asset"]["extras"]["source"]["upAxis"], "Z");
+    let info = d.source_info();
+    assert_eq!(info.up_axis, Fact::Declared(Axis::PosZ));
+    assert_eq!(info.meters_per_unit, Fact::Declared(0.01));
+    assert_eq!(info.unit.as_deref(), Some("centimeter"));
+    assert!(info.converted.units && info.converted.up_axis && !info.converted.handedness);
+    assert_eq!(info.output_meters_per_unit(), Fact::Declared(1.0));
     assert_eq!(d.json["nodes"].as_array().unwrap().last().unwrap()["name"], "RootNode");
+}
+
+#[test]
+fn the_asset_says_who_made_it_and_when() {
+    let head = r"<contributor><author>Ann &amp; Bo</author><authoring_tool>Modeler 3</authoring_tool>
+        <comments>first cut</comments><copyright>(c) 2024 Ann</copyright></contributor>
+      <contributor><author>Cy</author><authoring_tool>Fixer 1</authoring_tool><comments>cleaned up</comments></contributor>
+      <created>2024-01-02T03:04:05Z</created><modified>2024-02-03T04:05:06Z</modified>
+      <keywords>crate wood prop</keywords><revision>7</revision><subject>A crate</subject><title>Crate</title>";
+    let d = read(&doc(head, QUAD, r##"<node><instance_geometry url="#quad"/></node>"##));
+    let info = d.source_info();
+    assert_eq!(info.format.as_deref(), Some("COLLADA"));
+    assert_eq!(info.version.as_deref(), Some("1.4.1"));
+    assert_eq!(info.tool.as_deref(), Some("Modeler 3; Fixer 1"));
+    assert_eq!(info.author.as_deref(), Some("Ann & Bo; Cy"));
+    assert_eq!(info.copyright.as_deref(), Some("(c) 2024 Ann"));
+    assert_eq!(info.comments, ["first cut", "cleaned up"]);
+    assert_eq!(info.title.as_deref(), Some("Crate"));
+    assert_eq!(info.description.as_deref(), Some("A crate"));
+    assert_eq!(info.keywords, ["crate", "wood", "prop"]);
+    assert_eq!(info.created.as_deref(), Some("2024-01-02T03:04:05Z"));
+    assert_eq!(info.modified.as_deref(), Some("2024-02-03T04:05:06Z"));
+    assert_eq!(d.json["asset"]["copyright"], "(c) 2024 Ann");
+    let source = &d.json["asset"]["extras"]["source"];
+    assert_eq!(source["revision"], "7");
+    assert_eq!(source["contributors"][1]["authoring_tool"], "Fixer 1");
+    // No unit and no up axis: COLLADA's meter and Y up, assumed, and nothing to convert.
+    assert_eq!(info.meters_per_unit, Fact::Assumed(1.0));
+    assert_eq!(info.unit.as_deref(), Some("meter"));
+    assert_eq!(info.up_axis, Fact::Assumed(Axis::PosY));
+    assert_eq!(info.handedness, Fact::Declared(Handedness::Right));
+    assert_eq!(info.converted, crate::source::Converted::default());
 }
 
 #[test]

@@ -154,10 +154,19 @@ impl Parser {
                     && let Some(f) = attr(e, b"conversionFactor").and_then(|f| f64_from(f.trim_ascii()))
                 {
                     self.g.unit = Some(f);
+                    self.g.unit_name = text(b"name");
                 }
                 return Frame::Skip;
             }
-            b"meta" | b"component" | b"IS" | b"field" | b"fieldValue" | b"connect" => return Frame::Skip,
+            b"meta" => {
+                if matches!(parent, Some(Frame::Top))
+                    && let (Some(name), Some(content)) = (text(b"name"), text(b"content"))
+                {
+                    self.g.meta.push((name, content));
+                }
+                return Frame::Skip;
+            }
+            b"component" | b"IS" | b"field" | b"fieldValue" | b"connect" => return Frame::Skip,
             b"ProtoDeclare" => {
                 let name = text(b"name").unwrap_or_default();
                 self.g.protos.push(Proto {
