@@ -1227,7 +1227,27 @@ impl Builder {
         images: Vec<Source>,
         json: &mut Map<String, Value>,
     ) {
-        let mut w = Writer::new(images.len());
+        // A WebP image a flattened glTF kept is re-encoded as PNG now; one that doesn't decode is
+        // left out, with the textures that use it.
+        let images: Vec<Option<Source>> = images
+            .into_iter()
+            .map(|s| match s {
+                Source::Image(i) => i.into_png_or_jpeg().map(Source::Image),
+                r @ Source::Ref(..) => Some(r),
+            })
+            .collect();
+        let mut next = 0;
+        let written = images
+            .iter()
+            .map(|s| {
+                s.as_ref().map(|_| {
+                    next += 1;
+                    next - 1
+                })
+            })
+            .collect();
+        let images = images.into_iter().flatten();
+        let mut w = Writer::new(written);
         let materials: Vec<Value> = materials.into_iter().map(|m| w.material(&m.into())).collect();
         let images: Vec<Value> = images
             .into_iter()

@@ -363,15 +363,17 @@ type Sampler = ([u32; 2], [Option<u32>; 2]);
 
 /// Writes materials: the textures they name (one per image and sampler), their samplers, and the extensions used.
 pub(crate) struct Writer {
-    images: usize,
+    /// Each image's index among those written: `None` for one left out.
+    images: Vec<Option<usize>>,
     /// (image, sampler) → texture, in order.
     textures: Vec<(usize, Sampler)>,
     used: Vec<&'static str>,
 }
 
 impl Writer {
-    /// A writer over `images` images. Textures are made as materials use them, one for each image and sampler.
-    pub(crate) fn new(images: usize) -> Self {
+    /// A writer over images written at the indices `images` gives (`None` for one left out, whose textures go
+    /// too). Textures are made as materials use them, one for each image and sampler.
+    pub(crate) fn new(images: Vec<Option<usize>>) -> Self {
         Self {
             images,
             textures: Vec::new(),
@@ -387,8 +389,9 @@ impl Writer {
 
     /// A texture info, or `None` when its image isn't there.
     fn tex(&mut self, t: Option<&Tex>, scale_key: Option<&str>) -> Option<Value> {
-        let t = t.filter(|t| t.image < self.images)?;
-        let key = (t.image, (t.wrap, t.filter));
+        let t = t?;
+        let image = (*self.images.get(t.image)?)?;
+        let key = (image, (t.wrap, t.filter));
         let index = self.textures.iter().position(|&k| k == key).unwrap_or_else(|| {
             self.textures.push(key);
             self.textures.len() - 1
@@ -658,7 +661,7 @@ mod tests {
 
     #[test]
     fn default_material_writes_only_the_core() {
-        let mut w = Writer::new(0);
+        let mut w = Writer::new(Vec::new());
         let m = w.material(&Full::default());
         assert!(m.get("extensions").is_none());
         assert_eq!(m["pbrMetallicRoughness"]["metallicFactor"], json!(1.0));
@@ -668,7 +671,7 @@ mod tests {
 
     #[test]
     fn bright_emission_takes_a_strength() {
-        let mut w = Writer::new(0);
+        let mut w = Writer::new(Vec::new());
         let m = w.material(&Full {
             emissive: [4.0, 2.0, 0.0],
             ..Full::default()
@@ -683,7 +686,7 @@ mod tests {
 
     #[test]
     fn textures_are_shared_per_image_and_wrap() {
-        let mut w = Writer::new(2);
+        let mut w = Writer::new(vec![Some(0), Some(1)]);
         let clamped = Tex {
             wrap: [CLAMP; 2],
             transform: Some(UvTransform {
@@ -719,7 +722,7 @@ mod tests {
 
     #[test]
     fn out_of_range_values_are_clamped_or_dropped() {
-        let mut w = Writer::new(0);
+        let mut w = Writer::new(Vec::new());
         let m = w.material(&Full {
             metallic: 2.0,
             roughness: -1.0,

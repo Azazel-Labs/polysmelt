@@ -2,6 +2,15 @@
 
 use std::io::Cursor;
 
+/// Whether `bytes`, a WebP image, has a header that reads and gives a size to decode into: what
+/// can be checked without decoding it.
+pub(crate) fn header_reads(bytes: &[u8]) -> bool {
+    image_webp::WebPDecoder::new(Cursor::new(bytes))
+        .ok()
+        .and_then(|d| d.output_buffer_size())
+        .is_some()
+}
+
 /// `bytes`, a WebP image (an animation's first frame), as PNG bytes.
 pub(crate) fn to_png(bytes: &[u8]) -> Option<Vec<u8>> {
     let mut d = image_webp::WebPDecoder::new(Cursor::new(bytes)).ok()?;

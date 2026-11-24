@@ -231,13 +231,18 @@ impl Material {
     }
 }
 
-/// An image ready to embed: PNG or JPEG bytes.
+/// An image ready to embed: PNG or JPEG bytes, or a WebP image a glTF document holds, which is
+/// re-encoded as PNG only when it's written.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Image {
     /// The encoded image. Shared: an image read from a document's buffer points into it, and
     /// clones point at the same bytes.
     pub bytes: crate::Bytes,
-    /// `image/png` or `image/jpeg`.
+    /// `image/png` or `image/jpeg`; or `image/webp` for a WebP image [`Document::flatten`]
+    /// took from a glTF document as it is, which [`to_glb`] writes as PNG and
+    /// [`Image::into_png_or_jpeg`] turns into PNG.
+    ///
+    /// [`Document::flatten`]: crate::document::Document::flatten
     pub mime: &'static str,
 }
 
@@ -332,9 +337,33 @@ impl Image {
         image
     }
 
+    /// [`Image::decode_named`], except that a WebP image whose header reads is kept as it is,
+    /// as `image/webp`: decoding and re-encoding it waits until it's written.
+    pub(crate) fn kept_named(bytes: crate::Bytes, name: &std::path::Path) -> Option<Self> {
+        #[cfg(feature = "webp")]
+        if is_webp(&bytes) && crate::webp::header_reads(&bytes) {
+            return Some(Self {
+                bytes,
+                mime: "image/webp",
+            });
+        }
+        Self::decode_named(bytes, name)
+    }
+
+    /// The image as PNG or JPEG: PNG and JPEG as they are, and a WebP image (see
+    /// [`Image::mime`]) re-encoded as PNG. `None` for a WebP image that doesn't decode.
+    #[must_use]
+    pub fn into_png_or_jpeg(self) -> Option<Self> {
+        if self.mime == "image/webp" {
+            Self::webp(&self.bytes)
+        } else {
+            Some(self)
+        }
+    }
+
     /// WebP `bytes` re-encoded as PNG, with the `webp` feature.
     pub(crate) fn webp(bytes: &[u8]) -> Option<Self> {
-        if !(bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP") {
+        if !is_webp(bytes) {
             return None;
         }
         #[cfg(feature = "webp")]
@@ -355,6 +384,11 @@ impl Image {
             None
         }
     }
+}
+
+/// Whether `bytes` start as a WebP file does.
+fn is_webp(bytes: &[u8]) -> bool {
+    bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP"
 }
 
 /// An sRGB-encoded color channel in linear light.
