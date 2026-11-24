@@ -1,10 +1,11 @@
 //! 3MF, the 3D-printing format: a zip of XML models. Read here: meshes, components (in the same model or another
 //! part of the zip) and the build's placed items, in the model's unit (scaled to glTF's meters); the 3MF materials
 //! extension's base materials, color groups (per triangle or blended across one), 2D textures, composite materials
-//! (mixed into a color) and multiproperties (layered into a color, or a texture's coordinates); and what slicers
-//! keep beside them: the filaments' colors, which filament each object and part prints in (Bambu Studio,
-//! `OrcaSlicer`, `PrusaSlicer`), the filaments painted onto triangles, and which parts and volumes aren't printed
-//! but change how the rest prints (modifiers, negative volumes, support blockers and enforcers).
+//! (mixed into a color) and multiproperties (layered into a color, or a texture's coordinates); the beam lattice
+//! extension's beams and balls, made into triangles (see [`lattice`]); and what slicers keep beside them: the
+//! filaments' colors, which filament each object and part prints in (Bambu Studio, `OrcaSlicer`, `PrusaSlicer`), the
+//! filaments painted onto triangles, and which parts and volumes aren't printed but change how the rest prints
+//! (modifiers, negative volumes, support blockers and enforcers).
 //!
 //! The build is a node per item and component, each with its 3MF transform, under a root node that
 //! turns the model's Z-up millimeters (or its unit) into glTF's Y-up meters; an object's triangles
@@ -13,6 +14,9 @@
 //! node (`KHR_node_visibility`) named for what it is. A component that leads back to an object it's
 //! inside is left out. Object names, types and part numbers, the model's metadata and the slicer's filament
 //! colors go in extras.
+//!
+//! An object of the volumetric extension, a level set of implicit functions, has no surface to read: a build of
+//! nothing else fails, saying so.
 //!
 //! The source's units are declared by the model's `unit`, or millimeters assumed when it has none, as the
 //! specification says; its up axis is +Z and its handedness right, as the specification fixes them. The
@@ -36,6 +40,9 @@ type Zip<'a> = ZipArchive<Box<dyn super::ReadSeek + 'a>>;
 
 use crate::material::{self, Factor, Full, Specular, Tex, Volume};
 use crate::mesh::{GRAY, Image, Material, Prim, srgb_to_linear};
+
+mod lattice;
+use lattice::{Attr, BallMode, BeamLook, Cap, Clip, Clipper, Lattice};
 
 /// A 3MF transform: the first three columns of a 4x4 matrix, row by row (points are row vectors).
 type Mat = [f32; 12];
@@ -83,6 +90,10 @@ struct Object {
     verts: Vec<[f32; 3]>,
     tris: Vec<Tri>,
     components: Vec<Component>,
+    /// Its beam lattice.
+    lattice: Option<Box<Lattice>>,
+    /// Whether it's a volumetric level set.
+    levelset: bool,
 }
 
 /// A property group of the materials extension.
@@ -382,6 +393,9 @@ pub(crate) fn load(input: super::Input<'_>, keep: Keep) -> Result<Document<'stat
         triangles: 0,
         built: 0,
         limit: input.limit,
+        lattices: HashMap::new(),
+        unclipped: 0,
+        levelsets: 0,
     };
     let mut items = Vec::new();
     for item in &main.build {
@@ -400,13 +414,27 @@ pub(crate) fn load(input: super::Input<'_>, keep: Keep) -> Result<Document<'stat
             items.push(n);
         }
     }
-    ensure!(out.triangles > 0, "this 3MF has no triangles");
+    if out.triangles == 0 {
+        ensure!(
+            out.levelsets == 0,
+            "this 3MF builds only volumetric level sets (shapes given by implicit functions), which have no \
+             triangles to read"
+        );
+        bail!("this 3MF has no triangles");
+    }
 
     let mut facts = Map::new();
     facts.insert("triangles".into(), json!(out.triangles));
     facts.insert("objects".into(), json!(main.build.len()));
     if out.distinct.len() > 1 {
         facts.insert("colors".into(), json!(out.distinct.len()));
+    }
+    let (beams, balls) = out.lattices.values().fold((0, 0), |(a, b), &(x, y)| (a + x, b + y));
+    if beams > 0 {
+        facts.insert("beams".into(), json!(beams));
+    }
+    if balls > 0 {
+        facts.insert("balls".into(), json!(balls));
     }
 
     let mut images = Images::new(!keep.image_bytes, std::path::Path::new(""));
@@ -502,6 +530,9 @@ pub(crate) fn load(input: super::Input<'_>, keep: Keep) -> Result<Document<'stat
     if out.dropped > 0 {
         source["droppedComponents"] = json!(out.dropped);
     }
+    if out.unclipped > 0 {
+        source["unclippedLattices"] = json!(out.unclipped);
+    }
     if let Value::Object(m) = &mut source {
         info.write(m);
     }
@@ -575,6 +606,12 @@ struct Emit<'a> {
     built: usize,
     /// The most triangles the meshes may have.
     limit: usize,
+    /// The beams and balls drawn of each object (model file, id) with a lattice.
+    lattices: HashMap<(String, u32), (usize, usize)>,
+    /// Lattices to be clipped by a mesh that isn't there, drawn whole.
+    unclipped: usize,
+    /// Level sets placed, which draw nothing.
+    levelsets: usize,
 }
 
 /// An object's mesh as [`Emit::mesh_of_object`] is asked for it: model file, object id, filament, whether at the
@@ -589,6 +626,9 @@ const MAX_NODES: usize = 1 << 20;
 const MAX_VOLUMES: usize = 4096;
 /// The most objects a build may visit, placed or not.
 const MAX_VISITS: usize = 1 << 24;
+/// The most triangles an object's beam lattice is made into, while the limit allows: its curves are coarsened to
+/// fit.
+const MAX_LATTICE_TRIANGLES: usize = 1 << 22;
 
 /// Where a node is placed: inside the build item for object `item` (the one slicers' settings are kept against),
 /// printing in `filament` unless its parts or triangles say otherwise, `depth` components down, and whether it's
@@ -667,7 +707,10 @@ impl Emit<'_> {
             }
         }
         self.path.pop();
-        if !o.tris.is_empty() {
+        if o.levelset && o.tris.is_empty() && o.lattice.is_none() {
+            self.levelsets += 1;
+        }
+        if !o.tris.is_empty() || o.lattice.is_some() {
             let top = at.depth == 0;
             if let Some(mesh) = self.mesh_of_object(key, o, id, at.filament, top, None)? {
                 node.insert("mesh".into(), json!(mesh));
@@ -740,7 +783,7 @@ impl Emit<'_> {
             return Ok(mesh);
         }
         let part = self.parts.get(key).context("model file")?;
-        let mesh = self.mesh(part, o, id, filament, top, range)?;
+        let mesh = self.mesh(part, key, o, id, filament, top, range)?;
         self.mesh_of.insert(at, mesh);
         Ok(mesh)
     }
@@ -751,9 +794,11 @@ impl Emit<'_> {
     ///
     /// Corners share a vertex wherever the object's triangles do, unless their texture coordinates or colors
     /// differ. There are no normals: printed models are faceted, which glTF clients shade flat.
+    #[allow(clippy::too_many_arguments)]
     fn mesh(
         &mut self,
         part: &Part,
+        key: &str,
         o: &Object,
         id: u32,
         filament: Option<usize>,
@@ -801,23 +846,10 @@ impl Emit<'_> {
                     let [r, g, b] = self.slicer.filament(n);
                     (Look::Color([r, g, b, 255], None), None, None)
                 }
-                None => self.properties(part, o, t),
+                None => self.properties(part, t.pid.or(o.pid), [t.p1.or(o.pindex), t.p2, t.p3]),
             };
-            match look {
-                Look::Color(c, _) => {
-                    self.distinct.insert([c[0], c[1], c[2]]);
-                }
-                Look::Vertex => {
-                    for c in colors.iter().flatten() {
-                        self.distinct.insert([c[0], c[1], c[2]]);
-                    }
-                }
-                _ => {}
-            }
-            let material = *self.looks.entry(look).or_insert_with(|| {
-                self.order.push(look);
-                self.order.len() - 1
-            });
+            self.note(look, colors.as_ref());
+            let material = self.material(look);
             if prim_of.len() <= material {
                 prim_of.resize(material + 1, u32::MAX);
             }
@@ -869,6 +901,33 @@ impl Emit<'_> {
             count += 1;
             self.built += 1;
         }
+        let mut extras = None;
+        if range.is_none()
+            && let Some(l) = o.lattice.as_deref()
+        {
+            let (made, beams, balls) = self.lattice(part, o, id, l, filament, &mut prims);
+            count += made;
+            self.built += made;
+            ensure!(
+                self.built <= self.limit,
+                "too many triangles to convert (more than {})",
+                self.limit
+            );
+            self.lattices.insert((key.to_owned(), id), (beams, balls));
+            let mut e = json!({ "beams": beams });
+            if balls > 0 {
+                e["balls"] = json!(balls);
+            }
+            if !l.sets.is_empty() {
+                let sets: Vec<Value> = l
+                    .sets
+                    .iter()
+                    .map(|s| json!({ "name": s.name, "identifier": s.identifier, "beams": s.beams, "balls": s.balls }))
+                    .collect();
+                e["beamsets"] = json!(sets);
+            }
+            extras = Some(e);
+        }
         // Materials are numbered as looks turn up, so every one used is already there.
         let Some(mut mesh) = self.b.mesh(prims, usize::MAX) else {
             return Ok(None);
@@ -876,21 +935,180 @@ impl Emit<'_> {
         if let Some(name) = &o.name {
             mesh["name"] = json!(name);
         }
+        if let Some(e) = extras {
+            mesh["extras"] = e;
+        }
         self.meshes.push(mesh);
         self.mesh_triangles.push(count);
         Ok(Some(self.meshes.len() - 1))
     }
 
-    /// A triangle's look from the materials extension: its property group (its own, else its object's) and the
-    /// entry for each corner (p1, p2 and p3; else the object's pindex).
+    /// The material of `look`, numbered as looks turn up.
+    fn material(&mut self, look: Look) -> usize {
+        *self.looks.entry(look).or_insert_with(|| {
+            self.order.push(look);
+            self.order.len() - 1
+        })
+    }
+
+    /// Counts the colors `look` shows.
+    fn note(&mut self, look: Look, colors: Option<&[[u8; 4]; 3]>) {
+        match look {
+            Look::Color(c, _) => {
+                self.distinct.insert([c[0], c[1], c[2]]);
+            }
+            Look::Vertex => {
+                for c in colors.into_iter().flatten() {
+                    self.distinct.insert([c[0], c[1], c[2]]);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The primitive of `look` among a lattice's, `prim_of` each look's so far.
+    fn lattice_prim(&mut self, prims: &mut Vec<Prim>, prim_of: &mut HashMap<Look, usize>, look: Look) -> usize {
+        let material = self.material(look);
+        *prim_of.entry(look).or_insert_with(|| {
+            prims.push(Prim {
+                material,
+                ..Prim::default()
+            });
+            prims.len() - 1
+        })
+    }
+
+    /// A lattice's look, in property group `pid` from entry `p[0]` to `p[1]`, and the attributes at either end;
+    /// for colors that blend, each end's color too. An object's filament overrides it.
+    fn lattice_look(
+        &mut self,
+        part: &Part,
+        filament: Option<usize>,
+        pid: Option<u32>,
+        p: [Option<u32>; 2],
+    ) -> (Look, [Attr; 2], [[u8; 4]; 2]) {
+        let (look, uvs, colors) = match filament {
+            Some(n) => {
+                let [r, g, b] = self.slicer.filament(n);
+                (Look::Color([r, g, b, 255], None), None, None)
+            }
+            None => self.properties(part, pid, [p[0], p[1], p[1]]),
+        };
+        self.note(look, colors.as_ref());
+        match (look, uvs, colors) {
+            (Look::Texture(_), Some(uv), _) => {
+                let at = |k: usize| Attr::Uv([uv[k][0], 1.0 - uv[k][1]]);
+                (look, [at(0), at(1)], [[0; 4]; 2])
+            }
+            (Look::Vertex, _, Some(cs)) => (
+                look,
+                [Attr::Color(linear(cs[0])), Attr::Color(linear(cs[1]))],
+                [cs[0], cs[1]],
+            ),
+            _ => (look, [Attr::None; 2], [[0; 4]; 2]),
+        }
+    }
+
+    /// Object `o`'s beam lattice made into triangles, in primitives added to `prims` (with normals, so apart from
+    /// the faceted triangles'), clipped by its clipping mesh. Returns the triangles, and the beams and balls drawn.
+    ///
+    /// A beam's properties are its own, else the lattice's, else the object's, the second end's defaulting to the
+    /// first's; colors that differ blend along it, and a display property (which can't blend) is the first end's
+    /// throughout. A sphere at a vertex takes the properties of the end or ball that gave it its radius.
+    fn lattice(
+        &mut self,
+        part: &Part,
+        o: &Object,
+        id: u32,
+        l: &Lattice,
+        filament: Option<usize>,
+        prims: &mut Vec<Prim>,
+    ) -> (usize, usize, usize) {
+        let plan = lattice::plan(l, &o.verts);
+        if plan.beams.is_empty() && plan.spheres.is_empty() {
+            return (0, 0, 0);
+        }
+        let first = prims.len();
+        let mut prim_of: HashMap<Look, usize> = HashMap::new();
+        let mut looks = Vec::with_capacity(plan.beams.len());
+        for &i in &plan.beams {
+            let b = &l.beams[i];
+            let pid = b.pid.or(l.pid).or(o.pid);
+            let p1 = b.p[0].or(l.pindex).or(o.pindex);
+            let p2 = if pid.is_some_and(|g| part.group_display.contains_key(&g)) {
+                None
+            } else {
+                b.p[1]
+            };
+            let (look, side_attr, colors) = self.lattice_look(part, filament, pid, [p1, p2]);
+            let side = self.lattice_prim(prims, &mut prim_of, look);
+            // Where colors blend along the side, each end's cap is its end's color.
+            let ends = if look == Look::Vertex {
+                colors.map(|c| (self.lattice_prim(prims, &mut prim_of, Look::Color(c, None)), Attr::None))
+            } else {
+                [(side, side_attr[0]), (side, side_attr[1])]
+            };
+            looks.push(BeamLook { side, side_attr, ends });
+        }
+        let mut sphere_looks = Vec::with_capacity(plan.spheres.len());
+        for s in &plan.spheres {
+            let (pid, p) = match s.from {
+                lattice::From::End(k, end) => {
+                    sphere_looks.push(looks[k].ends[end]);
+                    continue;
+                }
+                lattice::From::Ball(k) => {
+                    let ball = &l.balls[k];
+                    (ball.pid.or(l.pid).or(o.pid), ball.p.or(l.pindex).or(o.pindex))
+                }
+                lattice::From::Lattice => (l.pid.or(o.pid), l.pindex.or(o.pindex)),
+            };
+            let (look, attr, colors) = self.lattice_look(part, filament, pid, [p, None]);
+            let look = if look == Look::Vertex {
+                Look::Color(colors[0], None)
+            } else {
+                look
+            };
+            sphere_looks.push((self.lattice_prim(prims, &mut prim_of, look), attr[0]));
+        }
+        let budget = self.limit.saturating_sub(self.built).min(MAX_LATTICE_TRIANGLES);
+        let mut made = lattice::build(l, &o.verts, &plan, &looks, &sphere_looks, prims, budget);
+        if l.clip != Clip::None {
+            // The clipping mesh is in the lattice's own space; it can't be the lattice's own object.
+            let clipping = l.clipping_mesh.filter(|&c| c != id).and_then(|c| part.objects.get(&c));
+            match clipping.and_then(|m| Clipper::new(&m.verts, m.tris.iter().map(|t| t.v))) {
+                Some(clipper) => {
+                    // What refining the cut may add comes out of what's left of the budget.
+                    let mut room = budget.saturating_sub(made);
+                    made = 0;
+                    for p in &mut prims[first..] {
+                        let before = p.indices.len() / 3;
+                        let after = lattice::clip(p, &clipper, l.clip == Clip::Inside, room);
+                        room = room.saturating_sub(after.saturating_sub(before));
+                        made += after;
+                    }
+                }
+                None => self.unclipped += 1,
+            }
+        }
+        (made, plan.beams.len(), plan.balls)
+    }
+
+    /// A look from the materials extension: property group `pid` and the entry for each corner (`p[0]`, the
+    /// second and third defaulting to the first), as already defaulted to the object's.
     #[allow(clippy::type_complexity)]
-    fn properties(&mut self, part: &Part, o: &Object, t: &Tri) -> (Look, Option<[[f32; 2]; 3]>, Option<[[u8; 4]; 3]>) {
+    fn properties(
+        &mut self,
+        part: &Part,
+        pid: Option<u32>,
+        p: [Option<u32>; 3],
+    ) -> (Look, Option<[[f32; 2]; 3]>, Option<[[u8; 4]; 3]>) {
         let plain = (Look::Plain, None, None);
-        let Some((gid, group)) = t.pid.or(o.pid).and_then(|g| Some((g, part.groups.get(&g)?))) else {
+        let Some((gid, group)) = pid.and_then(|g| Some((g, part.groups.get(&g)?))) else {
             return plain;
         };
-        let p1 = t.p1.or(o.pindex).unwrap_or(0) as usize;
-        let at = [p1, t.p2.map_or(p1, |v| v as usize), t.p3.map_or(p1, |v| v as usize)];
+        let p1 = p[0].unwrap_or(0) as usize;
+        let at = [p1, p[1].map_or(p1, |v| v as usize), p[2].map_or(p1, |v| v as usize)];
         match group {
             Group::Colors(cs) => {
                 let c = at.map(|i| cs.get(i).and_then(|e| e.0));
@@ -1024,6 +1242,8 @@ fn parse_part(r: impl Read, triangles: &mut usize, limit: usize) -> Result<Part>
     let mut in_build = false;
     // The `<metadata name>` whose text is being read.
     let mut meta: Option<String> = None;
+    // Inside an object's `<beamlattice>`, and inside one of its `<beamset>`s.
+    let (mut in_lattice, mut in_set) = (false, false);
     loop {
         let (e, empty) = match reader.read_event_into(&mut buf)? {
             Event::Start(e) => (e, false),
@@ -1057,6 +1277,8 @@ fn parse_part(r: impl Read, triangles: &mut usize, limit: usize) -> Result<Part>
                     }
                     b"build" => in_build = false,
                     b"metadata" => meta = None,
+                    b"beamlattice" => in_lattice = false,
+                    b"beamset" => in_set = false,
                     _ => {}
                 }
                 buf.clear();
@@ -1123,6 +1345,114 @@ fn parse_part(r: impl Read, triangles: &mut usize, limit: usize) -> Result<Part>
                     *triangles += 1;
                     ensure!(*triangles <= limit, "too many triangles to preview (more than {limit})");
                     o.tris.push(t);
+                }
+            }
+            b"beamlattice" => {
+                if let Some((_, o)) = &mut object {
+                    let mut l = Lattice::default();
+                    each_attr(&e, |k, v| match k {
+                        b"minlength" => l.minlength = num(v).unwrap_or(0.0),
+                        b"radius" => l.radius = num(v).unwrap_or(f32::NAN),
+                        b"cap" => l.cap = Cap::parse(v).unwrap_or(Cap::Sphere),
+                        b"ballmode" => {
+                            l.ball_mode = match v.trim_ascii() {
+                                b"all" => BallMode::All,
+                                b"mixed" => BallMode::Mixed,
+                                _ => BallMode::None,
+                            };
+                        }
+                        b"ballradius" => l.ball_radius = num(v).unwrap_or(f32::NAN),
+                        // `clipping` is what drafts of the extension called it.
+                        b"clippingmode" | b"clipping" => {
+                            l.clip = match v.trim_ascii() {
+                                b"inside" => Clip::Inside,
+                                b"outside" => Clip::Outside,
+                                _ => Clip::None,
+                            };
+                        }
+                        b"clippingmesh" => l.clipping_mesh = num(v),
+                        b"pid" => l.pid = num(v),
+                        b"pindex" => l.pindex = num(v),
+                        _ => {}
+                    });
+                    o.lattice = Some(Box::new(l));
+                    in_lattice = !empty;
+                }
+            }
+            b"beam" if in_lattice => {
+                if let Some(l) = object.as_mut().and_then(|(_, o)| o.lattice.as_deref_mut()) {
+                    let (mut v, mut r, mut cap, mut pid, mut p) =
+                        ([u32::MAX; 2], [None; 2], [None; 2], None, [None; 2]);
+                    each_attr(&e, |k, x| match k {
+                        b"v1" => v[0] = num(x).unwrap_or(u32::MAX),
+                        b"v2" => v[1] = num(x).unwrap_or(u32::MAX),
+                        b"r1" => r[0] = num::<f32>(x),
+                        b"r2" => r[1] = num::<f32>(x),
+                        b"cap1" => cap[0] = Cap::parse(x),
+                        b"cap2" => cap[1] = Cap::parse(x),
+                        b"pid" => pid = num(x),
+                        b"p1" => p[0] = num(x),
+                        b"p2" => p[1] = num(x),
+                        _ => {}
+                    });
+                    let r1 = r[0].unwrap_or(l.radius);
+                    *triangles += 1;
+                    ensure!(*triangles <= limit, "too many beams to preview (more than {limit})");
+                    l.beams.push(lattice::Beam {
+                        v,
+                        r: [r1, r[1].unwrap_or(r1)],
+                        cap: cap.map(|c| c.unwrap_or(l.cap)),
+                        pid,
+                        p,
+                    });
+                }
+            }
+            b"ball" if in_lattice => {
+                if let Some(l) = object.as_mut().and_then(|(_, o)| o.lattice.as_deref_mut()) {
+                    let (mut v, mut r, mut pid, mut p) = (u32::MAX, None, None, None);
+                    each_attr(&e, |k, x| match k {
+                        b"vindex" => v = num(x).unwrap_or(u32::MAX),
+                        b"r" => r = num::<f32>(x),
+                        b"pid" => pid = num(x),
+                        b"p" => p = num(x),
+                        _ => {}
+                    });
+                    *triangles += 1;
+                    ensure!(*triangles <= limit, "too many balls to preview (more than {limit})");
+                    l.balls.push(lattice::Ball {
+                        v,
+                        r: r.unwrap_or(l.ball_radius),
+                        pid,
+                        p,
+                    });
+                }
+            }
+            b"beamset" if in_lattice => {
+                if let Some(l) = object.as_mut().and_then(|(_, o)| o.lattice.as_deref_mut()) {
+                    l.sets.push(lattice::BeamSet {
+                        name: attr(&e, b"name"),
+                        identifier: attr(&e, b"identifier"),
+                        ..lattice::BeamSet::default()
+                    });
+                    in_set = !empty;
+                }
+            }
+            kind @ (b"ref" | b"ballref") if in_set => {
+                if let Some(set) = object
+                    .as_mut()
+                    .and_then(|(_, o)| o.lattice.as_deref_mut())
+                    .and_then(|l| l.sets.last_mut())
+                {
+                    if kind == b"ref" {
+                        set.beams += 1;
+                    } else {
+                        set.balls += 1;
+                    }
+                }
+            }
+            b"levelset" => {
+                if let Some((_, o)) = &mut object {
+                    o.levelset = true;
                 }
             }
             b"component" => {
