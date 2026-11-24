@@ -121,7 +121,12 @@ impl<'a> Reader<'a> {
     }
 
     fn bytes(&mut self, n: usize) -> Result<&'a [u8]> {
-        ensure!(n <= self.left(), Truncated, "OGRE file cut short at byte {}", self.at);
+        ensure!(
+            n <= self.left(),
+            Truncated,
+            "OGRE file is cut short at byte {}",
+            self.at
+        );
         let b = &self.data[self.at..self.at + n];
         self.at += n;
         Ok(b)
@@ -571,8 +576,8 @@ fn decode(
         let offset = usize::from(e.offset);
         ensure!(
             offset + size <= stride,
-            Truncated,
-            "OGRE vertex element at offset {offset} runs past its {stride}-byte vertex"
+            Corrupt,
+            "OGRE vertex element at offset {offset} runs past the end of its {stride}-byte vertex"
         );
         let wanted = match e.semantic {
             VES_POSITION | VES_NORMAL | VES_TANGENT | VES_BINORMAL | VES_DIFFUSE | VES_SPECULAR => e.index == 0,

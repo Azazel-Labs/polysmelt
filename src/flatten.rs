@@ -690,7 +690,7 @@ impl<'d> Reader<'d> {
             ensure!(
                 off.saturating_add(src_len) <= blob.len(),
                 Truncated,
-                "glTF buffer view {i}: {name} data out of range"
+                "glTF buffer view {i}: {name} data runs past the end of its buffer"
             );
             let mut v = vec![0; usize_of(src_len)];
             blob.read_at(off, &mut v)?;
@@ -702,7 +702,7 @@ impl<'d> Reader<'d> {
         ensure!(
             len / 1024 <= src.len(),
             Truncated,
-            "glTF buffer view {i}: {name} data is truncated"
+            "glTF buffer view {i}: {name} data is cut short"
         );
         let mut out = vec![0; len];
         container::decode_view(ext, src, &mut out).with_within(|| format!("glTF buffer view {i}"))?;
@@ -724,7 +724,7 @@ impl<'d> Reader<'d> {
         ensure!(
             offset.saturating_add(len) <= b.len(),
             Truncated,
-            "glTF buffer view runs past its buffer"
+            "glTF buffer view runs past the end of its buffer"
         );
         usize::try_from(len).map_err(|_| err!(LimitExceeded, "glTF buffer view is too big to hold"))?;
         b.shared(offset, len)
@@ -824,14 +824,18 @@ impl<'d> Reader<'d> {
             .and_then(|s| s.checked_add(esize as u64))
             .filter(|&s| a.offset.checked_add(s).is_some_and(|end| end <= vlen))
             .with_context(ErrorKind::Corrupt, || {
-                format!("glTF accessor's {} elements run past their buffer view", a.count)
+                format!(
+                    "glTF accessor's {} elements run past the end of their buffer view",
+                    a.count
+                )
             })?;
         // Only a view with extensions can be meshopt-compressed.
         if ext && self.meshopt(view)? {
             let bytes = &self.meshopt[&view];
-            let s = bytes
-                .get(usize_of(a.offset)..usize_of(a.offset + span))
-                .context(ErrorKind::Corrupt, "glTF accessor runs past its decoded buffer view")?;
+            let s = bytes.get(usize_of(a.offset)..usize_of(a.offset + span)).context(
+                ErrorKind::Corrupt,
+                "glTF accessor runs past the end of its decoded buffer view",
+            )?;
             f(0, s, stride);
             return Ok(());
         }
@@ -844,7 +848,7 @@ impl<'d> Reader<'d> {
         ensure!(
             start + span <= b.len(),
             Truncated,
-            "glTF accessor runs past its buffer: bytes {start}..{} of buffer {buffer}, which holds {}",
+            "glTF accessor runs past the end of its buffer: bytes {start}..{} of buffer {buffer}, which holds {}",
             start + span,
             b.len()
         );

@@ -1497,7 +1497,7 @@ impl<'a> Bin<'a> {
         ensure!(
             off <= self.data.len(),
             Truncated,
-            "{} file points past its end",
+            "{} file has an offset that runs past the end of the file",
             self.what
         );
         self.at = off;
@@ -1560,7 +1560,11 @@ impl<'a> Bin<'a> {
         let n = usize::try_from(n).unwrap_or(usize::MAX);
         match n.checked_mul(size.max(1)) {
             Some(b) if b <= self.left() => Ok(n),
-            _ => bail!(Truncated, "{} file claims {n} items, more than it holds", self.what),
+            _ => bail!(
+                Truncated,
+                "{} file is cut short: it claims {n} items, more than it holds",
+                self.what
+            ),
         }
     }
 

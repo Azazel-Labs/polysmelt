@@ -391,7 +391,7 @@ fn chunks(data: &[u8]) -> impl Iterator<Item = Result<([u8; 4], &[u8])>> {
             at = data.len();
             return Some(Err(err!(
                 Truncated,
-                "B3D {} chunk claims {size} bytes, more than the {} it has room for",
+                "B3D {} chunk runs past the end of what holds it: it claims {size} bytes, and there is room for {}",
                 String::from_utf8_lossy(&tag),
                 rest.len() - 8
             )));
@@ -780,7 +780,9 @@ mod tests {
         // A chunk claiming more than its parent.
         let mut v = good.clone();
         v[4..8].copy_from_slice(&i32::MAX.to_le_bytes());
-        assert!(read(&v).unwrap_err().to_string().contains("more than"));
+        let err = read(&v).unwrap_err();
+        assert_eq!(err.kind(), crate::ErrorKind::Truncated);
+        assert!(err.to_string().contains("runs past the end of what holds it"), "{err}");
         // Too many texture coordinate sets.
         let at = v.windows(4).position(|w| w == b"VRTS").unwrap();
         let mut v = good.clone();

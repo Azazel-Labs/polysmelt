@@ -411,7 +411,7 @@ fn collect(nodes: &[Node<'_>], out: &mut Collected) {
 fn top_level(d: &[u8]) -> Result<Vec<&[u8]>> {
     let mut p = 0;
     while let Some(size) = u32_at(d, p + 2) {
-        ensure!(size as usize <= d.len() - p - 6, Truncated, "model.dat is truncated");
+        ensure!(size as usize <= d.len() - p - 6, Truncated, "model.dat is cut short");
         p += 6 + size as usize;
     }
     let mut records: Vec<(u16, &[u8], &[u8])> = Vec::new();

@@ -431,11 +431,11 @@ fn read(bytes: &[u8], keep: Keep) -> Result<Document<'static>> {
             let need = n
                 .checked_mul(record)
                 .filter(|&b| b <= body.len())
-                .context(ErrorKind::Truncated, "PCD data ends early")?;
+                .context(ErrorKind::Truncated, "PCD data is cut short")?;
             binary(&body[..need], &lay, n)?
         }
         Data::Compressed => {
-            ensure!(body.len() >= 8, Truncated, "PCD data ends early");
+            ensure!(body.len() >= 8, Truncated, "PCD data is cut short");
             let packed = usize_of(u32::from_le_bytes([body[0], body[1], body[2], body[3]]));
             let size = usize_of(u32::from_le_bytes([body[4], body[5], body[6], body[7]]));
             let need = n
@@ -448,7 +448,7 @@ fn read(bytes: &[u8], keep: Keep) -> Result<Document<'static>> {
             );
             let data = body
                 .get(8..8 + packed)
-                .context(ErrorKind::Truncated, "PCD data ends early")?;
+                .context(ErrorKind::Truncated, "PCD data is cut short")?;
             // LZF expands a byte to at most about 130 of them; anything more is a broken file.
             ensure!(
                 size <= packed.saturating_mul(140).saturating_add(64),
@@ -492,7 +492,7 @@ fn binary(data: &[u8], lay: &Layout, n: usize) -> Result<(Decoded, [f64; 3])> {
             ensure!(
                 e.start + (n - 1) * e.stride + e.size <= data.len(),
                 Truncated,
-                "PCD data ends early"
+                "PCD data is cut short"
             );
         }
     }

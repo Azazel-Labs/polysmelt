@@ -163,11 +163,7 @@ impl<'a> Lex<'a> {
             }
             b'"' => {
                 let Some(end) = rest[1..].iter().position(|&c| c == b'"' || c == b'\n') else {
-                    bail!(
-                        Truncated,
-                        "MD5 file, line {}: a string runs to the end of the file",
-                        self.line
-                    );
+                    bail!(Truncated, "MD5 file is cut short in a string on line {}", self.line);
                 };
                 if rest[1 + end] != b'"' {
                     return Err(self.err("a string runs past the end of its line"));
@@ -259,7 +255,7 @@ impl<'a> Lex<'a> {
         if n.saturating_mul(size) > self.b.len() - self.at {
             bail!(
                 Truncated,
-                "MD5 file, line {}: a count of {n} is more than the file holds",
+                "MD5 file is cut short: line {} counts {n}, more than the file holds",
                 self.line
             );
         }

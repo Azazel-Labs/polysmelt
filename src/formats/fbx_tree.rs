@@ -445,7 +445,7 @@ fn binary(data: &[u8]) -> Result<Tree<'_>> {
         if at + header > end {
             bail!(
                 Truncated,
-                "the file is cut short, or a node overruns its parent, at byte {at}"
+                "the file is cut short at byte {at}, or a node there runs past the end of its parent"
             );
         }
         let (Some(node_end), Some(count), Some(list)) = (word(at), word(at + w), word(at + 2 * w)) else {

@@ -360,7 +360,7 @@ fn parse(data: &[u8], morphs: bool) -> Result<File> {
         surfaces.extend(surface);
         at = at
             .checked_add(end)
-            .ok_or_else(|| err!(Truncated, "MD3 surface {s} points past the file's end"))?;
+            .ok_or_else(|| err!(Truncated, "MD3 surface {s} runs past the end of the file"))?;
     }
     Ok(File {
         version,
@@ -391,7 +391,7 @@ fn surface(data: &[u8], start: usize, s: usize, keep: usize, budget: &mut usize)
     let ofs = |b: &mut Bin<'_>, what: &str| -> Result<usize> {
         start
             .checked_add(size(b.i32()?, what)?)
-            .ok_or_else(|| err!(Truncated, "MD3 surface {s}'s {what} points past the file's end"))
+            .ok_or_else(|| err!(Truncated, "MD3 surface {s}'s {what} runs past the end of the file"))
     };
     let ofs_tris = ofs(&mut b, "triangle offset")?;
     let ofs_shaders = ofs(&mut b, "shader offset")?;

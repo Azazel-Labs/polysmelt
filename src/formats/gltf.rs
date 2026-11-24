@@ -128,7 +128,7 @@ pub(crate) fn load<'a>(input: Input<'a>, assets: &'a dyn Assets, keep: Keep) -> 
         ensure!(
             blob.len() >= declared,
             Truncated,
-            "glTF buffer {i} holds {} bytes but declares {declared}",
+            "glTF buffer {i} is cut short: it holds {} bytes but declares {declared}",
             blob.len()
         );
         if let Some(b) = b.as_object_mut() {
@@ -319,7 +319,7 @@ fn glb_layout<'b>(
         ensure!(u32_at(&head, 16) == 0, Corrupt, "binary glTF 1.0 content isn't JSON");
         let json_len = u64::from(u32_at(&head, 12));
         let end = u64::from(u32_at(&head, 8)).min(total);
-        ensure!(20 + json_len <= end, Truncated, "GLB is truncated");
+        ensure!(20 + json_len <= end, Truncated, "GLB is cut short");
         let text = read(20, usize_of(json_len))?;
         let json = glb_json(&text)?;
         return Ok((json, Some((20 + json_len, end - 20 - json_len))));
@@ -332,7 +332,7 @@ fn glb_layout<'b>(
     );
     ensure!(&head[16..20] == b"JSON", Corrupt, "GLB doesn't start with a JSON chunk");
     let json_len = u64::from(u32_at(&head, 12));
-    ensure!(20 + json_len <= total, Truncated, "GLB is truncated");
+    ensure!(20 + json_len <= total, Truncated, "GLB is cut short");
     let text = read(20, usize_of(json_len))?;
     let json = glb_json(&text)?;
     let at = (20 + json_len).next_multiple_of(4);
@@ -355,7 +355,7 @@ fn glb_in_memory(bytes: Cow<'_, [u8]>) -> Result<(Map<String, Value>, Option<Blo
     let (json, bin) = glb_layout(total, |off, len| {
         all.get(usize_of(off)..usize_of(off).saturating_add(len))
             .map(Cow::Borrowed)
-            .context(ErrorKind::Truncated, "GLB is truncated")
+            .context(ErrorKind::Truncated, "GLB is cut short")
     })?;
     let bin = bin.map(|(base, len)| {
         let (base, end) = (usize_of(base), usize_of(base + len));
@@ -406,7 +406,11 @@ fn open_file(path: &Path) -> Result<(Map<String, Value>, Option<Blob<'static>>)>
     head.try_reserve_exact(first)
         .map_err(|_| err!(LimitExceeded, "glTF file of {total} bytes"))?;
     (&mut file).take(first as u64).read_to_end(&mut head)?;
-    ensure!(head.len() == first, Truncated, "glTF file is shorter than it says");
+    ensure!(
+        head.len() == first,
+        Truncated,
+        "glTF file is cut short: it's shorter than its header says"
+    );
     let glb = head.starts_with(b"glTF");
     if glb && head.len() as u64 == total {
         return glb_in_memory(Cow::Owned(head));
@@ -424,7 +428,7 @@ fn open_file(path: &Path) -> Result<(Map<String, Value>, Option<Blob<'static>>)>
         let mut b = vec![0; len];
         file.seek(SeekFrom::Start(off))?;
         file.read_exact(&mut b)
-            .context(ErrorKind::Truncated, "GLB is truncated")?;
+            .context(ErrorKind::Truncated, "GLB is cut short")?;
         pos = off + len as u64;
         Ok(Cow::Owned(b))
     })?;

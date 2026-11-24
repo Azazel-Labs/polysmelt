@@ -392,7 +392,7 @@ impl<'a> Archive<'a> {
             for i in 0..count {
                 let tag = self.r.peek_u16()?;
                 let is_new = if tag == 0x7fff {
-                    u32_at(self.d(), self.r.p + 2).context(ErrorKind::Truncated, "archive ends early")? & 0x8000_0000
+                    u32_at(self.d(), self.r.p + 2).context(ErrorKind::Truncated, "archive is cut short")? & 0x8000_0000
                         != 0
                 } else {
                     tag == 0xffff || tag & 0x8000 != 0
@@ -1065,7 +1065,7 @@ impl<'a> Archive<'a> {
     fn read_section_plane(&mut self) -> Result<Value> {
         self.preamble()?;
         self.draw()?;
-        let first = f64_at(self.d(), self.r.p).context(ErrorKind::Truncated, "archive ends early")?;
+        let first = f64_at(self.d(), self.r.p).context(ErrorKind::Truncated, "archive is cut short")?;
         if first.abs() > 1.0001 {
             self.object(None)?;
         }
@@ -1498,7 +1498,7 @@ fn find_start(data: &[u8], ver: u32) -> Result<(usize, u32)> {
         })
     };
     if let Some(mh) = class_record(b"CMaterial").filter(|&mh| mh >= 4) {
-        let mc = u32_at(data, mh - 4).context(ErrorKind::Truncated, "archive ends early")?;
+        let mc = u32_at(data, mh - 4).context(ErrorKind::Truncated, "archive is cut short")?;
         ensure!(mc <= 100_000, Corrupt, "implausible material count");
         return Ok((mh, mc));
     }

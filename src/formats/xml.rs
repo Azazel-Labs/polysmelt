@@ -319,7 +319,7 @@ impl<'a> Xml<'a> {
                 at += 1;
             }
             match b.get(at) {
-                None => bail!(Truncated, "XML tag cut short"),
+                None => bail!(Truncated, "XML tag is cut short"),
                 Some(b'>') => {
                     closed = false;
                     at += 1;
@@ -417,7 +417,7 @@ fn find(b: &[u8], from: usize, pat: &[u8]) -> Result<usize> {
         }
         at += 1;
     }
-    bail!(Truncated, "XML cut short at byte {from}")
+    bail!(Truncated, "XML is cut short at byte {from}")
 }
 
 fn memchr(c: u8, b: &[u8]) -> Option<usize> {

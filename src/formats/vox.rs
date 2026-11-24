@@ -113,7 +113,7 @@ struct Body<'a> {
 impl Body<'_> {
     fn u32(&mut self) -> Result<u32> {
         let v = self.b.get(self.at..self.at + 4).and_then(|v| v.try_into().ok());
-        let v = v.context(ErrorKind::Truncated, "VOX chunk ends early")?;
+        let v = v.context(ErrorKind::Truncated, "VOX chunk is cut short")?;
         self.at += 4;
         Ok(u32::from_le_bytes(v))
     }
@@ -127,7 +127,7 @@ impl Body<'_> {
         let s = self
             .b
             .get(self.at..self.at.saturating_add(n))
-            .context(ErrorKind::Truncated, "VOX chunk ends early")?;
+            .context(ErrorKind::Truncated, "VOX chunk is cut short")?;
         self.at += n;
         Ok(std::str::from_utf8(s).unwrap_or(""))
     }
@@ -475,7 +475,7 @@ fn read(data: &[u8], max_voxels: usize) -> Result<Vox> {
         Ok(u32::from_le_bytes(
             data.get(at..at + 4)
                 .and_then(|b| b.try_into().ok())
-                .context(ErrorKind::Truncated, "VOX ends early")?,
+                .context(ErrorKind::Truncated, "VOX file is cut short")?,
         ))
     };
     ensure!(&data[8..12] == b"MAIN", Corrupt, "VOX file has no MAIN chunk");
@@ -499,7 +499,7 @@ fn read(data: &[u8], max_voxels: usize) -> Result<Vox> {
             .context(ErrorKind::Corrupt, "VOX chunk overflow")?;
         let body = data
             .get(start..end)
-            .context(ErrorKind::Truncated, "VOX chunk ends early")?;
+            .context(ErrorKind::Truncated, "VOX chunk is cut short")?;
         let mut b = Body { b: body, at: 0 };
         match id {
             b"SIZE" => size = Some([b.i32()?, b.i32()?, b.i32()?]),
@@ -513,7 +513,7 @@ fn read(data: &[u8], max_voxels: usize) -> Result<Vox> {
                 );
                 let raw = body
                     .get(4..4 + n * 4)
-                    .context(ErrorKind::Truncated, "VOX voxels end early")?;
+                    .context(ErrorKind::Truncated, "VOX voxels are cut short")?;
                 let size = size.take().context(ErrorKind::Corrupt, "VOX voxels without a SIZE")?;
                 v.models.push(Model {
                     size,
@@ -524,7 +524,7 @@ fn read(data: &[u8], max_voxels: usize) -> Result<Vox> {
                 // Entry i is color index i + 1.
                 let raw = body
                     .get(..1024)
-                    .context(ErrorKind::Truncated, "VOX palette ends early")?;
+                    .context(ErrorKind::Truncated, "VOX palette is cut short")?;
                 let mut p = [[0u8; 4]; 256];
                 for (i, c) in raw.as_chunks::<4>().0.iter().take(255).enumerate() {
                     p[i + 1] = *c;
@@ -541,7 +541,7 @@ fn read(data: &[u8], max_voxels: usize) -> Result<Vox> {
                 ensure!(
                     n as usize <= body.len() / 4,
                     Truncated,
-                    "VOX transform lists more frames than it holds"
+                    "VOX transform is cut short: it lists more frames than it holds"
                 );
                 let mut frames = Vec::new();
                 for k in 0..n {
@@ -576,7 +576,7 @@ fn read(data: &[u8], max_voxels: usize) -> Result<Vox> {
                 ensure!(
                     n as usize <= body.len() / 4,
                     Truncated,
-                    "VOX group lists more children than it holds"
+                    "VOX group is cut short: it lists more children than it holds"
                 );
                 let children = (0..n).map(|_| b.u32()).collect::<Result<_>>()?;
                 v.nodes.insert(id, Node::Group { attrs, children });
@@ -588,7 +588,7 @@ fn read(data: &[u8], max_voxels: usize) -> Result<Vox> {
                 ensure!(
                     n as usize <= body.len() / 4,
                     Truncated,
-                    "VOX shape lists more models than it holds"
+                    "VOX shape is cut short: it lists more models than it holds"
                 );
                 let mut models = Vec::new();
                 for _ in 0..n {
@@ -617,7 +617,7 @@ fn read(data: &[u8], max_voxels: usize) -> Result<Vox> {
                 ensure!(
                     n as usize <= body.len() / 4,
                     Truncated,
-                    "VOX note lists more names than it holds"
+                    "VOX note is cut short: it lists more names than it holds"
                 );
                 for _ in 0..n {
                     let note = b.string()?.to_owned();
@@ -627,7 +627,7 @@ fn read(data: &[u8], max_voxels: usize) -> Result<Vox> {
             b"IMAP" => {
                 v.index_map = body
                     .get(..256)
-                    .context(ErrorKind::Truncated, "VOX index map ends early")?
+                    .context(ErrorKind::Truncated, "VOX index map is cut short")?
                     .to_vec();
             }
             b"PACK" => {}
@@ -1703,6 +1703,6 @@ mod tests {
             max_triangles: crate::mesh::MAX_TRIANGLES * 2,
             ..Keep::ALL
         };
-        assert!(err(higher).contains("end early"), "{}", err(higher));
+        assert!(err(higher).contains("voxels are cut short"), "{}", err(higher));
     }
 }

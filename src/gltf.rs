@@ -241,7 +241,7 @@ impl<'a> Doc<'a> {
     fn parse_glb(input: &'a [u8]) -> Result<Self> {
         let u32_at = |at: usize| -> Result<usize> {
             let b = input.get(at..at + 4).and_then(|b| b.try_into().ok());
-            Ok(u32::from_le_bytes(b.context(ErrorKind::Truncated, "GLB is truncated")?) as usize)
+            Ok(u32::from_le_bytes(b.context(ErrorKind::Truncated, "GLB is cut short")?) as usize)
         };
         ensure!(u32_at(4)? == 2, Unsupported, "GLB version {} is not 2", u32_at(4)?);
         let len = u32_at(8)?;
@@ -258,10 +258,10 @@ impl<'a> Doc<'a> {
             let size = u32_at(at)?;
             let kind = input
                 .get(at + 4..at + 8)
-                .context(ErrorKind::Truncated, "GLB is truncated")?;
+                .context(ErrorKind::Truncated, "GLB is cut short")?;
             let body = input
                 .get(at + 8..at + 8 + size)
-                .context(ErrorKind::Truncated, "GLB chunk runs past the end")?;
+                .context(ErrorKind::Truncated, "GLB chunk runs past the end of the file")?;
             if json.is_none() {
                 ensure!(kind == CHUNK_JSON, Corrupt, "GLB doesn't start with a JSON chunk");
                 json = Some(body);
@@ -316,7 +316,7 @@ impl<'a> Doc<'a> {
         ensure!(
             bytes.len() >= declared,
             Truncated,
-            "buffer {i} holds {} bytes but declares {declared}",
+            "buffer {i} is cut short: it holds {} bytes but declares {declared}",
             bytes.len()
         );
         Ok(Data::Bytes(bytes))
@@ -367,12 +367,12 @@ impl<'a> Doc<'a> {
                     get_usize(ext, "byteLength")?,
                 )
                 .with_context(ErrorKind::Truncated, || {
-                    format!("buffer view {i}: {name} data out of range")
+                    format!("buffer view {i}: {name} data runs past the end of its buffer")
                 })?;
                 ensure!(
                     len / 1024 <= src.len(),
                     Truncated,
-                    "buffer view {i}: {name} data is truncated"
+                    "buffer view {i}: {name} data is cut short"
                 );
             } else {
                 let b = get_usize(
@@ -381,8 +381,9 @@ impl<'a> Doc<'a> {
                     "buffer",
                 )?;
                 let off = v.get("byteOffset").and_then(Value::as_u64).map_or(0, usize_of);
-                slice(bytes(b)?, off, len)
-                    .with_context(ErrorKind::Truncated, || format!("buffer view {i} out of range"))?;
+                slice(bytes(b)?, off, len).with_context(ErrorKind::Truncated, || {
+                    format!("buffer view {i} runs past the end of its buffer")
+                })?;
             }
             total = total.saturating_add(len.next_multiple_of(4));
         }
@@ -399,7 +400,7 @@ impl<'a> Doc<'a> {
                     get_usize(ext, "byteLength")?,
                 )
                 .with_context(ErrorKind::Truncated, || {
-                    format!("buffer view {i}: {name} data out of range")
+                    format!("buffer view {i}: {name} data runs past the end of its buffer")
                 })?;
                 bin.resize(at + len, 0);
                 decode_view(ext, src, &mut bin[at..]).with_within(|| format!("buffer view {i}"))?;
@@ -413,7 +414,9 @@ impl<'a> Doc<'a> {
                     v.get("byteOffset").and_then(Value::as_u64).map_or(0, usize_of),
                     len,
                 )
-                .with_context(ErrorKind::Truncated, || format!("buffer view {i} out of range"))?;
+                .with_context(ErrorKind::Truncated, || {
+                    format!("buffer view {i} runs past the end of its buffer")
+                })?;
                 bin.extend_from_slice(src);
             }
             placed.push(at);
@@ -778,7 +781,7 @@ pub(crate) fn decode_view(ext: &Map<String, Value>, src: &[u8], out: &mut [u8]) 
     let filter = ext.get("filter").and_then(Value::as_str).unwrap_or("NONE");
     let indices = match mode {
         "ATTRIBUTES" => {
-            ensure!(out.len() / 1024 <= src.len(), Truncated, "meshopt data is truncated");
+            ensure!(out.len() / 1024 <= src.len(), Truncated, "meshopt data is cut short");
             meshopt::decode_vertex_buffer_into(src, out, stride)?;
             return meshopt::apply_filter(filter, out, stride);
         }
@@ -858,7 +861,7 @@ pub(crate) fn rehome(obj: &mut Map<String, Value>, home: &[(usize, usize)]) -> R
     let off = obj.get("byteOffset").and_then(Value::as_u64).map_or(0, usize_of);
     let at = off
         .checked_add(base)
-        .context(ErrorKind::Truncated, "byteOffset out of range")?;
+        .context(ErrorKind::Truncated, "byteOffset is too large")?;
     obj.insert("buffer".into(), json!(nb));
     if nb == 0 || off != 0 {
         obj.insert("byteOffset".into(), json!(at));

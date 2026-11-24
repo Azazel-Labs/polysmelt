@@ -62,7 +62,7 @@ pub(super) fn parse(data: &[u8]) -> Result<Tree<'_>> {
         match lex.next()? {
             None => {
                 if let Some(name) = names.last() {
-                    bail!(Truncated, "the file ends inside {name}");
+                    bail!(Truncated, "the file is cut short inside {name}");
                 }
                 break;
             }

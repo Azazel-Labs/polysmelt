@@ -443,7 +443,7 @@ fn parse_asf(text: &str) -> Result<Skeleton> {
     if let Some(b) = bone {
         bail!(
             Truncated,
-            "ASF ends inside bone `{}`: an `end` is missing, or the file is cut short",
+            "ASF file is cut short inside bone `{}`, or its `end` is missing",
             show(&b.name)
         );
     }
@@ -1061,7 +1061,7 @@ mod tests {
         let cases = [
             ("", "no `:` sections"),
             ("hello\n", "not an ASF file"),
-            (":bonedata\nbegin\nname a\n", "ends inside bone"),
+            (":bonedata\nbegin\nname a\n", "is cut short inside bone"),
             (":bonedata\nname a\n", "outside a bone"),
             (":bonedata\nbegin\nname a\nlength x\nend\n", "length needs a number"),
             (":bonedata\nbegin\nname a\ndirection 1 0\nend\n", "direction needs"),

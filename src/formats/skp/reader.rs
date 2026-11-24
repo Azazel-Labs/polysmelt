@@ -26,7 +26,7 @@ impl<'a> Reader<'a> {
         let bytes = self
             .d
             .get(self.p..end)
-            .context(ErrorKind::Truncated, "archive ends early")?;
+            .context(ErrorKind::Truncated, "archive is cut short")?;
         self.p = end;
         Ok(bytes)
     }
@@ -67,7 +67,7 @@ impl<'a> Reader<'a> {
 
     /// The u16 at the cursor without moving it.
     pub(crate) fn peek_u16(&self) -> Result<u16> {
-        u16_at(self.d, self.p).context(ErrorKind::Truncated, "archive ends early")
+        u16_at(self.d, self.p).context(ErrorKind::Truncated, "archive is cut short")
     }
 
     /// Whether a string record starts at the cursor.

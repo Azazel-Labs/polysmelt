@@ -68,7 +68,7 @@ fn decode(bytes: &[u8], max: usize, threads: usize) -> Result<Document<'static>>
     let mut head = Vec::with_capacity(HEADER);
     // What a broken stream gives before it breaks is checked for length below.
     let _ = (&mut z).take(HEADER as u64).read_to_end(&mut head);
-    ensure!(head.len() == HEADER, Truncated, "SPZ data ends early: no header");
+    ensure!(head.len() == HEADER, Truncated, "SPZ data is cut short: no header");
     let word = |k: usize| u32::from_le_bytes([head[k], head[k + 1], head[k + 2], head[k + 3]]);
     ensure!(word(0) == MAGIC, UnknownFormat, "not an SPZ file: no NGSP header");
     let version = word(4);
@@ -117,7 +117,7 @@ fn decode(bytes: &[u8], max: usize, threads: usize) -> Result<Document<'static>>
     ensure!(
         data.len() >= core,
         Truncated,
-        "SPZ data ends early: {n} splats need {core} bytes, the stream holds {}",
+        "SPZ data is cut short: {n} splats need {core} bytes, the stream holds {}",
         data.len()
     );
     let mut s = unpack.splats;
@@ -563,7 +563,7 @@ mod tests {
         raw.extend(u32::MAX.to_le_bytes());
         raw.extend([3, 12, 0, 0]);
         let e = decode(&gzip(&raw), usize::MAX >> 8, 1).unwrap_err().to_string();
-        assert!(e.contains("ends early"), "{e}");
+        assert!(e.contains("is cut short"), "{e}");
         let e = decode(&gzip(&raw), 1000, 1).unwrap_err().to_string();
         assert!(e.contains("max_points"), "{e}");
         raw[12] = 7;

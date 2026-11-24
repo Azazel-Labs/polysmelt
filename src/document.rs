@@ -236,7 +236,7 @@ impl FileSpan {
         ensure!(
             off.checked_add(out.len() as u64).is_some_and(|end| end <= self.len),
             Truncated,
-            "read past the end of a file's glTF data"
+            "a read runs past the end of the file's glTF data"
         );
         let mut c = self.file.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if out.len() >= BLOCK {
@@ -587,7 +587,7 @@ impl Blob<'_> {
             ensure!(
                 len <= f.len,
                 Truncated,
-                "glTF buffer holds {} bytes but declares {len}",
+                "glTF buffer is cut short: it holds {} bytes but declares {len}",
                 f.len
             );
             let mut chunk = Vec::new();
@@ -612,7 +612,7 @@ impl Blob<'_> {
         ensure!(
             len <= self.len(),
             Truncated,
-            "glTF buffer holds {} bytes but declares {len}",
+            "glTF buffer is cut short: it holds {} bytes but declares {len}",
             self.len()
         );
         match self {
@@ -773,7 +773,7 @@ impl<'a> Document<'a> {
         ensure!(
             offset.saturating_add(len) <= b.len(),
             Truncated,
-            "glTF buffer view runs past its buffer"
+            "glTF buffer view runs past the end of its buffer"
         );
         b.shared(offset, len)
     }
@@ -906,7 +906,7 @@ impl<'a> Document<'a> {
             ensure!(
                 blob.len() >= declared,
                 Truncated,
-                "glTF buffer {i} holds {} bytes but declares {declared}",
+                "glTF buffer {i} is cut short: it holds {} bytes but declares {declared}",
                 blob.len()
             );
             bin_len = bin_len.next_multiple_of(4);

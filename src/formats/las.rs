@@ -109,12 +109,12 @@ impl Source<'_> {
                 at.checked_add(n)
                     .and_then(|end| b.get(at..end))
                     .map(Cow::Borrowed)
-                    .context(ErrorKind::Truncated, "LAS data ends early")
+                    .context(ErrorKind::Truncated, "LAS data is cut short")
             }
             #[cfg(feature = "laz")]
             Source::Laz(b) => slice(b)
                 .map(Cow::Owned)
-                .context(ErrorKind::Truncated, "LAS data ends early"),
+                .context(ErrorKind::Truncated, "LAS data is cut short"),
             Source::File(f) => {
                 use std::io::{Read as _, Seek as _};
                 let _ = slice;
@@ -125,7 +125,7 @@ impl Source<'_> {
                     .ok()
                     .context(ErrorKind::LimitExceeded, "not enough memory for the LAS data")?;
                 (&mut *f).take(n as u64).read_to_end(&mut out)?;
-                ensure!(out.len() == n, Truncated, "LAS data ends early");
+                ensure!(out.len() == n, Truncated, "LAS data is cut short");
                 Ok(Cow::Owned(out))
             }
         }
@@ -638,7 +638,7 @@ fn read(src: &Source<'_>, h: &Header, keep: Keep) -> Result<Document<'static>> {
         ensure!(
             h.count <= room,
             Truncated,
-            "LAS data ends early: {} points declared, room for {room}",
+            "LAS data is cut short: {} points declared, room for {room}",
             h.count
         );
     }
@@ -720,7 +720,7 @@ fn read(src: &Source<'_>, h: &Header, keep: Keep) -> Result<Document<'static>> {
                         let at = usize_of(h.data_offset + job.first * h.record as u64);
                         let raw = b
                             .get(at..at + job.count * h.record)
-                            .context(ErrorKind::Truncated, "LAS data ends early")?;
+                            .context(ErrorKind::Truncated, "LAS data is cut short")?;
                         plan.decode(raw, s, base);
                     }
                     Mode::Raw => {
@@ -1084,7 +1084,7 @@ mod laz_read {
             ensure!(
                 start.checked_add(8).is_some_and(|e| e <= len),
                 Truncated,
-                "LAZ data ends early"
+                "LAZ data is cut short"
             );
             let chunks = if vlr.chunk_size() == 0 && !vlr.uses_variable_size_chunks() {
                 None
@@ -1191,7 +1191,7 @@ mod laz_read {
         ensure!(
             table.checked_add(8).is_some_and(|e| e <= len),
             Truncated,
-            "the LAZ chunk table is past the end"
+            "the LAZ chunk table runs past the end of the file"
         );
         let chunks = u64::from(u32_at(bytes, usize_of(table) + 4));
         // Each chunk takes some bytes of point data, and no chunk is empty.

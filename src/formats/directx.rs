@@ -591,7 +591,7 @@ impl<'a> Nums<'a> {
         ensure!(
             n.saturating_mul(width) <= self.left(),
             Truncated,
-            "{} in a .x file counts {n} items, more than it holds",
+            "{} in a .x file is cut short: it counts {n} items, more than it holds",
             self.what
         );
         Ok(n)

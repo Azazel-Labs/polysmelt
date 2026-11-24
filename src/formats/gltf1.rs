@@ -926,7 +926,7 @@ fn floats(doc: &Document<'_>, a: usize) -> Result<(Vec<f32>, usize)> {
         for k in 0..n {
             let at = start + i * stride + k * 4;
             let b = buf.get(at..at + 4).with_context(ErrorKind::Truncated, || {
-                format!("glTF 1.0 accessor {a} runs past its buffer")
+                format!("glTF 1.0 accessor {a} runs past the end of its buffer")
             })?;
             out.push(f32::from_le_bytes([b[0], b[1], b[2], b[3]]));
         }

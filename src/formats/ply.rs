@@ -721,7 +721,7 @@ pub(crate) fn ply(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<D
     ensure!(
         !body.cut || !body.verts.pos.is_empty(),
         Truncated,
-        "PLY data ends early: the file holds fewer items than its header counts"
+        "PLY data is cut short: the file holds fewer items than its header counts"
     );
     let mut source = json!({
         "encoding": match head.format {
@@ -1783,7 +1783,7 @@ end_header
         let text = b"ply\nformat ascii 1.0\nelement vertex 9\nproperty float x\nproperty float y\nproperty float z\n\
                      end_header\n";
         let err = load(text).err().unwrap().to_string();
-        assert!(err.contains("ends early"), "{err}");
+        assert!(err.contains("is cut short"), "{err}");
     }
 
     #[test]

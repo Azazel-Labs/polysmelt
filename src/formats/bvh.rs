@@ -375,14 +375,14 @@ impl Hierarchy {
         if let Some(j) = self.pending.or(self.open.last().copied()) {
             bail!(
                 Truncated,
-                "BVH hierarchy ends inside joint `{}`: a brace is missing, or the file is cut short",
+                "BVH hierarchy is cut short inside joint `{}`, or a brace is missing",
                 self.joints[j].name
             );
         }
         ensure!(
             self.want == Want::Keyword,
             Truncated,
-            "BVH hierarchy ends inside an OFFSET or CHANNELS"
+            "BVH hierarchy is cut short inside an OFFSET or CHANNELS"
         );
         ensure!(!self.roots.is_empty(), Corrupt, "BVH hierarchy has no ROOT");
         Ok(())
@@ -1015,7 +1015,7 @@ Frame Time: 0.5
             ("ROOT a\n{\n}\n", "HIERARCHY"),
             ("HIERARCHY\n", "no ROOT"),
             ("HIERARCHY\nJOINT a\n{\n}\n", "JOINT outside"),
-            ("HIERARCHY\nROOT a\n{\nOFFSET 0 0 0\n", "ends inside joint `a`"),
+            ("HIERARCHY\nROOT a\n{\nOFFSET 0 0 0\n", "is cut short inside joint `a`"),
             ("HIERARCHY\nROOT a\nOFFSET 0 0 0\n", "`{` should follow"),
             ("HIERARCHY\nROOT a\n{\nOFFSET 0 0\n}\n", "OFFSET needs three numbers"),
             ("HIERARCHY\nROOT a\n{\n}\n}\n", "closes no joint"),
@@ -1030,9 +1030,12 @@ Frame Time: 0.5
                 "twice",
             ),
             ("HIERARCHY\nROOT a\n{\nWIDGET 1\n}\n", "WIDGET"),
-            ("HIERARCHY\nROOT a\n{\nMOTION\nFrames: 0\n", "ends inside joint"),
+            ("HIERARCHY\nROOT a\n{\nMOTION\nFrames: 0\n", "is cut short inside joint"),
             ("HIERARCHY\nOFFSET 0 0 0\n", "outside"),
-            ("HIERARCHY\nROOT a\n{\nCHANNELS 2 Xrotation\n}\n", "ends inside joint"),
+            (
+                "HIERARCHY\nROOT a\n{\nCHANNELS 2 Xrotation\n}\n",
+                "is cut short inside joint",
+            ),
         ];
         for (text, want) in cases {
             let e = error(text);

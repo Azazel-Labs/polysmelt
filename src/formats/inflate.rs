@@ -21,7 +21,7 @@ impl Bits<'_> {
             let byte = *self
                 .data
                 .get(self.at)
-                .context(ErrorKind::Truncated, "compressed data cut short")?;
+                .context(ErrorKind::Truncated, "compressed data is cut short")?;
             self.at += 1;
             self.buf |= usize::from(byte) << self.count;
             self.count += 8;
@@ -128,7 +128,7 @@ pub(crate) fn inflate(data: &[u8], out: &mut Vec<u8>, limit: usize) -> Result<()
                 let at = bits.at;
                 let head = data
                     .get(at..at + 4)
-                    .context(ErrorKind::Truncated, "compressed data cut short")?;
+                    .context(ErrorKind::Truncated, "compressed data is cut short")?;
                 let len = u16::from_le_bytes([head[0], head[1]]);
                 let not = u16::from_le_bytes([head[2], head[3]]);
                 ensure!(len == !not, Corrupt, "bad stored block in compressed data");
@@ -140,7 +140,7 @@ pub(crate) fn inflate(data: &[u8], out: &mut Vec<u8>, limit: usize) -> Result<()
                 );
                 out.extend_from_slice(
                     data.get(at + 4..at + 4 + len)
-                        .context(ErrorKind::Truncated, "compressed data cut short")?,
+                        .context(ErrorKind::Truncated, "compressed data is cut short")?,
                 );
                 bits.at = at + 4 + len;
             }
