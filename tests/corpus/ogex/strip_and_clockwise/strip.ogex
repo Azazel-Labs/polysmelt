@@ -1,0 +1,16 @@
+Metric (key = "up") { string { "z" } }
+GeometryNode { ObjectRef { ref { $strip } } }
+GeometryNode { ObjectRef { ref { $cw } } }
+GeometryObject $strip {
+Mesh (primitive = "triangle_strip") {
+  VertexArray (attrib = "position") { float[3] { {0.0, 1.0, 0.0}, {0.0, 0.0, 0.0}, {1.0, 1.0, 0.0}, {1.0, 0.0, 0.0}, {2.0, 1.0, 0.0}, {2.0, 0.0, 0.0} } }
+  VertexArray (attrib = "normal") { float[3] { {0, 0, 1}, {0, 0, 1}, {0, 0, 1}, {0, 0, 1}, {0, 0, 1}, {0, 0, 1} } }
+}
+}
+GeometryObject $cw {
+Mesh {
+  VertexArray (attrib = "position") { float[3] { {3.0, 0.0, 0.0}, {3.0, 1.0, 0.0}, {4.0, 0.0, 0.0} } }
+  VertexArray (attrib = "normal") { float[3] { {0, 0, 1}, {0, 0, 1}, {0, 0, 1} } }
+  IndexArray (front = "cw") { unsigned_int16[3] { {0, 1, 2} } }
+}
+}

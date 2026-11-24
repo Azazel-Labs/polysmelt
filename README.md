@@ -1,5 +1,9 @@
 # polysmelt
 
+[![crates.io](https://img.shields.io/crates/v/polysmelt.svg)](https://crates.io/crates/polysmelt)
+[![docs.rs](https://img.shields.io/docsrs/polysmelt)](https://docs.rs/polysmelt)
+[![CI](https://github.com/Azazel-Labs/polysmelt/actions/workflows/ci.yml/badge.svg)](https://github.com/Azazel-Labs/polysmelt/actions/workflows/ci.yml)
+
 Pure-Rust 3D asset interchange, with glTF as the hub. Read what other tools write, keep what
 you don't understand, and write compact or plain files back out.
 
@@ -41,8 +45,12 @@ Early. What exists today:
   coordinate system in `extras`. AMF (plain or zipped: objects, volumes and their materials,
   vertex and triangle colors, textures, constellations; curved triangles stay flat), LightWave objects (`.lwo`: LWOB,
   LWO2 and LWO3, with layers and pivots, surfaces and their image maps, UV and color maps,
-  smoothing angles and morph targets) and AC3D (`.ac`: the object tree, materials, textures,
-  crease angles, lines and triangle strips).
+  smoothing angles and morph targets), AC3D (`.ac`: the object tree, materials, textures,
+  crease angles, lines and triangle strips), OpenFlight (`.flt`: the node tree with levels of
+  detail, switches, instances, replication and references to other files, faces and meshes,
+  color, material and texture palettes with SGI images, light sources and animated groups) and
+  OpenGEX (`.ogex`: nodes and their transforms, meshes, materials and textures, skins, morph
+  targets, lights, cameras and animation tracks).
   Game and animation formats too: MikuMikuDance models (`.pmx` 2.0 and 2.1, `.pmd`, skinned,
   with morph targets, IK and materials) and `.vmd` motions, DirectX `.x` (text, binary and
   compressed, with frames, skins and animation sets), Quake II `.md2` and Quake III `.md3`
@@ -182,10 +190,12 @@ Early. What exists today:
 | `lwo` | LightWave objects (`.lwo`) | none |
 | `ac3d` | AC3D (`.ac`) | none |
 | `ogre` | OGRE `.mesh` and `.skeleton`, binary (v1.10 to v1.100) and XML, with `.material` scripts | none |
+| `flt` | OpenFlight (`.flt`), with SGI image textures | none |
+| `ogex` | OpenGEX (`.ogex`) | none |
 | `fs` | Reading files: `formats::load`, `assets::Folder`, `gltf::files_in` | none |
 
 Every reader is on by default, and so are `fs`, `webp` and the six texture decoders. `minimal`
-is the twenty-eight readers with no dependencies, plus `fs`, for
+is the thirty-one readers with no dependencies, plus `fs`, for
 `default-features = false, features = ["minimal"]`. Asking
 `formats::load` for a format whose feature is off returns an error that names the feature.
 

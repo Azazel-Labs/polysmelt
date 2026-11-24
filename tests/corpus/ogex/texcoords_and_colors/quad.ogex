@@ -1,0 +1,10 @@
+Metric (key = "up") { string { "y" } }
+GeometryNode { ObjectRef { ref { $q } } }
+GeometryObject $q {
+Mesh (primitive = "quads") {
+  VertexArray (attrib = "position") { float[3] { {0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0} } }
+  VertexArray (attrib = "texcoord") { float[2] { {0.0, 0.0}, {1.0, 0.0}, {1.0, 1.0}, {0.25, 0.75} } }
+  VertexArray (attrib = "color") { float[4] { {1.0, 0.0, 0.0, 1.0}, {0.0, 1.0, 0.0, 0.5}, {0.0, 0.0, 1.0, 1.0}, {0.25, 0.5, 0.75, 1.0} } }
+  IndexArray { unsigned_int32[4] { {0, 1, 2, 3} } }
+}
+}

@@ -1,6 +1,6 @@
 [package]
 name = "polysmelt"
-version = "0.13.2"
+version = "0.15.2"
 edition = "2024"
 # MIT-0, except the SketchUp reader (src/formats/skp), which is MIT: see its LICENSE-openskp.
 license = "MIT-0 AND MIT"
@@ -21,7 +21,7 @@ all-features = true
 [features]
 default = ["minimal", "fbx", "3mf", "usd", "draco", "webp", "skp", "dae", "x3d", "tga", "bmp", "gif", "tiff", "psd", "dds", "spz", "laz", "e57", "amf"]
 # The readers with no dependencies, and file access: `default-features = false, features = ["minimal"]`.
-minimal = ["fs", "stl", "ply", "vox", "obj", "3ds", "gltf", "bvh", "off", "dxf", "splat", "mmd", "directx", "md2", "md3", "md5", "iqm", "smd", "ms3d", "b3d", "asf", "c3d", "trc", "htr", "las", "pcd", "xyz", "lwo", "ac3d", "ogre"]
+minimal = ["fs", "stl", "ply", "vox", "obj", "3ds", "gltf", "bvh", "off", "dxf", "splat", "mmd", "directx", "md2", "md3", "md5", "iqm", "smd", "ms3d", "b3d", "asf", "c3d", "trc", "htr", "las", "pcd", "xyz", "lwo", "ac3d", "ogre", "flt", "ogex"]
 # Reading from the file system: `formats::load`, `assets::Folder` and `gltf::files_in`. Without
 # it (for wasm, say), models load from memory with `formats::load_bytes` and `assets::Memory`.
 fs = []
@@ -108,6 +108,10 @@ amf = ["dep:quick-xml", "dep:zip", "dep:base64", "dep:flate2"]
 lwo = []
 # AC3D `.ac` models.
 ac3d = []
+# OpenFlight `.flt` databases, with their SGI image textures.
+flt = []
+# OpenGEX `.ogex` scenes.
+ogex = []
 
 [dependencies]
 serde_json = "1"

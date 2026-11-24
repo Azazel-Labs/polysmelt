@@ -1,0 +1,16 @@
+Metric (key = "up") { string { "y" } }
+Metric (key = "time") { float { 0.5 } }
+Clip (index = 1) { Name { string { "walk" } } }
+GeometryNode {
+  Name { string { "mover" } }
+  ObjectRef { ref { $t } }
+  Translation %t (kind = "x") { float { 0 } }
+  Animation (clip = 0) { Track (target = %t) { Time { Key { float { 0, 2 } } } Value { Key { float { 0, 1 } } } } }
+  Animation (clip = 1) { Track (target = %t) { Time { Key { float { 0, 4 } } } Value { Key { float { 0, 2 } } } } }
+}
+GeometryObject $t {
+Mesh (primitive = "triangles") {
+  VertexArray (attrib = "position") { float[3] { {1.0, 0.0, 0.0}, {1.0, 1.0, 0.0}, {1.0, 0.0, 1.0} } }
+  IndexArray { unsigned_int16[3] { {0, 1, 2} } }
+}
+}

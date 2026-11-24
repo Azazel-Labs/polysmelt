@@ -68,6 +68,8 @@ cases.
 | LightWave (`lwo/`) | 18 | 15 | none |
 | AC3D (`ac/`) | 15 | 11 | none |
 | OGRE | 30 | 30 | none |
+| OpenFlight | 17 | 17 | none |
+| OpenGEX | 26 | 22 | none |
 
 - **Generated** cases are written byte by byte by `tools/corpus/<format>.py` (3DS is
   `tds.py`, 3MF is `threemf.py`, COLLADA is `dae.py`, PMX, PMD and VMD are `mmd.py`, DirectX
@@ -100,8 +102,8 @@ cases.
 - **Real files** from other projects' test data sit in their case folders, with the
   project's license beside them: PDAL's `simple.las` and `simple.laz` (BSD,
   `las/LICENSE-PDAL`), PCL's `bun0.pcd` and `car6.pcd` (BSD, `pcd/LICENSE-PCL`), two scans
-  from the e57 crate's test data (MIT, `e57/LICENSE-e57`), and assimp's AMF, LWO and AC test
-  models (BSD, `LICENSE-assimp` in each). The generator reads each file with its own small
+  from the e57 crate's test data (MIT, `e57/LICENSE-e57`), and assimp's AMF, LWO, AC and
+  OpenGEX test models (BSD, `LICENSE-assimp` in each). The generator reads each file with its own small
   parser, written from the specification, and writes the expectations from that, so these
   too are checked against the standard rather than against Polysmelt. A generator keeps
   these files when it empties its folder (or takes them from the folder given as its first
@@ -354,6 +356,21 @@ python tools/corpus/obj.py
   rejection, normal maps, texture aliases, schemes). Poses are worked out in `ogre.py` with
   plain matrices. Errors: versions, the later v2 layout, unknown element and track types,
   buffers and offsets out of range, huge counts, broken XML and truncation.
+- **OpenFlight**: a cube in feet, face colors (palette entries with intensities, packed,
+  transparent, unlit, hidden), vertex colors and normals, material palette entries, SGI
+  textures (stored and run-length encoded) and a PNG found by name, a missing texture,
+  multitexture layers with a UV list (a bump map as the normal texture), levels of detail, a
+  switch, matrices and a long ID, instances and replication, external references with their
+  own units and either file's materials, wireframes and light points, a mesh's vertex pool and
+  strips, fans, quadrilateral strips and polygons, light sources and an animated group.
+  Errors: files that aren't OpenFlight or have no geometry.
+- **OpenGEX**: cubes Z up and Y up in other units, index arrays of each integer size with
+  their own materials, triangle strips and clockwise fronts, lines and points, texture
+  coordinates and colors, a textured material with a texture transform and a missing texture,
+  node transforms of every kind, object-only transforms, shared geometry, levels of detail,
+  morph targets, a skin with an animated bone, linear, constant, Bezier and rotation tracks,
+  clips, lights and cameras, and OpenDDL syntax (comments, string concatenation, hex and
+  binary floats). Errors: an unclosed structure, no geometry; four real assimp models.
 
 ## `expect.json`
 

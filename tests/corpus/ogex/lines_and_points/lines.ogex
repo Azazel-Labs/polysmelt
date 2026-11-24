@@ -1,0 +1,20 @@
+Metric (key = "up") { string { "y" } }
+GeometryNode { ObjectRef { ref { $l } } }
+GeometryNode { ObjectRef { ref { $s } } }
+GeometryNode { ObjectRef { ref { $p } } }
+GeometryObject $l {
+Mesh (primitive = "lines") {
+  VertexArray (attrib = "position") { float[3] { {0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {1, 1, 0} } }
+  IndexArray { unsigned_int32[2] { {0, 1}, {2, 3} } }
+}
+}
+GeometryObject $s {
+Mesh (primitive = "line_strip") {
+  VertexArray (attrib = "position") { float[3] { {0, 0, 1}, {1, 0, 1}, {1, 1, 1}, {0, 1, 1} } }
+}
+}
+GeometryObject $p {
+Mesh (primitive = "points") {
+  VertexArray (attrib = "position") { float[3] { {0, 0, 2}, {1, 0, 2}, {1, 1, 2}, {0, 1, 2} } }
+}
+}

@@ -1,0 +1,20 @@
+Metric (key = "up") { string { "y" } }
+GeometryNode { ObjectRef { ref { $q } } MaterialRef { ref { $m } } }
+GeometryObject $q {
+Mesh (primitive = "quads") {
+  VertexArray (attrib = "position") { float[3] { {0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0} } }
+  VertexArray (attrib = "texcoord") { float[2] { {0.0, 0.0}, {1.0, 0.0}, {1.0, 1.0}, {0.25, 0.75} } }
+  IndexArray { unsigned_int32[4] { {0, 1, 2, 3} } }
+}
+}
+Material $m {
+  Name { string { "Painted" } }
+  Color (attrib = "diffuse") { float[3] { {0.5, 0.25, 1.0} } }
+  Color (attrib = "emission") { float[3] { {0.0, 0.5, 0.0} } }
+  Texture (attrib = "diffuse") {
+    string { "paint.png" }
+    Translation { float[3] { {0.5, 0.25, 0} } }
+    Scale { float[3] { {2, 2, 1} } }
+  }
+  Texture (attrib = "normal") { string { "missing.png" } }
+}
