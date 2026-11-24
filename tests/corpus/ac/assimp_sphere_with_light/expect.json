@@ -1,0 +1,20 @@
+{
+  "spec": "AC3D (the AC3D file format): a real file, a textured sphere and a light",
+  "source": "assimp test models (test/models/AC), BSD license, see ../LICENSE-assimp",
+  "triangles": 264,
+  "lines": 0,
+  "tolerance": 1e-05,
+  "bounds": {
+    "min": [
+      -0.121788,
+      -0.064684,
+      0.0
+    ],
+    "max": [
+      -0.007075,
+      0.043965,
+      0.111682
+    ]
+  },
+  "area": 0.037951
+}

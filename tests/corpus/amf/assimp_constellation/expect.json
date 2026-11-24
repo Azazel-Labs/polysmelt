@@ -1,0 +1,18 @@
+{
+  "spec": "AMF (ISO/ASTM 52915): a real file, colors and a constellation turning two copies",
+  "source": "assimp test models (test/models/AMF), BSD license, see ../LICENSE-assimp",
+  "triangles": 16,
+  "bounds": {
+    "min": [
+      -0.0055,
+      -0.002828,
+      -0.002828
+    ],
+    "max": [
+      0.006,
+      0.002828,
+      0.002828
+    ]
+  },
+  "tolerance": 1e-05
+}

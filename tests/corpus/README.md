@@ -60,6 +60,13 @@ cases.
 | C3D | 26 | 26 | none |
 | TRC | 19 | 19 | none |
 | HTR | 31 | 31 | none |
+| LAS and LAZ | 17 | 15 | none |
+| PCD | 25 | 23 | none |
+| Text point clouds (`xyz/`) | 21 | 21 | none |
+| E57 | 3 | 1 | none |
+| AMF | 23 | 21 | none |
+| LightWave (`lwo/`) | 18 | 15 | none |
+| AC3D (`ac/`) | 15 | 11 | none |
 
 - **Generated** cases are written byte by byte by `tools/corpus/<format>.py` (3DS is
   `tds.py`, 3MF is `threemf.py`, COLLADA is `dae.py`, PMX, PMD and VMD are `mmd.py`, DirectX
@@ -89,6 +96,15 @@ cases.
   bisection, apart from the reader's solver.
 - **Blender** cases (`blender_*` folders) are real exporter output, from
   `tools/corpus/blender_export.py`.
+- **Real files** from other projects' test data sit in their case folders, with the
+  project's license beside them: PDAL's `simple.las` and `simple.laz` (BSD,
+  `las/LICENSE-PDAL`), PCL's `bun0.pcd` and `car6.pcd` (BSD, `pcd/LICENSE-PCL`), two scans
+  from the e57 crate's test data (MIT, `e57/LICENSE-e57`), and assimp's AMF, LWO and AC test
+  models (BSD, `LICENSE-assimp` in each). The generator reads each file with its own small
+  parser, written from the specification, and writes the expectations from that, so these
+  too are checked against the standard rather than against Polysmelt. A generator keeps
+  these files when it empties its folder (or takes them from the folder given as its first
+  argument).
 
 Regenerate a format from the repository root:
 
@@ -293,6 +309,40 @@ python tools/corpus/obj.py
 - **TRC** and **HTR**: units, missing cells, dropped and cut-short rows, files without frame
   rates, times or frame lines; HTR's Euler orders, gravity and bone length axes, unit
   fractions, the global form and scale factors.
+
+- **LAS and LAZ**: versions 1.0, 1.2, 1.3 and 1.4 and point formats 0, 1, 2, 3, 6, 7 and 8,
+  with colors (16-bit, and 8-bit as some writers store them), near infrared, intensity,
+  returns, classification, GPS time and point source as attributes. Also scale and offset per
+  axis far from the origin, GeoKeyDirectory units (feet, and meters across with feet up),
+  truncation, an unknown point format and files that aren't LAS; a real LAS file and its LAZ
+  copy.
+- **PCD**: `ascii`, `binary` and `binary_compressed` (LZF), positions only, packed `rgb` and
+  `rgba`, normals and other fields, multi-count and padding fields, double and integer
+  positions, organized clouds with NaN holes, version 0.5 without a viewpoint, a viewpoint
+  kept in `extras`, and CRLF. Errors: truncation, no x y z, unknown data and files that
+  aren't PCD; two real PCL clouds.
+- **Text point clouds**: `.xyz` with spaces, commas, tabs or semicolons (with decimal commas),
+  comments and blank lines, 8- and 16-bit colors, normals, intensity, named columns and
+  coordinates far from the origin; Leica PTS (with several count blocks) and PTX (missing
+  returns, several scans placed by their matrices, colors, a broken header); `.asc` point
+  lists, and Esri ASCII grids from their corner or center with NODATA cells. Also files with
+  no points.
+- **E57**: two real files, a Cartesian scan of single-precision floats with 8-bit colors and a
+  spherical scan of doubles with invalid points left out; a file that isn't E57.
+- **AMF**: units (millimeters when unsaid, the standard's others and an unknown one), vertex
+  and triangle colors, volume, object and material colors in order of precedence, composite
+  materials, constellations (nested, turned about x, y and z, an instance of a missing
+  object), zipped files, metadata, curved edges kept flat, textures, bad indices, truncation
+  and files that aren't AMF or have no triangles; two real assimp models.
+- **LightWave**: LWO2 and LWOB cubes (left-handed points and clockwise polygons turned to
+  glTF's), z mirrored, surfaces (diffuse, luminosity, transparency, two sides), two surfaces,
+  UV maps with an image map, vertex color maps, layers with pivots and parents, lines and
+  points, concave polygons, morph maps and descriptions. Errors: other IFF files, no
+  polygons, indices past the points; three real assimp models.
+- **AC3D**: a cube of shaded quads, CRLF and a byte order mark, materials (color, emission,
+  transparency), two-sided surfaces, `loc` and `rot` in nested objects, textures with `texrep`
+  and `texoff`, closed and open lines, triangle strips and concave polygons. Errors: files
+  that aren't AC3D or have no geometry; four real assimp models.
 
 ## `expect.json`
 

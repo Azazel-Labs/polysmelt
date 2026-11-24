@@ -33,7 +33,16 @@ Early. What exists today:
   and splines, and block inserts, text or binary), and gaussian splats (3D gaussian splatting's
   PLY files, `.splat` and gzipped `.spz`, versions 1 to 3) as `KHR_gaussian_splatting`, which
   the glTF reader also reads: `to_glb` keeps every splat's spherical harmonics, scale and
-  rotation, and `flatten` draws the splats as points in their base color.
+  rotation, and `flatten` draws the splats as points in their base color. Point clouds:
+  LAS lidar (1.0 to 1.4, point formats 0 to 10) and LAZ, PCD (ascii, binary and
+  binary_compressed), E57 scans (each scan placed by its pose) and text clouds (`.xyz`, `.pts`,
+  `.ptx` with its scanner transforms, `.asc`, ESRI ASCII grids), as point primitives with their colors, the other
+  fields (intensity, classification, return numbers, GPS time...) as vertex attributes, and the
+  coordinate system in `extras`. AMF (plain or zipped: objects, volumes and their materials,
+  vertex and triangle colors, textures, constellations; curved triangles stay flat), LightWave objects (`.lwo`: LWOB,
+  LWO2 and LWO3, with layers and pivots, surfaces and their image maps, UV and color maps,
+  smoothing angles and morph targets) and AC3D (`.ac`: the object tree, materials, textures,
+  crease angles, lines and triangle strips).
   Game and animation formats too: MikuMikuDance models (`.pmx` 2.0 and 2.1, `.pmd`, skinned,
   with morph targets, IK and materials) and `.vmd` motions, DirectX `.x` (text, binary and
   compressed, with frames, skins and animation sets), Quake II `.md2` and Quake III `.md3`
@@ -163,10 +172,18 @@ Early. What exists today:
 | `tiff` | TIFF textures (strips or tiles; uncompressed, LZW, Deflate or PackBits; 1 to 16 bits), re-encoded as PNG | `flate2` |
 | `psd` | Photoshop `.psd` and `.psb` textures (the merged image, raw or RLE), re-encoded as PNG | `flate2` |
 | `dds` | DDS textures (BC1 to BC5 and uncompressed), re-encoded as PNG | `flate2` |
+| `las` | LAS lidar point clouds, 1.0 to 1.4 | none |
+| `laz` | LAZ, compressed LAS (turns on `las`) | `laz` |
+| `pcd` | PCD point clouds | none |
+| `xyz` | Text point clouds: `.xyz`, `.pts`, `.ptx`, `.asc` | none |
+| `e57` | E57 scans | `e57` |
+| `amf` | AMF, plain or zipped | `quick-xml`, `zip`, `base64`, `flate2` |
+| `lwo` | LightWave objects (`.lwo`) | none |
+| `ac3d` | AC3D (`.ac`) | none |
 | `fs` | Reading files: `formats::load`, `assets::Folder`, `gltf::files_in` | none |
 
 Every reader is on by default, and so are `fs`, `webp` and the six texture decoders. `minimal`
-is the twenty-three readers with no dependencies, plus `fs`, for
+is the twenty-eight readers with no dependencies, plus `fs`, for
 `default-features = false, features = ["minimal"]`. Asking
 `formats::load` for a format whose feature is off returns an error that names the feature.
 

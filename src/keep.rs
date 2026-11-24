@@ -137,7 +137,15 @@ impl Keep {
     /// [`Keep::threads`]: how many to use here, at least 1. WebAssembly without shared memory
     /// has no threads; elsewhere, a reader whose threads can't be started reads on one.
     #[cfg_attr(
-        not(any(feature = "obj", feature = "spz")),
+        not(any(
+            feature = "obj",
+            feature = "spz",
+            feature = "las",
+            feature = "pcd",
+            feature = "xyz",
+            feature = "e57",
+            feature = "ac3d"
+        )),
         allow(dead_code, reason = "only the OBJ and SPZ readers take threads")
     )]
     pub(crate) fn threads(self) -> usize {
@@ -159,7 +167,15 @@ thread_local! {
 
 /// `f` started on a thread of `s`; false, and `f` dropped, where no thread can be started.
 #[cfg_attr(
-    not(any(feature = "obj", feature = "spz")),
+    not(any(
+        feature = "obj",
+        feature = "spz",
+        feature = "las",
+        feature = "pcd",
+        feature = "xyz",
+        feature = "e57",
+        feature = "ac3d"
+    )),
     allow(dead_code, reason = "only the OBJ and SPZ readers take threads")
 )]
 pub(crate) fn spawn<'s>(s: &'s std::thread::Scope<'s, '_>, f: impl FnOnce() + Send + 's) -> bool {

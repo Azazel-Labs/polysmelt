@@ -1,9 +1,10 @@
 //! Pure-Rust 3D asset interchange, with glTF as the hub.
 //!
 //! - [`formats`]: readers for STL, PLY, `MagicaVoxel`, OBJ, FBX, 3DS, 3MF, USD, glTF,
-//!   `SketchUp`, BVH, COLLADA, VRM, OFF, X3D/VRML and DXF, and for game and animation assets
-//!   `MikuMikuDance` (PMX, PMD, VMD), `DirectX` `.x`, MD2, MD3, MD5, IQM, SMD, `MilkShape` 3D,
-//!   `Blitz3D`, ASF/AMC, C3D, TRC and HTR, each behind a cargo feature, producing a
+//!   `SketchUp`, BVH, COLLADA, VRM, OFF, X3D/VRML, DXF, LAS/LAZ, PCD, E57, text point clouds,
+//!   AMF, `LightWave` and AC3D, and for game and animation assets `MikuMikuDance` (PMX, PMD,
+//!   VMD), `DirectX` `.x`, MD2, MD3, MD5, IQM, SMD, `MilkShape` 3D, `Blitz3D`, ASF/AMC, C3D, TRC
+//!   and HTR, each behind a cargo feature, producing a
 //!   [`Document`](document::Document).
 //! - [`document`]: that common form, a glTF 2.0 document (JSON and buffers) written out as a GLB
 //!   as it is, flattened into a posed [`Mesh`](mesh::Mesh) on demand, and pruned to what a
@@ -69,7 +70,8 @@ pub mod rig;
     feature = "gif",
     feature = "tiff",
     feature = "psd",
-    feature = "dds"
+    feature = "dds",
+    feature = "amf"
 ))]
 mod png;
 #[cfg(any(

@@ -1,0 +1,18 @@
+{
+  "spec": "LightWave object (LWO2 and LWOB file formats): a real file, an LWOB sphere with a glossy surface",
+  "source": "assimp test models (test/models/LWO), BSD license, see ../LICENSE-assimp",
+  "triangles": 528,
+  "tolerance": 1e-05,
+  "bounds": {
+    "min": [
+      -2.15,
+      -2.1,
+      -2.5
+    ],
+    "max": [
+      2.15,
+      2.1,
+      2.6
+    ]
+  }
+}

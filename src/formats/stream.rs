@@ -143,7 +143,7 @@ impl<'a> Blocks<'a> {
 }
 
 /// Text up to and including the last line break.
-#[cfg(any(feature = "bvh", all(test, feature = "fs")))]
+#[cfg(any(feature = "bvh", feature = "xyz", all(test, feature = "fs")))]
 pub(crate) fn lines(data: &[u8]) -> Option<usize> {
     data.iter().rposition(|&b| b == b'\n').map(|i| i + 1)
 }

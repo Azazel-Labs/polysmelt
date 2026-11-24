@@ -62,6 +62,14 @@ fn enabled(ext: &str) -> bool {
         "c3d" => cfg!(feature = "c3d"),
         "trc" => cfg!(feature = "trc"),
         "htr" => cfg!(feature = "htr"),
+        "las" => cfg!(feature = "las"),
+        "laz" => cfg!(feature = "laz"),
+        "pcd" => cfg!(feature = "pcd"),
+        "xyz" | "pts" | "ptx" | "asc" => cfg!(feature = "xyz"),
+        "e57" => cfg!(feature = "e57"),
+        "amf" => cfg!(feature = "amf"),
+        "lwo" => cfg!(feature = "lwo"),
+        "ac" => cfg!(feature = "ac3d"),
         _ => false,
     }
 }
@@ -96,9 +104,9 @@ fn has_feature(name: &str) -> bool {
 /// Every model extension a full build reads, so cases are found in builds without some readers.
 const ALL_EXTENSIONS: &[&str] = &[
     "stl", "ply", "vox", "obj", "3ds", "fbx", "3mf", "usd", "usda", "usdc", "usdz", "gltf", "glb", "skp", "bvh", "dae",
-    "zae", "kmz", "off", "vrm", "vrma", "x3d", "x3dv", "x3dz", "wrl", "wrz", "dxf", "splat", "spz", "pmx", "pmd",
-    "vmd", "x", "md2", "md3", "md5mesh", "md5anim", "iqm", "smd", "vta", "ms3d", "b3d", "asf", "amc", "c3d", "trc",
-    "htr",
+    "zae", "kmz", "off", "vrm", "vrma", "x3d", "x3dv", "x3dz", "wrl", "wrz", "dxf", "splat", "spz", "las", "laz",
+    "pcd", "xyz", "pts", "ptx", "asc", "e57", "amf", "lwo", "ac", "pmx", "pmd", "vmd", "x", "md2", "md3", "md5mesh",
+    "md5anim", "iqm", "smd", "vta", "ms3d", "b3d", "asf", "amc", "c3d", "trc", "htr",
 ];
 
 fn ext_of(p: &Path) -> String {
@@ -1190,6 +1198,34 @@ fn trc() {
 #[test]
 fn htr() {
     check("htr");
+}
+#[test]
+fn las() {
+    check("las");
+}
+#[test]
+fn pcd() {
+    check("pcd");
+}
+#[test]
+fn xyz() {
+    check("xyz");
+}
+#[test]
+fn e57() {
+    check("e57");
+}
+#[test]
+fn amf() {
+    check("amf");
+}
+#[test]
+fn lwo() {
+    check("lwo");
+}
+#[test]
+fn ac3d() {
+    check("ac");
 }
 
 /// Every extension `formats::load` takes has cases, and every format a corpus folder.

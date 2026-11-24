@@ -42,6 +42,8 @@ static MISSING: Location = Location::Missing;
         feature = "obj",
         feature = "ply",
         feature = "3ds",
+        feature = "lwo",
+        feature = "ac3d",
         feature = "fbx",
         feature = "usd",
         feature = "3mf",
@@ -84,6 +86,8 @@ pub(crate) enum Source {
             feature = "obj",
             feature = "ply",
             feature = "3ds",
+            feature = "lwo",
+            feature = "ac3d",
             feature = "fbx",
             feature = "usd",
             feature = "3mf"
@@ -105,6 +109,8 @@ impl From<Image> for Source {
         feature = "obj",
         feature = "ply",
         feature = "3ds",
+        feature = "lwo",
+        feature = "ac3d",
         feature = "fbx",
         feature = "usd",
         feature = "3mf"
@@ -117,7 +123,15 @@ pub(crate) struct Images {
     lazy: bool,
     /// The model's folder, which URIs of files are made relative to.
     #[cfg_attr(
-        not(any(feature = "obj", feature = "ply", feature = "3ds", feature = "fbx", feature = "usd")),
+        not(any(
+            feature = "obj",
+            feature = "ply",
+            feature = "3ds",
+            feature = "lwo",
+            feature = "ac3d",
+            feature = "fbx",
+            feature = "usd"
+        )),
         allow(dead_code, reason = "only readers of texture files use it")
     )]
     dir: PathBuf,
@@ -130,6 +144,8 @@ pub(crate) struct Images {
         feature = "obj",
         feature = "ply",
         feature = "3ds",
+        feature = "lwo",
+        feature = "ac3d",
         feature = "fbx",
         feature = "usd",
         feature = "3mf"
@@ -153,7 +169,15 @@ impl Images {
     }
 
     #[cfg_attr(
-        not(any(feature = "obj", feature = "ply", feature = "3ds", feature = "fbx", feature = "usd")),
+        not(any(
+            feature = "obj",
+            feature = "ply",
+            feature = "3ds",
+            feature = "lwo",
+            feature = "ac3d",
+            feature = "fbx",
+            feature = "usd"
+        )),
         allow(dead_code, reason = "only readers of texture files use it")
     )]
     /// The texture file at `path`, found by the assets for `reference`: its index, or `None`
@@ -168,7 +192,15 @@ impl Images {
     }
 
     #[cfg_attr(
-        not(any(feature = "obj", feature = "ply", feature = "3ds", feature = "fbx", feature = "usd")),
+        not(any(
+            feature = "obj",
+            feature = "ply",
+            feature = "3ds",
+            feature = "lwo",
+            feature = "ac3d",
+            feature = "fbx",
+            feature = "usd"
+        )),
         allow(dead_code, reason = "only readers of texture files use it")
     )]
     fn read_file(&mut self, assets: &dyn Assets, path: PathBuf, reference: &str) -> Option<usize> {
@@ -252,7 +284,15 @@ pub(crate) fn gray(b: &[u8]) -> bool {
 }
 
 #[cfg_attr(
-    not(any(feature = "obj", feature = "ply", feature = "3ds", feature = "fbx", feature = "usd")),
+    not(any(
+        feature = "obj",
+        feature = "ply",
+        feature = "3ds",
+        feature = "lwo",
+        feature = "ac3d",
+        feature = "fbx",
+        feature = "usd"
+    )),
     allow(dead_code, reason = "only readers of texture files use it")
 )]
 /// A URI for a file at `path`: relative to the model's folder when it's under it.
@@ -271,6 +311,8 @@ fn file_uri(path: &Path, dir: &Path) -> String {
         feature = "obj",
         feature = "ply",
         feature = "3ds",
+        feature = "lwo",
+        feature = "ac3d",
         feature = "fbx",
         feature = "usd",
         feature = "3mf"

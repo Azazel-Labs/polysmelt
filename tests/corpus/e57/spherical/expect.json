@@ -1,0 +1,37 @@
+{
+  "spec": "E57 (ASTM E2807): a real file, one scan, spherical doubles with an invalid state",
+  "source": "e57 crate test data (testdata/), MIT license, see ../LICENSE-e57",
+  "tolerance": 0.0002,
+  "points": 180,
+  "triangles": 0,
+  "bounds": {
+    "min": [
+      1e-06,
+      0.0,
+      -0.5
+    ],
+    "max": [
+      1.0,
+      1.0,
+      0.499999
+    ]
+  },
+  "positions_include": [
+    [
+      1.0,
+      0.0,
+      -0.0
+    ],
+    [
+      1e-06,
+      1.0,
+      -0.000796
+    ],
+    [
+      0.999638,
+      0.019036,
+      0.019032
+    ]
+  ],
+  "colors": false
+}

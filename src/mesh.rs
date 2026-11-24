@@ -646,6 +646,11 @@ pub(crate) fn triangulate(corners: &[[f32; 3]], out: &mut Vec<[u32; 3]>) {
                     return false;
                 }
                 let pq = p[q as usize];
+                // A corner on top of one of the ear's (where a hole's bridge comes back) doesn't block it.
+                let bits = |v: [f64; 2]| v.map(f64::to_bits);
+                if [pa, pb, pc].iter().any(|&v| bits(v) == bits(pq)) {
+                    return false;
+                }
                 cross(pa, pb, pq) >= 0.0 && cross(pb, pc, pq) >= 0.0 && cross(pc, pa, pq) >= 0.0
             })
         });
@@ -863,6 +868,8 @@ mod triangulate_tests {
 #[cfg(any(
     feature = "ply",
     feature = "3ds",
+    feature = "lwo",
+    feature = "ac3d",
     feature = "fbx",
     feature = "vox",
     feature = "3mf",
@@ -876,6 +883,8 @@ pub(crate) struct FxHasher(u64);
 #[cfg(any(
     feature = "ply",
     feature = "3ds",
+    feature = "lwo",
+    feature = "ac3d",
     feature = "fbx",
     feature = "vox",
     feature = "3mf",
@@ -914,6 +923,8 @@ impl std::hash::Hasher for FxHasher {
 #[cfg(any(
     feature = "ply",
     feature = "3ds",
+    feature = "lwo",
+    feature = "ac3d",
     feature = "fbx",
     feature = "off",
     feature = "x3d",
