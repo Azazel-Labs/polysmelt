@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>polysmelt: any 3D model, in your browser, out as glTF</title>
+<meta name="description" content="Drop a 3D model in any of 60+ formats (FBX, OBJ, COLLADA, STL, PLY, 3DS, BVH, MD2, LAS, point clouds and more) or a whole folder. polysmelt reads it in Rust and WebAssembly, shows it lit and animated, and gives it back as GLB.">
+<meta name="theme-color" content="#0b0b0f">
+<link rel="canonical" href="https://azazel-labs.github.io/polysmelt/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="polysmelt">
+<meta property="og:title" content="polysmelt: drop any 3D model, get glTF">
+<meta property="og:description" content="60+ 3D formats in, clean glTF out. A Rust crate, running here in WebAssembly: drop a model or a folder to see it lit, animated and converted.">
+<meta property="og:url" content="https://azazel-labs.github.io/polysmelt/">
+<meta property="og:image" content="https://azazel-labs.github.io/polysmelt/social.png">
+<meta property="og:image:width" content="1280">
+<meta property="og:image:height" content="640">
+<meta property="og:image:alt" content="polysmelt: 3D formats melted down into glTF">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="polysmelt: drop any 3D model, get glTF">
+<meta name="twitter:description" content="60+ 3D formats in, clean glTF out. Rust and WebAssembly, right in the browser.">
+<meta name="twitter:image" content="https://azazel-labs.github.io/polysmelt/social.png">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='0' y2='1'%3E%3Cstop offset='0' stop-color='%23ffd36b'/%3E%3Cstop offset='1' stop-color='%23ff5a1f'/%3E%3C/linearGradient%3E%3C/defs%3E%3Cpath d='M5 9h22l-3 15a4 4 0 0 1-4 3h-8a4 4 0 0 1-4-3z' fill='%23262630'/%3E%3Cpath d='M7.5 13h17l-1.6 9.5a3 3 0 0 1-3 2.5h-7.8a3 3 0 0 1-3-2.5z' fill='url(%23g)'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <a class="wordmark" href="https://github.com/Azazel-Labs/polysmelt" aria-label="polysmelt on GitHub">
+    <svg class="crucible" viewBox="0 0 32 32" aria-hidden="true"><defs><linearGradient id="melt" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffd36b"/><stop offset="1" stop-color="#ff5a1f"/></linearGradient></defs><path d="M5 9h22l-3 15a4 4 0 0 1-4 3h-8a4 4 0 0 1-4-3z" fill="#262630"/><path d="M7.5 13h17l-1.6 9.5a3 3 0 0 1-3 2.5h-7.8a3 3 0 0 1-3-2.5z" fill="url(#melt)"/></svg>
+    <span>poly<b>smelt</b></span>
+  </a>
+  <p class="tagline">60+ 3D formats in. Clean glTF out. <span class="muted">Rust, running here in WebAssembly.</span></p>
+  <nav class="links">
+    <a href="https://github.com/Azazel-Labs/polysmelt">GitHub</a>
+    <a href="https://crates.io/crates/polysmelt">crates.io</a>
+    <a href="https://docs.rs/polysmelt">docs.rs</a>
+  </nav>
+</header>
+
+<main class="layout">
+  <section class="stage" id="stage">
+    <canvas id="canvas" aria-label="3D view: drag to turn, right-drag or two fingers to pan, scroll or pinch to zoom"></canvas>
+
+    <div class="drop" id="drop">
+      <div class="drop-card">
+        <svg class="drop-icon" viewBox="0 0 48 48" aria-hidden="true"><path d="M24 6v24m0 0-9-9m9 9 9-9" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/><path d="M8 32v4a6 6 0 0 0 6 6h20a6 6 0 0 0 6-6v-4" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/></svg>
+        <h1>Drop a 3D model here</h1>
+        <p>One file, several, or a whole folder: textures, MTL libraries and buffers are found beside the model.</p>
+        <div class="pick">
+          <label class="button primary">Choose files<input type="file" id="files" multiple hidden></label>
+          <label class="button">Choose a folder<input type="file" id="folder" webkitdirectory multiple hidden></label>
+        </div>
+        <p class="private">Nothing is uploaded: your files stay in this tab.</p>
+      </div>
+    </div>
+
+    <div class="busy" id="busy" hidden><div class="spinner"></div><span id="busy-text">Smelting...</span></div>
+    <div class="toast" id="toast" role="alert" hidden></div>
+    <div class="hint" id="hint" hidden>Drag to turn &middot; right-drag to pan &middot; scroll to zoom &middot; double-click to reframe</div>
+
+    <div class="toolbar" id="toolbar" hidden>
+      <button class="icon" id="reset" title="Reframe the model" aria-label="Reframe the model"><svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+      <button class="icon toggle on" id="floor" title="Floor and shadow" aria-label="Floor and shadow" aria-pressed="true"><svg viewBox="0 0 24 24"><path d="M2 17l5-6h10l5 6z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M7 14h10" stroke="currentColor" stroke-width="2"/></svg></button>
+      <button class="icon toggle" id="skeleton" title="Skeleton" aria-label="Skeleton" aria-pressed="false" hidden><svg viewBox="0 0 24 24"><circle cx="12" cy="4.5" r="2.2" fill="currentColor"/><path d="M12 7v7m0 0-4 7m4-7 4 7M6 10h12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>
+      <button class="icon" id="new" title="Open another model" aria-label="Open another model"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>
+    </div>
+
+    <div class="player" id="player" hidden>
+      <button class="icon" id="play" aria-label="Pause"><svg viewBox="0 0 24 24" id="play-icon"><path d="M7 5h3v14H7zM14 5h3v14h-3z" fill="currentColor"/></svg></button>
+      <select id="animation" aria-label="Animation"></select>
+      <input type="range" id="scrub" min="0" max="1" step="0.001" value="0" aria-label="Time">
+      <span class="time" id="time">0.00 s</span>
+      <select id="speed" aria-label="Speed"><option value="0.25">0.25x</option><option value="0.5">0.5x</option><option value="1" selected>1x</option><option value="2">2x</option></select>
+    </div>
+  </section>
+
+  <aside class="panel" id="panel">
+    <section class="card samples">
+      <h2>Try a sample</h2>
+      <div class="sample-grid" id="samples"></div>
+    </section>
+
+    <section class="card info" id="info" hidden>
+      <div class="info-head">
+        <div>
+          <h2 id="info-file">model</h2>
+          <p class="format" id="info-format"></p>
+        </div>
+        <button class="button primary" id="download" title="Convert to glTF and download">Download GLB</button>
+      </div>
+      <dl class="stats" id="stats"></dl>
+      <h3>Source</h3>
+      <dl class="facts" id="facts"></dl>
+      <p class="legend"><span class="tag declared">declared</span> the file says so &middot; <span class="tag assumed">assumed</span> its format's convention</p>
+    </section>
+
+    <section class="card formats">
+      <details>
+        <summary>Formats this page reads</summary>
+        <p id="format-list"></p>
+        <p class="muted">USD (.usd, .usda, .usdc, .usdz) needs OpenUSD, which doesn't build for the web yet; the crate reads it natively.</p>
+      </details>
+    </section>
+    <p class="footer">polysmelt reads the file and flattens it in WebAssembly; the view is drawn with wgpu on <span id="backend">WebGPU or WebGL 2</span>. <a href="https://github.com/Azazel-Labs/polysmelt/tree/main/demo">Source of this page</a>.</p>
+  </aside>
+</main>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
