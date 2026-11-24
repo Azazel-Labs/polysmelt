@@ -502,6 +502,11 @@ fn time(opts: &BTreeMap<String, Vec<String>>) {
                 if ext == "gltf" || ext == "glb" {
                     w.push(loaders::POLYSMELT_NO_IMAGES.to_owned());
                 }
+                // assimp reads these formats' first frame alone: timed against Polysmelt doing the
+                // same, as well as against its full load.
+                if loaders::first_frame_only(&ext) {
+                    w.push(loaders::POLYSMELT_FIRST_FRAME.to_owned());
+                }
                 w
             }
         };

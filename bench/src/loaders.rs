@@ -89,6 +89,13 @@ fn n(x: usize) -> u64 {
 pub const POLYSMELT: &str = "polysmelt";
 pub const POLYSMELT_GLB: &str = "polysmelt → GLB";
 pub const POLYSMELT_NO_IMAGES: &str = "polysmelt (no image bytes)";
+pub const POLYSMELT_FIRST_FRAME: &str = "polysmelt (first frame)";
+
+/// Formats whose assimp result is the first animation frame alone, where Polysmelt's load makes
+/// every frame a morph target.
+pub fn first_frame_only(ext: &str) -> bool {
+    matches!(ext, "md2" | "md3" | "mdc")
+}
 
 pub fn polysmelt_reads(ext: &str) -> bool {
     polysmelt::formats::EXTENSIONS.contains(&ext)
@@ -241,6 +248,13 @@ pub fn polysmelt_all_cores(src: &Src) -> Out {
 pub fn polysmelt_no_image_bytes(src: &Src) -> Out {
     use polysmelt::document::Keep;
     polysmelt_keep(src, Keep { threads: 1, image_bytes: false, ..Keep::ALL })
+}
+
+/// The first frame alone, without morph targets or animation: the work a library that reads a
+/// vertex-animated model's first frame (assimp's MD2, MD3 and MDC) does.
+pub fn polysmelt_first_frame(src: &Src) -> Out {
+    use polysmelt::document::Keep;
+    polysmelt_keep(src, Keep { threads: 1, morph_targets: false, animations: false, ..Keep::ALL })
 }
 
 /// A conversion: load, and write the document as a GLB in memory.
@@ -979,6 +993,7 @@ pub fn by_name(name: &str, ext: &str) -> Option<Loader> {
         POLYSMELT_GLB => l(POLYSMELT_GLB, polysmelt_glb),
         "polysmelt (threads: 0, all cores)" => l("polysmelt (threads: 0, all cores)", polysmelt_all_cores),
         POLYSMELT_NO_IMAGES => l(POLYSMELT_NO_IMAGES, polysmelt_no_image_bytes),
+        POLYSMELT_FIRST_FRAME => l(POLYSMELT_FIRST_FRAME, polysmelt_first_frame),
         "polysmelt (convert)" => l("polysmelt (convert)", polysmelt_convert),
         _ => competitors(ext).into_iter().chain(assimp_glb(ext)).find(|c| c.name == name),
     }
