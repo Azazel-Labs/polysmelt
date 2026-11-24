@@ -12,7 +12,7 @@ categories = ["graphics", "game-development", "parser-implementations", "encodin
 repository = "https://github.com/Azazel-Labs/polysmelt"
 readme = "README.md"
 # One crate on crates.io: the library alone. The corpus, its tools and the benchmarks stay in the repository.
-include = ["/src", "/examples", "/README.md", "/LICENSE", "/Cargo.toml"]
+include = ["/src", "/examples", "/README.md", "/CHANGELOG.md", "/LICENSE", "/Cargo.toml"]
 
 [package.metadata.docs.rs]
 all-features = true
