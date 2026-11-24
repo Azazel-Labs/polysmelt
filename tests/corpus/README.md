@@ -402,7 +402,8 @@ are required. Every other key is optional and is checked only when present.
 | --- | --- |
 | `file` | The model file to load. Required when the folder holds more than one model file. |
 | `needs` | A cargo feature the case needs beyond its format's own, such as `draco`, or `png` for the PNG encoder any image re-encoding feature brings. Builds without it skip the case. |
-| `error` | Loading must fail with an error containing this text (case-insensitive). |
+| `error` | Loading must fail with an error whose message (after the path it names) contains this text (case-insensitive). |
+| `error_kind` | Required with `error`: the `ErrorKind` the error has, as Debug prints it (`Truncated`, `Corrupt`, `Empty`, ...). An error from loading must also name a file in the case's folder. |
 | `no_mesh` | `true`: the file loads but has nothing to draw: no triangles, lines or points. |
 | `facts` | An object; each entry must match the loader's `facts`. |
 | `triangles`, `vertices`, `primitives`, `material_count`, `image_count` | Exact counts in the GLB. |
