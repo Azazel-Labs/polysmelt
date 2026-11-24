@@ -18,7 +18,7 @@ on:
         default: "40"
       profile:
         description: Files to profile with perf (paths under the corpora folder, or bare file names), comma-separated; "none" to skip
-        default: "rungholt.obj,khronos/Models/Sponza/glTF/Sponza.gltf,khronos/Models/ABeautifulGame/glTF/ABeautifulGame.gltf"
+        default: "rungholt.obj,khronos/Models/Sponza/glTF/Sponza.gltf,khronos/Models/ABeautifulGame/glTF/ABeautifulGame.gltf,vox/menger.vox"
   push:
     branches: ["cloud-bench/**"]
 
@@ -36,7 +36,7 @@ env:
   BLENDER_SHA256: 23432b064977908beb1ab4b7f32f024e7331105c875c187dce002aff84b10c11
   BUDGET: ${{ inputs.budget || '0.25' }}
   FLIPS: ${{ inputs.flips || '40' }}
-  PROFILE: ${{ inputs.profile || 'rungholt.obj,khronos/Models/Sponza/glTF/Sponza.gltf,khronos/Models/ABeautifulGame/glTF/ABeautifulGame.gltf' }}
+  PROFILE: ${{ inputs.profile || 'rungholt.obj,khronos/Models/Sponza/glTF/Sponza.gltf,khronos/Models/ABeautifulGame/glTF/ABeautifulGame.gltf,vox/menger.vox' }}
 
 jobs:
   corpora:
@@ -122,7 +122,7 @@ jobs:
           {
             echo "{"
             echo "\"polysmelt commit\": \"${GITHUB_SHA::7}\","
-            echo "\"polysmelt version\": \"$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)\","
+            echo "\"polysmelt version\": \"$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)\","
             echo "\"rustc\": \"$(rustc --version)\","
             echo "\"assimp\": \"$(dist/corpus info | python3 -c 'import json,sys; print(json.load(sys.stdin)["assimp"])') ($ASSIMP_REV)\","
             echo "\"Blender\": \"$BLENDER_VERSION LTS\""
@@ -211,7 +211,7 @@ jobs:
       - name: Damaged files
         run: |
           mkdir -p results/resilience
-          python3 tools/evidence/pick_resilience.py ~/corpora tools/evidence/corpora.txt ${{ matrix.shard }} 4 > files.txt
+          python3 tools/evidence/pick_resilience.py ~/corpora tools/evidence/corpora.txt ${{ matrix.shard }} 4 --per-format 64 > files.txt
           echo "$(wc -l < files.txt) files"
           # Two workers' worth of files per shard, in parallel halves.
           split -n l/2 -d files.txt part-
@@ -220,7 +220,7 @@ jobs:
               --json results/resilience/resilience-${{ matrix.shard }}-$p.json > /dev/null 2> $p.log &
           done
           wait
-          tail -3 part-*.log
+          tail -n 3 part-*.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -271,7 +271,7 @@ jobs:
           IFS=',' read -ra files <<< "$PROFILE"
           for f in "${files[@]}"; do
             p=~/corpora/$f
-            [ -f "$p" ] || p=$(find ~/corpora -name "$(basename "$f")" -type f | head -1)
+            [ -f "$p" ] || p=$(find ~/corpora -name "$(basename "$f")" -type f | head -n 1)
             [ -f "$p" ] || { echo "not found: $f"; continue; }
             name=$(basename "$p" | tr '.' '_')
             for loader in polysmelt "polysmelt → GLB"; do
@@ -279,6 +279,7 @@ jobs:
               perf record -q -F 1999 -g -o perf.data -- bin/profiling/corpus one "$loader" "$p" --repeat 4
               perf script -i perf.data 2> /dev/null | inferno-collapse-perf > stacks.txt
               inferno-flamegraph --title "$loader: $(basename "$p")" < stacks.txt > "results/profile/${name}-${tag}.svg"
+              gzip -c stacks.txt > "results/profile/${name}-${tag}.folded.gz"
               echo "$loader $(basename "$p"): $(wc -l < stacks.txt) stacks"
             done
           done

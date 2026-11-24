@@ -36,6 +36,15 @@ HARD = ("triangles",)
 SOFT = ("vertices", "materials", "nodes", "joints", "animations")
 
 
+
+# Competitors whose result is less than what Polysmelt's load makes, so their times aren't like for like.
+PARTIAL = {
+    "dot_vox": "only parses the voxels; Polysmelt also meshes them into triangles",
+    "fbxcel-dom": "only parses the node tree; Polysmelt also decodes the geometry, materials, skins and animation",
+    "bvh_anim": "only parses the joints and frames; Polysmelt also builds the glTF skeleton and animation",
+    "ply-rs": "parses into a generic map per element; Polysmelt builds an indexed mesh",
+}
+
 def load_jsonl(path):
     out = []
     if os.path.exists(path):
@@ -360,6 +369,15 @@ def main():
                             ["---", "---", "---:", "---:", "---:", "---:", "---:"]))
             if len(hard) > 150:
                 md.append(f"\n… {len(hard) - 150} more in `disagreements.csv`.\n")
+            if any(d[0].endswith(".dae") for d in hard):
+                md.append(
+                    "\nKnown causes on COLLADA, checked by hand against the files' `<polylist>` index lists: "
+                    "Polysmelt makes one glTF mesh per (geometry, material binding) pair, so a geometry that two "
+                    "instances bind to different materials counts twice (GearboxAssy.dae: 32 geometries, 41 pairs, "
+                    "378 674 triangles exactly); and it drops triangles whose three corners are not three distinct "
+                    "vertices, i.e. repeat a full (position, normal, texcoord) index tuple (2CylinderEngine.dae "
+                    "75 730 less 10 413 = 65 317; Buggy.dae 308 306 less 28 457 = 279 849). The `collada` crate "
+                    "counts every geometry once and every triangle the file lists.\n")
             for f, ds in per_file.items():
                 others = [x for x in by_file[f].items() if x[0] not in (P, PG) and x[1]["status"] == "ok"
                           and "triangles" in (x[1].get("stats") or {})]
@@ -548,6 +566,7 @@ def main():
             f"(Polysmelt's glTF load includes decoding it into a flat mesh); conversion is read plus writing a GLB in "
             f"memory. Threads alive after the run: {timing.get('threads_after')}.\n\n"
         )
+        md.append("† Not like for like: " + "; ".join(f"{code(o)} {w}" for o, w in PARTIAL.items()) + ".\n\n")
         pairs = defaultdict(lambda: defaultdict(list))  # (polysmelt side, other) -> ext -> [(file, p, o)]
         for f in tfiles:
             m = {l["loader"]: l for l in f["loaders"] if l.get("median_ms") is not None}
@@ -564,7 +583,8 @@ def main():
                 ratios = [oo / pp for _, pp, oo in xs if pp > 0]
                 w = sum(1 for r in ratios if r > 1)
                 tp, to = sum(x[1] for x in xs), sum(x[2] for x in xs)
-                rows.append([code(o), ext, len(xs), fmt_ratio(geomean(ratios)), fmt_ratio(min(ratios) if ratios else None),
+                rows.append([code(o) + (" †" if o in PARTIAL else ""), ext, len(xs), fmt_ratio(geomean(ratios)),
+                             fmt_ratio(min(ratios) if ratios else None),
                              fmt_ratio(max(ratios) if ratios else None), f"{w}/{len(xs)}", fmt_ms(tp), fmt_ms(to)])
                 for k, pp, oo in xs:
                     csv_rows.append([side, o, ext, k, pp, oo, oo / pp if pp else ""])
@@ -650,7 +670,8 @@ def main():
     # --- Losses ---------------------------------------------------------------------------------
     for k, side, o, pp, oo in speed_loss:
         losses.append((4, f"slower than {o}" + (" (conversion)" if side == PG else ""), k,
-                       f"{fmt_ms(pp)} ms vs {fmt_ms(oo)} ms ({pp / oo:.2f}× slower)", pp / oo))
+                       f"{fmt_ms(pp)} ms vs {fmt_ms(oo)} ms ({pp / oo:.2f}× slower)"
+                       + (f"; not like for like: {o} {PARTIAL[o]}" if o in PARTIAL else ""), pp / oo))
     for k, side, o, pr, orr in mem_loss:
         losses.append((5, f"more memory than {o}" + (" (conversion)" if side == PG else ""), k,
                        f"{pr / 1024:.1f} MB vs {orr / 1024:.1f} MB ({pr / max(orr, 1):.2f}×)", pr / max(orr, 1)))

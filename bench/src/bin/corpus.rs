@@ -79,6 +79,7 @@ fn main() {
         "sweep" => sweep(&opts),
         "one" => one(&pos, &opts),
         "time" => time(&opts),
+        "time-file" => time_one(&pos, &opts),
         "info" => println!(
             "{}",
             json!({ "assimp": loaders::assimp_version(), "polysmelt_extensions": polysmelt::formats::EXTENSIONS })
@@ -465,6 +466,7 @@ fn time(opts: &BTreeMap<String, Vec<String>>) {
         }
     }
     let mut results = Vec::new();
+    let mut threads = 0;
     let started = Instant::now();
     let files = ok.len();
     for (i, ((corpus, rel), (bytes, good))) in ok.into_iter().enumerate() {
@@ -488,13 +490,35 @@ fn time(opts: &BTreeMap<String, Vec<String>>) {
         if ls.len() < 2 {
             continue;
         }
-        let r = time_file(&path, &ls, budget);
+        // Each file in a process of its own (pinned like this one), all its loaders in that process
+        // in rotating turns: a loader that crashes when it runs again in one process costs that
+        // file's timings, not the run's.
+        let names: Vec<&str> = ls.iter().map(|l| l.name).collect();
+        let out = Command::new(std::env::current_exe().unwrap())
+            .arg("time-file")
+            .arg(&path)
+            .args(["--ext", &ext, "--loaders", &names.join(","), "--budget", &budget.as_secs_f64().to_string()])
+            .stderr(Stdio::inherit())
+            .output();
+        let r = match out.as_ref().ok().filter(|o| o.status.success()).and_then(|o| serde_json::from_slice::<Value>(&o.stdout).ok()) {
+            Some(v) => {
+                threads = threads.max(v["threads"].as_u64().unwrap_or(0));
+                v["loaders"].clone()
+            }
+            None => {
+                let why = match &out {
+                    Ok(o) => format!("timing process failed: {}", o.status),
+                    Err(e) => format!("timing process didn't start: {e}"),
+                };
+                eprintln!("{corpus}/{rel}: {why}");
+                Value::from(names.iter().map(|n| json!({ "loader": n, "error": why })).collect::<Vec<_>>())
+            }
+        };
         if (i + 1) % 100 == 0 {
             eprintln!("[{}/{files} {:.0}s]", i + 1, started.elapsed().as_secs_f64());
         }
         results.push(json!({ "corpus": corpus, "file": rel, "ext": ext, "bytes": bytes, "loaders": r }));
     }
-    let threads = proc_status().map(|s| s.2);
     let doc = json!({
         "budget_s": budget.as_secs_f64(),
         "threads_after": threads,
@@ -510,6 +534,18 @@ fn time(opts: &BTreeMap<String, Vec<String>>) {
 fn allowed_cpus() -> Option<String> {
     let s = std::fs::read_to_string("/proc/self/status").ok()?;
     s.lines().find(|l| l.starts_with("Cpus_allowed_list:")).map(|l| l.split_whitespace().nth(1).unwrap_or("").to_owned())
+}
+
+/// `time-file <file> --ext <ext> --loaders a,b --budget <s>`: one file's timings, as JSON on stdout.
+fn time_one(pos: &[String], opts: &BTreeMap<String, Vec<String>>) {
+    let path = Path::new(pos.first().expect("file"));
+    let ext = opt(opts, "ext").map_or_else(|| loaders::ext_of(path), str::to_owned);
+    let budget = Duration::from_secs_f64(opt(opts, "budget").map_or(0.25, |v| v.parse().unwrap()));
+    let ls: Vec<Loader> =
+        list_opt(opts, "loaders").unwrap_or_default().iter().filter_map(|w| loaders::by_name(w, &ext)).collect();
+    let r = time_file(path, &ls, budget);
+    let threads = proc_status().map_or(0, |s| s.2);
+    println!("{}", json!({ "loaders": r, "threads": threads }));
 }
 
 fn time_file(path: &Path, ls: &[Loader], budget: Duration) -> Vec<Value> {
