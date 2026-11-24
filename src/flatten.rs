@@ -47,7 +47,7 @@ use serde_json::{Map, Value};
 
 #[cfg(doc)]
 use crate::document::Keep;
-use crate::document::{Counts, Document, Pose};
+use crate::document::{Bounds, Counts, Document, Pose};
 use crate::gltf as container;
 use crate::mesh::{
     Anisotropy, Clearcoat, Extensions, Factor, Image, Iridescence, Material, Mesh, Prim, Sampling, Sheen, Specular,
@@ -145,6 +145,22 @@ impl Document<'_> {
         counts(&self.json)
     }
 
+    /// The box around every vertex the default scene draws in `pose`, transforms, instances,
+    /// morphs and skins applied, exactly as [`Document::flatten`] places them (lines and points
+    /// too, unless [`Document::lines_and_points`] leaves them out); `None` when it draws nothing.
+    /// Only positions are read: no other attribute, material or image. A file's own bounds
+    /// (glTF's accessor `min` and `max`) aren't trusted, since files get them wrong.
+    ///
+    /// # Errors
+    ///
+    /// As [`Document::flatten`], except that no triangle or point limit applies.
+    pub fn bounds(&self, pose: Pose) -> Result<Option<Bounds>> {
+        let mut r = Reader::new(self)?;
+        r.bind = pose == Pose::Bind;
+        r.pose(pose)?;
+        r.bounds()
+    }
+
     /// How many triangles the default scene draws: [`Document::counts`]' triangles.
     #[must_use]
     pub fn triangles(&self) -> usize {
@@ -166,6 +182,7 @@ fn counts(json: &Map<String, Value>) -> Counts {
             let Some(pos) = p.get("attributes").and_then(|a| index(a, "POSITION")) else {
                 continue;
             };
+            c.vertices += count(pos) * k;
             let n = index(p, "indices").map_or_else(|| count(pos), count);
             match p.get("mode").and_then(Value::as_u64).unwrap_or(4) {
                 0 => c.points += n * k,
@@ -1696,6 +1713,73 @@ impl Reader<'_> {
         }
         self.skeleton(&mut mesh);
         Ok(mesh.prims.iter().any(|p| !p.is_empty()).then_some(mesh))
+    }
+
+    /// See [`Document::bounds`].
+    fn bounds(&mut self) -> Result<Option<Bounds>> {
+        let uses = self.uses()?;
+        let mut lo = [f32::INFINITY; 3];
+        let mut hi = [f32::NEG_INFINITY; 3];
+        for u in &uses {
+            for p in items(self.get("meshes", u.mesh)?, "primitives") {
+                let mode = mode(p);
+                let attrs = p.get("attributes").unwrap_or(&Value::Null);
+                let Some(pos) = index(attrs, "POSITION") else {
+                    continue;
+                };
+                if !self.drawn(mode) {
+                    continue;
+                }
+                self.draco.clear();
+                if let Some(ext) = p.get("extensions").and_then(|e| e.get("KHR_draco_mesh_compression")) {
+                    if mode < 4 {
+                        // Not drawn: see `primitive`.
+                        continue;
+                    }
+                    #[cfg(feature = "draco")]
+                    self.decode_draco(ext, attrs, index(p, "indices"))?;
+                    #[cfg(not(feature = "draco"))]
+                    {
+                        let _ = ext;
+                        ensure!(
+                            self.acc(pos)?.view.is_some(),
+                            "glTF uses Draco compression, which needs Polysmelt's `draco` feature"
+                        );
+                    }
+                }
+                let mut positions = self.read(pos, [0.0; 3])?;
+                for (k, target) in items(p, "targets").iter().enumerate() {
+                    let w = u.weights.get(k).copied().unwrap_or(0.0);
+                    if w == 0.0 {
+                        continue;
+                    }
+                    if let Some(a) = index(target, "POSITION") {
+                        for (v, d) in positions.iter_mut().zip(self.read(a, [0.0; 3])?) {
+                            for c in 0..3 {
+                                v[c] += w * d[c];
+                            }
+                        }
+                    }
+                }
+                if let Some(skin) = u.skin {
+                    let morphed = !u.weights.is_empty();
+                    self.skin(skin, attrs, &mut positions, &mut [], &mut [], morphed)?;
+                }
+                for m in &u.transforms {
+                    let still = m[..12] == IDENTITY[..12] && m[12..15] == [0.0; 3];
+                    for &v in &positions {
+                        let v = if still { v } else { apply_point(m, v) };
+                        if v.iter().all(|x| x.is_finite()) {
+                            for c in 0..3 {
+                                lo[c] = lo[c].min(v[c]);
+                                hi[c] = hi[c].max(v[c]);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok((lo[0] <= hi[0]).then_some(Bounds { min: lo, max: hi }))
     }
 
     /// Whether a primitive in `mode` is drawn: triangles, strips and fans, and points and lines
@@ -3849,6 +3933,78 @@ mod tests {
         assert_eq!(back.prims[1].points, mesh.prims[1].points);
         assert!(back.prims[1].normals.is_empty(), "no normals are made up for points");
         assert!(to_glb(&back).unwrap() == glb, "written again, the same bytes");
+    }
+
+    /// The box around a flattened mesh's positions.
+    fn box_of(mesh: Option<&Mesh>) -> Option<crate::document::Bounds> {
+        let mut lo = [f32::INFINITY; 3];
+        let mut hi = [f32::NEG_INFINITY; 3];
+        for v in mesh.into_iter().flat_map(|m| &m.prims).flat_map(|p| &p.positions) {
+            for c in 0..3 {
+                lo[c] = lo[c].min(v[c]);
+                hi[c] = hi[c].max(v[c]);
+            }
+        }
+        (lo[0] <= hi[0]).then_some(crate::document::Bounds { min: lo, max: hi })
+    }
+
+    #[cfg(all(feature = "gltf", feature = "fs"))]
+    #[test]
+    fn bounds_hold_what_flatten_draws_in_every_pose() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/gltf");
+        let cases = [
+            "skin_animated/skin.glb",
+            "skin_rest_pose",
+            "skin_eight_influences",
+            "blender_shape_key/shape_key.glb",
+            "morph_default_weights",
+            "gpu_instancing/inst.glb",
+            "mirror_x/cube.glb",
+            "node_hierarchy",
+            "node_matrix",
+            "points_and_lines",
+            "quantized_normalized_i16",
+            "sparse",
+            "blender_draco/draco.glb",
+        ];
+        for case in cases {
+            let mut path = root.join(case);
+            if path.is_dir() {
+                path = std::fs::read_dir(&path)
+                    .unwrap()
+                    .map(|e| e.unwrap().path())
+                    .find(|p| p.extension().is_some_and(|e| e == "glb" || e == "gltf"))
+                    .unwrap();
+            }
+            let doc = crate::formats::open(&path, Keep::ALL).unwrap();
+            let mut poses = vec![Pose::Rest, Pose::Bind];
+            let animations = super::list(&doc.json, "animations").len();
+            poses.extend((0..animations).map(|index| Pose::Animation { index, time: 0.4 }));
+            for pose in poses {
+                let Ok(mesh) = doc.flatten(pose) else { continue };
+                let want = box_of(mesh.as_ref());
+                assert_eq!(doc.bounds(pose).unwrap(), want, "{case} in {pose:?}");
+                assert!(want.is_some(), "{case} draws something");
+            }
+        }
+    }
+
+    #[test]
+    fn bounds_and_vertices_count_every_instance() {
+        let meshes = serde_json::json!([{ "primitives": [{ "attributes": { "POSITION": 0 }, "indices": 2 }] }]);
+        let doc = corners(
+            meshes,
+            serde_json::json!([{ "mesh": 0 }, { "mesh": 0, "translation": [5, 0, -2], "rotation": [0, 0, 0.707_106_77, 0.707_106_77] }]),
+        );
+        let b = doc.bounds(Pose::Rest).unwrap().unwrap();
+        assert_eq!(b, box_of(doc.flatten(Pose::Rest).unwrap().as_ref()).unwrap());
+        let near = |a: [f32; 3], b: [f32; 3]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-6);
+        assert!(near(b.min, [0.0, 0.0, -2.0]) && near(b.max, [5.0, 1.0, 0.0]), "{b:?}");
+        assert!((b.center()[0] - 2.5).abs() < 1e-6 && (b.size()[2] - 2.0).abs() < 1e-6);
+        let c = doc.counts();
+        assert_eq!((c.vertices, c.triangles), (8, 4));
+        let empty = corners(serde_json::json!([]), serde_json::json!([]));
+        assert_eq!(empty.bounds(Pose::Rest).unwrap(), None);
     }
 
     #[cfg(feature = "draco")]

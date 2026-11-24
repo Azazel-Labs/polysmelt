@@ -95,6 +95,30 @@ pub struct Counts {
     pub points: usize,
     /// Line segments: a strip or loop of n points is n - 1 or n of them.
     pub lines: usize,
+    /// Vertices: each drawn primitive's positions, once for each instance of it, whether its
+    /// indices name them all or not.
+    pub vertices: usize,
+}
+
+/// An axis-aligned box: what [`Document::bounds`] gives.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Bounds {
+    pub min: [f32; 3],
+    pub max: [f32; 3],
+}
+
+impl Bounds {
+    /// How far the box reaches along each axis.
+    #[must_use]
+    pub fn size(&self) -> [f32; 3] {
+        std::array::from_fn(|c| self.max[c] - self.min[c])
+    }
+
+    /// The box's middle.
+    #[must_use]
+    pub fn center(&self) -> [f32; 3] {
+        std::array::from_fn(|c| self.min[c] + (self.max[c] - self.min[c]) / 2.0)
+    }
 }
 
 /// Where a buffer's bytes are.
