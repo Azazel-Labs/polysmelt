@@ -694,7 +694,7 @@ mod tests {
         assert_eq!(a["scale"][0], 2.0);
         assert_eq!(j["asset"]["extras"]["source"]["backgroundColor"][0], 1.0);
         let flat = doc.flatten(Pose::Rest).unwrap().unwrap();
-        assert!(!flat.prims.is_empty());
+        assert_ne!(flat.prims.len(), 0);
     }
 
     #[test]

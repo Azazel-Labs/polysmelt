@@ -1024,7 +1024,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::mesh::{Image, Material, Mesh, Prim, to_glb};
+    use crate::mesh::{Image, Material, Mesh, Prim};
 
     /// A grid with normals, UVs and a (fake) PNG texture, as a GLB.
     fn grid_glb(n: u32) -> Vec<u8> {
@@ -1056,7 +1056,7 @@ mod tests {
             }],
             skeleton: Vec::new(),
         };
-        to_glb(&mesh).unwrap()
+        mesh.to_glb().unwrap()
     }
 
     fn u(v: &Value) -> usize {

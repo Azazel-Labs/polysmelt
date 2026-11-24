@@ -723,9 +723,9 @@ fn guess_texture(
 mod tests {
     use super::*;
     use crate::assets::{Folder, Memory};
-    use crate::mesh::Mesh;
     #[allow(unused_imports)]
-    use crate::mesh::{GRAY, to_glb};
+    use crate::mesh::GRAY;
+    use crate::mesh::Mesh;
     use serde_json::{Map, Value};
 
     /// Reads `path` with assets found under `root`, as (mesh, facts); and reads it again from
@@ -818,7 +818,7 @@ vt 0 1
         bin.extend_from_slice(&[0, 0]);
         let (m, f) = load_bytes("a.stl", &bin);
         assert_eq!(f["triangles"], 1);
-        let glb = to_glb(&m.unwrap()).unwrap();
+        let glb = m.unwrap().to_glb().unwrap();
         assert!(glb.starts_with(b"glTF"));
 
         let ascii = "solid t\nfacet normal 0 0 1\nouter loop\nvertex 0 0 0\nvertex 1 0 0\nvertex 0 1 0\nendloop\nendfacet\nendsolid t\n";
@@ -933,7 +933,7 @@ end_header
         assert_eq!(m.prims.len(), 2);
         assert_eq!(m.triangles(), 10 * 2);
         assert_eq!(m.materials[m.prims[0].material].color, [1.0, 0.0, 0.0, 1.0]);
-        assert!(to_glb(&m).unwrap().starts_with(b"glTF"));
+        assert!(m.to_glb().unwrap().starts_with(b"glTF"));
     }
 
     #[test]
@@ -1455,7 +1455,7 @@ f 1/1 3/3 4/4
         assert_eq!(m.materials[m.prims[0].material].name, "Wood");
         assert_eq!(m.materials[m.prims[0].material].color_image, Some(0));
         assert_eq!(m.prims[0].uvs[0], [0.0, 1.0], "V flipped");
-        assert!(to_glb(&m).unwrap().starts_with(b"glTF"));
+        assert!(m.to_glb().unwrap().starts_with(b"glTF"));
     }
 
     #[cfg(all(feature = "dae", feature = "stl"))]

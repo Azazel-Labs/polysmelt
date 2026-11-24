@@ -1880,7 +1880,7 @@ impl Reader<'_> {
     fn skeleton(&self, mesh: &mut Mesh) {
         let nodes = self.nodes;
         let mut used = vec![false; nodes.len()];
-        for p in mesh.prims.iter().filter(|p| p.skinned()) {
+        for p in mesh.prims.iter().filter(|p| p.is_skinned()) {
             for &j in p.skin_joints.as_flattened() {
                 if let Some(u) = used.get_mut(j as usize) {
                     *u = true;
@@ -1960,7 +1960,7 @@ impl Reader<'_> {
         // Each node's bone, as a flat table: one load per joint, no branches.
         let bone: Vec<u32> = bone_of.iter().map(|b| b.map_or(0, u32_of)).collect();
         for p in &mut mesh.prims {
-            if mesh.skeleton.is_empty() || !p.skinned() {
+            if mesh.skeleton.is_empty() || !p.is_skinned() {
                 p.skin_joints = Vec::new();
                 p.skin_weights = Vec::new();
                 continue;
@@ -3179,7 +3179,7 @@ fn slerp(a: &[f32], b: &[f32], s: f64, out: &mut [f64]) {
 mod tests {
     use crate::assets::Folder;
     use crate::document::{Keep, Pose};
-    use crate::mesh::{Material, Mesh, Prim, to_glb};
+    use crate::mesh::{Material, Mesh, Prim};
 
     /// A bumpy grid with normals, UVs and colors, in two materials.
     fn grid(n: u32) -> Mesh {
@@ -3262,7 +3262,7 @@ mod tests {
         );
         let mesh = doc.flatten(Pose::Rest).unwrap().unwrap();
         assert!(
-            to_glb(&mesh).unwrap() == to_glb(&in_memory.flatten(Pose::Rest).unwrap().unwrap()).unwrap(),
+            mesh.to_glb().unwrap() == in_memory.flatten(Pose::Rest).unwrap().unwrap().to_glb().unwrap(),
             "{name} flattens differently from memory"
         );
         mesh
@@ -3380,7 +3380,7 @@ mod tests {
         assert_eq!(p.normals, [[0., 0., 1.]; 3]);
 
         // Written out, the sets are renumbered from 0 with no gaps, the color texture's first.
-        let glb = to_glb(&mesh).unwrap();
+        let glb = mesh.to_glb().unwrap();
         let back = load(dir.path(), "back.glb", &glb);
         let q = &back.prims[0];
         assert_eq!(q.uvs, p.uvs);
@@ -3458,7 +3458,7 @@ mod tests {
             assert_eq!(mesh.prims[0].uv_sets[set], [[0., 0.], [1., 0.], [0., 1.]]);
         };
         check(&mesh);
-        let back = load(dir.path(), "back.glb", &to_glb(&mesh).unwrap());
+        let back = load(dir.path(), "back.glb", &mesh.to_glb().unwrap());
         check(&back);
     }
 
@@ -3519,14 +3519,14 @@ mod tests {
     fn reads_back_what_to_glb_writes() {
         let dir = tempfile::tempdir().unwrap();
         let mesh = grid(30);
-        let glb = to_glb(&mesh).unwrap();
+        let glb = mesh.to_glb().unwrap();
         same(&mesh, &load(dir.path(), "plain.glb", &glb));
     }
 
     #[test]
     fn streamed_glb_cut_short_is_an_error() {
         let dir = tempfile::tempdir().unwrap();
-        let glb = to_glb(&grid(60)).unwrap();
+        let glb = grid(60).to_glb().unwrap();
         assert!(glb.len() > 2 * 64 * 1024);
         let path = dir.path().join("cut.glb");
         std::fs::write(&path, &glb[..glb.len() - 1000]).unwrap();
@@ -3538,7 +3538,7 @@ mod tests {
     fn reads_meshopt_compressed_glb() {
         let dir = tempfile::tempdir().unwrap();
         let mesh = grid(30);
-        let packed = crate::gltf::compress(&to_glb(&mesh).unwrap()).unwrap();
+        let packed = crate::gltf::compress(&mesh.to_glb().unwrap()).unwrap();
         same(&mesh, &load(dir.path(), "packed.glb", &packed));
     }
 
@@ -3546,7 +3546,7 @@ mod tests {
     fn decode_leaves_plain_gltf() {
         let dir = tempfile::tempdir().unwrap();
         let mesh = grid(30);
-        let packed = crate::gltf::compress(&to_glb(&mesh).unwrap()).unwrap();
+        let packed = crate::gltf::compress(&mesh.to_glb().unwrap()).unwrap();
         let path = dir.path().join("packed.glb");
         std::fs::write(&path, &packed).unwrap();
         let mut doc = crate::formats::load(&path, "glb", &Folder::new(dir.path()), Keep::ALL).unwrap();
@@ -3558,7 +3558,7 @@ mod tests {
         // The compressed data and the fallback are gone: only the decoded buffer is left.
         assert_eq!(doc.json["buffers"].as_array().unwrap().len(), 1);
         let after = doc.flatten(Pose::Rest).unwrap().unwrap();
-        assert_eq!(to_glb(&before).unwrap(), to_glb(&after).unwrap());
+        assert_eq!(before.to_glb().unwrap(), after.to_glb().unwrap());
         same(&mesh, &load(dir.path(), "decoded.glb", &doc.to_glb().unwrap()));
         // Decoding plain glTF changes nothing.
         let glb = doc.to_glb().unwrap();
@@ -3618,7 +3618,7 @@ mod tests {
     #[test]
     fn decode_keeps_required_extensions_it_cant_draw() {
         let dir = tempfile::tempdir().unwrap();
-        let packed = crate::gltf::compress(&to_glb(&grid(10)).unwrap()).unwrap();
+        let packed = crate::gltf::compress(&grid(10).to_glb().unwrap()).unwrap();
         let path = dir.path().join("packed.glb");
         std::fs::write(&path, &packed).unwrap();
         let mut doc = crate::formats::load(&path, "glb", &Folder::new(dir.path()), Keep::ALL).unwrap();
@@ -3671,7 +3671,7 @@ mod tests {
         doc.decode().unwrap();
         assert_eq!(doc.json["accessors"][1]["componentType"], 5123);
         let after = doc.flatten(Pose::Rest).unwrap().unwrap();
-        assert_eq!(to_glb(&before).unwrap(), to_glb(&after).unwrap());
+        assert_eq!(before.to_glb().unwrap(), after.to_glb().unwrap());
     }
 
     #[test]
@@ -3679,7 +3679,7 @@ mod tests {
         // A compressed GLB split into a .gltf and its buffer files.
         let dir = tempfile::tempdir().unwrap();
         let mesh = grid(10);
-        let packed = crate::gltf::compress(&to_glb(&mesh).unwrap()).unwrap();
+        let packed = crate::gltf::compress(&mesh.to_glb().unwrap()).unwrap();
         let json_len = u32::from_le_bytes(packed[12..16].try_into().unwrap()) as usize;
         let mut json: serde_json::Value = serde_json::from_slice(&packed[20..20 + json_len]).unwrap();
         let bin = &packed[20 + json_len + 8..];
@@ -3894,7 +3894,7 @@ mod tests {
         mesh.prims[1].indices.clear();
         mesh.prims[1].normals.clear();
         mesh.prims[1].points = (0..9).collect();
-        let glb = to_glb(&mesh).unwrap();
+        let glb = mesh.to_glb().unwrap();
         let len = u32::from_le_bytes(glb[12..16].try_into().unwrap()) as usize;
         let json: serde_json::Value = serde_json::from_slice(&glb[20..20 + len]).unwrap();
         let prims = json["meshes"]
@@ -3932,7 +3932,7 @@ mod tests {
         assert_eq!(back.prims[0].positions, mesh.prims[0].positions);
         assert_eq!(back.prims[1].points, mesh.prims[1].points);
         assert!(back.prims[1].normals.is_empty(), "no normals are made up for points");
-        assert!(to_glb(&back).unwrap() == glb, "written again, the same bytes");
+        assert!(back.to_glb().unwrap() == glb, "written again, the same bytes");
     }
 
     /// The box around a flattened mesh's positions.

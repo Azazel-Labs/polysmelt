@@ -960,7 +960,7 @@ impl<'a> Document<'a> {
         let (skinned, rigid): (Vec<Prim>, Vec<Prim>) = if skeleton.is_empty() {
             (Vec::new(), prims)
         } else {
-            prims.into_iter().partition(Prim::skinned)
+            prims.into_iter().partition(Prim::is_skinned)
         };
         let mut meshes = vec![(None, rigid)];
         if !skinned.is_empty() {
@@ -983,12 +983,15 @@ impl<'a> Document<'a> {
     ) -> Document<'static> {
         let materials = texcoords(&mut meshes, materials);
         let mut b = Builder::default();
-        let rig = (!skeleton.is_empty() && meshes.iter().any(|(_, p)| !p.is_empty() && p.iter().all(Prim::skinned)))
-            .then(|| Rigging::new(skeleton, meshes.iter().flat_map(|(_, p)| p)));
+        let rig = (!skeleton.is_empty()
+            && meshes
+                .iter()
+                .any(|(_, p)| !p.is_empty() && p.iter().all(Prim::is_skinned)))
+        .then(|| Rigging::new(skeleton, meshes.iter().flat_map(|(_, p)| p)));
         let (mut nodes, mut out) = (Vec::new(), Vec::new());
         let mut skinned_node = None;
         for (name, prims) in meshes {
-            let skinned = !prims.is_empty() && prims.iter().all(Prim::skinned);
+            let skinned = !prims.is_empty() && prims.iter().all(Prim::is_skinned);
             b.joints = rig.as_ref().filter(|_| skinned).map(|r| (r.offset, r.joints.len()));
             let Some(mut mesh) = b.mesh(prims, materials.len()) else {
                 continue;
@@ -1105,7 +1108,7 @@ impl<'s> Rigging<'s> {
         use crate::flatten::{IDENTITY, affine_inverse, decompose, mul, trs};
         let roots = skeleton.iter().filter(|b| b.parent.is_none()).count();
         let unbound = || {
-            prims.filter(|p| p.skinned()).any(|p| {
+            prims.filter(|p| p.is_skinned()).any(|p| {
                 p.skin_weights
                     .iter()
                     .any(|w| w.iter().sum::<f32>().partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater))

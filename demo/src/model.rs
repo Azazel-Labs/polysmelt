@@ -160,7 +160,7 @@ impl Model {
         if animated && gpu_skinnable(&doc, &rig, mesh.as_ref()) {
             let bind = doc.flatten(Pose::Bind).map_err(|e| format!("{e:#}"))?;
             if let Some(b) =
-                bind.filter(|b| b.skeleton.len() <= MAX_BONES && b.prims.iter().all(polysmelt::mesh::Prim::skinned))
+                bind.filter(|b| b.skeleton.len() <= MAX_BONES && b.prims.iter().all(polysmelt::mesh::Prim::is_skinned))
             {
                 mesh = Some(b);
                 motion = Motion::Gpu;
@@ -409,7 +409,7 @@ fn gpu_skinnable(doc: &Document<'_>, rig: &Rig, rest: Option<&Mesh>) -> bool {
         && counts.points == 0
         && counts.lines == 0
         && !rest.prims.is_empty()
-        && rest.prims.iter().all(polysmelt::mesh::Prim::skinned)
+        && rest.prims.iter().all(polysmelt::mesh::Prim::is_skinned)
 }
 
 /// Whether a mesh draws nothing.
