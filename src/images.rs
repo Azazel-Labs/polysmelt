@@ -78,7 +78,7 @@ impl Reference {
 }
 
 /// An image a reader collected for a material: read, or a reference to read later.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) enum Source {
     Image(Image),
     #[cfg_attr(
@@ -95,6 +95,9 @@ pub(crate) enum Source {
         allow(dead_code, reason = "only readers with textures make references")
     )]
     Ref(Reference, String),
+    /// A PNG or JPEG file, left in the file until its bytes are wanted, and its type.
+    #[cfg(feature = "fs")]
+    File(crate::document::FileSpan, &'static str),
 }
 
 impl From<Image> for Source {
@@ -205,6 +208,14 @@ impl Images {
     )]
     fn read_file(&mut self, assets: &dyn Assets, path: PathBuf, reference: &str) -> Option<usize> {
         if !self.lazy {
+            // A PNG or JPEG file as it is stays in the file: only its first bytes are read.
+            #[cfg(feature = "fs")]
+            if assets.reads_files()
+                && let Some((head, span)) = crate::document::FileSpan::open(&path, 4)
+                && let Some(mime) = crate::mesh::Image::mime_of(&head)
+            {
+                return Some(self.push(Source::File(span, mime)));
+            }
             let img = assets.load_image(&path)?;
             return Some(self.push(Source::Image(img)));
         }

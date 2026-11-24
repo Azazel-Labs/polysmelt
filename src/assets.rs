@@ -61,6 +61,13 @@ pub trait Assets {
         self.image(&bytes, name)
     }
 
+    /// Whether [`read`](Self::read) and [`load_image`](Self::load_image) read the file at the
+    /// path as it is, so a PNG or JPEG texture can be left in its file until it's written. `false`
+    /// by default.
+    fn reads_files(&self) -> bool {
+        false
+    }
+
     /// A texture file read as an embeddable image.
     fn load_image(&self, path: &Path) -> Option<Image> {
         self.image(&self.read(path)?, path)
@@ -105,6 +112,10 @@ impl Assets for Folder {
 
     fn image_shared(&self, bytes: crate::Bytes, name: &Path) -> Option<Image> {
         Image::from_png_or_jpeg(bytes.clone()).or_else(|| self.image(&bytes, name))
+    }
+
+    fn reads_files(&self) -> bool {
+        true
     }
 
     fn load_image(&self, path: &Path) -> Option<Image> {

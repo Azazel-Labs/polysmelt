@@ -2667,6 +2667,8 @@ impl Reader<'_> {
         match self.images.list.get(image) {
             Some(crate::images::Source::Image(i)) => gray(&i.bytes),
             Some(crate::images::Source::Ref(r, _)) => r.bytes.as_deref().is_some_and(gray),
+            #[cfg(feature = "fs")]
+            Some(crate::images::Source::File(f, _)) => f.read_all().is_ok_and(|b| gray(&b)),
             None => false,
         }
     }

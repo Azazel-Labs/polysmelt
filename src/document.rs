@@ -123,6 +123,16 @@ pub(crate) struct FileSpan {
     len: u64,
 }
 
+#[cfg(feature = "fs")]
+impl fmt::Debug for FileSpan {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FileSpan")
+            .field("base", &self.base)
+            .field("len", &self.len)
+            .finish_non_exhaustive()
+    }
+}
+
 /// A [`FileSpan`]'s file and the blocks of it last read.
 #[cfg(feature = "fs")]
 struct Cursor {
@@ -147,6 +157,28 @@ const BLOCKS: usize = 8;
 
 #[cfg(feature = "fs")]
 impl FileSpan {
+    /// The file at `path`, whole, with its first `n` bytes (fewer when it's shorter).
+    pub(crate) fn open(path: &std::path::Path, n: u64) -> Option<(Vec<u8>, Self)> {
+        use std::io::Read as _;
+        let mut file = File::open(path).ok()?;
+        let len = file.metadata().ok()?.len();
+        let mut head = Vec::new();
+        (&mut file).take(n).read_to_end(&mut head).ok()?;
+        let at = head.len() as u64;
+        Some((head, Self::new(file, 0, len, at)))
+    }
+
+    /// The whole span, read.
+    #[cfg_attr(
+        not(feature = "usd"),
+        allow(dead_code, reason = "only the USD reader reads a texture whole")
+    )]
+    pub(crate) fn read_all(&self) -> Result<Vec<u8>> {
+        let mut out = vec![0; usize_of(self.len)];
+        self.read_at(0, &mut out)?;
+        Ok(out)
+    }
+
     /// `len` bytes of `file` from `base`; its cursor is at `base + at`.
     #[cfg_attr(not(feature = "gltf"), allow(dead_code, reason = "only the glTF reader makes one"))]
     pub(crate) fn new(file: File, base: u64, len: u64, at: u64) -> Self {
@@ -238,6 +270,9 @@ pub(crate) enum Part {
     U32(Vec<u32>),
     U16(Vec<u16>),
     Bytes(Bytes),
+    /// A file's bytes, read when they're wanted (a texture file, written as it is).
+    #[cfg(feature = "fs")]
+    File(FileSpan),
 }
 
 #[allow(dead_code, reason = "readers use the part types their formats need")]
@@ -271,15 +306,36 @@ impl Part {
         Part::Bytes(v.into())
     }
 
-    /// The part as a GLB stores it. Typed parts exist only on little-endian targets, where
-    /// their memory is that.
-    fn as_bytes(&self) -> &[u8] {
-        match self {
+    /// The part as a GLB stores it, when it's in memory. Typed parts exist only on little-endian
+    /// targets, where their memory is that.
+    fn as_bytes(&self) -> Option<&[u8]> {
+        Some(match self {
             Part::F32(v) => bytemuck::cast_slice(v),
             Part::U32(v) => bytemuck::cast_slice(v),
             Part::U16(v) => bytemuck::cast_slice(v),
             Part::Bytes(v) => v,
+            #[cfg(feature = "fs")]
+            Part::File(_) => return None,
+        })
+    }
+
+    fn len(&self) -> u64 {
+        match self {
+            #[cfg(feature = "fs")]
+            Part::File(f) => f.len,
+            _ => self.as_bytes().map_or(0, <[u8]>::len) as u64,
         }
+    }
+
+    /// Copies the part's bytes `from..from + out.len()` into `out`.
+    fn read_at(&self, from: u64, out: &mut [u8]) -> Result<()> {
+        #[cfg(feature = "fs")]
+        if let Part::File(f) = self {
+            return f.read_at(from, out);
+        }
+        let b = self.as_bytes().expect("only a file's part isn't in memory");
+        out.copy_from_slice(&b[usize_of(from)..usize_of(from) + out.len()]);
+        Ok(())
     }
 }
 
@@ -287,7 +343,7 @@ impl Parts {
     /// Adds a part at the next 4-byte boundary; returns its offset and length.
     pub(crate) fn push(&mut self, part: Part) -> (u64, u64) {
         let at = self.len.next_multiple_of(4);
-        let n = part.as_bytes().len() as u64;
+        let n = part.len();
         self.list.push((at, part));
         self.len = at + n;
         (at, n)
@@ -301,7 +357,7 @@ impl Parts {
 
     fn slice(&self, off: u64, len: u64) -> Option<&[u8]> {
         let (at, part) = &self.list[self.part_at(off)?];
-        let bytes = part.as_bytes();
+        let bytes = part.as_bytes()?;
         let start = usize_of(off - at);
         bytes.get(start..start.checked_add(usize_of(len))?)
     }
@@ -316,7 +372,7 @@ impl Parts {
         Some(bytes.slice(start..end))
     }
 
-    fn read_at(&self, off: u64, out: &mut [u8]) {
+    fn read_at(&self, off: u64, out: &mut [u8]) -> Result<()> {
         out.fill(0);
         let end = off + out.len() as u64;
         let first = self.part_at(off).unwrap_or(0);
@@ -324,13 +380,12 @@ impl Parts {
             if *at >= end {
                 break;
             }
-            let bytes = part.as_bytes();
-            let (from, to) = (off.max(*at), end.min(at + bytes.len() as u64));
+            let (from, to) = (off.max(*at), end.min(at + part.len()));
             if from < to {
-                out[usize_of(from - off)..usize_of(to - off)]
-                    .copy_from_slice(&bytes[usize_of(from - at)..usize_of(to - at)]);
+                part.read_at(from - at, &mut out[usize_of(from - off)..usize_of(to - off)])?;
             }
         }
+        Ok(())
     }
 
     fn write_to(&self, len: u64, w: &mut dyn Write) -> Result<()> {
@@ -340,10 +395,14 @@ impl Parts {
                 break;
             }
             write_zeros(w, (*at).min(len) - pos)?;
-            let bytes = part.as_bytes();
-            let take = usize_of((len - at).min(bytes.len() as u64));
-            w.write_all(&bytes[..take])?;
-            pos = at + take as u64;
+            let take = (len - at).min(part.len());
+            match (part.as_bytes(), part) {
+                (Some(bytes), _) => w.write_all(&bytes[..usize_of(take)])?,
+                #[cfg(feature = "fs")]
+                (None, Part::File(f)) => f.write_range(0, take, &mut Vec::new(), w)?,
+                (None, _) => unreachable!("only a file's part isn't in memory"),
+            }
+            pos = at + take;
         }
         write_zeros(w, len.saturating_sub(pos))
     }
@@ -416,7 +475,7 @@ impl Blob<'_> {
             Blob::Bytes(b) => out.copy_from_slice(&b[usize_of(off)..usize_of(end)]),
             #[cfg(feature = "fs")]
             Blob::File(f) => f.read_at(off, out)?,
-            Blob::Parts(p) => p.read_at(off, out),
+            Blob::Parts(p) => p.read_at(off, out)?,
             Blob::Missing(_) => bail!("glTF data is in a meshopt fallback buffer, which holds none"),
         }
         Ok(())
@@ -1278,6 +1337,8 @@ impl Builder {
             .map(|s| match s {
                 Source::Image(i) => i.into_png_or_jpeg().map(Source::Image),
                 r @ Source::Ref(..) => Some(r),
+                #[cfg(feature = "fs")]
+                f @ Source::File(..) => Some(f),
             })
             .collect();
         let mut next = 0;
@@ -1304,6 +1365,11 @@ impl Builder {
                 Source::Ref(r, uri) => {
                     self.refs.insert(i, r);
                     json!({ "uri": uri })
+                }
+                #[cfg(feature = "fs")]
+                Source::File(span, mime) => {
+                    let v = self.view(Part::File(span), None);
+                    json!({ "bufferView": v, "mimeType": mime })
                 }
             })
             .collect();

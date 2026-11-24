@@ -375,7 +375,7 @@ impl Image {
         None
     }
 
-    fn mime_of(bytes: &[u8]) -> Option<&'static str> {
+    pub(crate) fn mime_of(bytes: &[u8]) -> Option<&'static str> {
         if bytes.starts_with(b"\x89PNG") {
             Some("image/png")
         } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
