@@ -91,24 +91,6 @@ fn fact<T>(declared: bool, v: T) -> Fact<T> {
     if declared { Fact::Declared(v) } else { Fact::Assumed(v) }
 }
 
-/// The name of a unit `meters` long, for the common ones.
-fn unit_name(meters: f64) -> Option<&'static str> {
-    [
-        ("millimeter", 0.001),
-        ("centimeter", 0.01),
-        ("decimeter", 0.1),
-        ("meter", 1.0),
-        ("kilometer", 1000.0),
-        ("inch", 0.0254),
-        ("foot", 0.3048),
-        ("yard", 0.9144),
-        ("mile", 1609.344),
-    ]
-    .into_iter()
-    .find(|(_, m)| ((meters - m) / m).abs() < 1e-6)
-    .map(|(name, _)| name)
-}
-
 /// A forward direction as the file writes it: `"x"`, `"-x"`, ... `"-z"`.
 fn forward_axis(s: &str) -> Option<Axis> {
     let (negative, letter) = s.strip_prefix('-').map_or((false, s), |l| (true, l));
@@ -909,7 +891,7 @@ fn finish(mut c: Ctx<'_>) -> Document<'static> {
         format: Some("OpenGEX".into()),
         // A unit is a meter, and +Z is up, unless the file's metrics say otherwise.
         meters_per_unit: fact(m.has_distance, m.distance),
-        unit: unit_name(m.distance).map(str::to_owned),
+        unit: crate::source::unit_name(m.distance).map(str::to_owned),
         up_axis: fact(m.has_up, if m.y_up { Axis::PosY } else { Axis::PosZ }),
         forward_axis: m.forward.map_or(Fact::Unknown, Fact::Declared),
         handedness: Fact::Declared(Handedness::Right),

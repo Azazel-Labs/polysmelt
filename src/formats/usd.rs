@@ -301,7 +301,7 @@ fn stage_info(stage: &usd::Stage, z_up: bool, meters: f64, tcps: f64) -> SourceI
     let mut info = SourceInfo {
         format: Some("USD".into()),
         meters_per_unit: fact("metersPerUnit", meters),
-        unit: unit_name(meters).map(str::to_owned),
+        unit: crate::source::unit_name(meters).map(str::to_owned),
         up_axis: if up_given && authored(stage, "upAxis") {
             Fact::Declared(up)
         } else {
@@ -320,25 +320,6 @@ fn stage_info(stage: &usd::Stage, z_up: bool, meters: f64, tcps: f64) -> SourceI
     info.converted.units = (meters - 1.0).abs() > 1e-12;
     info.converted.up_axis = z_up;
     info
-}
-
-/// The name of a unit `meters` long, for the lengths USD names (`UsdGeomLinearUnits`).
-fn unit_name(meters: f64) -> Option<&'static str> {
-    [
-        ("nanometer", 1e-9),
-        ("micrometer", 1e-6),
-        ("millimeter", 0.001),
-        ("centimeter", 0.01),
-        ("meter", 1.0),
-        ("kilometer", 1000.0),
-        ("inch", 0.0254),
-        ("foot", 0.3048),
-        ("yard", 0.9144),
-        ("mile", 1609.344),
-    ]
-    .into_iter()
-    .find(|(_, m)| ((meters - m) / m).abs() < 1e-6)
-    .map(|(name, _)| name)
 }
 
 /// The paths of the stage's prims, composed (which reads the layers they reference), parents before children.

@@ -383,6 +383,28 @@ impl SourceInfo {
     }
 }
 
+/// A unit's usual name by its length in meters (`"millimeter"` for 0.001), within a part in a
+/// million; `None` for a length no common unit has.
+#[allow(dead_code, reason = "readers that give their units as lengths use it")]
+pub(crate) fn unit_name(meters: f64) -> Option<&'static str> {
+    [
+        ("nanometer", 1e-9),
+        ("micrometer", 1e-6),
+        ("millimeter", 0.001),
+        ("centimeter", 0.01),
+        ("decimeter", 0.1),
+        ("meter", 1.0),
+        ("kilometer", 1000.0),
+        ("inch", 0.0254),
+        ("foot", 0.3048),
+        ("yard", 0.9144),
+        ("mile", 1609.344),
+    ]
+    .into_iter()
+    .find(|(_, m)| ((meters - m) / m).abs() < 1e-6)
+    .map(|(name, _)| name)
+}
+
 /// The length in meters of a unit by its name, in the spellings formats use (`"mm"`, `"millimeter"`,
 /// `"millimetres"`, `"in"`, `"feet"`, `"us survey foot"`...). `None` for a name it doesn't know.
 #[allow(dead_code, reason = "readers that name their units use it")]
@@ -469,5 +491,8 @@ mod tests {
         assert_eq!(meters_in("inch"), Some(0.0254));
         assert_eq!(meters_in("US_Survey_Foot"), Some(1200.0 / 3937.0));
         assert_eq!(meters_in("parsec"), None);
+        assert_eq!(unit_name(0.0254), Some("inch"));
+        assert_eq!(unit_name(0.010_000_001), Some("centimeter"));
+        assert_eq!(unit_name(0.5), None);
     }
 }

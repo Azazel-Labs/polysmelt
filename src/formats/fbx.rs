@@ -305,24 +305,6 @@ const MAX_CURVE_POINTS: usize = 1 << 22;
 /// angles, glTF quaternions, so long turns are cut into steps short enough to agree.
 const MAX_STEP_DEGREES: f64 = 10.0;
 
-/// The name of a unit `meters` long, for the units FBX files are written in.
-fn unit_name(meters: f64) -> Option<&'static str> {
-    [
-        ("millimeter", 0.001),
-        ("centimeter", 0.01),
-        ("decimeter", 0.1),
-        ("meter", 1.0),
-        ("kilometer", 1000.0),
-        ("inch", 0.0254),
-        ("foot", 0.3048),
-        ("yard", 0.9144),
-        ("mile", 1609.344),
-    ]
-    .into_iter()
-    .find(|(_, m)| ((meters - m) / m).abs() < 1e-6)
-    .map(|(name, _)| name)
-}
-
 /// The scene's frame rate, from `TimeMode` (the FBX SDK's `EMode`), or `CustomFrameRate` when that's the mode.
 fn frame_rate(settings: &Props<'_>) -> Fact<f64> {
     const RATES: [f64; 19] = [
@@ -593,7 +575,7 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         } else {
             Fact::Assumed(unit)
         },
-        unit: unit_name(unit).map(str::to_owned),
+        unit: crate::source::unit_name(unit).map(str::to_owned),
         up_axis: declared("UpAxis", signed(up, up_s)),
         forward_axis: declared("FrontAxis", signed(front, front_s)),
         frame_rate: frame_rate(&settings),
