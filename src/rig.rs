@@ -22,6 +22,18 @@ impl Trs {
         rotation: [0.0, 0.0, 0.0, 1.0],
         scale: [1.0; 3],
     };
+
+    /// The transform as a column-major 4×4 matrix (translation × rotation × scale), as glTF
+    /// writes a node's `matrix`.
+    #[must_use]
+    pub fn matrix(&self) -> [f32; 16] {
+        let m = crate::flatten::trs(
+            self.translation.map(f64::from),
+            self.rotation.map(f64::from),
+            self.scale.map(f64::from),
+        );
+        m.map(crate::num::f32_of)
+    }
 }
 
 impl Default for Trs {
@@ -149,6 +161,11 @@ impl Channel {
 pub struct Animation {
     pub name: Option<String>,
     pub channels: Vec<Channel>,
+    /// The frames per second it was made at, when the file says or its format assumes one:
+    /// the animation's own (`extras.frameRate`), else the file's
+    /// ([`SourceInfo::frame_rate`](crate::source::SourceInfo::frame_rate)). Key times are in
+    /// seconds whatever it is; it says which times are frames.
+    pub frame_rate: Option<f64>,
 }
 
 impl Animation {
@@ -241,11 +258,7 @@ impl Rig {
 
     /// Every node's transform relative to its parent in animation `animation` at `time`
     /// seconds: its rest transform, with what the animation's channels set in place of it.
-    /// `None` for the rest pose.
-    ///
-    /// # Panics
-    ///
-    /// If there's no animation `animation`.
+    /// `None` (or an animation there isn't) for the rest pose.
     #[must_use]
     pub fn pose(&self, animation: Option<usize>, time: f32) -> Vec<Trs> {
         let mut out = Vec::with_capacity(self.nodes.len());
@@ -255,34 +268,74 @@ impl Rig {
 
     /// [`Rig::pose`] into `out`, which is cleared first: posing frame after frame into the same
     /// vector allocates nothing after the first.
-    ///
-    /// # Panics
-    ///
-    /// If there's no animation `animation`.
     pub fn pose_into(&self, animation: Option<usize>, time: f32, out: &mut Vec<Trs>) {
         out.clear();
         out.extend(self.nodes.iter().map(|n| n.rest));
-        let Some(a) = animation else { return };
-        for c in &self.animations[a].channels {
+        let Some(a) = animation.and_then(|a| self.animations.get(a)) else {
+            return;
+        };
+        for c in &a.channels {
             if let Some(o) = out.get_mut(c.node) {
                 c.pose(time, c.times.partition_point(|&x| x <= time), o);
             }
         }
     }
 
-    /// A [`Poser`] for animation `animation`, to pose it at one time after another.
-    ///
-    /// # Panics
-    ///
-    /// If there's no animation `animation`.
+    /// A [`Poser`] for animation `animation`, to pose it at one time after another: the rest
+    /// pose, for an animation there isn't.
     #[must_use]
     pub fn poser(&self, animation: usize) -> Poser<'_> {
-        let channels = &self.animations[animation].channels;
+        let channels = self.animations.get(animation).map_or(&[][..], |a| &a.channels);
         Poser {
             rig: self,
             channels,
             keys: vec![0; channels.len()],
         }
+    }
+
+    /// Every node's world transform, as a column-major matrix, given each one's transform
+    /// relative to its parent (a pose, as [`Rig::pose`] gives; nodes past its end at rest).
+    /// A node in a cycle, which glTF forbids, is placed by its own transform alone.
+    #[must_use]
+    pub fn world(&self, local: &[Trs]) -> Vec<[f32; 16]> {
+        use crate::flatten::{M4, mul};
+        let own = |i: usize| -> M4 {
+            let t = local.get(i).unwrap_or(&self.nodes[i].rest);
+            crate::flatten::trs(
+                t.translation.map(f64::from),
+                t.rotation.map(f64::from),
+                t.scale.map(f64::from),
+            )
+        };
+        let mut world: Vec<M4> = (0..self.nodes.len()).map(own).collect();
+        for i in self.parents_first() {
+            if let Some(p) = self.nodes[i].parent {
+                world[i] = mul(&world[p], &world[i]);
+            }
+        }
+        world.into_iter().map(|m| m.map(crate::num::f32_of)).collect()
+    }
+
+    /// Skin `skin`'s joint matrices for a pose's world transforms (as [`Rig::world`] gives):
+    /// each joint's world matrix times its inverse bind matrix, column-major, in the skin's
+    /// joint order, which is what `JOINTS_0` indexes. A vertex blended through them lands in
+    /// world space: glTF ignores the skinned mesh node's own transform. Empty for a skin there
+    /// isn't.
+    #[must_use]
+    pub fn skin_matrices(&self, skin: usize, world: &[[f32; 16]]) -> Vec<[f32; 16]> {
+        let Some(s) = self.skins.get(skin) else {
+            return Vec::new();
+        };
+        let wide = |m: &[f32; 16]| m.map(f64::from);
+        let identity = Trs::IDENTITY.matrix();
+        s.joints
+            .iter()
+            .zip(&s.inverse_bind)
+            .map(|(&j, ibm)| {
+                let w = world.get(j).unwrap_or(&identity);
+                crate::flatten::mul(&wide(w), &wide(ibm)).map(crate::num::f32_of)
+            })
+            .collect()
     }
 
     /// The nodes in an order where each comes after its parent, and so every joint after the
@@ -331,6 +384,7 @@ mod tests {
             skins: Vec::new(),
             animations: vec![Animation {
                 name: None,
+                frame_rate: None,
                 channels: vec![
                     // Written twice too long at its first key.
                     channel(
@@ -400,7 +454,8 @@ mod tests {
         assert_eq!(
             Animation {
                 name: None,
-                channels: Vec::new()
+                channels: Vec::new(),
+                frame_rate: None,
             }
             .key_times(),
             Vec::<f32>::new()
@@ -445,5 +500,85 @@ mod tests {
         assert_eq!(rig.pose(Some(0), 0.0)[0].rotation, [0.0, 0.0, 0.0, 1.0]);
         assert_eq!(rig.pose(Some(0), 0.5)[0].translation, [1.0, 2.0, 3.0]);
         assert_eq!(rig.pose(Some(0), 0.5)[1].scale, [2.0, 2.0, 2.0]);
+    }
+
+    fn close(a: &[f32], b: &[f32]) -> bool {
+        a.len() == b.len() && a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-5)
+    }
+
+    #[test]
+    fn a_transform_composes_into_a_column_major_matrix() {
+        let half = std::f32::consts::FRAC_1_SQRT_2;
+        let t = Trs {
+            translation: [1.0, 2.0, 3.0],
+            rotation: [0.0, 0.0, half, half], // 90° about +Z
+            scale: [2.0, 2.0, 2.0],
+        };
+        let want = [
+            0.0, 2.0, 0.0, 0.0, // +X goes to +Y, doubled
+            -2.0, 0.0, 0.0, 0.0, // +Y goes to -X
+            0.0, 0.0, 2.0, 0.0, //
+            1.0, 2.0, 3.0, 1.0,
+        ];
+        assert!(close(&t.matrix(), &want), "{:?}", t.matrix());
+        assert!(close(
+            &Trs::IDENTITY.matrix(),
+            &super::super::flatten::IDENTITY.map(crate::num::f32_of)
+        ));
+    }
+
+    #[test]
+    fn world_transforms_and_skin_matrices_follow_the_tree() {
+        let mut rig = rig();
+        rig.nodes[0].children = vec![1];
+        let mut pose = vec![Trs::IDENTITY; 2];
+        pose[0].translation = [1.0, 0.0, 0.0];
+        pose[1].translation = [0.0, 1.0, 0.0];
+        let world = rig.world(&pose);
+        assert!(close(&world[1][12..15], &[1.0, 1.0, 0.0]), "{:?}", world[1]);
+        // Inverse bind matrices that undo the pose: the joint matrices are the identity.
+        let undo = |m: &[f32; 16]| {
+            let mut i = Trs::IDENTITY.matrix();
+            i[12] = -m[12];
+            i[13] = -m[13];
+            i[14] = -m[14];
+            i
+        };
+        rig.skins.push(super::Skin {
+            name: None,
+            joints: vec![0, 1],
+            inverse_bind: vec![undo(&world[0]), undo(&world[1])],
+            skeleton: None,
+        });
+        for m in rig.skin_matrices(0, &world) {
+            assert!(close(&m, &Trs::IDENTITY.matrix()), "{m:?}");
+        }
+        assert_eq!(rig.skin_matrices(5, &world), Vec::<[f32; 16]>::new());
+        assert_eq!(rig.world(&[]).len(), 2, "nodes past the pose are at rest");
+    }
+
+    #[test]
+    fn an_animation_that_is_not_there_poses_the_rest_pose() {
+        let rig = rig();
+        assert_eq!(rig.pose(Some(9), 0.5), rig.pose(None, 0.5));
+        let mut out = Vec::new();
+        rig.poser(9).pose_into(0.5, &mut out);
+        assert_eq!(out, rig.pose(None, 0.5));
+    }
+
+    #[cfg(all(feature = "gltf", feature = "fs"))]
+    #[test]
+    fn an_animation_takes_its_own_frame_rate_before_the_files() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/gltf/skin_animated/skin.glb");
+        let mut doc = crate::formats::open(&path, crate::document::Keep::ALL).unwrap();
+        assert_eq!(
+            doc.rig().unwrap().animations[0].frame_rate,
+            None,
+            "glTF has no frame rate"
+        );
+        doc.json["asset"]["extras"] = serde_json::json!({ "source": { "frameRate": 30.0 } });
+        assert_eq!(doc.rig().unwrap().animations[0].frame_rate, Some(30.0));
+        doc.json["animations"][0]["extras"] = serde_json::json!({ "frameRate": 24.0 });
+        assert_eq!(doc.rig().unwrap().animations[0].frame_rate, Some(24.0));
     }
 }

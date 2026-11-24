@@ -72,6 +72,7 @@ impl Document<'_> {
         }
 
         let mut animations = Vec::new();
+        let file_rate = self.source_info().frame_rate.value().copied();
         // Key times by accessor: channels mostly share them, every bone keyed on the same frames.
         let mut read_times: HashMap<usize, Vec<f32>> = HashMap::new();
         for (k, a) in list(json, "animations").iter().enumerate() {
@@ -121,9 +122,11 @@ impl Document<'_> {
                     values,
                 });
             }
+            let own_rate = a.pointer("/extras/frameRate").and_then(Value::as_f64);
             animations.push(Animation {
                 name: name(a),
                 channels,
+                frame_rate: own_rate.or(file_rate).filter(|r| r.is_finite() && *r > 0.0),
             });
         }
         Ok(Rig {
