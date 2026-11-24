@@ -299,7 +299,7 @@ fn parse(bytes: &[u8]) -> Result<(Graph, Info)> {
         let mut r = flate2::read::MultiGzDecoder::new(bytes).take(MAX_INFLATED);
         // A file cut short reads as far as it inflates.
         if r.read_to_end(&mut inflated).is_err() && inflated.is_empty() {
-            bail!("not a gzipped X3D or VRML file");
+            bail!(UnknownFormat, "not a gzipped X3D or VRML file");
         }
         inflated.as_slice()
     } else {
@@ -326,10 +326,10 @@ fn parse(bytes: &[u8]) -> Result<(Graph, Info)> {
     let (head, version) = (words.next().unwrap_or_default(), words.next().unwrap_or_default());
     let version = String::from_utf8_lossy(version.strip_prefix(b"V").unwrap_or(version)).into_owned();
     let format = match head {
-        b"#VRML" if version.starts_with('1') => bail!("VRML 1.0 isn't supported, only VRML97 and X3D"),
+        b"#VRML" if version.starts_with('1') => bail!(Unsupported, "VRML 1.0 isn't supported, only VRML97 and X3D"),
         b"#VRML" => "VRML97",
         b"#X3D" => "X3D",
-        _ if bytes.is_empty() => bail!("an empty file"),
+        _ if bytes.is_empty() => bail!(Empty, "an empty file"),
         _ => "VRML97",
     };
     let mut g = classic::parse(bytes);
@@ -568,6 +568,7 @@ impl Convert<'_> {
         self.triangles += self.mesh_tris[m];
         ensure!(
             self.triangles <= self.limit,
+            LimitExceeded,
             "too many triangles to convert (more than {})",
             self.limit
         );

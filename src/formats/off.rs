@@ -27,7 +27,7 @@ use crate::document::Document;
 use crate::mesh::{FastMap, GRAY, Material, Prim, smooth_normals, srgb_to_linear, triangulate};
 use crate::num::u32_of;
 use crate::source::SourceInfo;
-use crate::{Context as _, Result};
+use crate::{Context as _, ErrorKind, Result};
 
 /// What a file's vertices carry, from its header keyword.
 #[derive(Clone, Copy, Debug, Default)]
@@ -82,7 +82,7 @@ pub(crate) fn load(input: Input<'_>) -> Result<Document<'static>> {
     } else {
         ascii(&mut c, layout, leftover, input.limit, &mut m)?;
     }
-    ensure!(!m.tris.is_empty(), "OFF has no faces");
+    ensure!(!m.tris.is_empty(), Empty, "OFF has no faces");
     let triangles = m.tris.len();
     let mut source = Map::new();
     source.insert("header".into(), json!(keyword));
@@ -121,7 +121,7 @@ fn header<'a>(c: &mut Cursor<'a>) -> Result<(Layout, String, Option<&'a [u8]>)> 
         ..Layout::default()
     };
     let Some(first) = c.token(true) else {
-        bail!("OFF file is empty");
+        bail!(Empty, "OFF file is empty");
     };
     let mut t = first;
     for (prefix, flag) in [
@@ -141,7 +141,7 @@ fn header<'a>(c: &mut Cursor<'a>) -> Result<(Layout, String, Option<&'a [u8]>)> 
     }
     let (keyword, leftover) = if t.len() >= 3 && t[..3].eq_ignore_ascii_case(b"OFF") {
         let rest = &t[3..];
-        ensure!(rest.iter().all(u8::is_ascii_digit), "not an OFF file");
+        ensure!(rest.iter().all(u8::is_ascii_digit), UnknownFormat, "not an OFF file");
         (
             String::from_utf8_lossy(&first[..first.len() - rest.len()]).into_owned(),
             (!rest.is_empty()).then_some(rest),
@@ -154,7 +154,7 @@ fn header<'a>(c: &mut Cursor<'a>) -> Result<(Layout, String, Option<&'a [u8]>)> 
         };
         (String::new(), Some(first))
     } else {
-        bail!("not an OFF file");
+        bail!(UnknownFormat, "not an OFF file");
     };
     if leftover.is_none() {
         let back = c.at;
@@ -166,8 +166,11 @@ fn header<'a>(c: &mut Cursor<'a>) -> Result<(Layout, String, Option<&'a [u8]>)> 
         }
     }
     if ndim && !layout.binary {
-        let n = c.token(true).and_then(int).context("OFF dimension missing")?;
-        ensure!((1..=32).contains(&n), "OFF dimension {n} is out of range");
+        let n = c
+            .token(true)
+            .and_then(int)
+            .context(ErrorKind::Corrupt, "OFF dimension missing")?;
+        ensure!((1..=32).contains(&n), Unsupported, "OFF dimension {n} is out of range");
         layout.dim = usize::try_from(n).unwrap_or(3);
     } else if ndim {
         layout.dim = 0; // Read with the counts.
@@ -181,12 +184,18 @@ fn ascii(c: &mut Cursor<'_>, layout: Layout, leftover: Option<&[u8]>, limit: usi
         Some(t) => int(t),
         None => c.token(true).and_then(int),
     }
-    .context("OFF vertex count missing")?;
-    let nf = c.token(true).and_then(int).context("OFF face count missing")?;
-    ensure!(nv >= 0 && nf >= 0, "OFF counts are negative");
+    .context(ErrorKind::Corrupt, "OFF vertex count missing")?;
+    let nf = c
+        .token(true)
+        .and_then(int)
+        .context(ErrorKind::Corrupt, "OFF face count missing")?;
+    ensure!(nv >= 0 && nf >= 0, Corrupt, "OFF counts are negative");
     // The edge count, when there is one, and anything else on the line.
     c.end_line();
-    let (nv, nf) = (usize::try_from(nv)?, usize::try_from(nf)?);
+    let (nv, nf) = (
+        usize::try_from(nv).context(ErrorKind::LimitExceeded, "OFF vertex count is too big")?,
+        usize::try_from(nf).context(ErrorKind::LimitExceeded, "OFF face count is too big")?,
+    );
     // Each vertex takes at least six bytes ("0 0 0\n"), each face eight.
     m.positions.reserve(nv.min(c.d.len() / 6));
     m.tris.reserve(nf.min(c.d.len() / 8));
@@ -277,6 +286,7 @@ fn ascii(c: &mut Cursor<'_>, layout: Layout, leftover: Option<&[u8]>, limit: usi
         }
         ensure!(
             m.tris.len() <= limit,
+            LimitExceeded,
             "too many triangles to convert (more than {limit})"
         );
     }
@@ -378,13 +388,15 @@ fn face(m: &mut Model, corners: &[u32], color: Option<[f32; 4]>, pts: &mut Vec<[
 fn binary(d: &[u8], at: usize, mut layout: Layout, limit: usize, m: &mut Model) -> Result<()> {
     let mut r = Be { d, at };
     if layout.dim == 0 {
-        let n = r.int().context("OFF dimension missing")?;
-        ensure!((1..=32).contains(&n), "OFF dimension {n} is out of range");
-        layout.dim = usize::try_from(n)?;
+        let n = r.int().context(ErrorKind::Corrupt, "OFF dimension missing")?;
+        ensure!((1..=32).contains(&n), Unsupported, "OFF dimension {n} is out of range");
+        layout.dim = usize::try_from(n).context(ErrorKind::Unsupported, "OFF dimension is out of range")?;
     }
-    let nv = usize::try_from(r.int().context("OFF counts missing")?).context("OFF counts are negative")?;
-    let nf = usize::try_from(r.int().context("OFF counts missing")?).context("OFF counts are negative")?;
-    r.int().context("OFF counts missing")?;
+    let nv = usize::try_from(r.int().context(ErrorKind::Corrupt, "OFF counts missing")?)
+        .context(ErrorKind::Corrupt, "OFF counts are negative")?;
+    let nf = usize::try_from(r.int().context(ErrorKind::Corrupt, "OFF counts missing")?)
+        .context(ErrorKind::Corrupt, "OFF counts are negative")?;
+    r.int().context(ErrorKind::Corrupt, "OFF counts missing")?;
     let floats = layout.dim
         + usize::from(layout.homogeneous)
         + if layout.normal { layout.dim } else { 0 }
@@ -474,6 +486,7 @@ fn binary(d: &[u8], at: usize, mut layout: Layout, limit: usize, m: &mut Model) 
         }
         ensure!(
             m.tris.len() <= limit,
+            LimitExceeded,
             "too many triangles to convert (more than {limit})"
         );
     }

@@ -276,7 +276,7 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
             extras: None,
         });
     }
-    ensure!(!scene.nodes.is_empty(), "MS3D file has no triangles or joints");
+    ensure!(!scene.nodes.is_empty(), Empty, "MS3D file has no triangles or joints");
 
     facts.insert("joints".into(), json!(joints));
     facts.insert("groups".into(), json!(m.groups.len()));
@@ -353,12 +353,14 @@ fn parse(data: &[u8]) -> Result<Ms3d> {
     let mut b = Bin::new(data, "MS3D");
     ensure!(
         data.len() >= 14 && &data[..10] == MAGIC,
+        UnknownFormat,
         "isn't a MilkShape 3D file: it doesn't start with MS3D000000"
     );
     b.skip(10)?;
     let version = b.i32()?;
     ensure!(
         (3..=4).contains(&version),
+        Unsupported,
         "MS3D version {version} isn't one this reader knows (3 or 4)"
     );
 

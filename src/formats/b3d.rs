@@ -345,7 +345,7 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
             extras: None,
         });
     }
-    ensure!(!scene.nodes.is_empty(), "B3D file has no nodes");
+    ensure!(!scene.nodes.is_empty(), Empty, "B3D file has no nodes");
 
     facts.insert("nodes".into(), json!(f.nodes.len()));
     facts.insert("brushes".into(), json!(f.brushes.len()));
@@ -383,14 +383,15 @@ fn chunks(data: &[u8]) -> impl Iterator<Item = Result<([u8; 4], &[u8])>> {
         let rest = &data[at..];
         if rest.len() < 8 {
             at = data.len();
-            return Some(Err(invalid!("B3D file is cut short in a chunk header")));
+            return Some(Err(err!(Truncated, "B3D file is cut short in a chunk header")));
         }
         let tag: [u8; 4] = [rest[0], rest[1], rest[2], rest[3]];
         let size = i32::from_le_bytes([rest[4], rest[5], rest[6], rest[7]]);
         let Some(size) = usize::try_from(size).ok().filter(|&s| s <= rest.len() - 8) else {
             at = data.len();
-            return Some(Err(invalid!(
-                "B3D {} chunk claims {size} bytes, more than the {} it has room for",
+            return Some(Err(err!(
+                Truncated,
+                "B3D {} chunk runs past the end of what holds it: it claims {size} bytes, and there is room for {}",
                 String::from_utf8_lossy(&tag),
                 rest.len() - 8
             )));
@@ -404,7 +405,7 @@ fn chunks(data: &[u8]) -> impl Iterator<Item = Result<([u8; 4], &[u8])>> {
 fn cstring(b: &mut Bin<'_>) -> Result<String> {
     let rest = &b.data[b.at..];
     let Some(end) = rest.iter().position(|&c| c == 0) else {
-        bail!("B3D file is cut short in a name");
+        bail!(Truncated, "B3D file is cut short in a name");
     };
     let s = scene::text(&rest[..end]);
     b.skip(end + 1)?;
@@ -415,11 +416,12 @@ fn cstring(b: &mut Bin<'_>) -> Result<String> {
 fn parse(data: &[u8]) -> Result<B3d> {
     ensure!(
         data.len() >= 8 && &data[..4] == b"BB3D",
+        UnknownFormat,
         "isn't a Blitz3D file: it doesn't start with BB3D"
     );
     let mut f = B3d::default();
     let mut top = chunks(data);
-    let (_, body) = top.next().unwrap_or_else(|| Err(invalid!("B3D file is empty")))?;
+    let (_, body) = top.next().unwrap_or_else(|| Err(err!(Empty, "B3D file is empty")))?;
     let mut b = Bin::new(body, "B3D");
     f.version = b.i32()?;
     for c in chunks(&body[4..]) {
@@ -461,6 +463,7 @@ fn brus(body: &[u8], f: &mut B3d) -> Result<()> {
     let n = b.i32()?;
     ensure!(
         (0..=8).contains(&n),
+        Corrupt,
         "B3D brushes claim {n} textures each, more than the 8 the format allows"
     );
     let n = usize::try_from(n).unwrap_or(0);
@@ -489,7 +492,11 @@ fn brus(body: &[u8], f: &mut B3d) -> Result<()> {
 }
 
 fn node(body: &[u8], parent: Option<usize>, depth: usize, f: &mut B3d) -> Result<()> {
-    ensure!(depth < MAX_DEPTH, "B3D nodes nest deeper than {MAX_DEPTH}");
+    ensure!(
+        depth < MAX_DEPTH,
+        LimitExceeded,
+        "B3D nodes nest deeper than {MAX_DEPTH}"
+    );
     let mut b = Bin::new(body, "B3D");
     let name = cstring(&mut b)?;
     let translation = b.vec3()?;
@@ -608,7 +615,10 @@ fn vrts(body: &[u8], m: &mut Mesh) -> Result<()> {
         usize::try_from(sets).ok().filter(|&s| s <= 8),
         usize::try_from(size).ok().filter(|&s| s <= 4),
     ) else {
-        bail!("B3D vertices claim {sets} texture coordinate sets of {size}, more than the format allows (8 of 4)");
+        bail!(
+            Corrupt,
+            "B3D vertices claim {sets} texture coordinate sets of {size}, more than the format allows (8 of 4)"
+        );
     };
     let normals = flags & 1 != 0;
     let colors = flags & 2 != 0;
@@ -770,7 +780,9 @@ mod tests {
         // A chunk claiming more than its parent.
         let mut v = good.clone();
         v[4..8].copy_from_slice(&i32::MAX.to_le_bytes());
-        assert!(read(&v).unwrap_err().to_string().contains("more than"));
+        let err = read(&v).unwrap_err();
+        assert_eq!(err.kind(), crate::ErrorKind::Truncated);
+        assert!(err.to_string().contains("runs past the end of what holds it"), "{err}");
         // Too many texture coordinate sets.
         let at = v.windows(4).position(|w| w == b"VRTS").unwrap();
         let mut v = good.clone();

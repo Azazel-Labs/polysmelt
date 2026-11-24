@@ -25,7 +25,7 @@ use crate::document::{Builder, Document, Keep};
 use crate::material::{Factor, Full};
 use crate::mesh::{Material, Prim, srgb_to_linear};
 use crate::source::{Axis, Fact, Handedness, SourceInfo};
-use crate::{Context as _, Result};
+use crate::{Context as _, ErrorKind, Result};
 
 /// The most voxels a file may hold, unless [`Keep::max_triangles`] is raised past its default,
 /// which raises this in proportion.
@@ -112,9 +112,10 @@ struct Body<'a> {
 
 impl Body<'_> {
     fn u32(&mut self) -> Result<u32> {
-        let v = self.b.get(self.at..self.at + 4).context("VOX chunk ends early")?;
+        let v = self.b.get(self.at..self.at + 4).and_then(|v| v.try_into().ok());
+        let v = v.context(ErrorKind::Truncated, "VOX chunk is cut short")?;
         self.at += 4;
-        Ok(u32::from_le_bytes(v.try_into()?))
+        Ok(u32::from_le_bytes(v))
     }
 
     fn i32(&mut self) -> Result<i32> {
@@ -126,14 +127,14 @@ impl Body<'_> {
         let s = self
             .b
             .get(self.at..self.at.saturating_add(n))
-            .context("VOX chunk ends early")?;
+            .context(ErrorKind::Truncated, "VOX chunk is cut short")?;
         self.at += n;
         Ok(std::str::from_utf8(s).unwrap_or(""))
     }
 
     fn dict(&mut self) -> Result<HashMap<String, String>> {
         let n = self.u32()?;
-        ensure!(n <= 4096, "VOX dictionary too large");
+        ensure!(n <= 4096, LimitExceeded, "VOX dictionary too large");
         let mut d = HashMap::new();
         for _ in 0..n {
             let k = self.string()?.to_owned();
@@ -465,13 +466,19 @@ fn source(v: &Vox) -> Value {
 
 /// Reads every chunk, refusing a file of more than `max_voxels` voxels.
 fn read(data: &[u8], max_voxels: usize) -> Result<Vox> {
-    ensure!(data.len() >= 20 && &data[..4] == b"VOX ", "not a MagicaVoxel file");
+    ensure!(
+        data.len() >= 20 && &data[..4] == b"VOX ",
+        UnknownFormat,
+        "not a MagicaVoxel file"
+    );
     let le = |at: usize| -> Result<u32> {
         Ok(u32::from_le_bytes(
-            data.get(at..at + 4).context("VOX ends early")?.try_into()?,
+            data.get(at..at + 4)
+                .and_then(|b| b.try_into().ok())
+                .context(ErrorKind::Truncated, "VOX file is cut short")?,
         ))
     };
-    ensure!(&data[8..12] == b"MAIN", "VOX file has no MAIN chunk");
+    ensure!(&data[8..12] == b"MAIN", Corrupt, "VOX file has no MAIN chunk");
     let mut v = Vox {
         version: le(4)?,
         ..Vox::default()
@@ -484,18 +491,30 @@ fn read(data: &[u8], max_voxels: usize) -> Result<Vox> {
         let id = &data[at..at + 4];
         let content = le(at + 4)? as usize;
         let start = at + 12;
-        let end = start.checked_add(content).context("VOX chunk overflow")?;
-        let next = end.checked_add(le(at + 8)? as usize).context("VOX chunk overflow")?;
-        let body = data.get(start..end).context("VOX chunk ends early")?;
+        let end = start
+            .checked_add(content)
+            .context(ErrorKind::Corrupt, "VOX chunk overflow")?;
+        let next = end
+            .checked_add(le(at + 8)? as usize)
+            .context(ErrorKind::Corrupt, "VOX chunk overflow")?;
+        let body = data
+            .get(start..end)
+            .context(ErrorKind::Truncated, "VOX chunk is cut short")?;
         let mut b = Body { b: body, at: 0 };
         match id {
             b"SIZE" => size = Some([b.i32()?, b.i32()?, b.i32()?]),
             b"XYZI" => {
                 let n = b.u32()? as usize;
                 total = total.saturating_add(n);
-                ensure!(total <= max_voxels, "too many voxels to convert ({total})");
-                let raw = body.get(4..4 + n * 4).context("VOX voxels end early")?;
-                let size = size.take().context("VOX voxels without a SIZE")?;
+                ensure!(
+                    total <= max_voxels,
+                    LimitExceeded,
+                    "too many voxels to convert ({total})"
+                );
+                let raw = body
+                    .get(4..4 + n * 4)
+                    .context(ErrorKind::Truncated, "VOX voxels are cut short")?;
+                let size = size.take().context(ErrorKind::Corrupt, "VOX voxels without a SIZE")?;
                 v.models.push(Model {
                     size,
                     voxels: raw.as_chunks::<4>().0.to_vec(),
@@ -503,7 +522,9 @@ fn read(data: &[u8], max_voxels: usize) -> Result<Vox> {
             }
             b"RGBA" => {
                 // Entry i is color index i + 1.
-                let raw = body.get(..1024).context("VOX palette ends early")?;
+                let raw = body
+                    .get(..1024)
+                    .context(ErrorKind::Truncated, "VOX palette is cut short")?;
                 let mut p = [[0u8; 4]; 256];
                 for (i, c) in raw.as_chunks::<4>().0.iter().take(255).enumerate() {
                     p[i + 1] = *c;
@@ -519,7 +540,8 @@ fn read(data: &[u8], max_voxels: usize) -> Result<Vox> {
                 let n = b.u32()?;
                 ensure!(
                     n as usize <= body.len() / 4,
-                    "VOX transform lists more frames than it holds"
+                    Truncated,
+                    "VOX transform is cut short: it lists more frames than it holds"
                 );
                 let mut frames = Vec::new();
                 for k in 0..n {
@@ -553,7 +575,8 @@ fn read(data: &[u8], max_voxels: usize) -> Result<Vox> {
                 let n = b.u32()?;
                 ensure!(
                     n as usize <= body.len() / 4,
-                    "VOX group lists more children than it holds"
+                    Truncated,
+                    "VOX group is cut short: it lists more children than it holds"
                 );
                 let children = (0..n).map(|_| b.u32()).collect::<Result<_>>()?;
                 v.nodes.insert(id, Node::Group { attrs, children });
@@ -564,7 +587,8 @@ fn read(data: &[u8], max_voxels: usize) -> Result<Vox> {
                 let n = b.u32()?;
                 ensure!(
                     n as usize <= body.len() / 4,
-                    "VOX shape lists more models than it holds"
+                    Truncated,
+                    "VOX shape is cut short: it lists more models than it holds"
                 );
                 let mut models = Vec::new();
                 for _ in 0..n {
@@ -590,13 +614,22 @@ fn read(data: &[u8], max_voxels: usize) -> Result<Vox> {
             }
             b"NOTE" => {
                 let n = b.u32()?;
-                ensure!(n as usize <= body.len() / 4, "VOX note lists more names than it holds");
+                ensure!(
+                    n as usize <= body.len() / 4,
+                    Truncated,
+                    "VOX note is cut short: it lists more names than it holds"
+                );
                 for _ in 0..n {
                     let note = b.string()?.to_owned();
                     v.notes.push(note);
                 }
             }
-            b"IMAP" => v.index_map = body.get(..256).context("VOX index map ends early")?.to_vec(),
+            b"IMAP" => {
+                v.index_map = body
+                    .get(..256)
+                    .context(ErrorKind::Truncated, "VOX index map is cut short")?
+                    .to_vec();
+            }
             b"PACK" => {}
             _ => {
                 let name = String::from_utf8_lossy(id).into_owned();
@@ -607,7 +640,7 @@ fn read(data: &[u8], max_voxels: usize) -> Result<Vox> {
         }
         at = next;
     }
-    ensure!(!v.models.is_empty(), "VOX file has no model");
+    ensure!(!v.models.is_empty(), Empty, "VOX file has no model");
     Ok(v)
 }
 
@@ -628,9 +661,10 @@ impl Walk<'_> {
     /// The glTF node for scene node `id` (a transform with the group or shape under it), its
     /// index; `None` for an id that isn't there.
     fn visit(&mut self, id: u32, depth: usize, visible: bool) -> Result<Option<usize>> {
-        ensure!(depth < 64, "VOX scene graph too deep");
+        ensure!(depth < 64, LimitExceeded, "VOX scene graph too deep");
         ensure!(
             self.out.len() < MAX_NODES,
+            LimitExceeded,
             "VOX scene graph unfolds into too many nodes"
         );
         let Some(node) = self.v.nodes.get(&id) else {
@@ -1024,6 +1058,7 @@ fn mesh_model(model: &Model, centered: bool, prims: &mut HashMap<u8, Prim>) -> R
     let [sx, sy, sz] = model.size;
     ensure!(
         (1..=1024).contains(&sx) && (1..=1024).contains(&sy) && (1..=1024).contains(&sz),
+        Corrupt,
         "VOX model size {sx}x{sy}x{sz} is out of range"
     );
     let size = [sx as usize, sy as usize, sz as usize];
@@ -1193,7 +1228,8 @@ fn mesh_model(model: &Model, centered: bool, prims: &mut HashMap<u8, Prim>) -> R
         ids.clear();
         for q in &ring {
             let id = shared.get(r.color, q[0], q[1], || {
-                let id = u32::try_from(p.positions.len())?;
+                let id = u32::try_from(p.positions.len())
+                    .context(ErrorKind::LimitExceeded, "too many vertices for 32-bit indices")?;
                 p.positions.push(to_gltf(r.point(q[0], q[1]).map(|c| c as f32)));
                 p.normals.push(normal);
                 Ok(id)
@@ -1224,7 +1260,8 @@ fn mesh_model(model: &Model, centered: bool, prims: &mut HashMap<u8, Prim>) -> R
             strip(p, &ring, &ids, &a, &b, 1);
         } else {
             // A point in the middle, which no edge of any other rectangle passes through.
-            let id = u32::try_from(p.positions.len())?;
+            let id = u32::try_from(p.positions.len())
+                .context(ErrorKind::LimitExceeded, "too many vertices for 32-bit indices")?;
             let mut m = r.point(0, 0).map(|c| c as f32);
             m[ua] = (u0 + u1) as f32 / 2.0;
             m[va] = (v0 + v1) as f32 / 2.0;
@@ -1666,6 +1703,6 @@ mod tests {
             max_triangles: crate::mesh::MAX_TRIANGLES * 2,
             ..Keep::ALL
         };
-        assert!(err(higher).contains("end early"), "{}", err(higher));
+        assert!(err(higher).contains("voxels are cut short"), "{}", err(higher));
     }
 }

@@ -610,6 +610,7 @@ fn extrusion(g: &Graph, id: usize, textured: bool, limit: usize) -> Result<Polys
         .and_then(|t| t.checked_add((usize::from(begin) + usize::from(end)) * cap_points));
     ensure!(
         tris.is_some_and(|t| t <= limit),
+        LimitExceeded,
         "too many triangles to convert (more than {limit})"
     );
     let planes = spine_planes(&spine);
@@ -830,7 +831,11 @@ fn flat(g: &Graph, id: usize, limit: usize) -> Result<Prim> {
                 .map(|v| v.map(f32_of))
                 .collect();
             let tris = vertices.as_chunks::<3>().0;
-            ensure!(tris.len() <= limit, "too many triangles to convert (more than {limit})");
+            ensure!(
+                tris.len() <= limit,
+                LimitExceeded,
+                "too many triangles to convert (more than {limit})"
+            );
             let finite = |q: &[f32; 2]| q.iter().all(|c| c.is_finite());
             let (mut lo, mut hi) = ([f32::MAX; 2], [f32::MIN; 2]);
             for q in vertices.iter().filter(|q| finite(q)) {
@@ -922,7 +927,11 @@ fn to_prim(p: &Polys, textured: bool, limit: usize) -> Result<Prim> {
             }
             face_normals.push(nrm);
         }
-        ensure!(tris.len() <= limit, "too many triangles to convert (more than {limit})");
+        ensure!(
+            tris.len() <= limit,
+            LimitExceeded,
+            "too many triangles to convert (more than {limit})"
+        );
     }
     let corner_pos = |c: u32| p.corners[c as usize][0];
     let smooth = if p.shading == Shading::Smooth || p.shading == Shading::Given {

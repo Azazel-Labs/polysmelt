@@ -348,7 +348,7 @@ impl Mesh {
     ///
     /// When the mesh has nothing to draw.
     pub fn to_glb(&self) -> Result<Vec<u8>> {
-        ensure!(self.prims.iter().any(|p| !p.is_empty()), "nothing to draw");
+        ensure!(self.prims.iter().any(|p| !p.is_empty()), Empty, "nothing to draw");
         Document::from_mesh(self.clone(), serde_json::Map::new()).to_glb()
     }
 }

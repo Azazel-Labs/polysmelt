@@ -26,7 +26,7 @@ use crate::document::Document;
 use crate::mesh::srgb_to_linear;
 use crate::num::{f32_of, usize_of};
 use crate::source::{Axis, Fact, Handedness, SourceInfo};
-use crate::{Context as _, Result};
+use crate::{Context as _, ErrorKind, Result};
 
 /// Whether `json` is glTF 1.0 (or an earlier draft).
 pub(crate) fn is_v1(json: &Map<String, Value>) -> bool {
@@ -260,6 +260,7 @@ pub(crate) fn upgrade(mut v1: Map<String, Value>) -> Result<(Map<String, Value>,
     for (i, (id, v)) in views.list.iter().enumerate() {
         ensure!(
             out_views[i]["buffer"].is_u64(),
+            Corrupt,
             "glTF 1.0 bufferView {id:?} names no buffer there is ({})",
             v.get("buffer").unwrap_or(&Value::Null)
         );
@@ -903,7 +904,11 @@ fn push(doc: &mut Document<'_>, bytes: Vec<u8>) -> usize {
 fn floats(doc: &Document<'_>, a: usize) -> Result<(Vec<f32>, usize)> {
     let acc = &doc.json["accessors"][a];
     let get = |v: &Value, k: &str| v.get(k).and_then(Value::as_u64).unwrap_or(0);
-    ensure!(get(acc, "componentType") == 5126, "glTF 1.0 accessor {a} isn't float");
+    ensure!(
+        get(acc, "componentType") == 5126,
+        Corrupt,
+        "glTF 1.0 accessor {a} isn't float"
+    );
     let count = usize_of(get(acc, "count"));
     let n = components(acc.get("type").and_then(Value::as_str).unwrap_or("SCALAR"));
     let Some(v) = acc.get("bufferView").and_then(Value::as_u64) else {
@@ -920,9 +925,9 @@ fn floats(doc: &Document<'_>, a: usize) -> Result<(Vec<f32>, usize)> {
     for i in 0..count {
         for k in 0..n {
             let at = start + i * stride + k * 4;
-            let b = buf
-                .get(at..at + 4)
-                .with_context(|| format!("glTF 1.0 accessor {a} runs past its buffer"))?;
+            let b = buf.get(at..at + 4).with_context(ErrorKind::Truncated, || {
+                format!("glTF 1.0 accessor {a} runs past the end of its buffer")
+            })?;
             out.push(f32::from_le_bytes([b[0], b[1], b[2], b[3]]));
         }
     }

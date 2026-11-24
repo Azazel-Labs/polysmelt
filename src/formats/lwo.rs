@@ -378,14 +378,14 @@ impl Model {
 
 fn parse(data: &[u8]) -> Result<Model> {
     let mut r = Rd::new(data);
-    ensure!(r.id() == Some(FORM), "not a LightWave object");
+    ensure!(r.id() == Some(FORM), UnknownFormat, "not a LightWave object");
     let size = r.u4().unwrap_or(0) as usize;
     let kind = match &r.id().unwrap_or_default() {
         b"LWOB" => Kind::Lwob,
         b"LWLO" => Kind::Lwlo,
         b"LWO2" => Kind::Lwo2,
         b"LWO3" => Kind::Lwo3,
-        _ => bail!("not a LightWave object"),
+        _ => bail!(UnknownFormat, "not a LightWave object"),
     };
     let body = r.rest();
     let want = size.saturating_sub(4);
@@ -1788,7 +1788,12 @@ fn build(l: &Layer, looks: &[Look], look_of: &[usize], budget: &mut Budget) -> R
                     tris.clear();
                     triangles(&pos, budget, &mut tris);
                     budget.triangles += tris.len();
-                    ensure!(budget.triangles <= budget.limit, "more than {} triangles", budget.limit);
+                    ensure!(
+                        budget.triangles <= budget.limit,
+                        LimitExceeded,
+                        "more than {} triangles",
+                        budget.limit
+                    );
                     prim.indices
                         .extend(tris.iter().flatten().map(|&k| corner_idx[k as usize]));
                 }
@@ -2051,7 +2056,7 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         meshes.push(mesh);
         mesh_of.push(Some(meshes.len() - 1));
     }
-    ensure!(!meshes.is_empty(), "this LightWave object has no polygons");
+    ensure!(!meshes.is_empty(), Empty, "this LightWave object has no polygons");
 
     // The layers as nodes, each at its pivot, relative to its parent's.
     let parent = parents(&m.layers);

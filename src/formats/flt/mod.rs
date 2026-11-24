@@ -214,6 +214,7 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
     let scene = expand(&mut c)?;
     ensure!(
         !c.meshes.is_empty() || !c.lights.is_empty(),
+        Empty,
         "this OpenFlight file has no geometry"
     );
     Ok(finish(c, scene))
@@ -1344,7 +1345,12 @@ fn build_mesh(c: &mut Ctx<'_>, file: u32, node: u32, pal: Pal) -> Result<MeshOf>
                 c.built_triangles += n - 2;
             }
         }
-        ensure!(c.built_triangles <= c.limit, "more than {} triangles", c.limit);
+        ensure!(
+            c.built_triangles <= c.limit,
+            LimitExceeded,
+            "more than {} triangles",
+            c.limit
+        );
     }
     let mut primitives = Vec::new();
     for (key, image, mut part) in parts {

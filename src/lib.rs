@@ -17,69 +17,39 @@
 //! - [`gltf`]: GLB packing, and meshopt compression added to or decoded away from a GLB.
 //! - [`meshopt`]: the `EXT_meshopt_compression` and `KHR_meshopt_compression` bitstreams.
 
-use std::fmt::Display;
-
 /// The shared byte buffer [`mesh::Image`] holds, from the `bytes` crate: cloning or slicing one
 /// doesn't copy its bytes.
 pub use bytes::Bytes;
 
-/// Returns an [`Error::InvalidInput`] built from a format string.
+/// Returns an [`Error`] of an [`ErrorKind`] (named bare: `Corrupt`) with a message built from a
+/// format string.
 macro_rules! bail {
-    ($($t:tt)*) => {
-        return Err($crate::Error::InvalidInput($crate::printable(format!($($t)*))))
+    ($kind:ident, $($t:tt)*) => {
+        return Err(err!($kind, $($t)*))
     };
 }
 
-/// Bails unless the condition holds.
+/// Bails with an error of the kind unless the condition holds.
 macro_rules! ensure {
-    ($cond:expr, $($t:tt)*) => {
+    ($cond:expr, $kind:ident, $($t:tt)*) => {
         if !$cond {
-            bail!($($t)*)
+            bail!($kind, $($t)*)
         }
     };
 }
 
-/// An [`Error::InvalidInput`] built from a format string.
+/// An [`Error`] of an [`ErrorKind`] (named bare: `Corrupt`) with a message built from a format
+/// string. A constant message isn't allocated.
 #[allow(unused_macros)]
-macro_rules! invalid {
-    ($($t:tt)*) => {
-        $crate::Error::InvalidInput($crate::printable(format!($($t)*)))
+macro_rules! err {
+    ($kind:ident, $($t:tt)*) => {
+        $crate::Error::from_args($crate::ErrorKind::$kind, format_args!($($t)*))
     };
-}
-
-/// Text from a file as an error message shows it: quoted, escaped as Rust writes a string
-/// literal (so control characters and NULs come out printable), and cut to 32 characters.
-#[allow(dead_code, reason = "which readers use it depends on the enabled features")]
-pub(crate) fn shown(text: &[u8]) -> String {
-    const MOST: usize = 32;
-    let text = String::from_utf8_lossy(text);
-    let mut cut: String = text.chars().take(MOST).collect();
-    if text.chars().nth(MOST).is_some() {
-        cut.push('…');
-    }
-    format!("{cut:?}")
-}
-
-/// An error message with any control characters escaped, so file content that slipped into
-/// it can't garble a terminal or a report.
-pub(crate) fn printable(message: String) -> String {
-    if !message.chars().any(char::is_control) {
-        return message;
-    }
-    message
-        .chars()
-        .map(|c| {
-            if c.is_control() {
-                c.escape_debug().to_string()
-            } else {
-                c.to_string()
-            }
-        })
-        .collect()
 }
 
 pub mod assets;
 pub mod document;
+mod error;
 mod flatten;
 pub mod formats;
 mod gaussian;
@@ -120,66 +90,6 @@ mod test_rng;
 #[cfg(feature = "webp")]
 mod webp;
 
-/// What can go wrong reading or writing an asset.
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    /// The input is malformed or uses something unsupported.
-    #[error("{0}")]
-    InvalidInput(String),
-    /// Reading a file failed.
-    #[error(transparent)]
-    Io(#[from] std::io::Error),
-}
-
-/// A result with [`Error`].
-pub type Result<T, E = Error> = std::result::Result<T, E>;
-
-/// Turns a missing value or a foreign error into an [`Error::InvalidInput`] that says what was
-/// being done.
-#[allow(dead_code)]
-pub(crate) trait Context<T> {
-    fn context(self, what: impl Display) -> Result<T>;
-    fn with_context<D: Display>(self, what: impl FnOnce() -> D) -> Result<T>;
-}
-
-impl<T> Context<T> for Option<T> {
-    fn context(self, what: impl Display) -> Result<T> {
-        self.ok_or_else(|| Error::InvalidInput(printable(what.to_string())))
-    }
-    fn with_context<D: Display>(self, what: impl FnOnce() -> D) -> Result<T> {
-        self.ok_or_else(|| Error::InvalidInput(printable(what().to_string())))
-    }
-}
-
-impl<T, E: Display> Context<T> for std::result::Result<T, E> {
-    fn context(self, what: impl Display) -> Result<T> {
-        self.map_err(|e| Error::InvalidInput(printable(format!("{what}: {e}"))))
-    }
-    fn with_context<D: Display>(self, what: impl FnOnce() -> D) -> Result<T> {
-        self.map_err(|e| Error::InvalidInput(printable(format!("{}: {e}", what()))))
-    }
-}
-
-/// Foreign errors met while parsing, as invalid input.
-macro_rules! invalid_from {
-    ($($t:ty),* $(,)?) => {
-        $(impl From<$t> for Error {
-            fn from(e: $t) -> Self {
-                Error::InvalidInput(e.to_string())
-            }
-        })*
-    };
-}
-
-invalid_from!(
-    std::num::ParseIntError,
-    std::num::ParseFloatError,
-    std::num::TryFromIntError,
-    std::array::TryFromSliceError,
-    std::str::Utf8Error,
-    serde_json::Error,
-);
-#[cfg(any(feature = "3mf", feature = "usd"))]
-invalid_from!(zip::result::ZipError);
-#[cfg(feature = "3mf")]
-invalid_from!(quick_xml::Error);
+#[allow(unused_imports, reason = "which readers use them depends on the enabled features")]
+pub(crate) use error::{Context, Within, printable, shown};
+pub use error::{Error, ErrorKind, Result};

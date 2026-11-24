@@ -28,7 +28,7 @@ use crate::images::Source;
 use crate::material::{Alpha, CLAMP, Full, REPEAT, Tex};
 use crate::mesh::{GRAY, Image, Material, Prim, srgb_to_linear};
 use crate::source::{Axis, Fact, SourceInfo};
-use crate::{Context as _, Result};
+use crate::{Context as _, ErrorKind, Result, Within as _};
 
 /// The most unzipped from a zipped AMF: more is a zip bomb, not a model.
 const MAX_PART: u64 = 2 << 30;
@@ -45,7 +45,8 @@ const NONE: f32 = f32::NAN;
 pub(crate) fn load(input: super::Input<'_>) -> Result<Document<'static>> {
     let zipped = input.head(4)?.starts_with(b"PK\x03\x04");
     let amf = if zipped {
-        let mut zip = zip::ZipArchive::new(input.seekable()?).context("this zipped AMF can't be opened")?;
+        let mut zip =
+            zip::ZipArchive::new(input.seekable()?).context(ErrorKind::Corrupt, "this zipped AMF can't be opened")?;
         let names: Vec<String> = zip
             .file_names()
             .filter_map(Result::ok)
@@ -55,13 +56,13 @@ pub(crate) fn load(input: super::Input<'_>) -> Result<Document<'static>> {
             .iter()
             .find(|n| n.to_ascii_lowercase().ends_with(".amf"))
             .or_else(|| names.iter().find(|n| !n.ends_with('/')))
-            .context("this zip holds no AMF")?
+            .context(ErrorKind::UnknownFormat, "this zip holds no AMF")?
             .clone();
         let entry = zip
             .by_name(&name)
-            .with_context(|| format!("reading {name}"))?
+            .with_context(ErrorKind::Corrupt, || format!("reading {name}"))?
             .take(MAX_PART);
-        parse(BufReader::with_capacity(1 << 16, entry), input.limit).with_context(|| format!("reading {name}"))?
+        parse(BufReader::with_capacity(1 << 16, entry), input.limit).with_within(|| format!("reading {name}"))?
     } else {
         parse(BufReader::with_capacity(1 << 16, input.seekable()?), input.limit)?
     };
@@ -296,12 +297,16 @@ fn parse(r: impl BufRead, limit: usize) -> Result<Amf> {
             Err(quick_xml::Error::Syntax(e)) if root && e != quick_xml::errors::SyntaxError::InvalidBangMarkup => {
                 Event::Eof
             }
-            event => event.with_context(|| format!("bad XML near byte {at}"))?,
+            event => event.with_context(ErrorKind::Corrupt, || format!("bad XML near byte {at}"))?,
         };
         match event {
             Event::Start(e) => {
                 let t = tag(e.local_name().as_ref());
-                ensure!(root || t == Tag::Amf, "not an AMF file (it doesn't start with <amf>)");
+                ensure!(
+                    root || t == Tag::Amf,
+                    UnknownFormat,
+                    "not an AMF file (it doesn't start with <amf>)"
+                );
                 root = true;
                 s.text.clear();
                 open(&mut a, &mut s, t, &e);
@@ -309,7 +314,11 @@ fn parse(r: impl BufRead, limit: usize) -> Result<Amf> {
             }
             Event::Empty(e) => {
                 let t = tag(e.local_name().as_ref());
-                ensure!(root || t == Tag::Amf, "not an AMF file (it doesn't start with <amf>)");
+                ensure!(
+                    root || t == Tag::Amf,
+                    UnknownFormat,
+                    "not an AMF file (it doesn't start with <amf>)"
+                );
                 root = true;
                 s.text.clear();
                 open(&mut a, &mut s, t, &e);
@@ -349,7 +358,7 @@ fn parse(r: impl BufRead, limit: usize) -> Result<Amf> {
         }
         buf.clear();
     }
-    ensure!(root, "not an AMF file (it has no <amf>)");
+    ensure!(root, UnknownFormat, "not an AMF file (it has no <amf>)");
     Ok(a)
 }
 
@@ -582,6 +591,7 @@ fn close(a: &mut Amf, s: &mut State, t: Tag, parent: Option<Tag>, limit: usize) 
                 a.vertices += 1;
                 ensure!(
                     a.vertices <= limit.saturating_mul(3),
+                    LimitExceeded,
                     "too many vertices to convert (more than three for each of {limit} triangles)"
                 );
                 let i = o.verts.len();
@@ -603,7 +613,11 @@ fn close(a: &mut Amf, s: &mut State, t: Tag, parent: Option<Tag>, limit: usize) 
         }
         Tag::Triangle => {
             if let Some(v) = &mut s.volume {
-                ensure!(a.triangles < limit, "too many triangles to convert (more than {limit})");
+                ensure!(
+                    a.triangles < limit,
+                    LimitExceeded,
+                    "too many triangles to convert (more than {limit})"
+                );
                 a.triangles += 1;
                 let k = v.tris.len();
                 v.tris.push(s.corners);
@@ -929,7 +943,9 @@ fn build(a: &Amf, zipped: bool) -> Result<Document<'static>> {
                     tex.image(vol.maps.get(*m as usize)?.tex)
                 })
                 .collect();
-            let mut order: Vec<u32> = (0..u32::try_from(vol.tris.len())?).collect();
+            let mut order: Vec<u32> = (0..u32::try_from(vol.tris.len())
+                .context(ErrorKind::LimitExceeded, "too many triangles for 32-bit indices")?)
+                .collect();
             if image_of.iter().any(Option::is_some) {
                 order.sort_by_key(|&t| image_of[t as usize].map_or(0, |i| i + 1));
             }
@@ -985,7 +1001,8 @@ fn build(a: &Amf, zipped: bool) -> Result<Document<'static>> {
                         let index = if let Some(i) = found {
                             i
                         } else {
-                            let index = u32::try_from(p.positions.len())?;
+                            let index = u32::try_from(p.positions.len())
+                                .context(ErrorKind::LimitExceeded, "too many vertices for 32-bit indices")?;
                             p.positions.push(o.verts[v as usize]);
                             match some(o.normals.get(v as usize)) {
                                 Some(n) => p.normals.push(n),
@@ -1060,7 +1077,7 @@ fn build(a: &Amf, zipped: bool) -> Result<Document<'static>> {
             mesh_of.push(Some(meshes.len() - 1));
         }
     }
-    ensure!(triangles > 0, "this AMF has no triangles");
+    ensure!(triangles > 0, Empty, "this AMF has no triangles");
 
     let mut place = Place {
         a,

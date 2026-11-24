@@ -71,6 +71,7 @@ pub(super) fn load<'a>(text: &str, dir: &Path, limit: usize, assets: &dyn Assets
     let root = xml.root();
     ensure!(
         root.is("irr_scene"),
+        UnknownFormat,
         "not an Irrlicht scene: the root is <{}>",
         root.name()
     );
@@ -100,7 +101,7 @@ pub(super) fn load<'a>(text: &str, dir: &Path, limit: usize, assets: &dyn Assets
     for n in root.children().filter(|c| c.is("node")) {
         w.node(n, None)?;
     }
-    ensure!(w.nodes > 0 || w.hidden > 0, "Irrlicht scene has no nodes");
+    ensure!(w.nodes > 0 || w.hidden > 0, Empty, "Irrlicht scene has no nodes");
     w.aim_cameras();
 
     let World {
@@ -185,6 +186,7 @@ pub(super) fn load<'a>(text: &str, dir: &Path, limit: usize, assets: &dyn Assets
         }
         ensure!(
             doc.counts().triangles <= limit,
+            LimitExceeded,
             "too many triangles to convert (more than {limit})"
         );
     }
@@ -349,6 +351,7 @@ impl World<'_> {
         let limit = self.limit;
         ensure!(
             scene.triangles() <= limit,
+            LimitExceeded,
             "too many triangles to convert (more than {limit})"
         );
         Ok(())
@@ -467,6 +470,7 @@ impl World<'_> {
                 let limit = self.limit;
                 ensure!(
                     self.ctx.scene.triangles() <= limit,
+                    LimitExceeded,
                     "too many triangles to convert (more than {limit})"
                 );
             }

@@ -9,7 +9,7 @@ use super::{Reader, floats, index, items, list, list_of};
 use crate::document::Document;
 use crate::num::f32_of;
 use crate::rig::{Animation, Channel, Interpolation, Node, Property, Rig, Skin, Trs};
-use crate::{Context as _, Result};
+use crate::{Context as _, ErrorKind, Result};
 
 impl Document<'_> {
     /// The document's nodes, skins and animations, accessors read. A document loaded with a
@@ -48,13 +48,14 @@ impl Document<'_> {
         for (k, s) in list(json, "skins").iter().enumerate() {
             let joints = list_of(s, "joints");
             if let Some(&j) = joints.iter().find(|&&j| j >= nodes.len()) {
-                bail!("glTF skin {k} names node {j}, which doesn't exist");
+                bail!(Corrupt, "glTF skin {k} names node {j}, which doesn't exist");
             }
             let inverse_bind = match index(s, "inverseBindMatrices") {
                 Some(a) => {
                     let m = r.read::<16>(a, IDENTITY)?;
                     ensure!(
                         m.len() >= joints.len(),
+                        Corrupt,
                         "glTF skin {k} has {} inverse bind matrices for {} joints",
                         m.len(),
                         joints.len()
@@ -92,13 +93,16 @@ impl Document<'_> {
                 };
                 ensure!(
                     node < nodes.len(),
+                    Corrupt,
                     "glTF animation {k} animates node {node}, which doesn't exist"
                 );
                 let s = index(ch, "sampler")
                     .and_then(|s| samplers.get(s))
-                    .with_context(|| format!("glTF animation {k}: a channel names a missing sampler"))?;
+                    .with_context(ErrorKind::Corrupt, || {
+                        format!("glTF animation {k}: a channel names a missing sampler")
+                    })?;
                 let (Some(input), Some(output)) = (index(s, "input"), index(s, "output")) else {
-                    bail!("glTF animation {k}: a sampler has no input or output");
+                    bail!(Corrupt, "glTF animation {k}: a sampler has no input or output");
                 };
                 let interpolation = match s.get("interpolation").and_then(Value::as_str).unwrap_or("LINEAR") {
                     "STEP" => Interpolation::Step,

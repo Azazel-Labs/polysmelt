@@ -2906,6 +2906,7 @@ pub(crate) fn obj(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<D
             read += chunk.len();
             ensure!(
                 r.triangles <= r.limit,
+                LimitExceeded,
                 "too many triangles to convert (more than {})",
                 r.limit
             );
@@ -2920,9 +2921,14 @@ pub(crate) fn obj(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<D
         r.groups[g].points.extend(0..u32_of(r.v.len()));
         r.points = r.v.len();
     }
-    ensure!(r.triangles + r.points + r.lines > 0, "OBJ has no faces or vertices");
+    ensure!(
+        r.triangles + r.points + r.lines > 0,
+        Empty,
+        "OBJ has no faces or vertices"
+    );
     ensure!(
         r.triangles <= r.limit,
+        LimitExceeded,
         "too many triangles to convert (more than {})",
         r.limit
     );

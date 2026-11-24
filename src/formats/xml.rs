@@ -255,7 +255,7 @@ impl<'a> Xml<'a> {
                 let mut i = at + 2;
                 loop {
                     let Some(&c) = b.get(i) else {
-                        bail!("XML document type left open");
+                        bail!(Corrupt, "XML document type left open");
                     };
                     if quote != 0 {
                         if c == quote {
@@ -278,10 +278,15 @@ impl<'a> Xml<'a> {
                 let end = find(b, start, b">")?;
                 let name = src[start..end].trim_end();
                 let Some(open) = stack.pop() else {
-                    bail!("XML closing tag </{name}> has no opening tag");
+                    bail!(Corrupt, "XML closing tag </{name}> has no opening tag");
                 };
                 let (s, e) = doc.nodes[open].name;
-                ensure!(&src[s..e] == name, "XML tag <{}> closed by </{name}>", &src[s..e]);
+                ensure!(
+                    &src[s..e] == name,
+                    Corrupt,
+                    "XML tag <{}> closed by </{name}>",
+                    &src[s..e]
+                );
                 doc.nodes[open].content.1 = at;
                 at = end + 1;
             } else {
@@ -290,9 +295,9 @@ impl<'a> Xml<'a> {
         }
         if let Some(&open) = stack.last() {
             let (s, e) = doc.nodes[open].name;
-            bail!("XML element <{}> left open", &src[s..e]);
+            bail!(Corrupt, "XML element <{}> left open", &src[s..e]);
         }
-        ensure!(!doc.nodes.is_empty(), "XML holds no element");
+        ensure!(!doc.nodes.is_empty(), Corrupt, "XML holds no element");
         Ok(doc)
     }
 
@@ -304,7 +309,7 @@ impl<'a> Xml<'a> {
                 .iter()
                 .position(|&c| c.is_ascii_whitespace() || c == b'>' || c == b'/')
                 .unwrap_or(b.len() - at);
-        ensure!(name_end > at, "XML tag without a name at byte {at}");
+        ensure!(name_end > at, Corrupt, "XML tag without a name at byte {at}");
         let name = (at, name_end);
         at = name_end;
         let attr_start = self.attrs.len();
@@ -314,14 +319,18 @@ impl<'a> Xml<'a> {
                 at += 1;
             }
             match b.get(at) {
-                None => bail!("XML tag cut short"),
+                None => bail!(Truncated, "XML tag is cut short"),
                 Some(b'>') => {
                     closed = false;
                     at += 1;
                     break;
                 }
                 Some(b'/') => {
-                    ensure!(b.get(at + 1) == Some(&b'>'), "XML tag has a stray / at byte {at}");
+                    ensure!(
+                        b.get(at + 1) == Some(&b'>'),
+                        Corrupt,
+                        "XML tag has a stray / at byte {at}"
+                    );
                     closed = true;
                     at += 2;
                     break;
@@ -341,6 +350,7 @@ impl<'a> Xml<'a> {
             }
             ensure!(
                 n1 > n0 && b.get(at) == Some(&b'='),
+                Corrupt,
                 "XML attribute without a value at byte {n0}"
             );
             at += 1;
@@ -348,11 +358,11 @@ impl<'a> Xml<'a> {
                 at += 1;
             }
             let Some(&q @ (b'"' | b'\'')) = b.get(at) else {
-                bail!("XML attribute value without quotes at byte {at}");
+                bail!(Corrupt, "XML attribute value without quotes at byte {at}");
             };
             let v0 = at + 1;
             let Some(len) = memchr(q, &b[v0..]) else {
-                bail!("XML attribute value left open");
+                bail!(Corrupt, "XML attribute value left open");
             };
             at = v0 + len + 1;
             self.attrs.push(XAttr {
@@ -381,7 +391,11 @@ impl<'a> Xml<'a> {
             self.nodes[parent].last = i;
         }
         if !closed {
-            ensure!(stack.len() < MAX_DEPTH, "XML elements nest deeper than {MAX_DEPTH}");
+            ensure!(
+                stack.len() < MAX_DEPTH,
+                LimitExceeded,
+                "XML elements nest deeper than {MAX_DEPTH}"
+            );
             stack.push(i);
         }
         Ok(at)
@@ -403,7 +417,7 @@ fn find(b: &[u8], from: usize, pat: &[u8]) -> Result<usize> {
         }
         at += 1;
     }
-    bail!("XML cut short at byte {from}")
+    bail!(Truncated, "XML is cut short at byte {from}")
 }
 
 fn memchr(c: u8, b: &[u8]) -> Option<usize> {

@@ -53,6 +53,7 @@ pub(crate) fn stl(input: Input<'_>) -> Result<Document<'static>> {
     };
     ensure!(
         n <= input.limit,
+        LimitExceeded,
         "too many triangles to convert ({n}, more than {})",
         input.limit
     );
@@ -75,9 +76,9 @@ pub(crate) fn stl(input: Input<'_>) -> Result<Document<'static>> {
             let mut again = input.blocks()?;
             again.need(84)?;
             again.consume(84);
-            binary(again, n, Colors::VisCam)?.ok_or_else(|| invalid!("STL changed while being read"))?
+            binary(again, n, Colors::VisCam)?.ok_or_else(|| err!(Io, "STL changed while being read"))?
         }
-        None => bail!("STL changed while being read"),
+        None => bail!(Io, "STL changed while being read"),
     };
     let prims = std::mem::take(&mut mesh.prims);
     Ok(document(vec![(None, prims)], &mesh, source))
@@ -209,7 +210,7 @@ fn binary(mut blocks: Blocks<'_>, n: usize, colors: Colors) -> Result<Option<Mes
     while left > 0 {
         let data = blocks.need(50)?;
         let k = (data.len() / 50).min(left);
-        ensure!(k > 0, "STL changed while being read");
+        ensure!(k > 0, Io, "STL changed while being read");
         for f in data[..k * 50].as_chunks::<50>().0 {
             let a = u16::from_le_bytes([f[48], f[49]]);
             let t = facet(f);
@@ -234,10 +235,10 @@ fn binary(mut blocks: Blocks<'_>, n: usize, colors: Colors) -> Result<Option<Mes
         left -= k;
     }
     if let Colors::None = colors {
-        ensure!(plain.triangles() > 0, "STL has no triangles");
+        ensure!(plain.triangles() > 0, Empty, "STL has no triangles");
         return Ok(Some(single(plain.finish())));
     }
-    ensure!(!groups.is_empty(), "STL has no triangles");
+    ensure!(!groups.is_empty(), Empty, "STL has no triangles");
     let mut mesh = Mesh::default();
     for (i, (c, w)) in groups.into_iter().enumerate() {
         let mut p = w.finish();
@@ -279,6 +280,7 @@ fn ascii(mut blocks: Blocks<'_>, limit: usize) -> Result<Vec<(Option<String>, Pr
         head.trim_ascii_start()
             .get(..5)
             .is_some_and(|w| w.eq_ignore_ascii_case(b"solid")),
+        UnknownFormat,
         "not an STL file"
     );
     // Sized from the first block's bytes per facet once it's read.
@@ -351,7 +353,11 @@ fn ascii(mut blocks: Blocks<'_>, limit: usize) -> Result<Vec<(Option<String>, Pr
                         if finite(&tri) {
                             w.push(tri);
                             total += 1;
-                            ensure!(total <= limit, "too many triangles to convert (more than {limit})");
+                            ensure!(
+                                total <= limit,
+                                LimitExceeded,
+                                "too many triangles to convert (more than {limit})"
+                            );
                         }
                     }
                     continue;
@@ -383,6 +389,7 @@ fn ascii(mut blocks: Blocks<'_>, limit: usize) -> Result<Vec<(Option<String>, Pr
     finish_solid(&mut solids, &name, w);
     ensure!(
         !solids.is_empty(),
+        Empty,
         "STL has no triangles{}",
         if dropped > 0 {
             format!(" ({dropped} dropped for a bad vertex line)")

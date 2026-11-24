@@ -241,7 +241,7 @@ pub const EXTENSIONS: &[&str] = &[
 #[cfg(feature = "fs")]
 pub fn open(path: impl AsRef<Path>, keep: Keep) -> Result<Document<'static>> {
     // A bare file name's folder is the current one, which its references are found from.
-    let path = std::path::absolute(path.as_ref())?;
+    let path = std::path::absolute(path.as_ref()).map_err(|e| crate::Error::from(e).at(path.as_ref()))?;
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     let folder = crate::assets::Folder::new(path.parent().unwrap_or(&path));
     load(&path, ext, &folder, keep)
@@ -276,15 +276,20 @@ pub fn load(path: &Path, ext: &str, assets: &dyn Assets, keep: Keep) -> Result<D
         && len <= SMALL_FILE
     {
         let mut bytes = Vec::with_capacity(usize::try_from(len).unwrap_or(0));
-        file.read_to_end(&mut bytes)?;
+        file.read_to_end(&mut bytes)
+            .map_err(|e| crate::Error::from(e).at(path))?;
         let input = Input {
             path,
             data: Data::Bytes(&bytes),
             limit: MAX_TRIANGLES,
         };
-        return read(input, ext, assets, keep).map(Document::into_owned);
+        return read(input, ext, assets, keep)
+            .map(Document::into_owned)
+            .map_err(|e| e.at(path));
     }
-    read(Input::file(path), ext, assets, keep).map(Document::into_owned)
+    read(Input::file(path), ext, assets, keep)
+        .map(Document::into_owned)
+        .map_err(|e| e.at(path))
 }
 
 /// The largest model [`load`] reads whole before parsing, rather than streaming it from the file.
@@ -488,12 +493,17 @@ fn read<'a>(input: Input<'a>, ext: &str, assets: &'a dyn Assets, keep: Keep) -> 
         };
         match found {
             Some(e) => ext = e,
-            None if ext.is_empty() => bail!("can't tell this model's format from its first bytes"),
+            None if ext.is_empty() => bail!(UnknownFormat, "can't tell this model's format from its first bytes"),
             None => {}
         }
     }
     let limit = keep.triangles();
-    let mut doc = convert(Input { limit, ..input }, ext, assets, keep)?;
+    let mut doc = convert(Input { limit, ..input }, ext, assets, keep).map_err(|e| {
+        match EXTENSIONS.iter().find(|&&e| e == ext) {
+            Some(known) => e.in_format(feature_for(known)),
+            None => e,
+        }
+    })?;
     doc.max_triangles = limit;
     doc.prune(keep);
     if matches!(
@@ -612,8 +622,8 @@ fn convert<'a>(input: Input<'a>, ext: &str, assets: &'a dyn Assets, keep: Keep) 
         "irrmesh" | "irr" => irr::load(input, ext, assets, keep),
         #[cfg(feature = "xgl")]
         "xgl" | "zgl" => xgl::load(input, ext, assets, keep),
-        e if EXTENSIONS.contains(&e) => bail!("built without the `{}` feature", feature_for(e)),
-        _ => bail!("not a model format handled here: .{ext}"),
+        e if EXTENSIONS.contains(&e) => bail!(FeatureDisabled, "built without the `{}` feature", feature_for(e)),
+        _ => bail!(UnknownFormat, "not a model format handled here: .{ext}"),
     }
 }
 
