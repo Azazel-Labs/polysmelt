@@ -1,0 +1,3 @@
+# LF everywhere, whatever core.autocrlf says; the conformance corpus keeps every byte as it is
+# (tests/corpus/.gitattributes), since some cases have CRLF or mixed line endings on purpose.
+* text=auto eol=lf
