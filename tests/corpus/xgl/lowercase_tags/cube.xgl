@@ -1,0 +1,79 @@
+<world>
+<!-- a comment -->
+<mesh>
+<p id="0">0,0,0</p>
+<p id="1">1,0,0</p>
+<p id="2">0,1,0</p>
+<p id="3">1,1,0</p>
+<p id="4">0,0,1</p>
+<p id="5">1,0,1</p>
+<p id="6">0,1,1</p>
+<p id="7">1,1,1</p>
+<n id="0">0,0,-1</n>
+<n id="1">0,0,1</n>
+<n id="2">0,-1,0</n>
+<n id="3">0,1,0</n>
+<n id="4">-1,0,0</n>
+<n id="5">1,0,0</n>
+<f>
+<fv1><pref>0</pref><nref>0</nref></fv1>
+<fv2><pref>2</pref><nref>0</nref></fv2>
+<fv3><pref>3</pref><nref>0</nref></fv3>
+</f>
+<f>
+<fv1><pref>0</pref><nref>0</nref></fv1>
+<fv2><pref>3</pref><nref>0</nref></fv2>
+<fv3><pref>1</pref><nref>0</nref></fv3>
+</f>
+<f>
+<fv1><pref>4</pref><nref>1</nref></fv1>
+<fv2><pref>5</pref><nref>1</nref></fv2>
+<fv3><pref>7</pref><nref>1</nref></fv3>
+</f>
+<f>
+<fv1><pref>4</pref><nref>1</nref></fv1>
+<fv2><pref>7</pref><nref>1</nref></fv2>
+<fv3><pref>6</pref><nref>1</nref></fv3>
+</f>
+<f>
+<fv1><pref>0</pref><nref>2</nref></fv1>
+<fv2><pref>1</pref><nref>2</nref></fv2>
+<fv3><pref>5</pref><nref>2</nref></fv3>
+</f>
+<f>
+<fv1><pref>0</pref><nref>2</nref></fv1>
+<fv2><pref>5</pref><nref>2</nref></fv2>
+<fv3><pref>4</pref><nref>2</nref></fv3>
+</f>
+<f>
+<fv1><pref>2</pref><nref>3</nref></fv1>
+<fv2><pref>6</pref><nref>3</nref></fv2>
+<fv3><pref>7</pref><nref>3</nref></fv3>
+</f>
+<f>
+<fv1><pref>2</pref><nref>3</nref></fv1>
+<fv2><pref>7</pref><nref>3</nref></fv2>
+<fv3><pref>3</pref><nref>3</nref></fv3>
+</f>
+<f>
+<fv1><pref>0</pref><nref>4</nref></fv1>
+<fv2><pref>4</pref><nref>4</nref></fv2>
+<fv3><pref>6</pref><nref>4</nref></fv3>
+</f>
+<f>
+<fv1><pref>0</pref><nref>4</nref></fv1>
+<fv2><pref>6</pref><nref>4</nref></fv2>
+<fv3><pref>2</pref><nref>4</nref></fv3>
+</f>
+<f>
+<fv1><pref>1</pref><nref>5</nref></fv1>
+<fv2><pref>3</pref><nref>5</nref></fv2>
+<fv3><pref>7</pref><nref>5</nref></fv3>
+</f>
+<f>
+<fv1><pref>1</pref><nref>5</nref></fv1>
+<fv2><pref>7</pref><nref>5</nref></fv2>
+<fv3><pref>5</pref><nref>5</nref></fv3>
+</f>
+</mesh>
+</world>

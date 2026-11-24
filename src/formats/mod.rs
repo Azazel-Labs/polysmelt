@@ -5,14 +5,15 @@
 //! (`.x3d`, `.x3dv`, `.wrl`, and gzipped `.x3dz`, `.wrz`), DXF meshes, gaussian splats
 //! (`.splat`, `.spz`, and PLY's own, as `KHR_gaussian_splatting`), point clouds (LAS and LAZ
 //! lidar, PCD, E57 scans, and text: `.xyz`, `.pts`, `.ptx`, `.asc`), AMF, `LightWave` objects
-//! (`.lwo`), AC3D (`.ac`), `OpenFlight` (`.flt`) and `OpenGEX` (`.ogex`). Game and animation formats: `MikuMikuDance` (`.pmx`, `.pmd`,
+//! (`.lwo`), AC3D (`.ac`), `OpenFlight` (`.flt`), `OpenGEX` (`.ogex`), Irrlicht meshes and scenes
+//! (`.irrmesh`, `.irr`) and XGL (`.xgl`, and zipped `.zgl`). Game and animation formats: `MikuMikuDance` (`.pmx`, `.pmd`,
 //! `.vmd`), `DirectX` `.x`, MD2, MD3, MD5 (`.md5mesh`, `.md5anim`), IQM, SMD (`.smd`, `.vta`),
 //! `MilkShape` 3D (`.ms3d`), `Blitz3D` (`.b3d`), OGRE (`.mesh`, `.skeleton`, and their `.xml` forms, with
 //! `.material` scripts), and motion capture: ASF/AMC, C3D, TRC and HTR.
 //! Each becomes a [`Document`]: glTF as it is, the others converted; textures are embedded so the
 //! document stands on its own. Each format is behind a cargo feature of its name (`3ds` and
 //! `3mf` for those two, `xyz` for the text point clouds, `ac3d` for `.ac`, `mmd` for PMX, PMD
-//! and VMD, `directx` for `.x`, `asf` for ASF and AMC). A [`Keep`] says what to keep; by
+//! and VMD, `directx` for `.x`, `asf` for ASF and AMC, `irr` for Irrlicht's two). A [`Keep`] says what to keep; by
 //! default, everything.
 //!
 //! [`load_bytes`] reads a model already in memory, with the files it refers to found through
@@ -69,8 +70,12 @@ pub(crate) mod gltf;
 mod gltf1;
 #[cfg(feature = "htr")]
 mod htr;
+#[cfg(any(feature = "directx", feature = "xgl"))]
+mod inflate;
 #[cfg(feature = "iqm")]
 mod iqm;
+#[cfg(feature = "irr")]
+mod irr;
 #[cfg(feature = "las")]
 mod las;
 #[cfg(feature = "lwo")]
@@ -115,7 +120,9 @@ mod points;
     feature = "c3d",
     feature = "trc",
     feature = "htr",
-    feature = "ogre"
+    feature = "ogre",
+    feature = "irr",
+    feature = "xgl"
 ))]
 #[cfg_attr(
     not(all(
@@ -132,7 +139,9 @@ mod points;
         feature = "c3d",
         feature = "trc",
         feature = "htr",
-        feature = "ogre"
+        feature = "ogre",
+        feature = "irr",
+        feature = "xgl"
     )),
     allow(dead_code, reason = "each reader uses the parts its format needs")
 )]
@@ -159,7 +168,9 @@ mod stl;
     feature = "xyz",
     feature = "ac3d",
     feature = "ogex",
-    feature = "smd"
+    feature = "smd",
+    feature = "irr",
+    feature = "xgl"
 ))]
 #[cfg_attr(
     not(all(feature = "obj", feature = "ply", feature = "stl", feature = "bvh")),
@@ -184,6 +195,21 @@ mod wkt;
 mod x3d;
 #[cfg(any(feature = "fbx", feature = "usd", feature = "3ds", feature = "dae"))]
 mod xform;
+#[cfg(feature = "xgl")]
+mod xgl;
+#[cfg_attr(
+    not(all(
+        feature = "dae",
+        feature = "x3d",
+        feature = "amf",
+        feature = "3mf",
+        feature = "ogre",
+        feature = "irr",
+        feature = "xgl"
+    )),
+    allow(dead_code, reason = "each XML reader uses the parts it needs")
+)]
+mod xml;
 #[cfg(feature = "xyz")]
 mod xyz;
 
@@ -193,7 +219,7 @@ pub const EXTENSIONS: &[&str] = &[
     "zae", "kmz", "off", "vrm", "vrma", "x3d", "x3dv", "x3dz", "wrl", "wrz", "dxf", "splat", "spz", "las", "laz",
     "pcd", "xyz", "pts", "ptx", "asc", "e57", "amf", "lwo", "ac", "pmx", "pmd", "vmd", "x", "md2", "md3", "md5mesh",
     "md5anim", "iqm", "smd", "vta", "ms3d", "b3d", "asf", "amc", "c3d", "trc", "htr", "mesh", "skeleton", "xml", "flt",
-    "ogex",
+    "ogex", "irrmesh", "irr", "xgl", "zgl",
 ];
 
 /// Reads the model at `path`, keeping what `keep` says: the format is told by the path's
@@ -232,7 +258,7 @@ pub fn detect(bytes: &[u8]) -> Option<&'static str> {
 /// Reads the model at `path`, whose format is named by `ext` (without the dot, in any case),
 /// keeping what `keep` says. An `ext` that names no format (or is empty) has the format told
 /// from the file's first bytes, and an `.xml` file is read as the format its root element
-/// names (COLLADA, X3D, AMF or OGRE).
+/// names (COLLADA, X3D, AMF, OGRE, an Irrlicht mesh or scene, or XGL).
 ///
 /// # Errors
 ///
@@ -582,6 +608,10 @@ fn convert<'a>(input: Input<'a>, ext: &str, assets: &'a dyn Assets, keep: Keep) 
         "flt" => flt::load(input, assets, keep),
         #[cfg(feature = "ogex")]
         "ogex" => ogex::load(input, assets, keep),
+        #[cfg(feature = "irr")]
+        "irrmesh" | "irr" => irr::load(input, ext, assets, keep),
+        #[cfg(feature = "xgl")]
+        "xgl" | "zgl" => xgl::load(input, ext, assets, keep),
         e if EXTENSIONS.contains(&e) => bail!("built without the `{}` feature", feature_for(e)),
         _ => bail!("not a model format handled here: .{ext}"),
     }
@@ -602,6 +632,8 @@ fn feature_for(ext: &str) -> &str {
         "pts" | "ptx" | "asc" => "xyz",
         "ac" => "ac3d",
         "mesh" | "skeleton" | "xml" => "ogre",
+        "irrmesh" => "irr",
+        "zgl" => "xgl",
         e => e,
     }
 }

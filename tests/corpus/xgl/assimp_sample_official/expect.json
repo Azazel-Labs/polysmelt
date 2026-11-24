@@ -1,0 +1,18 @@
+{
+  "spec": "XGL 1.0 (the XGL file format specification): a real file, the specification's sample, a mesh placed twice, a directional light",
+  "source": "assimp test models (test/models/XGL), BSD license, see ../LICENSE-assimp",
+  "triangles": 24,
+  "bounds": {
+    "min": [
+      -1.9,
+      -0.5,
+      0.0
+    ],
+    "max": [
+      0.0,
+      1.4,
+      1.0
+    ]
+  },
+  "tolerance": 0.0001
+}

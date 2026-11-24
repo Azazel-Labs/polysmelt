@@ -521,29 +521,7 @@ fn basis(meters: f64, up: &str) -> M4 {
 
 /// The document's text as UTF-8: a byte order mark dropped, UTF-16 converted.
 fn decode(bytes: &[u8]) -> Cow<'_, [u8]> {
-    if let Some(rest) = bytes.strip_prefix(b"\xEF\xBB\xBF") {
-        return Cow::Borrowed(rest);
-    }
-    let utf16 = |rest: &[u8], le: bool| -> Cow<'_, [u8]> {
-        let units: Vec<u16> = rest
-            .chunks_exact(2)
-            .map(|c| {
-                if le {
-                    u16::from_le_bytes([c[0], c[1]])
-                } else {
-                    u16::from_be_bytes([c[0], c[1]])
-                }
-            })
-            .collect();
-        Cow::Owned(String::from_utf16_lossy(&units).into_bytes())
-    };
-    match bytes {
-        [0xFF, 0xFE, rest @ ..] => utf16(rest, true),
-        [0xFE, 0xFF, rest @ ..] => utf16(rest, false),
-        [b'<', 0, ..] => utf16(bytes, true),
-        [0, b'<', ..] => utf16(bytes, false),
-        _ => Cow::Borrowed(bytes),
-    }
+    crate::formats::xml::utf8(bytes)
 }
 
 /// The archive a document came in, for the textures beside it.

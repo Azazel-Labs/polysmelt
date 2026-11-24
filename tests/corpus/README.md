@@ -70,6 +70,8 @@ cases.
 | OGRE | 30 | 30 | none |
 | OpenFlight | 17 | 17 | none |
 | OpenGEX | 28 | 24 | none |
+| Irrlicht (`irr/`: IRRMesh and scenes) | 26 | 25 | none |
+| XGL (`xgl/`: XGL and ZGL) | 22 | 19 | none |
 
 - **Generated** cases are written byte by byte by `tools/corpus/<format>.py` (3DS is
   `tds.py`, 3MF is `threemf.py`, COLLADA is `dae.py`, PMX, PMD and VMD are `mmd.py`, DirectX
@@ -102,8 +104,8 @@ cases.
 - **Real files** from other projects' test data sit in their case folders, with the
   project's license beside them: PDAL's `simple.las` and `simple.laz` (BSD,
   `las/LICENSE-PDAL`), PCL's `bun0.pcd` and `car6.pcd` (BSD, `pcd/LICENSE-PCL`), two scans
-  from the e57 crate's test data (MIT, `e57/LICENSE-e57`), and assimp's AMF, LWO, AC and
-  OpenGEX test models (BSD, `LICENSE-assimp` in each). The generator reads each file with its own small
+  from the e57 crate's test data (MIT, `e57/LICENSE-e57`), and assimp's AMF, LWO, AC,
+  OpenGEX, IRRMesh and XGL test models (BSD, `LICENSE-assimp` in each). The generator reads each file with its own small
   parser, written from the specification, and writes the expectations from that, so these
   too are checked against the standard rather than against Polysmelt. A generator keeps
   these files when it empties its folder (or takes them from the folder given as its first
@@ -375,6 +377,21 @@ python tools/corpus/obj.py
   clips, lights and cameras, a file with objects but no nodes, one with nodes but no objects,
   and OpenDDL syntax (comments, string concatenation, hex and
   binary floats). Errors: an unclosed structure, no geometry; four real assimp models.
+- **Irrlicht**: IRRMesh buffers of each vertex type (standard, two texture coordinates with
+  the lightmap as the occlusion texture, tangents with the normal map), uniform and differing
+  vertex colors and vertex alpha, UTF-8 and UTF-16 in both byte orders, and indices out of
+  range. Scenes: node transforms nested and mirrored from Irrlicht's left-handed space, cube,
+  sphere, sky box and billboard nodes, mesh nodes naming IRRMesh and OBJ files (one placed
+  twice, one missing), a node's own materials over its file's, point and spot lights, a
+  camera, rotation, fly-circle and fly-straight animators sampled into keys, hidden and
+  unsupported nodes. Errors: files that aren't Irrlicht's, a scene with no nodes; one real
+  assimp scene.
+- **XGL**: meshes of referenced and inline vertices, lower-case tags, UTF-16, ZGL with and
+  without the zlib header, a `.xml` told by its root, materials (diffuse, emissive,
+  shininess, alpha) by reference, a face's own and a patch's, texture coordinates, lines and
+  points, object transforms nested, a mesh placed by two references, a directional light,
+  the ambient light and the background, unsupported tags, and broken references. Errors:
+  files that aren't XGL, no geometry; three real assimp models.
 
 ## `expect.json`
 

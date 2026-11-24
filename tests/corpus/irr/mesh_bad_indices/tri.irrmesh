@@ -1,0 +1,15 @@
+<?xml version="1.0"?>
+<mesh xmlns="http://irrlicht.sourceforge.net/IRRMESH_09_2007" version="1.0">
+<buffer>
+<material>
+</material>
+<vertices type="standard" vertexCount="3">
+0 0 0 0 0 -1 ffffffff 0 0
+0 1 0 0 0 -1 ffffffff 0 1
+1 0 0 0 0 -1 ffffffff 1 0
+</vertices>
+<indices indexCount="8">
+0 1 2 0 1 7 2 1
+</indices>
+</buffer>
+</mesh>

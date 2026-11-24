@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<irr_scene>
+<attributes>
+</attributes>
+<node type="empty">
+<attributes>
+<string name="Name" value="parent" />
+<vector3d name="Position" value="0, 5, 0" />
+<vector3d name="Rotation" value="0, 90, 0" />
+<vector3d name="Scale" value="2, 2, 2" />
+</attributes>
+<node type="cube">
+<attributes>
+<string name="Name" value="child" />
+<vector3d name="Position" value="1, 0, 0" />
+<vector3d name="Rotation" value="30, 0, 45" />
+<float name="Size" value="1" />
+</attributes>
+</node>
+</node>
+</irr_scene>

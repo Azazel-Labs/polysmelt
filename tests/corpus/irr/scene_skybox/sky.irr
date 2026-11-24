@@ -1,0 +1,10 @@
+<?xml version="1.0"?>
+<irr_scene>
+<attributes>
+</attributes>
+<node type="skyBox">
+<attributes>
+<string name="Name" value="sky" />
+</attributes>
+</node>
+</irr_scene>

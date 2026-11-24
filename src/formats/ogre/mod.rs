@@ -233,10 +233,9 @@ enum Parsed {
     Skeleton(SkeletonFile),
 }
 
-/// An XML file's text: UTF-8 without its byte order mark, or bytes as Latin-1.
-fn xml_text(data: &[u8]) -> String {
-    let data = data.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(data);
-    scene::text(data)
+/// An XML file's text: UTF-16 converted, UTF-8 without its byte order mark, or bytes as Latin-1.
+fn xml_text(data: &[u8]) -> std::borrow::Cow<'_, str> {
+    crate::formats::xml::text(data)
 }
 
 fn parse(data: &[u8]) -> Result<Parsed> {

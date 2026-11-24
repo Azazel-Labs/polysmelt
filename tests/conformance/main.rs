@@ -73,6 +73,8 @@ fn enabled(ext: &str) -> bool {
         "mesh" | "skeleton" | "xml" => cfg!(feature = "ogre"),
         "flt" => cfg!(feature = "flt"),
         "ogex" => cfg!(feature = "ogex"),
+        "irrmesh" | "irr" => cfg!(feature = "irr"),
+        "xgl" | "zgl" => cfg!(feature = "xgl"),
         _ => false,
     }
 }
@@ -100,6 +102,10 @@ fn has_feature(name: &str) -> bool {
         ("tiff", cfg!(feature = "tiff")),
         ("psd", cfg!(feature = "psd")),
         ("dds", cfg!(feature = "dds")),
+        // Formats a case needs beyond the one its extension names: a scene's mesh file, or `.xml` read by its root.
+        ("obj", cfg!(feature = "obj")),
+        ("irr", cfg!(feature = "irr")),
+        ("xgl", cfg!(feature = "xgl")),
     ];
     features.iter().any(|&(f, on)| on && f == name)
 }
@@ -110,7 +116,7 @@ const ALL_EXTENSIONS: &[&str] = &[
     "zae", "kmz", "off", "vrm", "vrma", "x3d", "x3dv", "x3dz", "wrl", "wrz", "dxf", "splat", "spz", "las", "laz",
     "pcd", "xyz", "pts", "ptx", "asc", "e57", "amf", "lwo", "ac", "pmx", "pmd", "vmd", "x", "md2", "md3", "md5mesh",
     "md5anim", "iqm", "smd", "vta", "ms3d", "b3d", "asf", "amc", "c3d", "trc", "htr", "mesh", "skeleton", "xml", "flt",
-    "ogex",
+    "ogex", "irrmesh", "irr", "xgl", "zgl",
 ];
 
 fn ext_of(p: &Path) -> String {
@@ -1242,6 +1248,16 @@ fn flt() {
 #[test]
 fn ogex() {
     check("ogex");
+}
+
+#[test]
+fn irr() {
+    check("irr");
+}
+
+#[test]
+fn xgl() {
+    check("xgl");
 }
 
 /// Every extension `formats::load` takes has cases, and every format a corpus folder.

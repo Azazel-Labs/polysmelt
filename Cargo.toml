@@ -21,7 +21,7 @@ all-features = true
 [features]
 default = ["minimal", "fbx", "3mf", "usd", "draco", "webp", "skp", "dae", "x3d", "tga", "bmp", "gif", "tiff", "psd", "dds", "spz", "laz", "e57", "amf"]
 # The readers with no dependencies, and file access: `default-features = false, features = ["minimal"]`.
-minimal = ["fs", "stl", "ply", "vox", "obj", "3ds", "gltf", "bvh", "off", "dxf", "splat", "mmd", "directx", "md2", "md3", "md5", "iqm", "smd", "ms3d", "b3d", "asf", "c3d", "trc", "htr", "las", "pcd", "xyz", "lwo", "ac3d", "ogre", "flt", "ogex"]
+minimal = ["fs", "stl", "ply", "vox", "obj", "3ds", "gltf", "bvh", "off", "dxf", "splat", "mmd", "directx", "md2", "md3", "md5", "iqm", "smd", "ms3d", "b3d", "asf", "c3d", "trc", "htr", "las", "pcd", "xyz", "lwo", "ac3d", "ogre", "flt", "ogex", "irr", "xgl"]
 # Reading from the file system: `formats::load`, `assets::Folder` and `gltf::files_in`. Without
 # it (for wasm, say), models load from memory with `formats::load_bytes` and `assets::Memory`.
 fs = []
@@ -112,6 +112,10 @@ ac3d = []
 flt = []
 # OpenGEX `.ogex` scenes.
 ogex = []
+# Irrlicht scenes (`.irr`) and meshes (`.irrmesh`).
+irr = []
+# XGL and zipped XGL (`.xgl`, `.zgl`).
+xgl = []
 
 [dependencies]
 serde_json = "1"

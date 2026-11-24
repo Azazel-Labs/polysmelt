@@ -305,28 +305,8 @@ fn parse(bytes: &[u8]) -> Result<(Graph, Info)> {
     } else {
         bytes
     };
-    let utf16;
-    let bytes = match bytes {
-        [0xff, 0xfe, rest @ ..] | [0xfe, 0xff, rest @ ..] => {
-            let le = bytes[0] == 0xff;
-            let units: Vec<u16> = rest
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .map(|&b| {
-                    if le {
-                        u16::from_le_bytes(b)
-                    } else {
-                        u16::from_be_bytes(b)
-                    }
-                })
-                .collect();
-            utf16 = String::from_utf16_lossy(&units).into_bytes();
-            utf16.as_slice()
-        }
-        [0xef, 0xbb, 0xbf, rest @ ..] => rest,
-        _ => bytes,
-    };
+    let decoded = crate::formats::xml::utf8(bytes);
+    let bytes = &*decoded;
     let start = bytes
         .iter()
         .position(|&b| !b.is_ascii_whitespace())

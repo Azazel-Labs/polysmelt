@@ -1,0 +1,14 @@
+<?xml version="1.0"?>
+<irr_scene>
+<attributes>
+</attributes>
+<node type="sphere">
+<attributes>
+<string name="Name" value="ball" />
+<vector3d name="Position" value="0, 3, 0" />
+<float name="Radius" value="2" />
+<int name="PolyCountX" value="8" />
+<int name="PolyCountY" value="6" />
+</attributes>
+</node>
+</irr_scene>
