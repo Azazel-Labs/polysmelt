@@ -912,6 +912,25 @@ write("morph_relative", {"morph.dae": collada(
       f"{SPEC}: a RELATIVE <morph>, whose target holds offsets", triangles=1, document={"morph_targets": 1},
       bounds={"min": [0, 0, 1], "max": [1, 1, 1]}, json={"/meshes/0/weights": [0.5]})
 
+
+def lit_tri_geom(gid, pts, normal, name=None):
+    """A triangle whose corners read one normal through an offset of their own."""
+    return geometry(gid, f'<triangles count="1">{inputs(gid, [("VERTEX", 0), ("NORMAL", 1)])}<p>0 0 1 0 2 0</p>'
+                         "</triangles>", pts, normals=[normal], name=name)
+
+
+# Two targets: one turns the normals from +Z to +Y, half applied (a normal halfway between); the other lifts the
+# triangle and leaves its normals be, so it has no normals of its own.
+write("morph_normals", {"morph.dae": collada(
+    [lib("geometries", lit_tri_geom("Base", TRI, (0, 0, 1)), lit_tri_geom("Tilt", TRI, (0, 1, 0)),
+         lit_tri_geom("Up", UP_TRI, (0, 0, 1))),
+     lib("controllers", morph("NORMALIZED", ["Tilt", "Up"], [0.5, 0.5]))],
+    node('<instance_controller url="#Morph"/>', "Shape", "Shape"))},
+      f"{SPEC}: a <morph> whose target turns the normals (read per corner): the target carries the change, and at "
+      "rest the weights apply", triangles=1, document={"morph_targets": 2},
+      bounds={"min": [0, 0, 0.5], "max": [1, 1, 0.5]}, normals_in=[[0, 0.70710678, 0.70710678]],
+      json={"/meshes/0/primitives/0/targets/1/NORMAL": None})
+
 # ---------------------------------------------------------------------------------------------------------------
 # Animations
 

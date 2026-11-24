@@ -235,6 +235,33 @@ case(FMT, "gltf_data_uri", {"cube.gltf": cube_doc().embedded()},
 case(FMT, "gltf_bom", {"cube.gltf": "﻿" + cube_doc().embedded()},
      {"spec": SPEC + ": JSON with a UTF-8 byte order mark", "source": SRC, **CUBE})
 
+# A GLB whose indices are in a second buffer, a file beside it.
+g = cube_doc()
+data = bytes(g.bin) + bytes(-len(g.bin) % 4)
+j = g.finish()
+ind = g.j["accessors"][g.j["meshes"][0]["primitives"][0]["indices"]]["bufferView"]
+v = j["bufferViews"][ind]
+extra = data[v["byteOffset"]:v["byteOffset"] + v["byteLength"]]
+j["buffers"].append({"uri": "extra.bin", "byteLength": len(extra)})
+j["bufferViews"][ind] = {**v, "buffer": 1, "byteOffset": 0}
+text = json.dumps(j, separators=(",", ":")).encode()
+text += b" " * (-len(text) % 4)
+body = struct.pack("<I4s", len(text), b"JSON") + text + struct.pack("<I4s", len(data), b"BIN\0") + data
+case(FMT, "glb_external_bin", {"cube.glb": b"glTF" + struct.pack("<II", 2, 12 + len(body)) + body,
+                               "extra.bin": extra},
+     {"spec": SPEC + ": a GLB with a second buffer in a file beside it (4.4.3.3)", "source": SRC, **CUBE})
+
+# A buffer with no data, and no URI: valid when it's empty, as a placeholder some writers leave.
+g = cube_doc()
+j = g.finish()
+j["buffers"].append({"byteLength": 0})
+data = bytes(g.bin) + bytes(-len(g.bin) % 4)
+text = json.dumps(j, separators=(",", ":")).encode()
+text += b" " * (-len(text) % 4)
+body = struct.pack("<I4s", len(text), b"JSON") + text + struct.pack("<I4s", len(data), b"BIN\0") + data
+case(FMT, "empty_buffer", {"cube.glb": b"glTF" + struct.pack("<II", 2, 12 + len(body)) + body},
+     {"spec": SPEC + ": an empty buffer with no URI beside the GLB's binary chunk (3.6.1.1)", "source": SRC, **CUBE})
+
 # A GLB whose JSON chunk starts with a byte order mark, which the spec forbids (4.4.3.2) but
 # writers emit; read past it.
 glb = cube_doc().glb()
@@ -671,6 +698,120 @@ g.node(mesh=g.mesh([{"attributes": {"POSITION": g.acc(pos, minmax=True), "TEXCOO
 case(FMT, "texcoord_1", {"cube.glb": g.glb()},
      {"spec": SPEC + ": a color texture reading the second UV set (textureInfo.texCoord)", "source": SRC, **CUBE,
       "uvs_include": [[0, 0.5], [0.5, 0.5], [0.5, 0], [0, 0]]})
+
+# Every core texture slot in one material, each read its own way. The color texture is scaled 2x (baked into
+# the flat mesh's UVs) and sampled clamped and mirrored with nearest filters; the normal map shares its
+# transform; the metallic-roughness texture has none (half the baked UVs); the emissive texture is scaled 4x
+# (twice the baked UVs); occlusion reads TEXCOORD_1 at half strength; the normal map has a scale.
+g = G()
+pos, nrm, uv, idx = flat_cube()
+uv1 = [[t[0] / 2, t[1] / 2] for t in uv]
+g.use("KHR_texture_transform")
+for rgb in (RED, GREEN, BLUE):
+    g.add("images", {"bufferView": g.view(png(rgb)), "mimeType": "image/png"})
+g.add("samplers", {"wrapS": 33071, "wrapT": 33648, "magFilter": 9728, "minFilter": 9728})
+g.add("textures", {"source": 0, "sampler": 0})
+g.add("textures", {"source": 1})
+g.add("textures", {"source": 2})
+x2 = {"extensions": {"KHR_texture_transform": {"scale": [2, 2]}}}
+g.add("materials", {"name": "Slots",
+                    "pbrMetallicRoughness": {"baseColorTexture": {"index": 0, **x2},
+                                             "metallicRoughnessTexture": {"index": 1}},
+                    "normalTexture": {"index": 2, "scale": 0.7, **x2},
+                    "occlusionTexture": {"index": 1, "texCoord": 1, "strength": 0.5},
+                    "emissiveTexture": {"index": 2, "extensions": {"KHR_texture_transform": {"scale": [4, 4]}}}})
+g.node(mesh=g.mesh([{"attributes": {"POSITION": g.acc(pos, minmax=True), "NORMAL": g.acc(nrm),
+                                    "TEXCOORD_0": g.acc(uv, typ="VEC2"), "TEXCOORD_1": g.acc(uv1, typ="VEC2")},
+                     "indices": g.acc(idx, U16, "SCALAR", target=34963), "material": 0}]))
+case(FMT, "texture_slots", {"cube.glb": g.glb()},
+     {"spec": SPEC + ": every texture slot kept with its sampler (3.8.4), coordinate set, normal scale, occlusion "
+                     "strength and KHR_texture_transform relative to the color texture's baked one",
+      "source": SRC, **CUBE, "uvs_include": [[0, 2], [2, 2], [2, 0], [0, 0]],
+      "materials": [{"name": "Slots", "textured": True, "normal_map": True, "pixel": RED}],
+      "flat_json": {"/materials/0/pbrMetallicRoughness/baseColorTexture/extensions": None,
+                    "/materials/0/pbrMetallicRoughness/metallicRoughnessTexture/extensions/KHR_texture_transform":
+                        {"scale": [0.5, 0.5]},
+                    "/materials/0/normalTexture/scale": 0.7,
+                    "/materials/0/normalTexture/extensions": None,
+                    "/materials/0/occlusionTexture/texCoord": 1,
+                    "/materials/0/occlusionTexture/strength": 0.5,
+                    "/materials/0/occlusionTexture/extensions": None,
+                    "/materials/0/emissiveTexture/extensions/KHR_texture_transform": {"scale": [2, 2]},
+                    "/samplers/0": {"wrapS": 33071, "wrapT": 33648, "magFilter": 9728, "minFilter": 9728},
+                    "/samplers/1": {"wrapS": 10497, "wrapT": 10497},
+                    "/samplers/1/magFilter": None,
+                    "/meshes/0/primitives/0/attributes/TEXCOORD_2": None}})
+
+# A normal map on the color texture's coordinates whose transform, relative to the color's, shears: no
+# KHR_texture_transform can say it, so it's left out (the color texture stays).
+g = G()
+g.use("KHR_texture_transform")
+g.add("images", {"bufferView": g.view(png(RED)), "mimeType": "image/png"})
+g.add("textures", {"source": 0})
+g.add("materials", {"name": "Shear",
+                    "pbrMetallicRoughness": {"baseColorTexture": {
+                        "index": 0, "extensions": {"KHR_texture_transform": {"rotation": math.pi / 4}}}},
+                    "normalTexture": {"index": 0, "extensions": {"KHR_texture_transform": {"scale": [2, 1]}}}})
+g.node(mesh=g.mesh([cube_prim(g, uvs=True, material=0)]))
+case(FMT, "texture_transform_shear", {"cube.glb": g.glb()},
+     {"spec": "KHR_texture_transform: a texture whose transform relative to the color texture's shears is left out",
+      "source": SRC, **CUBE, "materials": [{"name": "Shear", "textured": True, "normal_map": False}]})
+
+# The KHR_materials_* extensions, each with its factors and a texture, kept on the flat mesh's material.
+g = G()
+g.use("KHR_materials_ior", "KHR_materials_specular", "KHR_materials_transmission", "KHR_materials_volume",
+      "KHR_materials_clearcoat", "KHR_materials_sheen", "KHR_materials_iridescence", "KHR_materials_anisotropy",
+      "KHR_materials_dispersion", "KHR_materials_emissive_strength")
+g.add("images", {"bufferView": g.view(png(GREEN)), "mimeType": "image/png"})
+g.add("textures", {"source": 0})
+t0 = {"index": 0}
+g.add("materials", {"name": "Fancy", "emissiveFactor": [0.5, 0.25, 0], "extensions": {
+    "KHR_materials_emissive_strength": {"emissiveStrength": 4},
+    "KHR_materials_ior": {"ior": 1.8},
+    "KHR_materials_specular": {"specularFactor": 0.6, "specularTexture": t0, "specularColorFactor": [1, 0.5, 0.25]},
+    "KHR_materials_transmission": {"transmissionFactor": 0.9, "transmissionTexture": t0},
+    "KHR_materials_volume": {"thicknessFactor": 0.3, "attenuationDistance": 2, "attenuationColor": [0.9, 0.8, 0.7]},
+    "KHR_materials_clearcoat": {"clearcoatFactor": 0.75, "clearcoatRoughnessFactor": 0.2,
+                                "clearcoatNormalTexture": t0},
+    "KHR_materials_sheen": {"sheenColorFactor": [0.2, 0.3, 0.4], "sheenRoughnessFactor": 0.5,
+                            "sheenColorTexture": t0},
+    "KHR_materials_iridescence": {"iridescenceFactor": 1, "iridescenceIor": 1.5,
+                                  "iridescenceThicknessMaximum": 500, "iridescenceThicknessTexture": t0},
+    "KHR_materials_anisotropy": {"anisotropyStrength": 0.4, "anisotropyRotation": 1.25},
+    "KHR_materials_dispersion": {"dispersion": 0.1}}})
+pos, nrm, uv, idx = flat_cube()
+tangents = [[0, 0, 0, 1] for _ in pos]
+for q in range(6):
+    # Each face's tangent runs along its U.
+    a, b = pos[q * 4], pos[q * 4 + 1]
+    tangents[q * 4:q * 4 + 4] = [[b[k] - a[k] for k in range(3)] + [1]] * 4
+g.node(mesh=g.mesh([{"attributes": {"POSITION": g.acc(pos, minmax=True), "NORMAL": g.acc(nrm),
+                                    "TANGENT": g.acc(tangents, typ="VEC4"), "TEXCOORD_0": g.acc(uv, typ="VEC2")},
+                     "indices": g.acc(idx, U16, "SCALAR", target=34963), "material": 0}]))
+E = "/materials/0/extensions/"
+case(FMT, "material_extensions", {"cube.glb": g.glb()},
+     {"spec": "KHR_materials_ior, specular, transmission, volume, clearcoat, sheen, iridescence, anisotropy, "
+              "dispersion and emissive_strength, with their textures, kept on the flat mesh's material",
+      "source": SRC, **CUBE, "materials": [{"name": "Fancy", "emissive": [1, 0.5, 0]}],
+      "flat_json": {E + "KHR_materials_emissive_strength/emissiveStrength": 2,
+                    "/materials/0/emissiveFactor": [1, 0.5, 0],
+                    E + "KHR_materials_ior/ior": 1.8,
+                    E + "KHR_materials_specular": {"specularFactor": 0.6, "specularColorFactor": [1, 0.5, 0.25],
+                                                   "specularTexture": {"index": 0}},
+                    E + "KHR_materials_transmission": {"transmissionFactor": 0.9,
+                                                       "transmissionTexture": {"index": 0}},
+                    E + "KHR_materials_volume": {"thicknessFactor": 0.3, "attenuationDistance": 2,
+                                                 "attenuationColor": [0.9, 0.8, 0.7]},
+                    E + "KHR_materials_clearcoat": {"clearcoatFactor": 0.75, "clearcoatRoughnessFactor": 0.2,
+                                                    "clearcoatNormalTexture": {"index": 0}},
+                    E + "KHR_materials_sheen": {"sheenColorFactor": [0.2, 0.3, 0.4], "sheenRoughnessFactor": 0.5,
+                                                "sheenColorTexture": {"index": 0}},
+                    E + "KHR_materials_iridescence": {"iridescenceFactor": 1, "iridescenceIor": 1.5,
+                                                      "iridescenceThicknessMaximum": 500,
+                                                      "iridescenceThicknessTexture": {"index": 0}},
+                    E + "KHR_materials_iridescence/iridescenceThicknessMinimum": None,
+                    E + "KHR_materials_anisotropy": {"anisotropyStrength": 0.4, "anisotropyRotation": 1.25},
+                    E + "KHR_materials_dispersion/dispersion": 0.1}})
 
 # Vertex colors: float RGB, normalized u8 RGBA, normalized u16 RGBA.
 g = G()

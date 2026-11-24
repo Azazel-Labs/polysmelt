@@ -688,48 +688,6 @@ fn splines_by_knots_weights_and_fit_points() {
 }
 
 #[test]
-fn nurbs_curves() {
-    // A quarter circle, as a rational quadratic: every point is on the circle.
-    let ctrl = [[1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]];
-    let knots = [0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
-    let weights = [1.0, std::f64::consts::FRAC_1_SQRT_2, 1.0];
-    let mut out = Vec::new();
-    assert_eq!(nurbs(2, &ctrl, &weights, &knots, usize::MAX, &mut out), Ok(9));
-    assert_eq!(out.len(), 9);
-    assert!(out.iter().all(|p| (p[0].hypot(p[1]) - 1.0).abs() < 1e-12), "{out:?}");
-    assert_eq!((out[0], out[8]), (ctrl[0], ctrl[2]));
-    // Weights that aren't one for each control point, or aren't all above zero, aren't used.
-    for weights in [&weights[..2], &[1.0, 0.0, 1.0], &[1.0, f64::NAN, 1.0]] {
-        nurbs(2, &ctrl, weights, &knots, usize::MAX, &mut out).unwrap();
-        assert!(out.iter().any(|p| (p[0].hypot(p[1]) - 1.0).abs() > 1e-3));
-    }
-    // A cubic with unclamped knots is drawn over its knots from the fourth to the fourth last.
-    let line: Vec<[f64; 3]> = (0..6).map(|i| [f64::from(i), 0.0, 0.0]).collect();
-    let uniform: Vec<f64> = (0..10).map(f64::from).collect();
-    nurbs(3, &line, &[], &uniform, usize::MAX, &mut out).unwrap();
-    let (first, last) = (out[0][0], out[out.len() - 1][0]);
-    assert!((first - 1.0).abs() < 1e-12 && (last - 4.0).abs() < 1e-12, "{out:?}");
-    // Degrees that don't fit, knots that go back, aren't numbers or leave no span; or more points
-    // than the budget.
-    let bad = Err("splines whose degree or knots don't fit were drawn through their control points");
-    assert_eq!(nurbs(0, &ctrl, &[], &knots, usize::MAX, &mut out), bad);
-    assert_eq!(nurbs(3, &ctrl, &[], &[0.0; 7], usize::MAX, &mut out), bad);
-    assert_eq!(nurbs(12, &[[0.0; 3]; 13], &[], &[], usize::MAX, &mut out), bad);
-    assert_eq!(nurbs(i64::MIN, &ctrl, &[], &knots, usize::MAX, &mut out), bad);
-    for knots in [
-        [0.0, 0.0, 1.0, 0.5, 1.0, 1.0],
-        [0.0, 0.0, 0.0, f64::NAN, 1.0, 1.0],
-        [0.0; 6],
-    ] {
-        assert_eq!(nurbs(2, &ctrl, &[], &knots, usize::MAX, &mut out), bad, "{knots:?}");
-    }
-    assert_eq!(
-        nurbs(2, &ctrl, &weights, &knots, 8, &mut out),
-        Err("curves past the most points were drawn coarsely")
-    );
-}
-
-#[test]
 fn curves_past_the_most_points_are_coarse() {
     // A circle past the budget is a segment for each quarter turn.
     let mut m = Model {

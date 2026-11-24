@@ -693,13 +693,14 @@ impl<'a> Document<'a> {
     /// `extras.source`. A mesh whose primitives are all skinned is bound to `skeleton`, when
     /// there is one.
     pub(crate) fn from_named(
-        meshes: Vec<(Option<String>, Vec<Prim>)>,
+        mut meshes: Vec<(Option<String>, Vec<Prim>)>,
         materials: &[Material],
         images: Vec<Source>,
         source: Option<Value>,
         facts: Map<String, Value>,
         skeleton: &[Bone],
     ) -> Document<'static> {
+        let materials = texcoords(&mut meshes, materials);
         let mut b = Builder::default();
         let rig = (!skeleton.is_empty() && meshes.iter().any(|(_, p)| !p.is_empty() && p.iter().all(Prim::skinned)))
             .then(|| Rigging::new(skeleton, meshes.iter().flat_map(|(_, p)| p)));
@@ -739,9 +740,69 @@ impl<'a> Document<'a> {
         json.insert("scenes".into(), json!([{ "nodes": scene }]));
         json.insert("nodes".into(), Value::Array(nodes));
         json.insert("meshes".into(), Value::Array(out));
-        b.materials(materials, images, &mut json);
+        b.materials(&materials, images, &mut json);
         b.finish(json, facts)
     }
+}
+
+/// The glTF materials for `materials`, their textures reading the coordinate sets as each primitive using them
+/// numbers its sets (the color texture's first, then the others that are there, in order). A material with a
+/// texture on another set ([`Sampling::uv_set`](crate::mesh::Sampling::uv_set)) gets a copy for each numbering
+/// the primitives give it, and the primitives are pointed at theirs.
+fn texcoords(meshes: &mut [(Option<String>, Vec<Prim>)], materials: &[Material]) -> Vec<Full> {
+    let mut out: Vec<Full> = materials.iter().map(Full::from).collect();
+    let last = materials.len().saturating_sub(1);
+    // The other sets each material's textures read, in order.
+    let sets: Vec<Vec<usize>> = materials
+        .iter()
+        .map(|m| {
+            let used = std::cell::RefCell::new(Vec::new());
+            Full::of(m, |s| {
+                used.borrow_mut().extend(s);
+                Some(0)
+            });
+            let mut used = used.into_inner();
+            used.sort_unstable();
+            used.dedup();
+            used
+        })
+        .collect();
+    // (material, the numbers its sets get, the material written for them).
+    let mut copies: Vec<(usize, Vec<Option<u32>>, usize)> = Vec::new();
+    for p in meshes.iter_mut().flat_map(|(_, p)| p) {
+        let i = p.material.min(last);
+        let Some(want) = sets.get(i).filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        let n = p.positions.len();
+        let first = u32::from(p.uvs.len() == n);
+        let numbers: Vec<Option<u32>> = want
+            .iter()
+            .map(|&s| {
+                p.uv_sets.get(s).filter(|v| v.len() == n)?;
+                let before = p.uv_sets[..s].iter().filter(|v| v.len() == n).count();
+                Some(first + u32::try_from(before).ok()?)
+            })
+            .collect();
+        if let Some(c) = copies.iter().find(|c| c.0 == i && c.1 == numbers) {
+            p.material = c.2;
+            continue;
+        }
+        let full = Full::of(&materials[i], |s| match s {
+            None => Some(0),
+            Some(s) => want.iter().position(|&w| w == s).and_then(|k| numbers[k]),
+        });
+        let slot = if copies.iter().any(|c| c.0 == i) {
+            out.push(full);
+            out.len() - 1
+        } else {
+            out[i] = full;
+            i
+        };
+        copies.push((i, numbers, slot));
+        p.material = slot;
+    }
+    out
 }
 
 /// A skeleton as a skin's joints: the bones, after a root above them all when they have

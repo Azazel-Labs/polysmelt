@@ -90,9 +90,77 @@ pub struct Bone {
     pub matrix: [f32; 16],
 }
 
+pub use crate::material::{
+    Anisotropy, CLAMP, Clearcoat, Factor, Iridescence, LINEAR, LINEAR_MIPMAP_LINEAR, MIRROR, REPEAT, Sheen, Specular,
+    UvTransform, Volume,
+};
+
+/// How a material samples a texture: the coordinates it reads, a transform on them, and the
+/// sampler's wrap and filters. The default reads [`Prim::uvs`] as they are, repeating, filtered
+/// linearly between mipmaps.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Sampling {
+    /// The coordinates read: `None` is [`Prim::uvs`], `Some(n)` is [`Prim::uv_sets`]`[n]`.
+    pub uv_set: Option<usize>,
+    /// Moves those coordinates before sampling (glTF's `KHR_texture_transform`).
+    pub transform: Option<UvTransform>,
+    /// S and T wrap modes, glTF's numbers: [`REPEAT`], [`CLAMP`] or [`MIRROR`].
+    pub wrap: [u32; 2],
+    /// Magnification and minification filters, glTF's numbers (9728 nearest, 9729 linear,
+    /// 9984 to 9987 between mipmaps); `None` leaves the choice to the viewer.
+    pub filter: [Option<u32>; 2],
+}
+
+impl Default for Sampling {
+    fn default() -> Self {
+        Self {
+            uv_set: None,
+            transform: None,
+            wrap: [REPEAT; 2],
+            filter: [Some(LINEAR), Some(LINEAR_MIPMAP_LINEAR)],
+        }
+    }
+}
+
+/// How each of a material's core textures is sampled.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Samplings {
+    pub color: Sampling,
+    pub normal: Sampling,
+    pub metallic_roughness: Sampling,
+    pub occlusion: Sampling,
+    pub emissive: Sampling,
+}
+
+/// A texture an extension uses: an image in [`Mesh::images`], and how it's sampled.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Texture {
+    pub image: usize,
+    pub sampling: Sampling,
+}
+
+/// The `KHR_materials_*` extensions to glTF's metallic-roughness model: index of refraction,
+/// specular, transmission, clearcoat, sheen, volume, anisotropy, iridescence and dispersion.
+/// A `None` is the extension left out.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Extensions {
+    /// `KHR_materials_ior`.
+    pub ior: Option<f32>,
+    pub specular: Option<Specular<Texture>>,
+    /// `KHR_materials_transmission`: how much light passes through, its texture's red scaling it.
+    pub transmission: Option<Factor<Texture>>,
+    pub clearcoat: Option<Clearcoat<Texture>>,
+    pub sheen: Option<Sheen<Texture>>,
+    pub volume: Option<Volume<Texture>>,
+    pub anisotropy: Option<Anisotropy<Texture>>,
+    pub iridescence: Option<Iridescence<Texture>>,
+    /// `KHR_materials_dispersion`: how much the index of refraction varies with wavelength.
+    pub dispersion: Option<f32>,
+}
+
 /// A material, glTF's metallic-roughness model: a base color, the metallic and roughness
-/// scalars, and the textures that vary them. Every texture reads [`Prim::uvs`]; the images
-/// are indices into [`Mesh::images`].
+/// scalars, and the textures that vary them. The textures read [`Prim::uvs`] unless their
+/// [`Sampling`] says otherwise; the images are indices into [`Mesh::images`].
 #[derive(Debug, Clone)]
 pub struct Material {
     pub name: String,
@@ -120,6 +188,14 @@ pub struct Material {
     pub alpha_cutoff: Option<f32>,
     /// Drawn in its color as it is, without lighting (glTF's `KHR_materials_unlit`).
     pub unlit: bool,
+    /// How much the normal map bends the normals: its X and Y scale.
+    pub normal_scale: f32,
+    /// How much the occlusion map darkens, 0 to 1.
+    pub occlusion_strength: f32,
+    /// How each texture above is sampled.
+    pub sampling: Samplings,
+    /// The `KHR_materials_*` extensions the source used, if any.
+    pub extensions: Option<Box<Extensions>>,
 }
 
 impl Default for Material {
@@ -147,6 +223,10 @@ impl Material {
             double_sided: false,
             alpha_cutoff: None,
             unlit: false,
+            normal_scale: 1.0,
+            occlusion_strength: 1.0,
+            sampling: Samplings::default(),
+            extensions: None,
         }
     }
 }

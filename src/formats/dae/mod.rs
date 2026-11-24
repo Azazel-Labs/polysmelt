@@ -24,7 +24,8 @@
 //!
 //! Skin controllers become glTF skins (up to the sixteen strongest influences of each vertex, in as many sets of
 //! joints and weights as they take, the bind shape folded into the inverse bind matrices), morph controllers morph
-//! targets with their default weights. Animations of transforms (whole, or one component of one) and of morph
+//! targets with their default weights (positions, and the normals a target changes when it has the base's
+//! topology). Animations of transforms (whole, or one component of one) and of morph
 //! weights are sampled into translation, rotation, scale and weight tracks, Bézier, Hermite, B-spline and cardinal
 //! curves and long turns cut into short steps; animation clips become glTF animations of their own. Cameras and
 //! lights (`KHR_lights_punctual`) come across with their nodes; an ambient light, which glTF lacks, becomes the
@@ -158,6 +159,7 @@ pub(super) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
         mesh_triangles: Vec::new(),
         mesh_of: HashMap::new(),
         points_of: HashMap::new(),
+        normals_of: HashMap::new(),
         materials: Vec::new(),
         material_of: HashMap::new(),
         images: Images::new(!keep.image_bytes, input.dir()),
@@ -470,6 +472,8 @@ pub(super) struct Reader<'a> {
     mesh_of: HashMap<MeshKey, Option<usize>>,
     /// Each skinned or morphed mesh's primitives' vertices, as indices into its geometry's `<vertices>`.
     points_of: HashMap<usize, Vec<Vec<u32>>>,
+    /// Each morphed mesh's primitives' normals (empty for one without), which its targets' normals are taken from.
+    normals_of: HashMap<usize, Vec<Vec<[f32; 3]>>>,
     materials: Vec<Full>,
     material_of: HashMap<MaterialKey, usize>,
     images: Images,
@@ -777,7 +781,9 @@ impl Reader<'_> {
         };
         let mut prims = Vec::new();
         let mut points = Vec::new();
+        let mut normals = Vec::new();
         let mut triangles = 0;
+        let morphed = morph.is_some() && self.keep.morph_targets;
         for p in pieces {
             let material = if self.keep.materials {
                 p.symbol
@@ -787,9 +793,15 @@ impl Reader<'_> {
                 None
             };
             // A piece draws triangles or lines, never both, so it is one glTF primitive.
+            let base = if morphed && p.prim.normals.len() == p.prim.positions.len() {
+                p.prim.normals.clone()
+            } else {
+                Vec::new()
+            };
             let Some(mut prim) = self.b.primitives(p.prim).pop() else {
                 continue;
             };
+            normals.push(base);
             if let Some(m) = material {
                 prim["material"] = json!(m);
             }
@@ -816,6 +828,7 @@ impl Reader<'_> {
         }
         if let Some(morph) = morph {
             self.morphs.push((m, morph));
+            self.normals_of.insert(m, normals);
         }
         Ok(Some(m))
     }
@@ -1150,26 +1163,31 @@ impl Reader<'_> {
                 .input(targets_el, "MORPH_WEIGHT")
                 .map(|s| geometry::read(dom, s, 1, xml::floats32).data)
                 .unwrap_or_default();
+            let Some(points) = self.points_of.get(&mesh).cloned() else {
+                continue;
+            };
+            let base_normals = self.normals_of.remove(&mesh).unwrap_or_default();
             let mut names = Vec::new();
             let mut targets = Vec::new();
+            let mut target_normals = Vec::new();
             for id in &ids {
                 let g = dom.by_id_at(morph, id).filter(|&g| dom.is(g, "geometry"));
                 names.push(g.and_then(|g| dom.attr(g, "name")).unwrap_or(id).to_owned());
-                let positions = g
-                    .and_then(|g| dom.child(g, "mesh").or_else(|| dom.child(g, "convex_mesh")))
-                    .and_then(|m| geometry::positions(dom, &mut self.sources, m));
-                targets.push(positions);
+                let target_mesh = g.and_then(|g| dom.child(g, "mesh").or_else(|| dom.child(g, "convex_mesh")));
+                targets.push(target_mesh.and_then(|m| geometry::positions(dom, &mut self.sources, m)));
+                // A relative target's normals would be offsets, which a normal can't be read as.
+                let normals = target_mesh
+                    .filter(|_| !relative && base_normals.iter().any(|n| !n.is_empty()))
+                    .and_then(|m| self.target_normals(m, mesh, &points, &base_normals));
+                target_normals.push(normals);
             }
-            let Some(points) = self.points_of.get(&mesh) else {
-                continue;
-            };
             let at = |acc: Option<&geometry::Acc<f32>>, p: u32| -> [f32; 3] {
                 acc.and_then(|a| a.get(p)).map_or([0.0; 3], |v| {
                     [v[0], v.get(1).copied().unwrap_or(0.0), v.get(2).copied().unwrap_or(0.0)]
                 })
             };
             let mut per_prim = Vec::new();
-            for pts in points {
+            for pts in &points {
                 let mut list = Vec::new();
                 for t in &targets {
                     let deltas: Vec<[f32; 3]> = pts
@@ -1190,11 +1208,21 @@ impl Reader<'_> {
                 per_prim.push(list);
             }
             let mut written = Vec::new();
-            for list in per_prim {
-                let accs: Vec<Value> = list
-                    .into_iter()
-                    .map(|d| json!({ "POSITION": self.b.positions(d) }))
-                    .collect();
+            for (k, list) in per_prim.into_iter().enumerate() {
+                let mut accs = Vec::new();
+                for (d, normals) in list.into_iter().zip(&mut target_normals) {
+                    let mut target = json!({ "POSITION": self.b.positions(d) });
+                    // A target that leaves a primitive's normals as they are has no normals of its own.
+                    let normals = normals
+                        .as_mut()
+                        .and_then(|n| n.get_mut(k))
+                        .map(std::mem::take)
+                        .unwrap_or_default();
+                    if normals.iter().any(|n| n.iter().any(|&c| c != 0.0)) {
+                        target["NORMAL"] = json!(self.b.floats(normals.concat(), "VEC3", false));
+                    }
+                    accs.push(target);
+                }
                 written.push(accs);
             }
             let w: Vec<f32> = (0..ids.len())
@@ -1209,6 +1237,37 @@ impl Reader<'_> {
             m["weights"] = json!(w);
             m["extras"]["targetNames"] = json!(names);
         }
+    }
+
+    /// The changes a morph target's `<mesh>` makes to the normals of each of `mesh`'s primitives, when it draws
+    /// what the base does over the same vertices (as targets do); `None` when it doesn't, or has no normals.
+    fn target_normals(
+        &mut self,
+        target: usize,
+        mesh: usize,
+        points: &[Vec<u32>],
+        base: &[Vec<[f32; 3]>],
+    ) -> Option<Vec<Vec<[f32; 3]>>> {
+        let budget = self.mesh_triangles.get(mesh).copied().unwrap_or(0);
+        let pieces = geometry::mesh(self.dom, &mut self.sources, target, budget).ok()?;
+        if pieces.len() != points.len() || pieces.iter().zip(points).any(|(p, pts)| p.points != *pts) {
+            return None;
+        }
+        let mut out = Vec::with_capacity(pieces.len());
+        for (p, b) in pieces.iter().zip(base) {
+            let n = &p.prim.normals;
+            if b.is_empty() || n.len() != b.len() {
+                out.push(Vec::new());
+                continue;
+            }
+            out.push(
+                n.iter()
+                    .zip(b)
+                    .map(|(t, b)| [t[0] - b[0], t[1] - b[1], t[2] - b[2]])
+                    .collect(),
+            );
+        }
+        Some(out)
     }
 
     /// A camera's index, made once for each `<camera>`.

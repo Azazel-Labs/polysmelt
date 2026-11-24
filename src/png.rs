@@ -4,7 +4,7 @@
 use std::io::Write as _;
 
 use flate2::{Compression, Crc, write::ZlibEncoder};
-#[cfg(feature = "3ds")]
+#[cfg(any(feature = "3ds", feature = "obj"))]
 use flate2::{Decompress, FlushDecompress, Status};
 
 use crate::num::usize_of;
@@ -84,97 +84,171 @@ fn paeth(a: u8, b: u8, c: u8) -> u8 {
 /// Samples a row and rows sampled: enough to tell what an image shows.
 #[cfg(feature = "3ds")]
 const SAMPLES: u32 = 64;
-/// The longest row [`sample`] reads, in bytes: 65536 RGBA pixels of 16 bits.
-#[cfg(feature = "3ds")]
+/// The longest row [`sample`] and [`decode`] read, in bytes: 65536 RGBA pixels of 16 bits.
+#[cfg(any(feature = "3ds", feature = "obj"))]
 const MAX_ROW: usize = 1 << 19;
 /// How many bytes of rows [`sample`] decodes before it stops: the top of a huge image stands for all of it.
 #[cfg(feature = "3ds")]
 const SAMPLE_BYTES: usize = 1 << 24;
+/// The most pixels [`decode`] makes: 8192 by 8192.
+#[cfg(feature = "obj")]
+const MAX_PIXELS: usize = 1 << 26;
+
+/// A PNG's header and its compressed rows: gray, RGB, palette and alpha kinds of 8 or 16 bits, not interlaced.
+#[cfg(any(feature = "3ds", feature = "obj"))]
+struct Png<'a> {
+    w: u32,
+    rows: u32,
+    kind: u8,
+    channels: usize,
+    /// Bytes a sample takes: 1 or 2.
+    size: usize,
+    palette: &'a [u8],
+    data: Vec<u8>,
+}
+
+#[cfg(any(feature = "3ds", feature = "obj"))]
+impl<'a> Png<'a> {
+    /// The PNG in `bytes`, when it's a kind read here; `None` for the rest.
+    fn parse(bytes: &'a [u8]) -> Option<Self> {
+        let mut rest = bytes.strip_prefix(b"\x89PNG\r\n\x1a\n")?;
+        let (mut ihdr, mut palette, mut data) = (None, &[][..], Vec::new());
+        while let Some(head) = rest.get(..8) {
+            let len = usize_of(u64::from(u32::from_be_bytes([head[0], head[1], head[2], head[3]])));
+            // A chunk cut short gives what it has.
+            let body = rest.get(8..).unwrap_or_default();
+            let body = &body[..len.min(body.len())];
+            match &head[4..8] {
+                b"IHDR" => ihdr = Some(body),
+                b"PLTE" => palette = body,
+                b"IDAT" => data.extend_from_slice(body),
+                b"IEND" => break,
+                _ => {}
+            }
+            rest = rest.get(len.saturating_add(12)..).unwrap_or_default();
+        }
+        let h = ihdr.filter(|h| h.len() >= 13)?;
+        let (w, rows) = (
+            u32::from_be_bytes([h[0], h[1], h[2], h[3]]),
+            u32::from_be_bytes([h[4], h[5], h[6], h[7]]),
+        );
+        let (depth, kind) = (h[8], h[9]);
+        let channels = match kind {
+            0 | 3 => 1,
+            4 => 2,
+            2 => 3,
+            6 => 4,
+            _ => return None,
+        };
+        if h[12] != 0 || !(depth == 8 || depth == 16 && kind != 3) || w == 0 || rows == 0 {
+            return None;
+        }
+        Some(Self {
+            w,
+            rows,
+            kind,
+            channels,
+            size: usize::from(depth / 8),
+            palette,
+            data,
+        })
+    }
+
+    /// The bytes a row's pixels take, when that's no more than [`MAX_ROW`].
+    fn row(&self) -> Option<usize> {
+        usize_of(u64::from(self.w))
+            .checked_mul(self.channels * self.size)
+            .filter(|&r| r <= MAX_ROW)
+    }
+
+    /// Decodes the first `rows` rows one at a time, handing each to `f` with its number: only one is held. It stops
+    /// early where the data ends; `None` when a row has a filter that isn't one or the data isn't zlib.
+    fn each_row(&self, rows: usize, mut f: impl FnMut(usize, &[u8])) -> Option<()> {
+        let row = self.row()?;
+        let bpp = self.channels * self.size;
+        let (mut line, mut prev) = (vec![0; row + 1], vec![0; row]);
+        let mut z = Decompress::new(true);
+        let (mut input, mut filled, mut y) = (&self.data[..], 0, 0);
+        while y < rows {
+            let (before_in, before_out) = (z.total_in(), z.total_out());
+            let status = z.decompress(input, &mut line[filled..], FlushDecompress::None).ok()?;
+            let used = usize_of(z.total_in() - before_in);
+            let made = usize_of(z.total_out() - before_out);
+            input = input.get(used..).unwrap_or_default();
+            filled += made;
+            if filled == line.len() {
+                let (filter, pixels) = line.split_first_mut()?;
+                unfilter(*filter, bpp, pixels, &prev)?;
+                f(y, pixels);
+                prev.copy_from_slice(pixels);
+                filled = 0;
+                y += 1;
+            } else if status == Status::StreamEnd || used == 0 && made == 0 {
+                break;
+            }
+        }
+        Some(())
+    }
+
+    /// A pixel's bytes as RGB: gray in every channel, a palette index looked up (black past the palette), 16-bit
+    /// samples by their high bytes, alpha left out.
+    fn rgb(&self, p: &[u8]) -> [u8; 3] {
+        let c = |i: usize| p[i * self.size];
+        match self.channels {
+            1 if self.kind == 3 => {
+                let i = usize::from(c(0)) * 3;
+                self.palette
+                    .get(i..i + 3)
+                    .map_or([0; 3], |rgb| [rgb[0], rgb[1], rgb[2]])
+            }
+            1 | 2 => [c(0); 3],
+            _ => [c(0), c(1), c(2)],
+        }
+    }
+}
 
 /// Pixels spread over a PNG, as RGB: up to [`SAMPLES`] from each of up to as many rows. Gray, RGB, palette and alpha
 /// kinds of 8 or 16 bits (high bytes kept), not interlaced; `None` for the rest, or when no row decodes. The rows
 /// decode one at a time, so only one is held, and past [`SAMPLE_BYTES`] of them the rest is left.
 #[cfg(feature = "3ds")]
 pub(crate) fn sample(bytes: &[u8]) -> Option<Vec<[u8; 3]>> {
-    let mut rest = bytes.strip_prefix(b"\x89PNG\r\n\x1a\n")?;
-    let (mut ihdr, mut palette, mut data) = (None, &[][..], Vec::new());
-    while let Some(head) = rest.get(..8) {
-        let len = usize_of(u64::from(u32::from_be_bytes([head[0], head[1], head[2], head[3]])));
-        // A chunk cut short gives what it has.
-        let body = rest.get(8..).unwrap_or_default();
-        let body = &body[..len.min(body.len())];
-        match &head[4..8] {
-            b"IHDR" => ihdr = Some(body),
-            b"PLTE" => palette = body,
-            b"IDAT" => data.extend_from_slice(body),
-            b"IEND" => break,
-            _ => {}
-        }
-        rest = rest.get(len.saturating_add(12)..).unwrap_or_default();
-    }
-    let h = ihdr.filter(|h| h.len() >= 13)?;
-    let (w, rows) = (
-        u32::from_be_bytes([h[0], h[1], h[2], h[3]]),
-        u32::from_be_bytes([h[4], h[5], h[6], h[7]]),
-    );
-    let (depth, kind) = (h[8], h[9]);
-    let channels = match kind {
-        0 | 3 => 1,
-        4 => 2,
-        2 => 3,
-        6 => 4,
-        _ => return None,
-    };
-    if h[12] != 0 || !(depth == 8 || depth == 16 && kind != 3) || w == 0 || rows == 0 {
-        return None;
-    }
-    let size = usize::from(depth / 8);
-    let bpp = channels * size;
-    let row = usize_of(u64::from(w)).checked_mul(bpp).filter(|&r| r <= MAX_ROW)?;
-    let rows = usize_of(u64::from(rows)).min((SAMPLE_BYTES / row).max(1));
+    let png = Png::parse(bytes)?;
+    let row = png.row()?;
+    let rows = usize_of(u64::from(png.rows)).min((SAMPLE_BYTES / row).max(1));
     let (y_step, x_step) = (
         rows.div_ceil(SAMPLES as usize),
-        usize_of(u64::from(w.div_ceil(SAMPLES))),
+        usize_of(u64::from(png.w.div_ceil(SAMPLES))),
     );
-    let (mut line, mut prev) = (vec![0; row + 1], vec![0; row]);
-    let mut z = Decompress::new(true);
-    let (mut input, mut filled, mut y) = (&data[..], 0, 0);
+    let bpp = png.channels * png.size;
     let mut out = Vec::new();
-    while y < rows {
-        let (before_in, before_out) = (z.total_in(), z.total_out());
-        let status = z.decompress(input, &mut line[filled..], FlushDecompress::None).ok()?;
-        let used = usize_of(z.total_in() - before_in);
-        let made = usize_of(z.total_out() - before_out);
-        input = input.get(used..).unwrap_or_default();
-        filled += made;
-        if filled == line.len() {
-            let (filter, pixels) = line.split_first_mut()?;
-            unfilter(*filter, bpp, pixels, &prev)?;
-            if y.is_multiple_of(y_step) {
-                for p in pixels.chunks_exact(bpp).step_by(x_step) {
-                    let c = |i: usize| p[i * size];
-                    out.push(match channels {
-                        1 if kind == 3 => {
-                            let i = usize::from(c(0)) * 3;
-                            palette.get(i..i + 3).map_or([0; 3], |rgb| [rgb[0], rgb[1], rgb[2]])
-                        }
-                        1 | 2 => [c(0); 3],
-                        _ => [c(0), c(1), c(2)],
-                    });
-                }
-            }
-            prev.copy_from_slice(pixels);
-            filled = 0;
-            y += 1;
-        } else if status == Status::StreamEnd || used == 0 && made == 0 {
-            break;
+    png.each_row(rows, |y, pixels| {
+        if y.is_multiple_of(y_step) {
+            out.extend(pixels.chunks_exact(bpp).step_by(x_step).map(|p| png.rgb(p)));
         }
-    }
+    })?;
     (!out.is_empty()).then_some(out)
 }
 
+/// A value for each pixel of a PNG, rows top to bottom, from each pixel's RGB by `pick`: the image's width, height
+/// and values. The kinds [`sample`] reads; `None` for the rest, for an image of more than [`MAX_PIXELS`], or when its
+/// rows don't all decode. Room is taken as rows decode, not from the size the header states.
+#[cfg(feature = "obj")]
+pub(crate) fn decode<T>(bytes: &[u8], pick: impl Fn([u8; 3]) -> T) -> Option<(u32, u32, Vec<T>)> {
+    let png = Png::parse(bytes)?;
+    let (w, h) = (usize_of(u64::from(png.w)), usize_of(u64::from(png.rows)));
+    if w.checked_mul(h)? > MAX_PIXELS {
+        return None;
+    }
+    let bpp = png.channels * png.size;
+    let mut out = Vec::new();
+    png.each_row(h, |_, pixels| {
+        out.extend(pixels.chunks_exact(bpp).map(|p| pick(png.rgb(p))));
+    })?;
+    (out.len() == w * h).then_some((png.w, png.rows, out))
+}
+
 /// A row through the inverse of PNG filter `kind`, in place, given the row above.
-#[cfg(feature = "3ds")]
+#[cfg(any(feature = "3ds", feature = "obj"))]
 fn unfilter(kind: u8, bpp: usize, line: &mut [u8], prev: &[u8]) -> Option<()> {
     if kind > 4 {
         return None;
@@ -292,5 +366,51 @@ mod tests {
         ihdr[..4].copy_from_slice(&u32::MAX.to_be_bytes());
         ihdr[9] = 6;
         assert_eq!(sample(&png(&ihdr, &[], &[0; 9])), None);
+    }
+}
+
+#[cfg(all(test, feature = "obj"))]
+mod decode_tests {
+    use super::*;
+
+    #[test]
+    #[allow(clippy::cast_possible_truncation, reason = "wrapping test patterns")]
+    fn decode_reads_back_every_pixel_encode_wrote() {
+        let (w, h) = (37u32, 21u32);
+        let px = |x: u32, y: u32| [x as u8, (y * 5) as u8, (x * 3 + y * 7) as u8];
+        for channels in [1, 2, 3, 4] {
+            let mut data = Vec::new();
+            for y in 0..h {
+                for x in 0..w {
+                    let p = px(x, y);
+                    data.extend(match channels {
+                        1 => vec![p[0]],
+                        2 => vec![p[0], 9],
+                        3 => p.to_vec(),
+                        _ => vec![p[0], p[1], p[2], 9],
+                    });
+                }
+            }
+            let png = encode(w, h, channels, &data).unwrap();
+            let (gw, gh, got) = decode(&png, |rgb| rgb).unwrap();
+            assert_eq!((gw, gh, got.len()), (w, h, (w * h) as usize));
+            for (i, s) in got.iter().enumerate() {
+                let (x, y) = (u32::try_from(i).unwrap() % w, u32::try_from(i).unwrap() / w);
+                let p = px(x, y);
+                assert_eq!(
+                    *s,
+                    if channels < 3 { [p[0]; 3] } else { p },
+                    "{channels} channels at {x}, {y}"
+                );
+            }
+            // One channel picked.
+            let (_, _, blue) = decode(&png, |rgb| rgb[2]).unwrap();
+            assert_eq!(blue[w as usize + 1], if channels < 3 { 1 } else { px(1, 1)[2] });
+            // Cut short: none once rows are missing, never a panic.
+            for len in 0..png.len() {
+                let _ = decode(&png[..len], |rgb| rgb);
+            }
+            assert_eq!(decode(&png[..png.len() / 2], |rgb| rgb), None);
+        }
     }
 }

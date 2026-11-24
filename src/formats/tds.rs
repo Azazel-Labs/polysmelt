@@ -339,7 +339,7 @@ fn material(d: &[u8]) -> Mat {
 #[derive(Default)]
 struct Look {
     color: Option<Tex>,
-    specular: Option<Specular>,
+    specular: Option<Specular<Tex>>,
     emissive: Option<Tex>,
     normal: Option<Tex>,
     alpha_source: bool,

@@ -18,10 +18,13 @@
 //!   baked in) and `COLOR_0`, in any component type `KHR_mesh_quantization` allows, sparse
 //!   accessors included. Without `NORMAL` a primitive keeps no normals: glTF shades it flat.
 //! - Materials: base color, metallic and roughness factors, emissive (with
-//!   `KHR_materials_emissive_strength`), double-sidedness, and
-//!   the color and normal textures (`KHR_materials_pbrSpecularGlossiness` as its diffuse), when
-//!   their images are PNG or JPEG, or WebP (`EXT_texture_webp`) with the `webp` feature, which
-//!   re-encodes it as PNG.
+//!   `KHR_materials_emissive_strength`), alpha mode, double-sidedness, unlit, the other
+//!   `KHR_materials_*` extensions (ior, specular, transmission, clearcoat, sheen, volume,
+//!   anisotropy, iridescence, dispersion), and every texture
+//!   (`KHR_materials_pbrSpecularGlossiness` as its diffuse) with its sampler, coordinate set and
+//!   `KHR_texture_transform` (relative to the color texture's, which the coordinates have baked
+//!   in), when their images are PNG or JPEG, or a format a feature re-encodes as PNG (WebP with
+//!   `EXT_texture_webp`, TGA, BMP, GIF, TIFF, PSD, DDS).
 //! - Meshopt-compressed views are decoded as they are read; Draco
 //!   (`KHR_draco_mesh_compression`) needs the `draco` feature.
 //! - A required extension it can't honour is an error, unless it only changes how surfaces look.
@@ -41,7 +44,10 @@ use serde_json::{Map, Value};
 use crate::document::Keep;
 use crate::document::{Counts, Document, Pose};
 use crate::gltf as container;
-use crate::mesh::{Image, Material, Mesh, Prim};
+use crate::mesh::{
+    Anisotropy, Clearcoat, Extensions, Factor, Image, Iridescence, Material, Mesh, Prim, Sampling, Sheen, Specular,
+    Texture, UvTransform, Volume,
+};
 use crate::num::{f32_of, u32_of, usize_of};
 use crate::{Context as _, Result};
 
@@ -2197,18 +2203,42 @@ impl Reader<'_> {
                 _ => m.color[3] = 1.0,
             }
             m.unlit = d.pointer("/extensions/KHR_materials_unlit").is_some();
-            // Every texture reads the color texture's coordinates (`Prim::uvs`): one that reads
-            // others would land in the wrong place, and is left out.
+            // `Prim::uvs` are the color texture's coordinates with its transform baked in: the
+            // other textures read them through what's left of their own transform, or read
+            // another set.
             let uv = color_texture(d).map_or((0, None), mapping);
-            let mut take = |info: Option<&Value>| {
-                let info = info.filter(|t| mapping(t) == uv)?;
-                self.texture(index(info, "index")?, mesh)
+            let mut take = |info: Option<&Value>| self.texture_info(info?, uv, mesh);
+            let mut slot = |info: Option<&Value>, image: &mut Option<usize>, sampling: &mut Sampling| {
+                if let Some(t) = take(info) {
+                    *image = Some(t.image);
+                    *sampling = t.sampling;
+                }
             };
-            m.color_image = take(color_texture(d));
-            m.normal_image = take(d.get("normalTexture"));
-            m.occlusion_image = take(d.get("occlusionTexture"));
-            m.emissive_image = take(d.get("emissiveTexture"));
-            m.metallic_roughness_image = take(d.pointer("/pbrMetallicRoughness/metallicRoughnessTexture"));
+            let s = &mut m.sampling;
+            slot(color_texture(d), &mut m.color_image, &mut s.color);
+            slot(d.get("normalTexture"), &mut m.normal_image, &mut s.normal);
+            slot(d.get("occlusionTexture"), &mut m.occlusion_image, &mut s.occlusion);
+            slot(d.get("emissiveTexture"), &mut m.emissive_image, &mut s.emissive);
+            slot(
+                d.pointer("/pbrMetallicRoughness/metallicRoughnessTexture"),
+                &mut m.metallic_roughness_image,
+                &mut s.metallic_roughness,
+            );
+            if m.normal_image.is_some() {
+                m.normal_scale = d
+                    .pointer("/normalTexture/scale")
+                    .and_then(Value::as_f64)
+                    .map_or(1.0, f32_of);
+            }
+            if m.occlusion_image.is_some() {
+                m.occlusion_strength = d
+                    .pointer("/occlusionTexture/strength")
+                    .and_then(Value::as_f64)
+                    .map_or(1.0, f32_of);
+            }
+            if let Some(ext) = d.get("extensions") {
+                m.extensions = self.extensions(ext, uv, mesh).map(Box::new);
+            }
         }
         mesh.materials.push(m);
         let s = mesh.materials.len() - 1;
@@ -2217,6 +2247,135 @@ impl Reader<'_> {
             _ => self.default_material = Some(s),
         }
         s
+    }
+
+    /// A texture info's image and how it's sampled, given the color texture's coordinate set and
+    /// transform `color` (which [`Prim::uvs`] have baked in); `None` when the image can't be
+    /// made, or the texture reads the color's coordinates through a transform that can't be
+    /// written relative to the color's (a shear).
+    fn texture_info(&mut self, info: &Value, color: (u64, Option<[f32; 6]>), mesh: &mut Mesh) -> Option<Texture> {
+        let t = index(info, "index")?;
+        let (set, own) = mapping(info);
+        let (uv_set, transform) = if set != color.0 {
+            (Some(usize::try_from(set).ok()?), uv_transform(info))
+        } else if color.1.is_none() {
+            (None, uv_transform(info))
+        } else if own == color.1 {
+            (None, None)
+        } else {
+            let relative = relative(own.unwrap_or([1.0, 0.0, 0.0, 0.0, 1.0, 0.0]), color.1?)?;
+            (None, Some(uv_decompose(relative)?))
+        };
+        let image = self.texture(t, mesh)?;
+        let sampler = list(self.json, "textures")
+            .get(t)
+            .and_then(|tex| index(tex, "sampler"))
+            .and_then(|s| list(self.json, "samplers").get(s));
+        let num = |k: &str| {
+            sampler
+                .and_then(|s| s.get(k))
+                .and_then(Value::as_u64)
+                .and_then(|v| u32::try_from(v).ok())
+        };
+        Some(Texture {
+            image,
+            sampling: Sampling {
+                uv_set,
+                transform: transform.filter(|x| *x != UvTransform::IDENTITY),
+                wrap: [num("wrapS").unwrap_or(10497), num("wrapT").unwrap_or(10497)],
+                filter: [num("magFilter"), num("minFilter")],
+            },
+        })
+    }
+
+    /// The `KHR_materials_*` extensions in a material's `extensions`, with their textures;
+    /// `None` when it has none of them.
+    fn extensions(&mut self, ext: &Value, uv: (u64, Option<[f32; 6]>), mesh: &mut Mesh) -> Option<Extensions> {
+        let num = |e: &Value, k: &str, default: f32| e.get(k).and_then(Value::as_f64).map_or(default, f32_of);
+        let mut tex = |e: &Value, k: &str| e.get(k).and_then(|info| self.texture_info(info, uv, mesh));
+        let get = |name: &str| ext.get(name).filter(|e| e.is_object());
+        let mut out = Extensions {
+            ior: get("KHR_materials_ior").map(|e| num(e, "ior", 1.5)),
+            dispersion: get("KHR_materials_dispersion").map(|e| num(e, "dispersion", 0.0)),
+            ..Extensions::default()
+        };
+        if let Some(e) = get("KHR_materials_specular") {
+            out.specular = Some(Specular {
+                factor: Factor {
+                    factor: num(e, "specularFactor", 1.0),
+                    tex: tex(e, "specularTexture"),
+                },
+                color: f32s(e.get("specularColorFactor"), [1.0; 3]),
+                color_tex: tex(e, "specularColorTexture"),
+            });
+        }
+        if let Some(e) = get("KHR_materials_transmission") {
+            out.transmission = Some(Factor {
+                factor: num(e, "transmissionFactor", 0.0),
+                tex: tex(e, "transmissionTexture"),
+            });
+        }
+        if let Some(e) = get("KHR_materials_clearcoat") {
+            out.clearcoat = Some(Clearcoat {
+                factor: Factor {
+                    factor: num(e, "clearcoatFactor", 0.0),
+                    tex: tex(e, "clearcoatTexture"),
+                },
+                roughness: Factor {
+                    factor: num(e, "clearcoatRoughnessFactor", 0.0),
+                    tex: tex(e, "clearcoatRoughnessTexture"),
+                },
+                normal: tex(e, "clearcoatNormalTexture"),
+            });
+        }
+        if let Some(e) = get("KHR_materials_sheen") {
+            out.sheen = Some(Sheen {
+                color: f32s(e.get("sheenColorFactor"), [0.0; 3]),
+                color_tex: tex(e, "sheenColorTexture"),
+                roughness: Factor {
+                    factor: num(e, "sheenRoughnessFactor", 0.0),
+                    tex: tex(e, "sheenRoughnessTexture"),
+                },
+            });
+        }
+        if let Some(e) = get("KHR_materials_volume") {
+            out.volume = Some(Volume {
+                thickness: Factor {
+                    factor: num(e, "thicknessFactor", 0.0),
+                    tex: tex(e, "thicknessTexture"),
+                },
+                attenuation_distance: e
+                    .get("attenuationDistance")
+                    .and_then(Value::as_f64)
+                    .map(f32_of)
+                    .filter(|d| d.is_finite() && *d > 0.0),
+                attenuation_color: f32s(e.get("attenuationColor"), [1.0; 3]),
+            });
+        }
+        if let Some(e) = get("KHR_materials_anisotropy") {
+            out.anisotropy = Some(Anisotropy {
+                strength: Factor {
+                    factor: num(e, "anisotropyStrength", 0.0),
+                    tex: tex(e, "anisotropyTexture"),
+                },
+                rotation: num(e, "anisotropyRotation", 0.0),
+            });
+        }
+        if let Some(e) = get("KHR_materials_iridescence") {
+            out.iridescence = Some(Iridescence {
+                factor: Factor {
+                    factor: num(e, "iridescenceFactor", 0.0),
+                    tex: tex(e, "iridescenceTexture"),
+                },
+                ior: num(e, "iridescenceIor", 1.3),
+                thickness: [
+                    num(e, "iridescenceThicknessMinimum", 100.0),
+                    num(e, "iridescenceThicknessMaximum", 400.0),
+                ],
+                thickness_tex: tex(e, "iridescenceThicknessTexture"),
+            });
+        }
+        (out != Extensions::default()).then_some(out)
     }
 
     /// The mesh image for glTF texture `t`: its source, or failing that one an extension
@@ -2304,6 +2463,63 @@ fn mapping(info: &Value) -> (u64, Option<[f32; 6]>) {
     let (sin, cos) = r.sin_cos();
     // translation * rotation * scale, as the extension defines them.
     (set, Some([cos * sx, sin * sy, ox, -sin * sx, cos * sy, oy]))
+}
+
+/// A texture info's `KHR_texture_transform` as it's written; `None` without one.
+fn uv_transform(info: &Value) -> Option<UvTransform> {
+    let t = info.get("extensions")?.get("KHR_texture_transform")?;
+    Some(UvTransform {
+        offset: f32s(t.get("offset"), [0.0; 2]),
+        rotation: f32_of(t.get("rotation").and_then(Value::as_f64).unwrap_or(0.0)),
+        scale: f32s(t.get("scale"), [1.0; 2]),
+    })
+}
+
+/// The 2x3 transform (row-major) that takes coordinates `color` has moved to where `own` moves
+/// them: `own * color^-1`; `None` when `color` collapses them.
+fn relative(own: [f32; 6], color: [f32; 6]) -> Option<[f32; 6]> {
+    let [a, b, e, c, d, f] = color.map(f64::from);
+    let det = a * d - b * c;
+    if det == 0.0 || !det.is_finite() {
+        return None;
+    }
+    // The inverse: its linear part, then the translation it undoes.
+    let (ia, ib, ic, id) = (d / det, -b / det, -c / det, a / det);
+    let (ie, if_) = (-(ia * e + ib * f), -(ic * e + id * f));
+    let [p, q, s, r, t, u] = own.map(f64::from);
+    let out = [
+        p * ia + q * ic,
+        p * ib + q * id,
+        p * ie + q * if_ + s,
+        r * ia + t * ic,
+        r * ib + t * id,
+        r * ie + t * if_ + u,
+    ];
+    #[allow(clippy::cast_possible_truncation, reason = "back to the f32s the matrices came in")]
+    Some(out.map(|v| v as f32))
+}
+
+/// A 2x3 transform (row-major) as `KHR_texture_transform` writes one, `translate * rotate *
+/// scale`; `None` when it shears, which that can't write.
+fn uv_decompose(m: [f32; 6]) -> Option<UvTransform> {
+    let [a, b, e, c, d, f] = m;
+    // The first column is (cos, -sin) * scale x; the second (sin, cos) * scale y.
+    let sx = a.hypot(c);
+    if sx == 0.0 || !sx.is_finite() {
+        return None;
+    }
+    let rotation = (-c).atan2(a);
+    let (sin, cos) = rotation.sin_cos();
+    let sy = b * sin + d * cos;
+    let tolerance = 1e-4 * sy.abs().max(1.0);
+    if (b - sin * sy).abs() > tolerance || (d - cos * sy).abs() > tolerance {
+        return None;
+    }
+    Some(UvTransform {
+        offset: [e, f],
+        rotation,
+        scale: [sx, sy],
+    })
 }
 
 /// A material's color texture info: `baseColorTexture`, or the specular-glossiness diffuse.
@@ -2885,7 +3101,7 @@ mod tests {
                     "metallicRoughnessTexture": { "index": 1 },
                 },
                 "occlusionTexture": { "index": 1 },
-                // Read through the other set, so not where `uvs` would put it.
+                // Read through the other set: kept with the set it reads.
                 "emissiveTexture": { "index": 2, "texCoord": 1 },
                 "extensions": { "KHR_materials_unlit": {} },
             }],
@@ -2915,7 +3131,10 @@ mod tests {
             };
             assert_ne!(mesh.images[c], mesh.images[o]);
             assert_eq!(m.metallic_roughness_image, Some(o), "one image, two textures");
-            assert_eq!(m.emissive_image, None);
+            let e = m.emissive_image.expect("the emissive texture on the other set");
+            assert!(mesh.images[e] != mesh.images[c] && mesh.images[e] != mesh.images[o]);
+            let set = m.sampling.emissive.uv_set.expect("its own set");
+            assert_eq!(mesh.prims[0].uv_sets[set], [[0., 0.], [1., 0.], [0., 1.]]);
         };
         check(&mesh);
         let back = load(dir.path(), "back.glb", &to_glb(&mesh).unwrap());

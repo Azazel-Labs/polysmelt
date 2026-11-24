@@ -300,6 +300,7 @@ impl<'a> Doc<'a> {
             },
             None if i == 0 && self.bin.is_some() => Cow::Borrowed(self.bin.unwrap_or_default()),
             None if fallback => return Ok(Data::Placeholder),
+            None if declared == 0 => Cow::Borrowed(&[]),
             None => bail!("buffer {i} has no data"),
         };
         ensure!(

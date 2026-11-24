@@ -39,6 +39,8 @@ mod fbx_tree;
 mod gltf;
 #[cfg(feature = "gltf")]
 mod gltf1;
+#[cfg(any(feature = "dxf", feature = "fbx"))]
+mod nurbs;
 #[cfg(feature = "obj")]
 mod obj;
 #[cfg(feature = "off")]

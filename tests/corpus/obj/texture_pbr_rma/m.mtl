@@ -1,0 +1,3 @@
+newmtl pbr
+Kd 1 1 1
+map_RMA rma.png

@@ -53,9 +53,21 @@ fn enabled(ext: &str) -> bool {
     }
 }
 
-/// Whether this build has a cargo feature a case `needs` beyond its format's own.
+/// Whether this build has a cargo feature a case `needs` beyond its format's own, or `png`: the
+/// PNG encoder any of the features re-encoding images brings.
 fn has_feature(name: &str) -> bool {
+    let png = cfg!(any(
+        feature = "webp",
+        feature = "skp",
+        feature = "tga",
+        feature = "bmp",
+        feature = "gif",
+        feature = "tiff",
+        feature = "psd",
+        feature = "dds"
+    ));
     let features = [
+        ("png", png),
         ("draco", cfg!(feature = "draco")),
         ("webp", cfg!(feature = "webp")),
         ("tga", cfg!(feature = "tga")),
@@ -254,9 +266,10 @@ fn document(e: &Map<String, Value>, doc: &Document<'_>) -> Result<(), String> {
     Ok(())
 }
 
-/// `json`: values the glTF JSON holds, by JSON pointer (`/materials/0/extensions/KHR_materials_ior/ior`). Numbers
-/// match to within 1e-4 (relative), arrays and objects member by member; `null` means the pointer must lead nowhere.
-fn pointers(e: &Map<String, Value>, doc: &Document<'_>) -> Result<(), String> {
+/// `json` (or another `key`): values the glTF JSON holds, by JSON pointer
+/// (`/materials/0/extensions/KHR_materials_ior/ior`). Numbers match to within 1e-4 (relative), arrays and objects
+/// member by member; `null` means the pointer must lead nowhere.
+fn pointers(e: &Map<String, Value>, key: &str, json: &Map<String, Value>) -> Result<(), String> {
     fn same(got: &Value, want: &Value) -> bool {
         match (got, want) {
             (Value::Number(g), Value::Number(w)) => {
@@ -268,13 +281,13 @@ fn pointers(e: &Map<String, Value>, doc: &Document<'_>) -> Result<(), String> {
             _ => got == want,
         }
     }
-    for (pointer, want) in e.get("json").and_then(Value::as_object).into_iter().flatten() {
+    for (pointer, want) in e.get(key).and_then(Value::as_object).into_iter().flatten() {
         // The document's JSON is a map: its first segment is a key, the rest a pointer into that member.
         let (top, rest) = pointer
             .trim_start_matches('/')
             .split_once('/')
             .unwrap_or((pointer.trim_start_matches('/'), ""));
-        let got = doc.json.get(top).and_then(|v| {
+        let got = json.get(top).and_then(|v| {
             if rest.is_empty() {
                 Some(v)
             } else {
@@ -283,9 +296,9 @@ fn pointers(e: &Map<String, Value>, doc: &Document<'_>) -> Result<(), String> {
         });
         match (got, want) {
             (None, Value::Null) => {}
-            (Some(got), Value::Null) => return Err(format!("{pointer} is {got}, expected nothing")),
-            (None, _) => return Err(format!("{pointer} is missing, expected {want}")),
-            (Some(got), _) if !same(got, want) => return Err(format!("{pointer} is {got}, expected {want}")),
+            (Some(got), Value::Null) => return Err(format!("{key} {pointer} is {got}, expected nothing")),
+            (None, _) => return Err(format!("{key} {pointer} is missing, expected {want}")),
+            (Some(got), _) if !same(got, want) => return Err(format!("{key} {pointer} is {got}, expected {want}")),
             _ => {}
         }
     }
@@ -705,7 +718,7 @@ fn run(case: &Case) -> Result<(), String> {
         }
     }
     document(e, &doc)?;
-    pointers(e, &doc)?;
+    pointers(e, "json", &doc.json)?;
     poses(e, &doc, tol)?;
     rig(e, &doc, tol)?;
     decoded(case, &ext, mesh.as_ref(), tol)?;
@@ -719,6 +732,17 @@ fn run(case: &Case) -> Result<(), String> {
     let bytes = polysmelt::mesh::to_glb(&mesh).map_err(|err| format!("to_glb failed: {err}"))?;
     keep_mesh_glb(case, &bytes);
     round_trip(&mesh, &bytes, tol)?;
+    // `flat_json`: the same, in the JSON of the flat mesh's GLB.
+    if e.contains_key("flat_json") {
+        let len = bytes
+            .get(12..16)
+            .map_or(0, |b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize);
+        let json: Map<String, Value> = bytes
+            .get(20..20 + len)
+            .and_then(|j| serde_json::from_slice(j).ok())
+            .ok_or("the mesh's GLB has no JSON")?;
+        pointers(e, "flat_json", &json)?;
+    }
     let g = glb::validate(&bytes).map_err(|err| format!("invalid GLB: {err}"))?;
     if (g.triangles(), g.lines(), g.points()) != (mesh.triangles(), mesh.lines(), mesh.points()) {
         return Err(format!(
@@ -982,13 +1006,20 @@ fn run(case: &Case) -> Result<(), String> {
         {
             return Err(format!("{label} alphaMode is {}, expected {mode}", m.alpha_mode));
         }
-        if let Some(px) = want.get("pixel") {
+        for (key, what, image) in [
+            ("pixel", "color", m.color_image),
+            ("metal_rough_pixel", "metallic-roughness", m.metal_rough_image),
+            ("occlusion_pixel", "occlusion", m.occlusion_image),
+        ] {
+            let Some(px) = want.get(key) else {
+                continue;
+            };
             let px = floats(px);
-            let img = m.color_image.ok_or(format!("{label} has no color texture to sample"))?;
+            let img = image.ok_or(format!("{label} has no {what} texture to sample"))?;
             let rgb = image::load_from_memory(&g.images[img].1).unwrap().to_rgb8();
             let got = rgb.get_pixel(0, 0).0.map(f32::from);
             if !close(&got, &px, 0.02) {
-                return Err(format!("{label} texture pixel is {got:?}, expected {px:?}"));
+                return Err(format!("{label} {what} texture pixel is {got:?}, expected {px:?}"));
             }
         }
     }

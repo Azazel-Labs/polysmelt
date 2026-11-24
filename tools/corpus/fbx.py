@@ -4,8 +4,9 @@ reference: the node tree and its binary encoding (32-bit headers up to 7.4, 64-b
 zlib-compressed arrays), the global axis system and unit, the model transform with its pre- and
 post-rotation, pivots, offsets and rotation order, geometric transforms, the hierarchy, instancing,
 the layer elements and their mapping and reference modes, materials by connection order, textures
-embedded or found by name, line geometry drawn as segments, and the objects a mesh reader should
-pass over (cameras, lights, skeletons, blend shapes, NURBS curves and surfaces).
+embedded or found by name, line geometry and NURBS curves (open, closed, rational and periodic)
+drawn as segments, and the objects a mesh reader should pass over (cameras, lights, skeletons,
+blend shapes, NURBS surfaces).
 
 Every case is a small scene built here; the expectations are computed from it in Python (the
 transform order, the axis basis) and are in glTF's Y-up metres.
@@ -865,18 +866,103 @@ write("line_no_model_template_color", s,
        "materials": [{"color": [1, srgb_to_linear(0.5), 0, 1]}]},
       extra_stats=False)
 
-# NURBS curves and surfaces aren't read, and are counted; the cube beside them is drawn.
+# --- NURBS curves ---------------------------------------------------------------------------
+
+def nurbs_curve(id, name, order, points, knots, form="Open", weights=None, color=None):
+    """A `NurbsCurve` geometry as the FBX SDK writes one: its order, form, points (x, y, z and a weight each)
+    and knot vector."""
+    ws = weights or [1] * len(points)
+    ch = [props70(P("Color", "ColorRGB", "Color", "", *color))] if color else []
+    ch += [Node("Type", S("NurbsCurve")), Node("NurbsCurveVersion", I(100)), Node("Order", I(order)),
+           Node("Dimension", I(3)), Node("Form", S(form)), Node("Rational", I(int(weights is not None))),
+           Node("Points", AD([c for p, w in zip(points, ws) for c in (*p, w)])), Node("KnotVector", AD(knots))]
+    return Node("Geometry", L(id), ON("Geometry", name), S("NurbsCurve"), children=ch)
+
+
+def de_boor(degree, points, knots, t, weights=None):
+    """The point at `t` on a NURBS curve, by de Boor's algorithm in homogeneous coordinates."""
+    ws = weights or [1] * len(points)
+    k = max(i for i in range(degree, len(points)) if knots[i] <= t and knots[i] < knots[i + 1])
+    d = [[*(c * ws[i] for c in points[i]), ws[i]] for i in range(k - degree, k + 1)]
+    for lv in range(1, degree + 1):
+        for j in range(degree, lv - 1, -1):
+            i = k - degree + j
+            a = (t - knots[i]) / (knots[i + degree + 1 - lv] - knots[i])
+            d[j] = [(1 - a) * x + a * y for x, y in zip(d[j - 1], d[j])]
+    x, y, z, w = d[degree]
+    return (x / w, y / w, z / w)
+
+
+def curve_case(name, spec, s, mid, pts, expect=None, enc="bin7400"):
+    """A case of a curve through `pts` (points on it, in the file's space, that every drawing has: knots and
+    the middles of spans), on model `mid`."""
+    at = placed(s, mid, pts)
+    write(name, s, spec, {"triangles": 0, "bounds": box(at), "positions_include": at,
+                          "json": {"/meshes/0/primitives/0/mode": 1}, **(expect or {})},
+          enc, extra_stats=False)
+
+
+# An open cubic (one span, a Bezier curve) on a model, unlit in its sRGB Color: through its ends, and at the
+# middle of its span three quarters of the way out.
+BEZ = [(0, 0, 0), (100, 0, 0), (100, 100, 0), (0, 100, 0)]
+BEZ_KNOTS = [0, 0, 0, 0, 1, 1, 1, 1]
+s = Scene()
+s.model(10, "Path", kind="NurbsCurve", T=(10, 0, 0))
+s.obj(nurbs_curve(1, "Path", 4, BEZ, BEZ_KNOTS, color=WIRE_COLOR), ("OO", 1, 10))
+curve_case("nurbs_curve_open", "an open cubic NurbsCurve drawn as segments along the curve, unlit in its sRGB Color",
+           s, 10, [de_boor(3, BEZ, BEZ_KNOTS, t) for t in (0, 0.5, 1)],
+           {"materials": [{"color": [*(srgb_to_linear(c) for c in WIRE_COLOR), 1]}],
+            "json": {"/meshes/0/primitives/0/mode": 1, "/meshes/0/name": "Path",
+                     "/materials/0/extensions/KHR_materials_unlit": {}}})
+
+# A circle as a closed rational quadratic: nine control points, the corners weighted by the square root of a half;
+# through the quarter points and, halfway through each span, the eighths. ASCII.
+H = math.sqrt(0.5)
+CIRCLE = [(100, 0, 0), (100, 100, 0), (0, 100, 0), (-100, 100, 0), (-100, 0, 0), (-100, -100, 0), (0, -100, 0),
+          (100, -100, 0), (100, 0, 0)]
+CIRCLE_W = [1, H, 1, H, 1, H, 1, H, 1]
+CIRCLE_KNOTS = [0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 4]
+s = Scene()
+s.model(10, "Ring", kind="NurbsCurve")
+s.obj(nurbs_curve(1, "Ring", 3, CIRCLE, CIRCLE_KNOTS, "Closed", CIRCLE_W), ("OO", 1, 10))
+curve_case("nurbs_curve_rational_circle", "a closed rational NurbsCurve (a circle) drawn with its weights; ASCII",
+           s, 10, [de_boor(2, CIRCLE, CIRCLE_KNOTS, t / 2, CIRCLE_W) for t in range(9)], enc="ascii7400")
+
+# A periodic cubic as Maya writes one: four control points around a square and seven more knots than points, the
+# curve wrapping around through the first three again. No model holds it, so it's drawn in its template's
+# Color (FbxNurbsCurve's, not FbxMesh's).
+SQUARE = [(100, 100, 0), (-100, 100, 0), (-100, -100, 0), (100, -100, 0)]
+PERIODIC_KNOTS = list(range(-3, 8))
+s = Scene()
+s.templates.append(Node("ObjectType", S("Geometry"), children=[Node("Count", I(1)), *[
+    Node("PropertyTemplate", S(t), children=[props70(P("Color", "ColorRGB", "Color", "", *c))])
+    for t, c in [("FbxMesh", (0.8, 0.8, 0.8)), ("FbxNurbsCurve", (1, 0.5, 0))]]]))
+s.obj(nurbs_curve(1, "Loop", 4, SQUARE, PERIODIC_KNOTS, "Periodic"))
+curve_case("nurbs_curve_periodic", "a periodic NurbsCurve, wrapped around through its first points, no model "
+           "holds: drawn where it is in its template's Color",
+           s, 0, [de_boor(3, SQUARE + SQUARE[:3], PERIODIC_KNOTS, t / 2) for t in range(9)],
+           {"materials": [{"color": [1, srgb_to_linear(0.5), 0, 1]}]})
+
+# Knots that don't fit the points (an order 4 curve of four points takes eight): drawn through its control points.
+s = Scene()
+s.model(10, "Path", kind="NurbsCurve")
+s.obj(nurbs_curve(1, "Path", 4, BEZ, [0, 0, 0, 1, 1, 1]), ("OO", 1, 10))
+curve_case("nurbs_curve_unfit_knots", "a NurbsCurve whose knots don't fit its points, drawn through its control "
+           "points", s, 10, BEZ, {"lines": 3, "vertices": 4})
+
+# NURBS surfaces aren't read, nor curves with no order, and are counted; the cube beside them is drawn.
 s = cube_scene()
 s.model(11, "Path", kind="NurbsCurve")
 s.model(12, "Patch", kind="NurbsSurface")
 s.obj(Node("Geometry", L(3), ON("Geometry", "Path"), S("NurbsCurve"), children=[
-    Node("Type", S("NurbsCurve")), Node("Order", I(4)), Node("Dimension", I(3)), Node("Form", S("Open")),
+    Node("Type", S("NurbsCurve")), Node("Dimension", I(3)), Node("Form", S("Open")),
     Node("Points", AD([0, 0, 0, 1, 100, 0, 0, 1, 100, 100, 0, 1, 0, 100, 0, 1])),
     Node("KnotVector", AD([0, 0, 0, 0, 1, 1, 1, 1]))]), ("OO", 3, 11))
 s.obj(Node("Geometry", L(4), ON("Geometry", "Patch"), S("NurbsSurface"), children=[
     Node("Type", S("NurbsSurface"))]), ("OO", 4, 12))
-write("nurbs_curves_skipped", s, "NURBS curve and surface geometry isn't read, and is counted by kind",
-      {"faces_outward": True, "json": {"/asset/extras/source/skipped": {"NurbsCurve": 1, "NurbsSurface": 1}}})
+write("nurbs_skipped", s, "NURBS surface geometry, and curves with no order, aren't read, and are counted by kind",
+      {"faces_outward": True, "lines": 0,
+       "json": {"/asset/extras/source/skipped": {"NurbsCurve": 1, "NurbsSurface": 1}}})
 
 
 # --- what a mesh reader passes over --------------------------------------------------------

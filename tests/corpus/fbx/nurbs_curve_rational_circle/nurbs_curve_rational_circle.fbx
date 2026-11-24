@@ -1,0 +1,63 @@
+; FBX 7.4.0 project file
+FBXHeaderExtension:  {
+	FBXHeaderVersion: 1003
+	FBXVersion: 7400
+	Creator: "FBX SDK/FBX Plugins version 2020.3"
+}
+
+Creator: "FBX SDK/FBX Plugins version 2020.3"
+
+GlobalSettings:  {
+	Version: 1000
+	Properties70:  {
+		P: "UpAxis", "int", "Integer", "", 1
+		P: "UpAxisSign", "int", "Integer", "", 1
+		P: "FrontAxis", "int", "Integer", "", 2
+		P: "FrontAxisSign", "int", "Integer", "", 1
+		P: "CoordAxis", "int", "Integer", "", 0
+		P: "CoordAxisSign", "int", "Integer", "", 1
+		P: "OriginalUpAxis", "int", "Integer", "", -1
+		P: "OriginalUpAxisSign", "int", "Integer", "", 1
+		P: "UnitScaleFactor", "double", "Number", "", 1
+		P: "OriginalUnitScaleFactor", "double", "Number", "", 1
+	}
+}
+
+Documents:  {
+	Count: 1
+}
+
+Definitions:  {
+	Version: 100
+	Count: 1
+}
+
+Objects:  {
+	Model: 10, "Model::Ring", "NurbsCurve" {
+		Version: 232
+		Properties70:  {
+		}
+		Shading: T
+		Culling: "CullingOff"
+	}
+	Geometry: 1, "Geometry::Ring", "NurbsCurve" {
+		Type: "NurbsCurve"
+		NurbsCurveVersion: 100
+		Order: 3
+		Dimension: 3
+		Form: "Closed"
+		Rational: 1
+		Points: *36 {
+			a: 100,0,0,1,100,100,0,0.7071067811865476,0,100,0,1,-100,100,0,0.7071067811865476,-100,0,0,1,-100,-100,0,0.7071067811865476,0,-100,0,1,100,-100,0,0.7071067811865476,100,0,0,1
+		}
+		KnotVector: *12 {
+			a: 0,0,0,1,1,2,2,3,3,4,4,4
+		}
+	}
+}
+
+Connections:  {
+	C: "OO", 10, 0
+	C: "OO", 1, 10
+}
+

@@ -25,6 +25,7 @@ use crate::material::{Factor, Full};
 use crate::mesh::{Material, Prim, srgb_to_linear};
 use crate::{Context as _, Result};
 
+/// The most voxels a file may hold, unless [`Keep::max_triangles`] allows more triangles than this.
 const MAX_VOXELS: usize = 4_000_000;
 
 /// The palette `MagicaVoxel` uses when a file has no `RGBA` chunk, indexed by color index (0 is
@@ -276,7 +277,7 @@ struct Vox {
 /// `MagicaVoxel`: each model a mesh of the faces between its voxels and empty space, one
 /// primitive per color; the scene graph as nodes, hidden ones kept but hidden.
 pub(crate) fn vox(data: &[u8], keep: Keep) -> Result<Document<'static>> {
-    let v = read(data)?;
+    let v = read(data, keep.triangles().max(MAX_VOXELS))?;
     let scene = v.nodes.contains_key(&0);
     let models = &v.models;
 
@@ -449,8 +450,8 @@ fn source(v: &Vox) -> Value {
     Value::Object(s)
 }
 
-/// Reads every chunk.
-fn read(data: &[u8]) -> Result<Vox> {
+/// Reads every chunk, refusing a file of more than `max_voxels` voxels.
+fn read(data: &[u8], max_voxels: usize) -> Result<Vox> {
     ensure!(data.len() >= 20 && &data[..4] == b"VOX ", "not a MagicaVoxel file");
     let le = |at: usize| -> Result<u32> {
         Ok(u32::from_le_bytes(
@@ -479,7 +480,7 @@ fn read(data: &[u8]) -> Result<Vox> {
             b"XYZI" => {
                 let n = b.u32()? as usize;
                 total = total.saturating_add(n);
-                ensure!(total <= MAX_VOXELS, "too many voxels to convert ({total})");
+                ensure!(total <= max_voxels, "too many voxels to convert ({total})");
                 let raw = body.get(4..4 + n * 4).context("VOX voxels end early")?;
                 let size = size.take().context("VOX voxels without a SIZE")?;
                 v.models.push(Model {
@@ -1546,5 +1547,26 @@ mod tests {
             doc.flatten(crate::document::Pose::Rest).unwrap().unwrap().triangles(),
             12
         );
+    }
+
+    /// The voxel limit rises with the triangle limit: a file claiming one voxel past the default is refused for its
+    /// size, while a higher limit gets as far as finding the voxels missing.
+    #[test]
+    fn a_triangle_limit_past_the_default_lets_more_voxels_in() {
+        let mut f = file([1, 1, 1], &[], &[]);
+        let at = f.windows(4).position(|w| w == b"XYZI").unwrap() + 12;
+        f[at..at + 4].copy_from_slice(&u32::try_from(MAX_VOXELS + 1).unwrap().to_le_bytes());
+        let err = |keep| format!("{:#}", vox(&f, keep).unwrap_err());
+        assert!(err(Keep::ALL).contains("too many voxels"), "{}", err(Keep::ALL));
+        let lower = Keep {
+            max_triangles: 10,
+            ..Keep::ALL
+        };
+        assert!(err(lower).contains("too many voxels"), "{}", err(lower));
+        let higher = Keep {
+            max_triangles: MAX_VOXELS * 2,
+            ..Keep::ALL
+        };
+        assert!(err(higher).contains("end early"), "{}", err(higher));
     }
 }

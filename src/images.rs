@@ -202,6 +202,38 @@ impl Images {
     }
 }
 
+/// Whether encoded image bytes are a gray PNG or JPEG, by the header: a PNG's color type, a JPEG's component count.
+#[cfg(any(feature = "obj", feature = "usd"))]
+pub(crate) fn gray(b: &[u8]) -> bool {
+    if b.starts_with(b"\x89PNG\r\n\x1a\n") {
+        // IHDR comes first; color type 0 is gray, 4 gray with alpha.
+        return b.get(12..16) == Some(b"IHDR".as_slice()) && matches!(b.get(25), Some(0 | 4));
+    }
+    if !b.starts_with(&[0xFF, 0xD8]) {
+        return false;
+    }
+    let mut i = 2usize;
+    while i + 4 <= b.len() {
+        if b[i] != 0xFF {
+            return false;
+        }
+        let marker = b[i + 1];
+        if marker == 0xFF {
+            i += 1;
+            continue;
+        }
+        // A start of frame (not a table): its component count follows the precision, height and width.
+        if (0xC0..=0xCF).contains(&marker) && !matches!(marker, 0xC4 | 0xC8 | 0xCC) {
+            return b.get(i + 9) == Some(&1);
+        }
+        if matches!(marker, 0xD9 | 0xDA) {
+            return false;
+        }
+        i = i.saturating_add(2 + usize::from(u16::from_be_bytes([b[i + 2], b[i + 3]])));
+    }
+    false
+}
+
 #[cfg_attr(
     not(any(feature = "obj", feature = "ply", feature = "3ds", feature = "fbx", feature = "usd")),
     allow(dead_code, reason = "only readers of texture files use it")

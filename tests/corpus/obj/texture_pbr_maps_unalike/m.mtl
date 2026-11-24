@@ -1,0 +1,4 @@
+newmtl pbr
+Kd 1 1 1
+map_Pr -s 2 2 1 rough.png
+map_Pm metal.png

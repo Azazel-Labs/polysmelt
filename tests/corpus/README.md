@@ -32,15 +32,15 @@ cases.
 | STL | 29 | 27 | 2 |
 | PLY | 37 | 33 | 4 |
 | VOX | 27 | 27 | none |
-| OBJ | 58 | 49 | 9 |
+| OBJ | 64 | 55 | 9 |
 | 3DS | 48 | 48 | none |
 | 3MF | 43 | 43 | none |
-| FBX | 130 | 112 | 18 |
+| FBX | 134 | 116 | 18 |
 | USD | 141 | 121 | 20 |
-| glTF | 75 | 60 | 15 |
+| glTF | 80 | 65 | 15 |
 | SketchUp | 31 | 7 | none |
 | BVH | 41 | 41 | none |
-| COLLADA | 76 | 76 | none |
+| COLLADA | 77 | 77 | none |
 | OFF | 23 | 23 | none |
 | VRM | 7 | 7 | none |
 | X3D | 53 | 53 | none |
@@ -91,7 +91,10 @@ python tools/corpus/obj.py
   and unknown chunks.
 - **OBJ**: every face-corner form, negative indices and n-gons. Covers MTL colors, PBR
   extensions, texture maps and their options, Windows paths and missing libraries, and TGA,
-  BMP, GIF, TIFF, PSD and DDS textures re-encoded as PNG. Also
+  BMP, GIF, TIFF, PSD and DDS textures re-encoded as PNG. Roughness, metalness and occlusion
+  maps glTF can't read as they are get packed into its channels: `map_RMA`, separate `map_Pr`
+  and `map_Pm` (with `-imfchan`), `map_Pm` alone, and maps laid out apart, which can't be. A
+  gray `map_Pr` alone serves as it is, and `anisor` rotates the anisotropy. Also
   vertex colors and syntax variants: line continuation, `w` components, number forms and
   non-UTF-8 text.
 - **3DS**: smoothing groups, materials (24-bit and float colors, transparency, shininess,
@@ -110,7 +113,9 @@ python tools/corpus/obj.py
   Also every normal, UV and color mapping, materials, textures (embedded, external and
   missing), and instancing. Line geometry is drawn as lines (polylines through `PointsIndex`,
   broken where an index isn't a point, in the model's material or the line's color, its own
-  or its template's), and NURBS curves and surfaces are counted as skipped.
+  or its template's). NURBS curves are drawn too: open, closed, rational and periodic ones
+  along the curve, and one whose knots don't fit through its control points. NURBS surfaces,
+  and curves with no order, are counted as skipped.
 - **USD**: `.usda`, `.usdc`, `.usd` in either encoding, and `.usdz`. Covers up axis and
   `metersPerUnit`, every xformOp and rotation order, holes and invalid faces,
   `leftHanded` orientation with authored and computed normals (mirrored too), and
@@ -132,7 +137,9 @@ python tools/corpus/obj.py
   `JOINTS_n`/`WEIGHTS_n` sets and weights only in the second set, an animation sampler
   shorter than its keys, `EXT_mesh_gpu_instancing`, metallic-roughness and specular-glossiness
   materials, and textures (embedded, external, data URI, missing, WebP fallback, a second UV
-  set, `KHR_texture_transform`). glTF 1.0, upgraded as it's read: objects keyed by ID,
+  set, `KHR_texture_transform` with a sheared transform). Also every texture slot with its
+  own sampler, scale and strength, material extensions carried to the flat mesh, an empty
+  buffer with no URI, and a GLB whose buffer is an external file. glTF 1.0, upgraded as it's read: objects keyed by ID,
   binary glTF, `KHR_materials_common` and technique materials, accessor strides, a node's
   several meshes, skins found by joint name with a bind shape matrix, animation parameters,
   cameras and lights. Errors: Draco, truncation, buffers outside the model's folder, and
@@ -172,7 +179,7 @@ python tools/corpus/obj.py
   straight, percent-encoded and `file://` paths, embedded hex, a missing file, a bump map, a
   height map, texture placement extras, and specular color and index of refraction. Skins
   with six and twenty influences, a bind shape matrix and IDREF joints, NORMALIZED and
-  RELATIVE morphs and animated morph weights, animations of whole matrices, components,
+  RELATIVE morphs and animated morph weights, morph targets' normals, animations of whole matrices, components,
   angles and matrix elements with LINEAR, STEP, 2D Bezier, BSPLINE and CARDINAL curves,
   nested animations and clips, cameras and lights in centimeters, and `<extra>` kept as
   extras. Also `.zae` with and without a manifest, a `.kmz`, byte order marks, UTF-16, a
@@ -231,7 +238,7 @@ are required. Every other key is optional and is checked only when present.
 | Key | Meaning |
 | --- | --- |
 | `file` | The model file to load. Required when the folder holds more than one model file. |
-| `needs` | A cargo feature the case needs beyond its format's own, such as `draco`. Builds without it skip the case. |
+| `needs` | A cargo feature the case needs beyond its format's own, such as `draco`, or `png` for the PNG encoder any image re-encoding feature brings. Builds without it skip the case. |
 | `error` | Loading must fail with an error containing this text (case-insensitive). |
 | `no_mesh` | `true`: the file loads but has nothing to draw: no triangles, lines or points. |
 | `facts` | An object; each entry must match the loader's `facts`. |
@@ -248,6 +255,7 @@ are required. Every other key is optional and is checked only when present.
 | `materials` | A list of material checks (below). |
 | `document` | Counts in the document's glTF JSON (`nodes`, `skins`, `animations`, `cameras`, `lights`, `joints`, `morph_targets`, `channels`), plus `node_names` and primitive `attributes` that must be there. |
 | `json` | Values in the document's glTF JSON, keyed by JSON pointer (`/materials/0/extensions/KHR_materials_ior/ior`). Numbers match to within `1e-4`, and objects match on the members given. `null` means the pointer must lead nowhere. |
+| `flat_json` | The same, in the glTF JSON of the flat mesh written as GLB, so what reaches the mesh (its materials, textures and samplers) can be checked. |
 | `rig` | A list of checks on what `Document::rig` makes of a node, found by `node` name. Each may give its `parent` (a name, or `null` for a root) and its `translation`, `rotation` (either sign) and `scale`. These are in the rest pose, or with `time` (seconds), posed by animation `animation` (default 0) at that time. `keys` maps a path (`translation`, `rotation`, `scale`) to the channel's key count, its key times, or `null` for no channel. |
 
 Each `materials` entry is matched by `name`, or by position when it has no name:
@@ -260,6 +268,8 @@ Each `materials` entry is matched by `name`, or by position when it has no name:
 | `double_sided` | The glTF `doubleSided` flag. |
 | `alpha_mode` | `OPAQUE`, `MASK` or `BLEND`. |
 | `pixel` | The base color texture's top-left pixel, as 8-bit RGB. |
+| `metal_rough_pixel` | The same, of the metallic-roughness texture. |
+| `occlusion_pixel` | The same, of the occlusion texture. |
 
 ## Adding a case
 

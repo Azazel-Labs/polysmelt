@@ -115,6 +115,8 @@ pub(crate) fn load<'a>(input: Input<'a>, assets: &'a dyn Assets, keep: Keep) -> 
             },
             None if i == 0 && bin.is_some() => bin.take().expect("checked"),
             None if fallback => Blob::Missing(declared),
+            // An empty buffer needs no data (a placeholder some writers leave).
+            None if declared == 0 => Blob::Bytes(Cow::Borrowed(&[])),
             None => bail!("glTF buffer {i} has no data"),
         };
         ensure!(
@@ -424,9 +426,14 @@ mod tests {
             .collect()
     }
 
-    /// The JSON without what writing may restate: views' default `byteOffset` and where in the
-    /// binary chunk each view sits.
+    /// The JSON without what writing may restate: views' default `byteOffset`, where in the
+    /// binary chunk each view sits, and empty buffers at the end, which no view can use.
     fn normalized(mut json: Value) -> Value {
+        if let Some(list) = json.get_mut("buffers").and_then(Value::as_array_mut) {
+            while list.len() > 1 && list.last().and_then(|b| b["byteLength"].as_u64()) == Some(0) {
+                list.pop();
+            }
+        }
         for v in json["bufferViews"].as_array_mut().into_iter().flatten() {
             let o = v.as_object_mut().unwrap();
             if o.get("buffer").and_then(Value::as_u64) == Some(0) {
@@ -464,7 +471,11 @@ mod tests {
                 continue;
             };
             let bytes = std::fs::read(&path).unwrap();
-            let assets = Folder::new(dir);
+            // The files beside it, for what it names (a model in memory reads them from its assets).
+            let mut assets = crate::assets::Memory::new();
+            for f in std::fs::read_dir(dir).unwrap().flatten() {
+                assets.insert(&f.file_name().to_string_lossy(), std::fs::read(f.path()).unwrap());
+            }
             let name = path.file_name().unwrap().to_string_lossy().into_owned();
             let mem = crate::formats::load_bytes(&bytes, &name, "glb", &assets, Keep::ALL).unwrap();
             let shown = |d: &Document<'_>| {
@@ -493,9 +504,13 @@ mod tests {
             let original = std::fs::read(&path).unwrap();
             let written = doc.to_glb().unwrap();
             let name = path.display();
-            // A glTF 1.0 file comes back as 2.0; only the second round trip must match.
-            if original[4..8] != 1u32.to_le_bytes() {
-                let (a, abin) = split(&original);
+            // A glTF 1.0 file comes back as 2.0, and buffers in files come back inside: only the
+            // second round trip must match.
+            let (a, abin) = split(&original);
+            let in_files = a["buffers"]
+                .as_array()
+                .is_some_and(|l| l.iter().any(|b| b.get("uri").is_some()));
+            if original[4..8] != 1u32.to_le_bytes() && !in_files {
                 let (b, bbin) = split(&written);
                 assert_eq!(normalized(a.clone()), normalized(b.clone()), "{name}: the JSON changed");
                 assert!(

@@ -4,8 +4,12 @@
 //! continue over lines ending in a backslash, a leading byte order mark is skipped, and text that
 //! isn't UTF-8 (names from older tools) is read as Latin-1. Polygons are triangulated in their
 //! plane, so concave faces stay inside their outline. Beyond the original format, vertex colors
-//! (`v x y z r g b`, or `#MRGB` comment blocks) and the MTL PBR keys (`Pr`, `Pm`, `Ke`, `norm`,
-//! `map_ORM`) are read.
+//! (`v x y z r g b`, or `#MRGB` comment blocks) and the MTL PBR keys (`Pr`, `Pm`, `Ps`, `Pc`, `Pcr`,
+//! `aniso`, `anisor`, `Ke`, `norm`, and the `map_Pr`, `map_Pm`, `map_ORM` and `map_RMA` maps) are read.
+//! glTF reads occlusion, roughness and metalness from one image's red, green and blue, so maps
+//! arranged otherwise are packed into a new PNG that way, when their pixels can be read (PNG, and
+//! the formats re-encoded as PNG). The maps are read for that even when the images' bytes aren't
+//! kept, so the textures are the same either way.
 //!
 //! Corners without a normal get one made from their faces: smooth within a smoothing group
 //! (`s 1`, the default), across texture seams, and flat for faces after `s off`. Corners with a
@@ -21,7 +25,7 @@ use std::collections::{HashMap, VecDeque};
 use std::io;
 #[cfg(any(feature = "fs", test))]
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
@@ -33,10 +37,10 @@ use super::stream;
 use crate::Result;
 use crate::assets::Assets;
 use crate::document::{Builder, Document, Keep, Part};
-use crate::images::Images;
+use crate::images::{Images, Source, gray};
 use crate::keep::spawn;
 use crate::material::{self, Alpha, Clearcoat, Factor, Full, Sheen, Specular, Tex, UvTransform};
-use crate::mesh::{Material, Prim, quad, smooth_normals, srgb_to_linear, triangulate};
+use crate::mesh::{Image, Material, Prim, quad, smooth_normals, srgb_to_linear, triangulate};
 use crate::num::u32_of;
 
 /// Marks a corner without a texture coordinate or normal.
@@ -79,17 +83,21 @@ struct MtlEntry {
     alpha_map: Option<MapRef>,
     /// `map_ORM`: occlusion, roughness and metalness in red, green and blue, as glTF packs them.
     orm_map: Option<MapRef>,
+    /// `map_RMA`: roughness, metalness and occlusion in red, green and blue.
+    rma_map: Option<MapRef>,
     /// `map_ao`: occlusion in red.
     occlusion_map: Option<MapRef>,
     /// `Ks`, Phong's highlight color.
     specular: Option<[f32; 3]>,
     /// `Ni`.
     ior: Option<f32>,
-    /// `Ps`, `Pc`, `Pcr` and `aniso`: the PBR extension's sheen, clearcoat and anisotropy.
+    /// `Ps`, `Pc`, `Pcr`, `aniso` and `anisor`: the PBR extension's sheen, clearcoat and anisotropy, its
+    /// rotation a fraction of a turn.
     sheen: Option<[f32; 3]>,
     clearcoat: Option<f32>,
     clearcoat_roughness: Option<f32>,
     anisotropy: Option<f32>,
+    anisotropy_rotation: Option<f32>,
     /// `illum`.
     illum: Option<f32>,
     /// Every statement as written: numbers as numbers, the rest as text.
@@ -210,6 +218,148 @@ struct MapRef {
     clamp: bool,
     /// `-bm`: a bump or normal map's strength.
     bump: f32,
+    /// `-imfchan`: the channel a one-value map reads.
+    channel: Pick,
+}
+
+/// The channel of an image a one-value map reads (`-imfchan`): red, green, blue, or by default its
+/// luminance (which is any channel of a gray image).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Pick {
+    Red,
+    Green,
+    Blue,
+    Luma,
+}
+
+#[cfg(any(
+    feature = "webp",
+    feature = "skp",
+    feature = "tga",
+    feature = "bmp",
+    feature = "gif",
+    feature = "tiff",
+    feature = "psd",
+    feature = "dds"
+))]
+impl Pick {
+    /// The value it picks from a pixel's red, green and blue.
+    fn of(self, [r, g, b]: [u8; 3]) -> u8 {
+        match self {
+            Pick::Red => r,
+            Pick::Green => g,
+            Pick::Blue => b,
+            // Rec. 709's weights, which add up to one: a gray pixel stays as it is.
+            Pick::Luma => {
+                let y = (2126 * u32::from(r) + 7152 * u32::from(g) + 722 * u32::from(b) + 5000) / 10_000;
+                u8::try_from(y).unwrap_or(u8::MAX)
+            }
+        }
+    }
+}
+
+/// Where a channel of a packed image comes from: a channel of a map's image, or one value everywhere.
+#[derive(Clone, Copy)]
+enum Plane<'a> {
+    Map(&'a MapRef, Pick),
+    Value(u8),
+}
+
+impl<'a> Plane<'a> {
+    /// A map's image in the map's own channel, or with no map, full (the factor's own value).
+    fn of(map: Option<&'a MapRef>) -> Self {
+        map.map_or(Plane::Value(255), |m| Plane::Map(m, m.channel))
+    }
+}
+
+/// A channel of a packed image, its map's file found: the key a packed image is made once by.
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum Channel {
+    File(PathBuf, Pick),
+    Value(u8),
+}
+
+/// How a material's texture is made from its map.
+enum Make<'a> {
+    /// The map's image as it is.
+    File,
+    /// The map's image as it is, when it's gray (the same in every channel); otherwise none.
+    Gray,
+    /// A new image, red, green and blue from these.
+    Pack([Plane<'a>; 3]),
+}
+
+/// A PNG of `channels` as its red, green and blue, from the images' decoded pixels: each file read
+/// and decoded once. `None` when a file can't be read or decoded (only PNG, and the formats
+/// re-encoded as PNG, can), when the images aren't one size, or when no channel is a file.
+#[cfg(any(
+    feature = "webp",
+    feature = "skp",
+    feature = "tga",
+    feature = "bmp",
+    feature = "gif",
+    feature = "tiff",
+    feature = "psd",
+    feature = "dds"
+))]
+fn pack(channels: &[Channel; 3], assets: &dyn Assets) -> Option<Image> {
+    let mut out: Option<(u32, u32, Vec<[u8; 3]>)> = None;
+    let mut done = [false; 3];
+    for k in 0..3 {
+        let Channel::File(path, _) = &channels[k] else {
+            continue;
+        };
+        if done[k] {
+            continue;
+        }
+        // Every channel this file gives, picked in one pass over its pixels.
+        let from: [Option<Pick>; 3] = std::array::from_fn(|j| match &channels[j] {
+            Channel::File(p, pick) if p == path => Some(*pick),
+            _ => None,
+        });
+        let image = assets.load_image(path)?;
+        let (w, h, px) = crate::png::decode(&image.bytes, |rgb| from.map(|f| f.map_or(0, |p| p.of(rgb))))?;
+        match &mut out {
+            None => out = Some((w, h, px)),
+            Some((ow, oh, o)) => {
+                if (*ow, *oh) != (w, h) {
+                    return None;
+                }
+                for (a, b) in o.iter_mut().zip(px) {
+                    for j in (0..3).filter(|&j| from[j].is_some()) {
+                        a[j] = b[j];
+                    }
+                }
+            }
+        }
+        for (d, f) in done.iter_mut().zip(from) {
+            *d |= f.is_some();
+        }
+    }
+    let (w, h, mut px) = out?;
+    for (j, c) in channels.iter().enumerate() {
+        if let Channel::Value(v) = c {
+            for p in &mut px {
+                p[j] = *v;
+            }
+        }
+    }
+    Image::from_png_or_jpeg(crate::png::encode(w, h, 3, px.as_flattened())?)
+}
+
+/// Without a PNG encoder, nothing is packed.
+#[cfg(not(any(
+    feature = "webp",
+    feature = "skp",
+    feature = "tga",
+    feature = "bmp",
+    feature = "gif",
+    feature = "tiff",
+    feature = "psd",
+    feature = "dds"
+)))]
+fn pack(_: &[Channel; 3], _: &dyn Assets) -> Option<Image> {
+    None
 }
 
 impl MapRef {
@@ -233,6 +383,13 @@ impl MapRef {
         t.scale = self.bump;
         t
     }
+
+    /// Whether it lays its image out as `other` does: the same placement and wrap.
+    fn same_layout(&self, other: &MapRef) -> bool {
+        #[allow(clippy::float_cmp, reason = "options as written")]
+        let same = self.offset == other.offset && self.scale == other.scale;
+        same && self.clamp == other.clamp
+    }
 }
 
 /// A texture statement: the file name after any options (`-s 1 1 1`, `-bm 0.5`, ...), and the options' values.
@@ -243,6 +400,7 @@ fn map_ref(rest: &[u8]) -> Option<MapRef> {
         scale: [1.0; 2],
         clamp: false,
         bump: 1.0,
+        channel: Pick::Luma,
     };
     let mut rest = trim(rest);
     while rest.first() == Some(&b'-') {
@@ -274,6 +432,14 @@ fn map_ref(rest: &[u8]) -> Option<MapRef> {
             b"-s" => m.scale = [n(0).unwrap_or(1.0), n(1).unwrap_or(1.0)],
             b"-clamp" => m.clamp = values.first().is_some_and(|w| w.eq_ignore_ascii_case(b"on")),
             b"-bm" => m.bump = n(0).unwrap_or(1.0),
+            b"-imfchan" => {
+                m.channel = match values.first().map(|w| w.to_ascii_lowercase()).as_deref() {
+                    Some(b"r") => Pick::Red,
+                    Some(b"g") => Pick::Green,
+                    Some(b"b") => Pick::Blue,
+                    _ => Pick::Luma,
+                }
+            }
             _ => {}
         }
     }
@@ -287,17 +453,21 @@ struct Look {
     color: Option<Tex>,
     normal: Option<Tex>,
     metal_rough: Option<Tex>,
+    /// Whether `metal_rough` holds metalness, not one value everywhere in its place.
+    metal_in_tex: bool,
     occlusion: Option<Tex>,
     emissive: Option<Tex>,
     /// Cut out by the color texture's alpha (`map_d` naming the `map_Kd` file).
     alpha: Option<Alpha>,
     /// Glass (`illum` 4, 6, 7 or 9) that is see-through.
     transmission: Option<f32>,
-    specular: Option<Specular>,
+    specular: Option<Specular<Tex>>,
     ior: Option<f32>,
-    sheen: Option<Sheen>,
-    clearcoat: Option<Clearcoat>,
+    sheen: Option<Sheen<Tex>>,
+    clearcoat: Option<Clearcoat<Tex>>,
     anisotropy: Option<f32>,
+    /// The anisotropy's rotation, in radians.
+    anisotropy_rotation: f32,
     unlit: bool,
 }
 
@@ -320,7 +490,7 @@ impl Look {
         if let Some(t) = &self.metal_rough {
             f.metallic_roughness_tex = Some(t.clone());
             // The texture is the value, unscaled, unless the file says otherwise.
-            if m.metallic <= 0.0 {
+            if self.metal_in_tex && m.metallic <= 0.0 {
                 f.metallic = 1.0;
             }
         }
@@ -339,7 +509,7 @@ impl Look {
         f.clearcoat.clone_from(&self.clearcoat);
         f.anisotropy = self.anisotropy.map(|a| material::Anisotropy {
             strength: Factor::of(a),
-            rotation: 0.0,
+            rotation: self.anisotropy_rotation,
         });
         f.unlit = self.unlit;
         f
@@ -383,6 +553,7 @@ fn read_mtl(data: &[u8], out: &mut HashMap<String, MtlEntry>) {
             b"pc" if n > 0 => e.clearcoat = Some(f[0]),
             b"pcr" if n > 0 => e.clearcoat_roughness = Some(f[0]),
             b"aniso" if n > 0 => e.anisotropy = Some(f[0]),
+            b"anisor" if n > 0 => e.anisotropy_rotation = Some(f[0]),
             b"illum" if n > 0 => e.illum = Some(f[0]),
             b"map_kd" => e.color_map = map_ref(rest),
             b"map_bump" | b"bump" | b"norm" | b"map_kn" => e.normal_map = map_ref(rest),
@@ -393,6 +564,7 @@ fn read_mtl(data: &[u8], out: &mut HashMap<String, MtlEntry>) {
             b"map_pm" => e.metallic_map = map_ref(rest),
             b"map_d" => e.alpha_map = map_ref(rest),
             b"map_orm" => e.orm_map = map_ref(rest),
+            b"map_rma" => e.rma_map = map_ref(rest),
             b"map_ao" => e.occlusion_map = map_ref(rest),
             _ => {}
         }
@@ -2771,7 +2943,9 @@ pub(crate) fn obj(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<D
         textured[m] |= !g.prim.uvs.is_empty();
     }
     let mut images = Images::new(!keep.image_bytes, dir);
-    let mut image_of: HashMap<std::path::PathBuf, Option<usize>> = HashMap::new();
+    let mut image_of: HashMap<PathBuf, Option<usize>> = HashMap::new();
+    // The images packed so far, by what they're packed from.
+    let mut packs: HashMap<[Channel; 3], Option<usize>> = HashMap::new();
     let mut out_materials = Vec::new();
     let mut looks: Vec<Look> = Vec::new();
     for (m, &name) in used.iter().enumerate() {
@@ -2795,19 +2969,53 @@ pub(crate) fn obj(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<D
                 mat.roughness = r;
             }
         }
-        let mut texture = |reference: Option<&MapRef>| -> Option<Tex> {
+        let mut texture = |reference: Option<&MapRef>, make: Make<'_>| -> Option<Tex> {
             if !textures || !textured[m] {
                 return None;
             }
             let reference = reference?;
             let found = assets.find(&reference.file, dir)?;
-            let image = (*image_of
-                .entry(found.clone())
-                .or_insert_with(|| images.file(assets, found, &reference.file)))?;
+            let image = match make {
+                Make::File => {
+                    (*image_of
+                        .entry(found.clone())
+                        .or_insert_with(|| images.file(assets, found, &reference.file)))?
+                }
+                // An image already read shows whether it's gray; one only named is read to see.
+                Make::Gray => match image_of.get(&found) {
+                    Some(None) => return None,
+                    Some(&Some(i)) if matches!(&images.list[i], Source::Image(img) if !gray(&img.bytes)) => {
+                        return None;
+                    }
+                    Some(&Some(i)) if matches!(&images.list[i], Source::Image(_)) => i,
+                    _ => {
+                        let img = assets.load_image(&found).filter(|img| gray(&img.bytes))?;
+                        (*image_of.entry(found.clone()).or_insert_with(|| {
+                            if keep.image_bytes {
+                                images.list.push(Source::Image(img));
+                                Some(images.list.len() - 1)
+                            } else {
+                                images.file(assets, found, &reference.file)
+                            }
+                        }))?
+                    }
+                },
+                Make::Pack(planes) => {
+                    let channel = |p: Plane<'_>| match p {
+                        Plane::Map(r, pick) => Some(Channel::File(assets.find(&r.file, dir)?, pick)),
+                        Plane::Value(v) => Some(Channel::Value(v)),
+                    };
+                    let key = [channel(planes[0])?, channel(planes[1])?, channel(planes[2])?];
+                    (*packs.entry(key).or_insert_with_key(|key| {
+                        images.list.push(Source::Image(pack(key, assets)?));
+                        Some(images.list.len() - 1)
+                    }))?
+                }
+            };
             Some(reference.tex(image))
         };
-        let color = texture(entry.and_then(|e| e.color_map.as_ref()));
-        let normal = texture(entry.and_then(|e| e.normal_map.as_ref()));
+        let color = texture(entry.and_then(|e| e.color_map.as_ref()), Make::File);
+        let normal = texture(entry.and_then(|e| e.normal_map.as_ref()), Make::File);
         mat.color_image = color.as_ref().map(|t| t.image);
         mat.normal_image = normal.as_ref().map(|t| t.image);
         let mut look = Look {
@@ -2816,7 +3024,7 @@ pub(crate) fn obj(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<D
             ..Look::default()
         };
         if let Some(e) = entry {
-            look.emissive = texture(e.emissive_map.as_ref());
+            look.emissive = texture(e.emissive_map.as_ref(), Make::File);
             mat.emissive_image = look.emissive.as_ref().map(|t| t.image);
             // The emissive texture shows as it is unless `Ke` scales it (exporters write zero
             // when it doesn't).
@@ -2824,21 +3032,60 @@ pub(crate) fn obj(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<D
                 mat.emissive = [1.0; 3];
             }
             // glTF reads roughness and metalness from one image's green and blue, and occlusion
-            // from its red.
-            if e.orm_map.is_some() {
-                look.metal_rough = texture(e.orm_map.as_ref());
+            // from its red: `map_ORM` as it is, `map_RMA` rearranged, and `map_Pr` and `map_Pm` as
+            // one (one file named for both is taken as packed that way already).
+            let (rough, metal) = (e.roughness_map.as_ref(), e.metallic_map.as_ref());
+            // Whether the texture holds roughness and metalness, not one value everywhere in their place.
+            let mut holds = [false; 2];
+            if let Some(orm) = &e.orm_map {
+                look.metal_rough = texture(Some(orm), Make::File);
                 look.occlusion.clone_from(&look.metal_rough);
-            } else if e.roughness_map.is_some() && e.roughness_map == e.metallic_map {
-                look.metal_rough = texture(e.roughness_map.as_ref());
+                holds = [true; 2];
+            } else if let Some(rma) = &e.rma_map {
+                let planes = [
+                    Plane::Map(rma, Pick::Blue),
+                    Plane::Map(rma, Pick::Red),
+                    Plane::Map(rma, Pick::Green),
+                ];
+                look.metal_rough = texture(Some(rma), Make::Pack(planes));
+                look.occlusion.clone_from(&look.metal_rough);
+                holds = [true; 2];
+            } else if rough.is_some() && rough == metal {
+                look.metal_rough = texture(rough, Make::File);
+                holds = [true; 2];
+            } else if rough.is_some() || metal.is_some() {
+                // A gray roughness image reads the same in every channel, so it serves as it is
+                // where nothing is metal.
+                if let Some(r) = rough
+                    && metal.is_none()
+                    && r.channel == Pick::Luma
+                    && e.metallic.is_none_or(|m| m <= 0.0)
+                {
+                    look.metal_rough = texture(Some(r), Make::Gray);
+                }
+                // Otherwise each map in its channel, where they lay their images out alike.
+                if look.metal_rough.is_none() && rough.zip(metal).is_none_or(|(r, m)| r.same_layout(m)) {
+                    let planes = [Plane::Value(255), Plane::of(rough), Plane::of(metal)];
+                    look.metal_rough = texture(rough.or(metal), Make::Pack(planes));
+                }
+                holds = [rough.is_some(), metal.is_some()];
+            }
+            if look.metal_rough.is_none() {
+                holds = [false; 2];
             }
             if look.occlusion.is_none() {
-                look.occlusion = texture(e.occlusion_map.as_ref());
+                look.occlusion = texture(e.occlusion_map.as_ref(), Make::File);
             }
             mat.metallic_roughness_image = look.metal_rough.as_ref().map(|t| t.image);
             mat.occlusion_image = look.occlusion.as_ref().map(|t| t.image);
-            if look.metal_rough.is_some() && e.metallic.is_none() {
+            // A texture holding a value is that value, unscaled, unless the file gives a factor.
+            if holds[0] && e.roughness.is_none() {
+                mat.roughness = 1.0;
+            }
+            if holds[1] && e.metallic.is_none() {
                 mat.metallic = 1.0;
             }
+            look.metal_in_tex = holds[1];
             // Opacity in the color texture's alpha: cut out there. A separate opacity file
             // would need its pixels moved into the color texture's alpha.
             if let (Some(a), Some(c)) = (&e.alpha_map, &e.color_map)
@@ -2856,7 +3103,7 @@ pub(crate) fn obj(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<D
                 mat.color[3] = 1.0;
             }
             let pbr = e.roughness.is_some() || e.metallic.is_some();
-            let spec_tex = texture(e.specular_map.as_ref());
+            let spec_tex = texture(e.specular_map.as_ref(), Make::File);
             if !pbr && (e.specular.is_some() || spec_tex.is_some()) {
                 // Phong's highlight, where half is glTF's usual.
                 look.specular = Some(Specular {
@@ -2867,7 +3114,7 @@ pub(crate) fn obj(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<D
             }
             // Every exporter writes Ni, often a placeholder of 1 (which would take the highlight away).
             look.ior = e.ior.filter(|i| *i > 1.0 && *i <= 5.0);
-            let sheen_tex = texture(e.sheen_map.as_ref());
+            let sheen_tex = texture(e.sheen_map.as_ref(), Make::File);
             if e.sheen.is_some() || sheen_tex.is_some() {
                 look.sheen = Some(Sheen {
                     color: e.sheen.unwrap_or([1.0; 3]),
@@ -2883,6 +3130,7 @@ pub(crate) fn obj(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<D
                 });
             }
             look.anisotropy = e.anisotropy;
+            look.anisotropy_rotation = e.anisotropy_rotation.map_or(0.0, |r| r * std::f32::consts::TAU);
             // Color on, ambient off: the color as it is, unlit.
             #[allow(clippy::float_cmp, reason = "illum is a whole number")]
             {
@@ -3566,5 +3814,79 @@ mod tests {
             0.75
         );
         assert!(glass["alphaMode"].is_null(), "{glass}");
+    }
+
+    // Packing needs the PNG encoder.
+    #[cfg(any(
+        feature = "webp",
+        feature = "skp",
+        feature = "tga",
+        feature = "bmp",
+        feature = "gif",
+        feature = "tiff",
+        feature = "psd",
+        feature = "dds"
+    ))]
+    #[test]
+    fn mtl_packs_rma_and_separate_roughness_and_metalness_maps() {
+        let solid = |rgb: [u8; 3], size: u32| {
+            let mut png = Vec::new();
+            image::RgbImage::from_pixel(size, size, image::Rgb(rgb))
+                .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+                .unwrap();
+            png
+        };
+        let mtl = "newmtl rma\nmap_RMA rma.png\n\
+                   newmtl split\nPm 0.5\nmap_Pr r.png\nmap_Pm -imfchan g m.png\n\
+                   newmtl unalike\nmap_Pr r.png\nmap_Pm -s 2 2 1 m.png\n\
+                   newmtl sizes\nmap_Pr r.png\nmap_Pm big.png\n\
+                   newmtl orm\nmap_ORM rma.png\n\
+                   newmtl turned\naniso 0.8\nanisor 0.25\n";
+        let assets = Memory::new()
+            .with("t.mtl", mtl)
+            .with("rma.png", solid([200, 100, 50], 2))
+            .with("r.png", solid([100, 150, 200], 2))
+            .with("m.png", solid([10, 220, 30], 2))
+            .with("big.png", solid([10, 220, 30], 4));
+        let mut text = String::from("mtllib t.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 0 1\n");
+        for name in ["rma", "split", "unalike", "sizes", "orm", "turned"] {
+            writeln!(text, "usemtl {name}\nf 1/1 2/2 3/3").unwrap();
+        }
+        let doc = |keep: Keep| obj(Input::memory(text.as_bytes(), "t.obj"), &assets, keep).unwrap();
+        let m = doc(Keep::ALL).flatten(crate::document::Pose::Rest).unwrap().unwrap();
+        let by = |name: &str| m.materials.iter().find(|x| x.name == name).unwrap();
+        let pixel = |i: Option<usize>| {
+            let img = image::load_from_memory(&m.images[i.unwrap()].bytes).unwrap().to_rgb8();
+            img.get_pixel(0, 0).0
+        };
+        // Roughness, metalness and occlusion from the red, green and blue moved to green, blue and red.
+        let rma = by("rma");
+        assert_eq!(pixel(rma.metallic_roughness_image), [50, 200, 100]);
+        assert_eq!(rma.occlusion_image, rma.metallic_roughness_image);
+        assert_eq!((rma.roughness, rma.metallic), (1.0, 1.0));
+        // Roughness as the luma of its map, metalness from the green its `-imfchan` names, scaled by `Pm`.
+        let split = by("split");
+        assert_eq!(pixel(split.metallic_roughness_image), [255, 143, 220]);
+        assert_eq!((split.roughness, split.metallic), (1.0, 0.5));
+        // Maps laid out apart, or of different sizes: no texture, the factors as they are.
+        for name in ["unalike", "sizes"] {
+            let x = by(name);
+            assert_eq!(x.metallic_roughness_image, None, "{name}");
+            assert_eq!(x.metallic, 0.0, "{name}");
+        }
+        assert_eq!(by("orm").roughness, 1.0);
+        let turned = by("turned").extensions.as_ref().unwrap();
+        let rotation = turned.anisotropy.as_ref().unwrap().rotation;
+        assert!((rotation - std::f32::consts::FRAC_PI_2).abs() < 1e-6);
+        // Without image bytes the maps are read all the same to pack them: the same materials, the packed image
+        // embedded and the file used as it is left unread.
+        let full = doc(Keep::ALL);
+        let lazy = doc(Keep {
+            image_bytes: false,
+            ..Keep::ALL
+        });
+        assert_eq!(lazy.json["materials"], full.json["materials"]);
+        let uris: Vec<_> = (0..3).map(|i| lazy.json["images"][i]["uri"].as_str()).collect();
+        assert_eq!(uris, [None, None, Some("rma.png")]);
     }
 }

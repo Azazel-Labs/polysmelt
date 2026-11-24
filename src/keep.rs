@@ -52,7 +52,8 @@ pub struct Keep {
     /// converted: each is a glTF image with a `uri`, and [`Document::images`] has a handle on it
     /// that says where it is (its file, if it's in one) and reads it on request.
     /// [`Document::embed_images`] reads them all. [`Document::prune`] leaves images as they
-    /// are: once read, they stay read.
+    /// are: once read, they stay read. Images a reader must look into to make a texture (an OBJ's
+    /// roughness and metalness maps packed into one) are read all the same, so the textures match.
     pub image_bytes: bool,
     /// Cameras.
     pub cameras: bool,

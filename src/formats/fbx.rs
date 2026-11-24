@@ -5,8 +5,9 @@
 //! cameras, lights, and user properties as node extras. The file's axis system and unit become a root node that
 //! carries them to glTF's Y-up meters, and are recorded in `asset.extras.source`.
 //!
-//! `Line` geometry is drawn as line segments, in its model's first material or else unlit in its own color. NURBS
-//! curves and surfaces and patches aren't read; `asset.extras.source.skipped` counts them by kind.
+//! `Line` geometry is drawn as line segments, in its model's first material or else unlit in its own color, and so
+//! is `NurbsCurve` geometry: each knot span in up to 32 segments, by how far it turns. NURBS surfaces and patches,
+//! and curves with no order or points, aren't read; `asset.extras.source.skipped` counts them by kind.
 //!
 //! Colors are sRGB, as the FBX SDK's tools write them, except that Blender writes material colors linear; vertex
 //! colors are sRGB from every tool, Blender included (its exporter's default).
@@ -17,6 +18,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use super::fbx_tree::{Attr as A, NodeHandle};
+use super::nurbs;
 use crate::{Context as _, Result};
 use serde_json::{Map, Value, json};
 
@@ -290,6 +292,10 @@ impl Layer {
 /// FBX time units per second.
 const KTIME: f64 = 46_186_158_000.0;
 
+/// The most points NURBS curves add to a file; past them, a curve is drawn through its control points. Each control
+/// point is a few bytes of the file but up to 32 segments, so this bounds what a file of curves costs.
+const MAX_CURVE_POINTS: usize = 1 << 22;
+
 /// The most degrees a rotation curve may turn between two samples: FBX interpolates Euler
 /// angles, glTF quaternions, so long turns are cut into steps short enough to agree.
 const MAX_STEP_DEGREES: f64 = 10.0;
@@ -436,6 +442,7 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         color_uv: HashMap::new(),
         material_uvs: HashMap::new(),
         line_materials: HashMap::new(),
+        curve_points: 0,
     };
     let models: Vec<i64> = objs.order.iter().copied().filter(|id| objs.is("Model", *id)).collect();
     // A level of detail group shows its first level, the finest; the others are kept, hidden.
@@ -488,9 +495,13 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
             continue;
         };
         let mesh = match kind_of(geom) {
-            "Mesh" | "Line" if objs.parents_of(g).any(|p| objs.is("Model", p)) => continue,
+            "NurbsCurve" if !is_curve(geom) => {
+                *skipped.entry("NurbsCurve").or_default() += 1;
+                continue;
+            }
+            "Mesh" | "Line" | "NurbsCurve" if objs.parents_of(g).any(|p| objs.is("Model", p)) => continue,
             "Mesh" => r.mesh_for(g, 0)?,
-            "Line" => match r.line_mesh(g, 0) {
+            "Line" | "NurbsCurve" => match r.line_mesh(g, 0) {
                 Some(mesh) => mesh,
                 None => continue,
             },
@@ -606,9 +617,14 @@ impl<'a> Objects<'a> {
     fn template(&self, node: NodeHandle<'_>) -> Option<&HashMap<String, Vec<A<'a>>>> {
         let all = self.templates.get(node.name())?;
         let kind = kind_of(node);
-        // A line's template is never a mesh's, nor a mesh's a line's.
+        // A line's or curve's template is never a mesh's, nor a mesh's a line's or curve's.
         if let [(name, one)] = all.as_slice()
-            && (node.name() != "Geometry" || (kind == "Line") == (name == "FbxLine"))
+            && (node.name() != "Geometry"
+                || match kind {
+                    "Line" => name == "FbxLine",
+                    "NurbsCurve" => name == "FbxNurbsCurve",
+                    _ => name != "FbxLine" && name != "FbxNurbsCurve",
+                })
         {
             return Some(one);
         }
@@ -617,6 +633,7 @@ impl<'a> Objects<'a> {
             "Model" => named("FbxNode"),
             "Geometry" if kind == "Shape" => named("FbxShape"),
             "Geometry" if kind == "Line" => named("FbxLine"),
+            "Geometry" if kind == "NurbsCurve" => named("FbxNurbsCurve"),
             "Geometry" => named("FbxMesh"),
             "NodeAttribute" => match kind {
                 "LimbNode" => named("FbxSkeleton"),
@@ -1427,6 +1444,8 @@ struct Reader<'o, 'a, 'x> {
     material_uvs: HashMap<usize, Vec<(TexField, String)>>,
     /// A line's linear color, by its components' bits → the unlit material drawing it.
     line_materials: HashMap<[u32; 3], usize>,
+    /// The points NURBS curves have drawn, out of `MAX_CURVE_POINTS`.
+    curve_points: usize,
 }
 
 /// Sets a node's transform, unless it isn't finite (a broken file): the node stays where its parent is.
@@ -1508,16 +1527,20 @@ impl Reader<'_, '_, '_> {
         let geometries: Vec<i64> = self
             .objs
             .children_of(m)
-            .filter(|g| self.objs.is_kind("Geometry", *g, "Mesh") || self.objs.is_kind("Geometry", *g, "Line"))
+            .filter(|&g| {
+                self.objs
+                    .node(g)
+                    .is_some_and(|n| n.name() == "Geometry" && matches!(kind_of(n), "Mesh" | "Line" | "NurbsCurve"))
+            })
             .collect();
         for g in geometries {
-            let built = if self.objs.is_kind("Geometry", g, "Line") {
+            let built = if self.objs.is_kind("Geometry", g, "Mesh") {
+                self.mesh_for(g, m)?
+            } else {
                 match self.line_mesh(g, m) {
                     Some(built) => built,
                     None => continue,
                 }
-            } else {
-                self.mesh_for(g, m)?
             };
             let skin = self
                 .objs
@@ -1665,8 +1688,8 @@ impl Reader<'_, '_, '_> {
         self.materials.len() - 1
     }
 
-    /// The mesh for `Line` geometry `g` as model `m` (0 for none) draws it: its segments, in the model's first
-    /// material, else unlit in the geometry's `Color` (white without one); `None` when it has none.
+    /// The mesh for `Line` or `NurbsCurve` geometry `g` as model `m` (0 for none) draws it: its segments, in the
+    /// model's first material, else unlit in the geometry's `Color` (white without one); `None` when it has none.
     fn line_mesh(&mut self, g: i64, m: i64) -> Option<usize> {
         let mut mats = if m == 0 { Vec::new() } else { self.model_materials(m) };
         mats.truncate(1);
@@ -1674,7 +1697,13 @@ impl Reader<'_, '_, '_> {
             return Some(i);
         }
         let geom = self.objs.node(g)?;
-        let prim = line_geometry(geom);
+        let prim = if kind_of(geom) == "NurbsCurve" {
+            let (prim, drawn) = curve_geometry(geom, MAX_CURVE_POINTS.saturating_sub(self.curve_points));
+            self.curve_points += drawn;
+            prim
+        } else {
+            line_geometry(geom)
+        };
         if prim.lines.is_empty() {
             return None;
         }
@@ -2557,6 +2586,81 @@ fn line_geometry(geom: NodeHandle<'_>) -> Prim {
         last = if end { None } else { cp };
     }
     prim
+}
+
+/// Whether `NurbsCurve` geometry has what drawing it takes: an `Order` (a whole number from 2) and `Points`.
+fn is_curve(geom: NodeHandle<'_>) -> bool {
+    child_attr(geom, "Order")
+        .and_then(num)
+        .map(whole)
+        .is_some_and(|o| (2..i64::MAX).contains(&o))
+        && child_attr(geom, "Points")
+            .and_then(floats)
+            .is_some_and(|p| p.len() >= 8)
+}
+
+/// A `NurbsCurve` geometry as one primitive's segments: the curve of its `Order` (its degree plus one) through its
+/// `Points` (x, y, z and a weight each) over its `KnotVector`, a `Periodic` one wrapped around to its first points
+/// again. A curve whose order or knots don't fit its points, or that takes more than `budget` points, is drawn
+/// through its control points; so is one with control points a float can't hold, broken there. The primitive, and
+/// the points it took from the budget.
+fn curve_geometry(geom: NodeHandle<'_>, budget: usize) -> (Prim, usize) {
+    if !is_curve(geom) {
+        return (Prim::default(), 0);
+    }
+    let raw = child_attr(geom, "Points").and_then(floats).unwrap_or_default();
+    let mut ctrl: Vec<[f64; 3]> = raw.chunks_exact(4).map(|c| [c[0], c[1], c[2]]).collect();
+    let mut weights: Vec<f64> = raw.chunks_exact(4).map(|c| c[3]).collect();
+    let order = child_attr(geom, "Order").and_then(num).map_or(0, whole);
+    let degree = order - 1;
+    let knots = child_attr(geom, "KnotVector").and_then(floats).unwrap_or_default();
+    let periodic = child_attr(geom, "Form").and_then(string) == Some("Periodic");
+    let n = ctrl.len();
+    // A periodic curve's knots run past its points by its degree: those points are its first ones again.
+    if periodic
+        && let Ok(p) = usize::try_from(degree)
+        && p < n
+        && knots.len() == n + 2 * p + 1
+    {
+        ctrl.extend_from_within(..p);
+        weights.extend_from_within(..p);
+    }
+    let finite = ctrl.iter().flatten().all(|c| c.is_finite());
+    let mut pts = Vec::new();
+    let drawn = if let Some(Ok(drawn)) = finite.then(|| nurbs::curve(degree, &ctrl, &weights, &knots, budget, &mut pts))
+    {
+        drawn
+    } else {
+        pts.clone_from(&ctrl);
+        if periodic {
+            pts.truncate(n);
+            pts.push(ctrl[0]);
+        }
+        0
+    };
+    let mut prim = Prim::default();
+    // The vertex the polyline is at: none past a point that isn't a number. One point twice draws nothing.
+    let mut last: Option<u32> = None;
+    for p in pts {
+        let p = p.map(f32_of);
+        if !p.iter().all(|c| c.is_finite()) {
+            last = None;
+            continue;
+        }
+        #[allow(clippy::float_cmp, reason = "the same point twice, exactly")]
+        if last.is_some_and(|v| prim.positions[v as usize] == p) {
+            continue;
+        }
+        let Ok(v) = u32::try_from(prim.positions.len()) else {
+            break;
+        };
+        prim.positions.push(p);
+        if let Some(u) = last {
+            prim.lines.extend_from_slice(&[u, v]);
+        }
+        last = Some(v);
+    }
+    (prim, drawn)
 }
 
 /// A whole number written as a float, as an index; anything else as one no array has.

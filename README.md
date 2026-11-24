@@ -20,7 +20,7 @@ Early. What exists today:
   GLB, with `files_in` as a fetch that stays inside the model's folder.
   `cargo run --example meshopt -- sample out.glb` writes a small test file.
 - **`formats`**: readers for STL (binary and ASCII), PLY, MagicaVoxel `.vox`, OBJ with MTL
-  materials and textures, FBX (binary and ASCII, line geometry drawn as lines), 3DS, 3MF, USD (`.usda`, `.usdc`,
+  materials and textures, FBX (binary and ASCII, line geometry and NURBS curves drawn as lines), 3DS, 3MF, USD (`.usda`, `.usdc`,
   `.usdz`, with basis, NURBS and Hermite curves and points), SketchUp `.skp` (SketchUp 3 to the latest, without the SketchUp SDK) and glTF 2.0
   (`.gltf`, `.glb`, meshopt- or Draco-compressed or not), and glTF 1.0 (with
   `KHR_binary_glTF` and `KHR_materials_common`), upgraded to 2.0 as it's read, BVH
@@ -94,9 +94,14 @@ Early. What exists today:
   has (`Prim::uv_sets`, by `TEXCOORD` number, for lightmaps, masks and decals), and vertex
   colors likewise (`Prim::colors` and `Prim::color_sets`); `to_glb` writes them all back. A
   `Material` has base color, metallic-roughness, normal, occlusion and emissive textures and
-  factors, double-sidedness, alpha (blend from the color's alpha, or cut out at
-  `alpha_cutoff`) and `unlit`. Every texture reads `Prim::uvs`; one mapped through a different
-  UV set or transform than the color texture is left off rather than drawn wrong. A skinned
+  factors, the normal map's scale and occlusion's strength, double-sidedness, alpha (blend
+  from the color's alpha, or cut out at `alpha_cutoff`), `unlit`, and the other
+  `KHR_materials_*` extensions (`Material::extensions`: ior, specular, transmission,
+  clearcoat, sheen, volume, anisotropy, iridescence, dispersion) with their textures. Each
+  texture's `Sampling` says which UVs it reads (`Prim::uvs`, or a set in `Prim::uv_sets`),
+  the transform on them left after the color texture's, and its sampler's wrap and filters;
+  only a transform that would shear relative to the color texture's is left off rather than
+  drawn wrong. A skinned
   primitive keeps each
   vertex's most-weighted joint (`Prim::joints`) and its four strongest joints and weights
   (`Prim::skin_joints`, `Prim::skin_weights`), over the mesh's `skeleton` of bones; `to_glb`

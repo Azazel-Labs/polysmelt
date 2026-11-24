@@ -1,9 +1,12 @@
 """OBJ + MTL conformance cases (Wavefront OBJ, Appendix B1 of the Advanced Visualizer manual,
 and MTL, Appendix B1 "Material Library File"), plus the de-facto extensions exporters write:
-vertex colors after positions, the PBR keys (Pr, Pm, Ke) and `norm` normal maps.
+vertex colors after positions, the PBR keys (Pr, Pm, Ke, aniso, anisor), their maps (packed into glTF's
+channels where they're laid out otherwise) and `norm` normal maps.
 """
 
 import math
+import struct
+import zlib
 
 from common import (AXES, CUBE_BOUNDS, CUBE_QUADS, CUBE_V, case, fresh, pil_image, png, polygon_area, psd,
                     r, srgb_to_linear, webp)
@@ -17,6 +20,18 @@ MTL_SPEC = "Wavefront MTL (Advanced Visualizer manual, appendix B1, material lib
 fresh(FMT, keep_prefix="blender_")
 
 UV = [(0, 0), (1, 0), (1, 1), (0, 1)]
+
+
+def gray_png(value, size=2):
+    """A solid gray PNG, one channel a pixel."""
+    raw = b"".join(b"\x00" + bytes([value]) * size for _ in range(size))
+
+    def chunk(kind, data):
+        c = kind + data
+        return struct.pack(">I", len(data)) + c + struct.pack(">I", zlib.crc32(c) & 0xFFFFFFFF)
+
+    ihdr = struct.pack(">IIBBBBB", size, size, 8, 0, 0, 0, 0)
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b"")
 
 
 def cube_v():
@@ -479,6 +494,82 @@ case(FMT, "texture_pbr_maps", {
         M0 + "/emissiveTexture": {},
         M0 + "/normalTexture/scale": 0.5,
     },
+})
+
+# Roughness, metalness and occlusion kept apart, or packed otherwise than glTF packs them, are packed into a new
+# image: occlusion in red, roughness in green, metalness in blue.
+case(FMT, "texture_pbr_rma", {
+    "model.obj": "mtllib m.mtl\nusemtl pbr\n" + TRI + "f 1/1 2/2 3/3\n",
+    "m.mtl": "newmtl pbr\nKd 1 1 1\nmap_RMA rma.png\n",
+    "rma.png": png([200, 100, 50]),
+}, {
+    "spec": "MTL PBR extension: map_RMA (roughness, metalness and occlusion in red, green and blue) moved into "
+            "glTF's channels, as the metallic-roughness and occlusion textures",
+    "source": SRC, "triangles": 1, "needs": "png",
+    "materials": [{"name": "pbr", "roughness": 1, "metallic": 1,
+                   "metal_rough_pixel": [50, 200, 100], "occlusion_pixel": [50, 200, 100]}],
+})
+
+case(FMT, "texture_pbr_separate_maps", {
+    "model.obj": "mtllib m.mtl\nusemtl pbr\n" + TRI + "f 1/1 2/2 3/3\n",
+    "m.mtl": "newmtl pbr\nKd 1 1 1\nPm 0.5\nmap_Pr rough.png\nmap_Pm -imfchan g metal.png\nmap_ao ao.png\n",
+    "rough.png": png([100, 150, 200]),
+    "metal.png": png([10, 220, 30]),
+    "ao.png": png([180, 60, 20]),
+}, {
+    "spec": "MTL PBR extension: map_Pr and map_Pm as separate images, packed into one metallic-roughness texture "
+            "(roughness from the luma, metalness from the channel -imfchan names, scaled by Pm), and map_ao as "
+            "the occlusion texture",
+    "source": SRC, "triangles": 1, "needs": "png",
+    # Luma 0.2126 R + 0.7152 G + 0.0722 B of (100, 150, 200) is 143.
+    "materials": [{"name": "pbr", "roughness": 1, "metallic": 0.5,
+                   "metal_rough_pixel": [255, 143, 220], "occlusion_pixel": [180, 60, 20]}],
+    "image_count": 2,
+})
+
+case(FMT, "texture_pbr_roughness_gray", {
+    "model.obj": "mtllib m.mtl\nusemtl pbr\n" + TRI + "f 1/1 2/2 3/3\n",
+    "m.mtl": "newmtl pbr\nKd 1 1 1\nmap_Pr rough.png\n",
+    "rough.png": gray_png(90),
+}, {
+    "spec": "MTL PBR extension: a gray map_Pr alone reads the same in green, so it serves as the metallic-roughness "
+            "texture as it is, nothing metal",
+    "source": SRC, "triangles": 1,
+    "materials": [{"name": "pbr", "roughness": 1, "metallic": 0, "metal_rough_pixel": [90, 90, 90]}],
+    "image_count": 1,
+})
+
+case(FMT, "texture_pbr_metalness_only", {
+    "model.obj": "mtllib m.mtl\nusemtl pbr\n" + TRI + "f 1/1 2/2 3/3\n",
+    "m.mtl": "newmtl pbr\nKd 1 1 1\nPr 0.4\nmap_Pm metal.png\n",
+    "metal.png": png([10, 220, 30]),
+}, {
+    "spec": "MTL PBR extension: map_Pm alone packed into the metallic-roughness texture's blue, with Pr as the "
+            "roughness",
+    "source": SRC, "triangles": 1, "needs": "png",
+    # Luma of (10, 220, 30) is 162.
+    "materials": [{"name": "pbr", "roughness": 0.4, "metallic": 1, "metal_rough_pixel": [255, 255, 162]}],
+})
+
+case(FMT, "texture_pbr_maps_unalike", {
+    "model.obj": "mtllib m.mtl\nusemtl pbr\n" + TRI + "f 1/1 2/2 3/3\n",
+    "m.mtl": "newmtl pbr\nKd 1 1 1\nmap_Pr -s 2 2 1 rough.png\nmap_Pm metal.png\n",
+    "rough.png": png([100, 150, 200]),
+    "metal.png": png([10, 220, 30]),
+}, {
+    "spec": "MTL PBR extension: map_Pr and map_Pm scaled differently can't share one texture, so neither is kept",
+    "source": SRC, "triangles": 1,
+    "materials": [{"name": "pbr", "metallic": 0}],
+    "json": {M0 + "/pbrMetallicRoughness/metallicRoughnessTexture": None},
+})
+
+case(FMT, "mtl_anisotropy_rotation", {
+    "model.obj": "mtllib m.mtl\nusemtl full\n" + TRI + "f 1 2 3\n",
+    "m.mtl": "newmtl full\nKd 1 1 1\naniso 0.8\nanisor 0.25\n",
+}, {
+    "spec": MTL_SPEC + " and the PBR extension: anisor, the anisotropy's rotation as a fraction of a turn",
+    "source": SRC, "triangles": 1,
+    "json": {EXT + "KHR_materials_anisotropy": {"anisotropyStrength": 0.8, "anisotropyRotation": 1.5707963}},
 })
 
 print("obj corpus written")

@@ -1,6 +1,7 @@
-//! A glTF material as the readers describe it: every core slot, each texture's coordinate set, sampler wrap and
-//! transform (`KHR_texture_transform`), and the `KHR_materials_*` extensions. [`Builder::materials`] writes them
-//! into the document; [`Material`] (the flat view's material) converts into one.
+//! A glTF material as the readers describe it: every core slot, each texture's coordinate set, sampler wrap,
+//! filters and transform (`KHR_texture_transform`), and the `KHR_materials_*` extensions. [`Builder::materials`]
+//! writes them into the document; [`Material`] (the flat view's material) converts into one. The extensions'
+//! types are generic over their texture, so the flat view's material carries them too.
 //!
 //! [`Builder::materials`]: crate::document::Builder::materials
 
@@ -21,12 +22,17 @@
 
 use serde_json::{Map, Value, json};
 
-use crate::mesh::Material;
+use crate::mesh::{Extensions, Material, Sampling, Texture};
 
 /// glTF's repeating wrap.
-pub(crate) const REPEAT: u32 = 10497;
-pub(crate) const CLAMP: u32 = 33071;
-pub(crate) const MIRROR: u32 = 33648;
+pub const REPEAT: u32 = 10497;
+/// glTF's wrap that clamps to the edge.
+pub const CLAMP: u32 = 33071;
+/// glTF's mirrored repeating wrap.
+pub const MIRROR: u32 = 33648;
+/// glTF's linear filter, and its linear filter between linearly filtered mipmaps.
+pub const LINEAR: u32 = 9729;
+pub const LINEAR_MIPMAP_LINEAR: u32 = 9987;
 
 /// A texture: an image, the texture coordinates it reads and how.
 #[derive(Clone, Debug, PartialEq)]
@@ -40,6 +46,8 @@ pub(crate) struct Tex {
     pub wrap: [u32; 2],
     /// A normal texture's scale or an occlusion texture's strength.
     pub scale: f32,
+    /// Magnification and minification filters; `None` leaves the choice to the viewer.
+    pub filter: [Option<u32>; 2],
 }
 
 impl Tex {
@@ -50,13 +58,14 @@ impl Tex {
             transform: None,
             wrap: [REPEAT; 2],
             scale: 1.0,
+            filter: [Some(LINEAR), Some(LINEAR_MIPMAP_LINEAR)],
         }
     }
 }
 
 /// `KHR_texture_transform`: `uv' = translate(offset) * rotate(rotation) * scale(scale) * uv`.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct UvTransform {
+pub struct UvTransform {
     pub offset: [f32; 2],
     /// Radians, counter-clockwise.
     pub rotation: f32,
@@ -64,7 +73,8 @@ pub(crate) struct UvTransform {
 }
 
 impl UvTransform {
-    pub(crate) const IDENTITY: Self = Self {
+    /// No change.
+    pub const IDENTITY: Self = Self {
         offset: [0.0; 2],
         rotation: 0.0,
         scale: [1.0; 2],
@@ -79,70 +89,90 @@ pub(crate) enum Alpha {
     Blend,
 }
 
-/// A factor and the texture that scales it.
+/// A factor and the texture that scales it. `T` is the texture: a [`Texture`] in the flat view's material.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct Factor {
+pub struct Factor<T> {
     pub factor: f32,
-    pub tex: Option<Tex>,
+    pub tex: Option<T>,
 }
 
-impl Factor {
-    pub(crate) fn of(factor: f32) -> Self {
+impl<T> Factor<T> {
+    /// The factor, without a texture.
+    #[must_use]
+    pub fn of(factor: f32) -> Self {
         Self { factor, tex: None }
+    }
+
+    fn map<U>(&self, f: &mut impl FnMut(&T) -> Option<U>) -> Factor<U> {
+        Factor {
+            factor: self.factor,
+            tex: self.tex.as_ref().and_then(f),
+        }
     }
 }
 
-/// `KHR_materials_specular`.
+/// `KHR_materials_specular`: the strength and color of the reflection at normal incidence.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct Specular {
-    pub factor: Factor,
+pub struct Specular<T> {
+    /// Its texture's alpha scales it.
+    pub factor: Factor<T>,
     /// Linear RGB.
     pub color: [f32; 3],
-    pub color_tex: Option<Tex>,
+    /// sRGB, scaling `color`.
+    pub color_tex: Option<T>,
 }
 
-/// `KHR_materials_clearcoat`.
+/// `KHR_materials_clearcoat`: a clear lacquer layer over the material.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct Clearcoat {
-    pub factor: Factor,
-    pub roughness: Factor,
-    pub normal: Option<Tex>,
+pub struct Clearcoat<T> {
+    /// Its texture's red scales it.
+    pub factor: Factor<T>,
+    /// Its texture's green scales it.
+    pub roughness: Factor<T>,
+    /// The layer's own normal map.
+    pub normal: Option<T>,
 }
 
-/// `KHR_materials_sheen`.
+/// `KHR_materials_sheen`: the soft back-scattering of cloth.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct Sheen {
+pub struct Sheen<T> {
     /// Linear RGB.
     pub color: [f32; 3],
-    pub color_tex: Option<Tex>,
-    pub roughness: Factor,
+    /// sRGB, scaling `color`.
+    pub color_tex: Option<T>,
+    /// Its texture's alpha scales it.
+    pub roughness: Factor<T>,
 }
 
-/// `KHR_materials_volume`.
+/// `KHR_materials_volume`: the thickness of a transmissive material, and how it tints light passing through.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct Volume {
-    pub thickness: Factor,
+pub struct Volume<T> {
+    /// In the mesh's units; its texture's green scales it.
+    pub thickness: Factor<T>,
     /// How far light goes before it is tinted `attenuation_color`; `None` is forever.
     pub attenuation_distance: Option<f32>,
     pub attenuation_color: [f32; 3],
 }
 
-/// `KHR_materials_anisotropy`.
+/// `KHR_materials_anisotropy`: highlights stretched along a direction (brushed metal, hair).
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct Anisotropy {
-    pub strength: Factor,
+pub struct Anisotropy<T> {
+    /// The texture holds a direction in red and green, and a strength in blue.
+    pub strength: Factor<T>,
     /// Radians, counter-clockwise from the tangent.
     pub rotation: f32,
 }
 
-/// `KHR_materials_iridescence`.
+/// `KHR_materials_iridescence`: the color shift of a thin film (soap bubbles, oil).
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct Iridescence {
-    pub factor: Factor,
+pub struct Iridescence<T> {
+    /// Its texture's red scales it.
+    pub factor: Factor<T>,
     pub ior: f32,
     /// The thin film's thickness range in nanometers.
     pub thickness: [f32; 2],
-    pub thickness_tex: Option<Tex>,
+    /// Green picks a thickness in that range.
+    pub thickness_tex: Option<T>,
 }
 
 /// A glTF material.
@@ -168,14 +198,14 @@ pub(crate) struct Full {
     pub unlit: bool,
     /// `KHR_materials_ior`.
     pub ior: Option<f32>,
-    pub specular: Option<Specular>,
+    pub specular: Option<Specular<Tex>>,
     /// `KHR_materials_transmission`.
-    pub transmission: Option<Factor>,
-    pub clearcoat: Option<Clearcoat>,
-    pub sheen: Option<Sheen>,
-    pub volume: Option<Volume>,
-    pub anisotropy: Option<Anisotropy>,
-    pub iridescence: Option<Iridescence>,
+    pub transmission: Option<Factor<Tex>>,
+    pub clearcoat: Option<Clearcoat<Tex>>,
+    pub sheen: Option<Sheen<Tex>>,
+    pub volume: Option<Volume<Tex>>,
+    pub anisotropy: Option<Anisotropy<Tex>>,
+    pub iridescence: Option<Iridescence<Tex>>,
     /// `KHR_materials_dispersion`.
     pub dispersion: Option<f32>,
     pub extras: Option<Value>,
@@ -212,19 +242,35 @@ impl Default for Full {
     }
 }
 
-impl From<&Material> for Full {
-    fn from(m: &Material) -> Self {
-        Self {
+impl Full {
+    /// The glTF material for a flat view's material, its textures reading the coordinates `texcoord` numbers:
+    /// `texcoord(None)` for [`Prim::uvs`](crate::mesh::Prim::uvs), `texcoord(Some(n))` for `uv_sets[n]`. A
+    /// texture whose coordinates aren't there (`None`) is left out.
+    pub(crate) fn of(m: &Material, texcoord: impl Fn(Option<usize>) -> Option<u32>) -> Self {
+        let tex = |image: usize, s: &Sampling, scale: f32| {
+            Some(Tex {
+                uv: texcoord(s.uv_set)?,
+                transform: s.transform,
+                wrap: s.wrap,
+                scale,
+                filter: s.filter,
+                ..Tex::new(image)
+            })
+        };
+        let slot = |image: Option<usize>, s: &Sampling, scale: f32| image.and_then(|i| tex(i, s, scale));
+        let mut t = |t: &Texture| tex(t.image, &t.sampling, 1.0);
+        let s = &m.sampling;
+        let mut full = Self {
             name: m.name.clone(),
             base_color: m.color,
-            base_color_tex: m.color_image.map(Tex::new),
+            base_color_tex: slot(m.color_image, &s.color, 1.0),
             metallic: m.metallic,
             roughness: m.roughness,
-            metallic_roughness_tex: m.metallic_roughness_image.map(Tex::new),
-            normal_tex: m.normal_image.map(Tex::new),
-            occlusion_tex: m.occlusion_image.map(Tex::new),
+            metallic_roughness_tex: slot(m.metallic_roughness_image, &s.metallic_roughness, 1.0),
+            normal_tex: slot(m.normal_image, &s.normal, m.normal_scale),
+            occlusion_tex: slot(m.occlusion_image, &s.occlusion, m.occlusion_strength),
             emissive: m.emissive,
-            emissive_tex: m.emissive_image.map(Tex::new),
+            emissive_tex: slot(m.emissive_image, &s.emissive, 1.0),
             alpha: match m.alpha_cutoff {
                 Some(c) => Alpha::Mask(c),
                 None if m.color[3] < 1.0 => Alpha::Blend,
@@ -233,7 +279,62 @@ impl From<&Material> for Full {
             double_sided: m.double_sided,
             unlit: m.unlit,
             ..Self::default()
+        };
+        if let Some(x) = m.extensions.as_deref() {
+            let Extensions {
+                ior,
+                specular,
+                transmission,
+                clearcoat,
+                sheen,
+                volume,
+                anisotropy,
+                iridescence,
+                dispersion,
+            } = x;
+            full.ior = *ior;
+            full.specular = specular.as_ref().map(|s| Specular {
+                factor: s.factor.map(&mut t),
+                color: s.color,
+                color_tex: s.color_tex.as_ref().and_then(&mut t),
+            });
+            full.transmission = transmission.as_ref().map(|f| f.map(&mut t));
+            full.clearcoat = clearcoat.as_ref().map(|c| Clearcoat {
+                factor: c.factor.map(&mut t),
+                roughness: c.roughness.map(&mut t),
+                normal: c.normal.as_ref().and_then(&mut t),
+            });
+            full.sheen = sheen.as_ref().map(|s| Sheen {
+                color: s.color,
+                color_tex: s.color_tex.as_ref().and_then(&mut t),
+                roughness: s.roughness.map(&mut t),
+            });
+            full.volume = volume.as_ref().map(|v| Volume {
+                thickness: v.thickness.map(&mut t),
+                attenuation_distance: v.attenuation_distance,
+                attenuation_color: v.attenuation_color,
+            });
+            full.anisotropy = anisotropy.as_ref().map(|a| Anisotropy {
+                strength: a.strength.map(&mut t),
+                rotation: a.rotation,
+            });
+            full.iridescence = iridescence.as_ref().map(|i| Iridescence {
+                factor: i.factor.map(&mut t),
+                ior: i.ior,
+                thickness: i.thickness,
+                thickness_tex: i.thickness_tex.as_ref().and_then(&mut t),
+            });
+            full.dispersion = *dispersion;
         }
+        full
+    }
+}
+
+impl From<&Material> for Full {
+    /// The glTF material, its textures reading `TEXCOORD_0`; one reading another of a primitive's sets
+    /// ([`Sampling::uv_set`]) is left out, as which number that set gets depends on the primitive.
+    fn from(m: &Material) -> Self {
+        Self::of(m, |set| set.is_none().then_some(0))
     }
 }
 
@@ -257,16 +358,19 @@ fn positive(x: f32) -> f32 {
     if x.is_finite() { x.max(0.0) } else { 0.0 }
 }
 
-/// Writes materials: the textures they name (one per image and wrap), their samplers, and the extensions used.
+/// A sampler: S and T wrap, magnification and minification filters.
+type Sampler = ([u32; 2], [Option<u32>; 2]);
+
+/// Writes materials: the textures they name (one per image and sampler), their samplers, and the extensions used.
 pub(crate) struct Writer {
     images: usize,
-    /// (image, wrap) → texture, in order.
-    textures: Vec<(usize, [u32; 2])>,
+    /// (image, sampler) → texture, in order.
+    textures: Vec<(usize, Sampler)>,
     used: Vec<&'static str>,
 }
 
 impl Writer {
-    /// A writer over `images` images. Textures are made as materials use them, one for each image and wrap.
+    /// A writer over `images` images. Textures are made as materials use them, one for each image and sampler.
     pub(crate) fn new(images: usize) -> Self {
         Self {
             images,
@@ -284,7 +388,7 @@ impl Writer {
     /// A texture info, or `None` when its image isn't there.
     fn tex(&mut self, t: Option<&Tex>, scale_key: Option<&str>) -> Option<Value> {
         let t = t.filter(|t| t.image < self.images)?;
-        let key = (t.image, t.wrap);
+        let key = (t.image, (t.wrap, t.filter));
         let index = self.textures.iter().position(|&k| k == key).unwrap_or_else(|| {
             self.textures.push(key);
             self.textures.len() - 1
@@ -318,7 +422,7 @@ impl Writer {
         Some(info)
     }
 
-    fn factor(&mut self, out: &mut Map<String, Value>, f: &Factor, key: &str, tex_key: &str, default: f32) {
+    fn factor(&mut self, out: &mut Map<String, Value>, f: &Factor<Tex>, key: &str, tex_key: &str, default: f32) {
         #[allow(clippy::float_cmp, reason = "exactly the default is left out")]
         if unit(f.factor) != default {
             out.insert(key.into(), json!(unit(f.factor)));
@@ -518,21 +622,31 @@ impl Writer {
 
     /// The textures (each `{sampler, source}`), the samplers they use, and the extensions the materials used.
     pub(crate) fn finish(self) -> (Vec<Value>, Vec<Value>, Vec<&'static str>) {
-        let mut wraps: Vec<[u32; 2]> = Vec::new();
+        let mut samplers: Vec<Sampler> = Vec::new();
         let textures = self
             .textures
             .iter()
-            .map(|&(image, wrap)| {
-                let s = wraps.iter().position(|&w| w == wrap).unwrap_or_else(|| {
-                    wraps.push(wrap);
-                    wraps.len() - 1
+            .map(|&(image, sampler)| {
+                let s = samplers.iter().position(|&w| w == sampler).unwrap_or_else(|| {
+                    samplers.push(sampler);
+                    samplers.len() - 1
                 });
                 json!({ "sampler": s, "source": image })
             })
             .collect();
-        let samplers = wraps
+        let samplers = samplers
             .iter()
-            .map(|w| json!({ "magFilter": 9729, "minFilter": 9987, "wrapS": w[0], "wrapT": w[1] }))
+            .map(|(w, [mag, min])| {
+                let mut s = json!({ "wrapS": w[0], "wrapT": w[1] });
+                // Only glTF's filter values: anything else is left to the viewer.
+                if let Some(f) = mag.filter(|f| matches!(f, 9728 | 9729)) {
+                    s["magFilter"] = json!(f);
+                }
+                if let Some(f) = min.filter(|f| matches!(f, 9728 | 9729 | 9984..=9987)) {
+                    s["minFilter"] = json!(f);
+                }
+                s
+            })
             .collect();
         (textures, samplers, self.used)
     }
