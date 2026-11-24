@@ -638,12 +638,14 @@ pub fn dot_vox_meshed(src: &Src) -> Out {
     let data = dot_vox::load_bytes(&bytes).map_err(e)?;
     let mut meshes = Vec::with_capacity(data.models.len());
     for m in &data.models {
-        let (sx, sy, sz) = (m.size.x as i32, m.size.y as i32, m.size.z as i32);
+        // Voxel coordinates are bytes, so no cell lies past 256 on an axis, whatever size a
+        // (damaged) file declares.
+        let (sx, sy, sz) = (m.size.x.min(256) as i32, m.size.y.min(256) as i32, m.size.z.min(256) as i32);
         let at = |x: i32, y: i32, z: i32| (x + sx * (y + sy * z)) as usize;
-        let mut grid = vec![0u8; (sx * sy * sz).max(0) as usize];
+        let mut grid = vec![0u8; (sx * sy * sz) as usize];
         for v in &m.voxels {
-            if (v.x as i32) < sx && (v.y as i32) < sy && (v.z as i32) < sz {
-                grid[at(v.x.into(), v.y.into(), v.z.into())] = v.i.wrapping_add(1).max(1);
+            if i32::from(v.x) < sx && i32::from(v.y) < sy && i32::from(v.z) < sz {
+                grid[at(v.x.into(), v.y.into(), v.z.into())] = 1;
             }
         }
         let filled = |x: i32, y: i32, z: i32| {

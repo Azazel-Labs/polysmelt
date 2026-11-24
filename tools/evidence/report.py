@@ -38,6 +38,9 @@ SOFT = ("vertices", "materials", "nodes", "joints", "animations")
 
 
 # Competitors whose result is less than what Polysmelt's load makes, so their times aren't like for like.
+# Loaders timed for a like-for-like speed figure whose counts aren't meant to match: left out of count parity.
+NO_PARITY = {"dot_vox + face mesher"}
+
 PARTIAL = {
     "dot_vox": "only parses the voxels; Polysmelt also meshes them into triangles",
     "dot_vox + face mesher": "a quad per exposed face, unmerged and unwelded; Polysmelt also merges same-colored faces into rectangles without T-junctions, shares their vertices and builds materials and the scene",
@@ -327,7 +330,7 @@ def main():
                 continue
             ps = p.get("stats", {})
             for l, r in ls.items():
-                if l in (P, PG) or r["status"] != "ok" or not r.get("stats"):
+                if l in (P, PG) or l in NO_PARITY or r["status"] != "ok" or not r.get("stats"):
                     continue
                 cs = r["stats"]
                 for key in HARD + SOFT:
@@ -360,8 +363,8 @@ def main():
                 per_file[d[0]].append(d)
             shown = []
             for d in hard[:150]:
-                others = [x for x in by_file[d[0]].items() if x[0] not in (P, PG) and x[1]["status"] == "ok"
-                          and "triangles" in (x[1].get("stats") or {})]
+                others = [x for x in by_file[d[0]].items() if x[0] not in (P, PG) and x[0] not in NO_PARITY
+                          and x[1]["status"] == "ok" and "triangles" in (x[1].get("stats") or {})]
                 agree_p = sum(1 for _, r in others if r["stats"]["triangles"] == d[3])
                 shown.append([d[0], code(d[1]), d[3], d[4], d[5] if d[5] != "" else "–", f"{d[6] * 100:.1f}%",
                               f"{agree_p}/{len(others)}"])
@@ -380,8 +383,8 @@ def main():
                     "75 730 less 10 413 = 65 317; Buggy.dae 308 306 less 28 457 = 279 849). The `collada` crate "
                     "counts every geometry once and every triangle the file lists.\n")
             for f, ds in per_file.items():
-                others = [x for x in by_file[f].items() if x[0] not in (P, PG) and x[1]["status"] == "ok"
-                          and "triangles" in (x[1].get("stats") or {})]
+                others = [x for x in by_file[f].items() if x[0] not in (P, PG) and x[0] not in NO_PARITY
+                          and x[1]["status"] == "ok" and "triangles" in (x[1].get("stats") or {})]
                 agree_p = sum(1 for _, r in others if r["stats"]["triangles"] == ds[0][3])
                 decl = ds[0][5]
                 if decl != "" and decl == ds[0][3]:
@@ -422,7 +425,7 @@ def main():
                 losses.append((1, "fails a glTF the gltf crate reads (deep parity)", f"khronos/{r['file']}",
                                short(p.get("error"), 160), r.get("bytes", 0)))
         md.append(table(["gltf crate", "Polysmelt", "Files"],
-                        [[s1 or "–", s2 or "–", n] for (s1, s2), n in sorted(outcome.items(), key=lambda x: -x[1])],
+                        [[s1 or "–", s2 or "–", n] for (s1, s2), n in sorted(outcome.items(), key=lambda x: (-x[1], str(x[0])))],
                         ["---", "---", "---:"]))
         md.append(f"\nFiles both read with any count or value different: {len(mism)}\n\n")
         if mism:
@@ -482,7 +485,7 @@ def main():
                 f[3] += va[k].get("error_count", 0) > 0 or "crash" in va[k]
         md.append("\nBy source format (GLBs written, of which with errors):\n\n")
         md.append(table(["Source format", "Polysmelt GLBs", "with errors", "assimp GLBs", "with errors"],
-                        [[e, v[0], v[1], v[2], v[3]] for e, v in sorted(fmt.items(), key=lambda x: -x[1][0])]))
+                        [[e, v[0], v[1], v[2], v[3]] for e, v in sorted(fmt.items(), key=lambda x: (-x[1][0], -x[1][2], x[0]))]))
         bad = sorted(k for k, v in vp.items() if v.get("error_count", 0) > 0 or "crash" in v)
         if bad:
             md.append(f"\nPolysmelt GLBs with validator errors ({len(bad)}):\n\n")
@@ -580,7 +583,7 @@ def main():
                     pairs[(side, o)][f["ext"]].append((k, m[side]["median_ms"], lm["median_ms"]))
         rows, csv_rows = [], []
         for (side, o), exts in sorted(pairs.items(), key=lambda x: (x[0][1] != A, x[0][1] != AG, x[0][1])):
-            for ext, xs in sorted(exts.items(), key=lambda x: -len(x[1])):
+            for ext, xs in sorted(exts.items(), key=lambda x: (-len(x[1]), x[0])):
                 ratios = [oo / pp for _, pp, oo in xs if pp > 0]
                 w = sum(1 for r in ratios if r > 1)
                 tp, to = sum(x[1] for x in xs), sum(x[2] for x in xs)
@@ -646,7 +649,7 @@ def main():
                 pairs[(side, o)][ext_of[k]].append((k, pr, orr, p.get("heap_peak"), r.get("heap_peak")))
         rows, csv_rows = [], []
         for (side, o), exts in sorted(pairs.items(), key=lambda x: (x[0][1] != A, x[0][1] != AG, x[0][1])):
-            for ext, xs in sorted(exts.items(), key=lambda x: -len(x[1])):
+            for ext, xs in sorted(exts.items(), key=lambda x: (-len(x[1]), x[0])):
                 ratios = [orr / max(pr, 1) for _, pr, orr, _, _ in xs]
                 w = sum(1 for r in ratios if r > 1)
                 rows.append([code(o), ext, len(xs), fmt_ratio(geomean(ratios)), fmt_ratio(min(ratios)),

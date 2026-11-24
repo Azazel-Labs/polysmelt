@@ -45,8 +45,9 @@ fn ext_of(p: &Path) -> String {
 /// The loaders a file goes through: Polysmelt's whole conversion, and its format's competitor.
 fn loaders_for(path: &Path) -> Vec<(&'static str, Run)> {
     let mut out: Vec<(&'static str, Run)> = vec![(POLYSMELT, loaders::polysmelt_convert)];
-    // `gltf (import)` does all the no-image variant does, and decodes images too.
-    out.extend(loaders::competitors(&ext_of(path)).into_iter().filter(|l| l.name != "gltf (no image decode)").map(|l| (l.name, l.run)));
+    // `gltf (import)` does all the no-image variant does, and decodes images too. The VOX face
+    // mesher is this harness's own code, there for a like-for-like speed figure, not a library.
+    out.extend(loaders::competitors(&ext_of(path)).into_iter().filter(|l| l.name != "gltf (no image decode)" && l.name != "dot_vox + face mesher").map(|l| (l.name, l.run)));
     out
 }
 
