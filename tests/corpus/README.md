@@ -33,8 +33,8 @@ cases.
 | PLY | 37 | 33 | 4 |
 | VOX | 27 | 27 | none |
 | OBJ | 64 | 55 | 9 |
-| 3DS | 48 | 48 | none |
-| 3MF | 43 | 43 | none |
+| 3DS | 49 | 49 | none |
+| 3MF | 54 | 54 | none |
 | FBX | 134 | 116 | 18 |
 | USD | 141 | 121 | 20 |
 | glTF | 80 | 65 | 15 |
@@ -69,7 +69,7 @@ cases.
 | AC3D (`ac/`) | 15 | 11 | none |
 | OGRE | 30 | 30 | none |
 | OpenFlight | 17 | 17 | none |
-| OpenGEX | 26 | 22 | none |
+| OpenGEX | 28 | 24 | none |
 
 - **Generated** cases are written byte by byte by `tools/corpus/<format>.py` (3DS is
   `tds.py`, 3MF is `threemf.py`, COLLADA is `dae.py`, PMX, PMD and VMD are `mmd.py`, DirectX
@@ -145,12 +145,15 @@ python tools/corpus/obj.py
   self-illumination), textures and two-sided faces. The bump map is the normal map when its
   image is one (by its pixels, a gray image's header, or its name), scaled by its amount; a
   height map, the shininess map and the reflection map stay in `extras`. Also cameras, point and spot lights, and
-  the keyframer: its hierarchy, pivots, dummies, instances and tracks. Also truncated and
+  the keyframer: its hierarchy, pivots, dummies, instances and tracks; a scene of only a
+  camera and a light. Also truncated and
   malformed chunks.
 - **3MF**: units, build items and components with transforms (including mirrored ones), the
   production extension, and colors from base materials, color groups and gradients.
-  Textures, plus the files Bambu and Prusa write. Also packaging variants and broken
-  packages.
+  Textures, plus the files Bambu and Prusa write. Beam lattices: butt, sphere and
+  hemisphere caps, tapered beams, balls, beam sets, colors blended along a beam, clipping
+  inside and outside a mesh, and beams beside triangles. A build of only a volumetric level
+  set fails with its own error. Also packaging variants and broken packages.
 - **FBX**: ASCII 6100 and 7300–7500, binary 7400–7700 (zlib-compressed arrays too). Covers
   axis systems and units, every rotation order, pivots, offsets and geometric transforms, and
   animation, including Euler keys baked past ±180° or flipped past straight up.
@@ -369,7 +372,8 @@ python tools/corpus/obj.py
   coordinates and colors, a textured material with a texture transform and a missing texture,
   node transforms of every kind, object-only transforms, shared geometry, levels of detail,
   morph targets, a skin with an animated bone, linear, constant, Bezier and rotation tracks,
-  clips, lights and cameras, and OpenDDL syntax (comments, string concatenation, hex and
+  clips, lights and cameras, a file with objects but no nodes, one with nodes but no objects,
+  and OpenDDL syntax (comments, string concatenation, hex and
   binary floats). Errors: an unclosed structure, no geometry; four real assimp models.
 
 ## `expect.json`

@@ -200,13 +200,13 @@ case(FMT, "cube_z_up", {"cube.ogex": metrics(distance=1.0) +
      {"spec": SPEC + ": a cube of quads with face normals, Z up, turned Y up", "source": SRC, "triangles": 12,
       "area": 6.0, "bounds": bounds([z_up(p) for p in CUBE_P]), "faces_outward": True, "normals_in": AXES,
       "winding_matches_normals": True, "facts": {"triangles": 12},
-      "document": {"node_names": ["Box"], "source": {"format": "OpenGEX", "upAxis": "Z", "metersPerUnit": 1.0}}})
+      "document": {"node_names": ["Box"], "source": {"format": "OpenGEX", "upAxis": "+Z", "metersPerUnit": 1.0}}})
 
 case(FMT, "centimeters_y_up", {"cube.ogex": metrics("y", distance=0.01) +
                                "GeometryNode { ObjectRef { ref { $box } } }\n" + geometry("box", cube_mesh(100.0))},
      {"spec": SPEC + ": a cube 100 units wide in a centimeter, Y-up file", "source": SRC, "triangles": 12,
       "area": 6.0, "bounds": {"min": [0, 0, 0], "max": [1, 1, 1]}, "faces_outward": True,
-      "document": {"source": {"upAxis": "Y", "metersPerUnit": 0.01}}})
+      "document": {"source": {"upAxis": "+Y", "metersPerUnit": 0.01}}})
 
 # One mesh, its triangles in three index arrays of three integer sizes, each with its own material.
 COLORS = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
@@ -535,6 +535,25 @@ case(FMT, "lights_and_camera", {"lights.ogex": text},
                "/extensions/KHR_lights_punctual/lights/1/type": "point",
                "/cameras/0/perspective/znear": 0.5, "/cameras/0/perspective/zfar": 50.0}})
 
+# A file of objects with no nodes: each is placed under the root by itself.
+text = (metrics() + 'CameraObject $cam { Param (attrib = "fov") { float { 1 } } }\n'
+        'LightObject $sun (type = "infinite") {}\n' + triangle("t", [[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [0.0, 3.0, 0.0]]))
+case(FMT, "objects_without_nodes", {"objects.ogex": text},
+     {"spec": SPEC + ": a camera, a light and a geometry object and no nodes; each is placed under the root, "
+      "untransformed", "source": SRC, "triangles": 1, "facts": {"materials": 0, "nodes": 4, "triangles": 1},
+      "bounds": bounds([z_up(p) for p in [[0, 0, 0], [2, 0, 0], [0, 3, 0]]]),
+      "document": {"nodes": 4, "lights": 1, "cameras": 1, "node_names": ["cam", "sun", "t"]}})
+
+# Nodes and nothing they place: an empty scene graph, a scene still.
+text = metrics() + """Node { Name { string { "Rig" } }
+  BoneNode { Name { string { "Hip" } } Translation { float[3] { {0, 0, 1} } } }
+}
+"""
+case(FMT, "nodes_only", {"rig.ogex": text},
+     {"spec": SPEC + ": a node and a bone node and no objects: nodes, no mesh", "source": SRC, "no_mesh": True,
+      "facts": {"materials": 0, "nodes": 3, "triangles": 0},
+      "document": {"nodes": 3, "node_names": ["Rig", "Hip"]}})
+
 # --- OpenDDL syntax --------------------------------------------------------------------------------
 
 ONE = "0x3F800000"  # 1.0 as float bits
@@ -656,7 +675,8 @@ def data(s):
 
 
 def read_ogex(text):
-    """What a real file draws: its triangles (in glTF's space), lights and cameras."""
+    """What a real file draws: its triangles (in glTF's space), lights, cameras and nodes (the root among them).
+    A file with no nodes has each of its objects placed under the root by itself."""
     top = parse_ddl(text)
     up, meters = "z", 1.0
     named = {}
@@ -691,32 +711,49 @@ def read_ogex(text):
             if s[0] == "CameraNode" and refs:
                 cameras += 1
             if s[0] == "GeometryNode" and refs:
-                obj = named[refs[0]]
-                for msh in [t for t in obj[3] if t[0] == "Mesh"][:1]:
-                    pos = next(data(t) for t in msh[3] if t[0] == "VertexArray" and t[2].get("attrib") == "position")
-                    for ia in [t for t in msh[3] if t[0] == "IndexArray"]:
-                        for f in data(ia):
-                            pts = [apply(m, pos[i]) for i in f]
-                            tris.append([z_up(p, meters) if up == "z" else [c * meters for c in p] for p in pts])
+                draw(named[refs[0]], m)
             walk(s[3], m)
 
+    def draw(obj, m):
+        for msh in [t for t in obj[3] if t[0] == "Mesh"][:1]:
+            pos = next(data(t) for t in msh[3] if t[0] == "VertexArray" and t[2].get("attrib") == "position")
+            for ia in [t for t in msh[3] if t[0] == "IndexArray"]:
+                for f in data(ia):
+                    pts = [apply(m, pos[i]) for i in f]
+                    tris.append([z_up(p, meters) if up == "z" else [c * meters for c in p] for p in pts])
+
+    kinds = ("Node", "BoneNode", "GeometryNode", "LightNode", "CameraNode")
+    nodes = 1 + sum(1 for s in top if s[0] in kinds)
     walk(top, IDENTITY)
-    return tris, lights, cameras
+    if nodes == 1:
+        for s in top:
+            if s[0] == "LightObject":
+                lights += 1
+            elif s[0] == "CameraObject":
+                cameras += 1
+            elif s[0] == "GeometryObject":
+                draw(s, IDENTITY)
+            else:
+                continue
+            nodes += 1
+    return tris, lights, cameras, nodes
 
 
 for name, folder in REAL.items():
     text = real[name].decode("utf-8")
-    tris, lights, cameras = read_ogex(text)
+    tris, lights, cameras, nodes = read_ogex(text)
     if tris:
         pts = [p for t in tris for p in t]
         expect = {"triangles": len(tris), "bounds": bounds(pts), "area": area(tris), "tolerance": 1e-4,
                   "document": {"lights": lights, "cameras": cameras}}
+    elif nodes > 1:
+        expect = {"no_mesh": True, "document": {"nodes": nodes, "lights": lights, "cameras": cameras}}
     else:
         expect = {"error": "no geometry"}
     what = {"assimp_example": "two boxes sharing a mesh, written as float bit patterns, their texture missing",
             "assimp_camera": "a cube, a light and a camera",
-            "assimp_empty_camera": "a camera object no node places",
-            "assimp_lights_only": "light objects no node places"}[folder]
+            "assimp_empty_camera": "camera objects and no nodes, each placed under the root by itself",
+            "assimp_lights_only": "light objects and no nodes, each placed under the root by itself"}[folder]
     if folder == "assimp_example":
         expect["document"]["source"] = {"missingTextures": 1}
     case(FMT, folder, {name: real[name]},

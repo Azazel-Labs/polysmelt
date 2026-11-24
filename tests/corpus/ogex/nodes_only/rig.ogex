@@ -1,0 +1,4 @@
+Metric (key = "up") { string { "z" } }
+Node { Name { string { "Rig" } }
+  BoneNode { Name { string { "Hip" } } Translation { float[3] { {0, 0, 1} } } }
+}

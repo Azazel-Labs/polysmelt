@@ -1,0 +1,9 @@
+Metric (key = "up") { string { "z" } }
+CameraObject $cam { Param (attrib = "fov") { float { 1 } } }
+LightObject $sun (type = "infinite") {}
+GeometryObject $t {
+Mesh (primitive = "triangles") {
+  VertexArray (attrib = "position") { float[3] { {0.0, 0.0, 0.0}, {2.0, 0.0, 0.0}, {0.0, 3.0, 0.0} } }
+  IndexArray { unsigned_int16[3] { {0, 1, 2} } }
+}
+}

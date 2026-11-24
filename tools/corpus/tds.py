@@ -247,6 +247,12 @@ case(FMT, "cameras_and_lights",
       "document": {"nodes": 5, "meshes": 1, "cameras": 1, "lights": 2,
                    "node_names": ["Camera01", "Light01", "Spot01", "Cube"]}})
 
+case(FMT, "cameras_and_lights_only",
+     {"scene.3ds": model(obj("Camera01", chunk(CAMERA, f32s([0, -10, 5, 0, 0, 0, 0, 45]))),
+                         obj("Light01", chunk(LIGHT, f32s([5, 5, 10]), color24((255, 255, 255)))))},
+     {"spec": SPEC + ": a camera and a light and no mesh, a scene still", "source": SRC, "no_mesh": True,
+      "document": {"nodes": 3, "meshes": 0, "cameras": 1, "lights": 1, "node_names": ["Camera01", "Light01"]}})
+
 case(FMT, "unknown_chunks",
      {"cube.3ds": model(chunk(0x1234, b"junk"), obj("Cube", chunk(0x4010), trimesh(CUBE_V, CUBE_FACES)),
                         chunk(0x7777, b"\0" * 9),

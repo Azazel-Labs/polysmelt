@@ -561,9 +561,14 @@ fn lights_and_cameras() {
     let cam = &j["cameras"][0]["perspective"];
     assert!(cam["yfov"].as_f64().unwrap() > 0.0);
     assert_eq!(cam["znear"], json!(1.5));
-    // An object that's never placed, or a file with nothing in it, has no geometry.
-    assert!(read("CameraObject { }").is_err());
+    // A file of objects and no nodes places each under the root; one with nothing in it, or only an empty
+    // geometry object, has no geometry.
+    let lone = read("CameraObject $c { }").unwrap();
+    assert_eq!(lone.json["cameras"].as_array().map(Vec::len), Some(1));
+    assert_eq!(lone.json["nodes"][1]["camera"], json!(0));
+    assert!(lone.to_glb().is_ok());
     assert!(read("").is_err());
+    assert!(read("GeometryObject { Mesh { } }").is_err());
     assert!(doc.to_glb().is_ok());
 }
 

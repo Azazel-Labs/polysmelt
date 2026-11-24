@@ -5,7 +5,8 @@
 //!
 //! Each node becomes a glTF node, placed by its node transforms (matrices, translations,
 //! rotations and scales, multiplied in order); its object transforms, which only its object
-//! takes, go on a child node that holds the object. A geometry object's most detailed mesh
+//! takes, go on a child node that holds the object; a file with no nodes has each of its objects
+//! placed under the root by itself. A geometry object's most detailed mesh
 //! becomes a glTF mesh, a primitive for each index array, its material the one the geometry
 //! node's material reference with that index names. Points, lines, line strips, triangles,
 //! triangle strips and quads are read; positions, normals, tangents (their handedness from the
@@ -500,13 +501,14 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         lines_or_points: false,
         stats: Stats::default(),
     };
-    nodes(&mut c);
+    let scene = nodes(&mut c);
     geometry::meshes(&mut c)?;
     if keep.animations {
         anim::animations(&mut c);
     }
+    // A file of nodes alone (a skeleton, or empty groups) is a scene still; one with nothing is not.
     ensure!(
-        !c.meshes.is_empty() || !c.lights.is_empty() || !c.cameras.is_empty(),
+        !c.meshes.is_empty() || !c.lights.is_empty() || !c.cameras.is_empty() || scene,
         "this OpenGEX file has no geometry"
     );
     Ok(finish(c))
@@ -540,8 +542,9 @@ fn track_targets(t: &Tree<'_>, n: u32) -> Vec<u32> {
     out
 }
 
-/// Builds the glTF nodes: the root (turning the file Y up, in meters), then every node.
-fn nodes(c: &mut Ctx<'_>) {
+/// Builds the glTF nodes: the root (turning the file Y up, in meters), then every node. Returns whether that's a
+/// scene even without meshes: the file has nodes, or lights or cameras to place without them.
+fn nodes(c: &mut Ctx<'_>) -> bool {
     let t = c.t;
     let mut root = json!({ "name": "RootNode" });
     if !c.metric.y_up {
@@ -644,6 +647,41 @@ fn nodes(c: &mut Ctx<'_>) {
         });
         push_kids(&mut stack, n, k);
     }
+    c.nodes.len() > 1 || objects(c)
+}
+
+/// Places a file's objects when it has no nodes to place them: each under the root, untransformed, so a file of
+/// only cameras or lights (or meshes) still shows them. Returns whether it placed a light or camera.
+fn objects(c: &mut Ctx<'_>) -> bool {
+    let t = c.t;
+    let mut seen = false;
+    for o in t.kids(ROOT).collect::<Vec<_>>() {
+        let ident = t.ident(o);
+        let kind = match ident {
+            "GeometryObject" => "geometry",
+            "LightObject" => "light",
+            "CameraObject" => "camera",
+            _ => continue,
+        };
+        seen |= kind != "geometry";
+        let name = node_name(t, o).unwrap_or_else(|| kind.to_owned());
+        let k = attach(c, json!({ "name": name }), 0);
+        match ident {
+            "GeometryObject" => c.geometry_nodes.push((o, k)),
+            "LightObject" if c.keep.lights => {
+                if let Some(l) = light(c, o) {
+                    c.nodes[k]["extensions"] = json!({ "KHR_lights_punctual": { "light": l } });
+                }
+            }
+            "CameraObject" if c.keep.cameras => {
+                if let Some(cam) = camera(c, o) {
+                    c.nodes[k]["camera"] = json!(cam);
+                }
+            }
+            _ => {}
+        }
+    }
+    seen
 }
 
 /// Adds a glTF node under `parent`; returns its index.
