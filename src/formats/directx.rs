@@ -49,7 +49,7 @@ use std::path::Path as FsPath;
 
 use serde_json::json;
 
-use super::inflate::inflate;
+use super::inflate::{MAX_INFLATED, inflate};
 use super::scene::{self, Animation, Channel, IDENTITY, Interp, M4, Node, Path, Primitive};
 use super::scene::{Scene, SceneMesh, Skin};
 use crate::assets::Assets;
@@ -63,8 +63,6 @@ use crate::{Context, ErrorKind, Result};
 
 /// How deep data objects may nest.
 const MAX_DEPTH: usize = 256;
-/// The most bytes a compressed file may inflate to.
-const MAX_INFLATED: usize = 1 << 30;
 /// Ticks per second when the file doesn't say.
 const DEFAULT_TICKS: f64 = 4800.0;
 use super::scene::MAX_UV_SETS;

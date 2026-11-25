@@ -1,17 +1,11 @@
 //! Just enough of a ZIP reader for `SketchUp` 2021+ files: the central directory, stored and deflated entries, and a
 //! cap on how much any entry may inflate to.
 
-use std::io::Read;
-
 use crate::{Context, ErrorKind, Result};
 use flate2::read::DeflateDecoder;
 
 use super::reader::{u16_at, u32_at};
-
-/// The largest entry this will inflate. Real `model.dat` files run to tens of megabytes.
-const MAX_ENTRY_BYTES: u64 = 1 << 30;
-/// Real entries compress about 10:1; twenty times that is a decompression bomb, not a model.
-const MAX_RATIO: u64 = 200;
+use crate::formats::inflate_capped;
 
 #[derive(Debug)]
 struct Entry {
@@ -100,21 +94,7 @@ impl<'a> Zip<'a> {
             .context(ErrorKind::Truncated, "ZIP entry is cut short")?;
         match e.method {
             0 => Ok(data.to_vec()),
-            8 => {
-                let limit = MAX_ENTRY_BYTES.min(e.compressed.saturating_mul(MAX_RATIO).saturating_add(1 << 20));
-                let mut out = Vec::new();
-                DeflateDecoder::new(data)
-                    .take(limit + 1)
-                    .read_to_end(&mut out)
-                    .with_context(ErrorKind::Corrupt, || format!("inflating {}", e.name))?;
-                ensure!(
-                    (out.len() as u64) <= limit,
-                    LimitExceeded,
-                    "ZIP entry {} inflates implausibly far",
-                    e.name
-                );
-                Ok(out)
-            }
+            8 => inflate_capped(DeflateDecoder::new(data), e.compressed, &e.name),
             m => bail!(
                 Unsupported,
                 "ZIP entry {} uses unsupported compression method {m}",

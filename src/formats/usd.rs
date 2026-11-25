@@ -35,7 +35,7 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
-use std::io::{self, Read as _};
+use std::io;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -3477,9 +3477,10 @@ impl<'a> Usdz<'a> {
                 .iter()
                 .find(|n| n.rsplit('/').next().is_some_and(|f| f.to_lowercase() == name))
         })?;
-        let mut f = self.0.by_name(entry).ok()?;
-        let mut bytes = Vec::new();
-        f.read_to_end(&mut bytes).ok()?;
+        // Entries are meant to be stored, but one deflated is read too, as far as is plausible.
+        let f = self.0.by_name(entry).ok()?;
+        let packed = f.compressed_size();
+        let bytes = super::inflate_capped(f, packed, entry).ok()?;
         Some((entry.clone(), bytes))
     }
 }
@@ -4494,5 +4495,32 @@ def HermiteCurves "Wave"
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_usdz_texture_that_inflates_implausibly_far_is_left_out() {
+        use std::io::Write as _;
+        // 64 MiB of zeros deflates to about 64 KB: a thousand times over, past any real texture.
+        let mut zip = zip::ZipWriter::new(io::Cursor::new(Vec::new()));
+        let deflated = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        let stored = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        zip.start_file("bomb.png", deflated).unwrap();
+        let zeros = vec![0u8; 1 << 20];
+        for _ in 0..64 {
+            zip.write_all(&zeros).unwrap();
+        }
+        zip.start_file("small.png", deflated).unwrap();
+        zip.write_all(&zeros[..4096]).unwrap();
+        zip.start_file("plain.png", stored).unwrap();
+        zip.write_all(b"not really a png").unwrap();
+        let bytes = zip.finish().unwrap().into_inner();
+        let stream: Box<dyn super::super::ReadSeek> = Box::new(io::Cursor::new(bytes));
+        let mut usdz = Usdz(zip::ZipArchive::new(stream).unwrap());
+        assert!(usdz.read("bomb.png").is_none());
+        assert_eq!(usdz.read("textures/small.png").map(|(_, b)| b.len()), Some(4096));
+        assert_eq!(
+            usdz.read("plain.png"),
+            Some(("plain.png".to_owned(), b"not really a png".to_vec()))
+        );
     }
 }

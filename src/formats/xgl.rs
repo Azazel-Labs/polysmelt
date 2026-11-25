@@ -37,7 +37,7 @@ pub(crate) fn load(input: super::Input<'_>, ext: &str, _assets: &dyn Assets, kee
         let mut out = Vec::new();
         // A zlib header (two bytes) before the deflate stream; a stream without one is read as it is.
         let body = if zipped(&bytes) { &bytes[2..] } else { &bytes[..] };
-        super::inflate::inflate(body, &mut out, MAX_INFLATED)?;
+        super::inflate::inflate(body, &mut out, super::inflate::MAX_INFLATED)?;
         raw = out;
         &raw
     } else {
@@ -46,9 +46,6 @@ pub(crate) fn load(input: super::Input<'_>, ext: &str, _assets: &dyn Assets, kee
     let text = super::xml::text(bytes);
     read(&text, input.limit, keep)
 }
-
-/// The most a zipped file inflates to.
-const MAX_INFLATED: usize = 1 << 31;
 
 /// Whether `b` starts with a zlib header: deflate, and a check that holds.
 fn zipped(b: &[u8]) -> bool {
