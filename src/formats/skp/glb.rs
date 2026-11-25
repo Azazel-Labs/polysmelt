@@ -10,7 +10,7 @@ use crate::{Context as _, ErrorKind, Result};
 use serde_json::{Value, json};
 
 use super::model::{Definition, Face, Id, Instance, Model};
-use super::triangulate::{newell, triangulate};
+use crate::polygon::{newell, triangulate_holes};
 use crate::vec3::{cross, dot, sub, unit};
 
 const INCH: f64 = 0.0254;
@@ -751,7 +751,7 @@ fn add_face(
     let Some(n) = face_normal(face) else {
         return 0;
     };
-    let tris = triangulate(&face.loops, n);
+    let tris = triangulate_holes(&face.loops, Some(n));
     let Ok(base) = u32::try_from(prim.positions.len() / 3) else {
         return 0;
     };

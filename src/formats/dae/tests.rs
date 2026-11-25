@@ -602,3 +602,22 @@ fn a_decimal_comma_reads_as_a_point() {
     let x = m.prims[0].positions.iter().map(|p| p[0]).fold(0.0f32, f32::max);
     assert!((x - 1.5).abs() < 1e-6, "{x}");
 }
+
+#[test]
+fn number_lists_take_every_spelling() {
+    let no = u32::MAX;
+    assert_eq!(
+        xml::indices(b" 0 7\t12\n+3 3.0 -0 0000000000042 4294967294 4294967295 99999999999 -1 2.5 x 1e1 "),
+        [0, 7, 12, 3, 3, 0, 42, 4_294_967_294, no, no, no, no, no, 10]
+    );
+    assert_eq!(xml::indices(b"5"), [5]);
+    assert_eq!(xml::indices(b" \r\n "), [0u32; 0]);
+    assert_eq!(
+        xml::floats32(b"1 -2.5 .5 1e3 1,5 1.#INF -1.#IND inf nan 1e39 x 0.1"),
+        [1.0, -2.5, 0.5, 1000.0, 1.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.1]
+    );
+    let mut v = Vec::new();
+    xml::floats(b"0.1 1.#INF -1.#INF 1.#QNAN nan 2,25 x", &mut v);
+    assert_eq!(v, [0.1, f64::INFINITY, f64::NEG_INFINITY, 0.0, 0.0, 2.25, 0.0]);
+    assert_eq!(xml::ints(b"1 -2 +3 x 1.0"), [1, -2, 3, -1, -1]);
+}

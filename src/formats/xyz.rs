@@ -22,7 +22,7 @@ use serde_json::{Map, Value, json};
 
 use super::Input;
 use super::points::{self, Cloud, Column};
-use super::stream::{f32_from, f64_from, lines, space};
+use super::stream::{f32_from, f64_from, lines, space, trim};
 use crate::document::{Document, Keep};
 use crate::num::f32_of;
 use crate::source::{Axis, Fact, SourceInfo};
@@ -90,13 +90,6 @@ pub(crate) fn load(input: Input<'_>, ext: &str, keep: Keep) -> Result<Document> 
     part.check(keep)?;
     let source = json!({ "columns": plan.described() });
     Ok(part.cloud(&plan, &ext.to_ascii_uppercase(), source))
-}
-
-/// `s` without spaces and control characters at its ends.
-fn trim(s: &[u8]) -> &[u8] {
-    let start = s.iter().position(|&b| !space(b)).unwrap_or(s.len());
-    let end = s.iter().rposition(|&b| !space(b)).map_or(start, |e| e + 1);
-    &s[start..end]
 }
 
 /// How a line's values are split.

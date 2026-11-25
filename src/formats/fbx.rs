@@ -1541,12 +1541,27 @@ impl Layered {
     }
 }
 
-/// Sorted, de-duplicated times, shifted so none is negative.
+/// Times closer than this are one key: exporters write the same frame to different curves a few
+/// ticks apart (two float paths to one time), and a step that small blows up per-frame velocities.
+const SAME_TIME: f64 = 1e-6;
+
+/// Sorted times with keys a hair apart merged, each to the last of its run: a step curve keyed at
+/// any of them already holds its new value there, where at the first it wouldn't yet.
 fn timeline(mut times: Vec<f64>) -> Vec<f64> {
     times.retain(|t| t.is_finite());
     times.sort_by(f64::total_cmp);
-    times.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
-    times
+    let mut out: Vec<f64> = Vec::with_capacity(times.len());
+    let mut start = f64::NEG_INFINITY;
+    for t in times {
+        match out.last_mut() {
+            Some(last) if t - start < SAME_TIME => *last = t,
+            _ => {
+                start = t;
+                out.push(t);
+            }
+        }
+    }
+    out
 }
 
 /// A blend shape target: its name, and by control point, its offsets to position and normal.
@@ -4693,6 +4708,23 @@ Connections:  {{
         let mut c = curve(&spin.iter().map(|v| v[1]).collect::<Vec<_>>());
         c.unwrap_degrees();
         assert_eq!(c.values, spin.iter().map(|v| v[1]).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn keys_a_hair_apart_become_one_time() {
+        // The same frame written to two curves through two float paths, 6e-8 s apart.
+        let t = timeline(vec![
+            0.0,
+            0.666_666_746,
+            0.666_666_687,
+            1.0,
+            f64::NAN,
+            1.0 + 4e-7,
+            1.0 + 8e-7,
+        ]);
+        assert_eq!(t, [0.0, 0.666_666_746, 1.0 + 8e-7]);
+        // Keys a frame apart stay apart, even at 1000 frames a second.
+        assert_eq!(timeline(vec![0.002, 0.001, 0.0]), [0.0, 0.001, 0.002]);
     }
 
     #[test]

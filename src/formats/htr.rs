@@ -37,6 +37,7 @@ use serde_json::{Map, json};
 
 use super::Input;
 use super::scene::{self, Animation, Channel, Interp, Node, Path, Scene};
+use super::stream::f64_from;
 use crate::Result;
 use crate::document::{Document, Keep};
 use crate::num::f32_of;
@@ -126,8 +127,8 @@ fn euler(order: &[usize; 3], angles: [f64; 3]) -> [f64; 4] {
 fn numbers<'a>(tokens: impl Iterator<Item = &'a str>, n: usize) -> Vec<f64> {
     let mut out = Vec::with_capacity(n);
     for t in tokens.take(n) {
-        match t.parse::<f64>() {
-            Ok(v) if v.is_finite() => out.push(v),
+        match f64_from(t.as_bytes()) {
+            Some(v) if v.is_finite() => out.push(v),
             _ => break,
         }
     }

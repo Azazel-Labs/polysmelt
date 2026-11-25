@@ -11,6 +11,7 @@ use crate::{Context as _, ErrorKind, Result};
 #[cfg(test)]
 use super::fbx_tree::{Array, BINARY_MAGIC, Elem, NodeHandle};
 use super::fbx_tree::{Attr, Builder, Tree, Version};
+use super::stream;
 
 /// Whether `data` is an ASCII FBX file.
 #[must_use]
@@ -297,12 +298,9 @@ enum Num {
 
 /// A number: an integer unless it has a point, an exponent or a `#`.
 fn number(s: &str) -> Num {
-    let b = s.as_bytes();
-    let digits = b.strip_prefix(b"-").unwrap_or(b);
     // Most numbers are short integers, read here without the general parser.
-    if !digits.is_empty() && digits.len() <= 18 && digits.iter().all(u8::is_ascii_digit) {
-        let n = digits.iter().fold(0i64, |n, &d| n * 10 + i64::from(d - b'0'));
-        return Num::Int(if digits.len() < b.len() { -n } else { n });
+    if let Some(n) = stream::int(s.as_bytes()) {
+        return Num::Int(n);
     }
     if !s.contains(['.', 'e', 'E', '#'])
         && let Ok(i) = s.parse::<i64>()
@@ -310,7 +308,7 @@ fn number(s: &str) -> Num {
         return Num::Int(i);
     }
     // `1.#INF` and the like, from old Windows exporters, have no use here.
-    Num::Float(s.parse().unwrap_or(0.0))
+    Num::Float(stream::f64_from(s.as_bytes()).unwrap_or(0.0))
 }
 
 /// An array's values, as the type its node always has.

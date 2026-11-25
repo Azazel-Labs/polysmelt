@@ -44,7 +44,7 @@ use serde_json::{Map, Value, json};
 use super::Input;
 use super::dates;
 use super::nurbs;
-use super::stream::f64_from;
+use super::stream::{self, f64_from};
 use crate::Result;
 use crate::document::{Builder, Document};
 use crate::mesh::{FastMap, Material, Prim, linear_u8, triangulate};
@@ -106,16 +106,7 @@ impl<'d> V<'d> {
 
 /// An integer's text: digits after an optional sign, or a real (truncated); 0 for neither.
 fn int(t: &[u8]) -> i64 {
-    let (neg, digits) = match t.first() {
-        Some(b'-') => (true, &t[1..]),
-        Some(b'+') => (false, &t[1..]),
-        _ => (false, t),
-    };
-    if !digits.is_empty() && digits.len() < 19 && digits.iter().all(u8::is_ascii_digit) {
-        let v = digits.iter().fold(0i64, |v, &d| v * 10 + i64::from(d - b'0'));
-        return if neg { -v } else { v };
-    }
-    V::Real(f64_from(t).unwrap_or(0.0)).int()
+    stream::int(t).unwrap_or_else(|| V::Real(f64_from(t).unwrap_or(0.0)).int())
 }
 
 /// A group code's text.
@@ -168,22 +159,7 @@ impl<'d> Pairs<'d> {
     /// The next line, without its end (`\n`, `\r\n` or a lone `\r`).
     #[inline]
     fn line(&mut self) -> Option<&'d [u8]> {
-        let d = self.d;
-        let rest = d.get(self.at..).filter(|r| !r.is_empty())?;
-        let n = rest
-            .iter()
-            .position(|&b| b == b'\n' || b == b'\r')
-            .unwrap_or(rest.len());
-        let mut at = self.at + n;
-        if at < d.len() {
-            at += if d[at] == b'\r' && d.get(at + 1) == Some(&b'\n') {
-                2
-            } else {
-                1
-            };
-        }
-        self.at = at;
-        Some(&rest[..n])
+        stream::next_line(self.d, &mut self.at)
     }
 
     #[inline]

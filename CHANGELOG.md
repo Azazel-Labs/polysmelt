@@ -2,30 +2,81 @@
 
 Breaking changes are allowed in minor releases until 1.0.
 
-## Unreleased
+## 0.18.0
 
-- FBX export: `Document::to_fbx` and `Document::write_fbx` (the `fbx` feature) write binary FBX
-  7.4, or 7.5 for files over 4 GiB. Written: the node tree with names, transforms and shared
-  geometry for instanced meshes, with a model per `EXT_mesh_gpu_instancing` instance; normals, tangents and binormals, every UV and color set, and
-  per-polygon materials; line geometry; materials as Phong properties with the PBR values,
-  alpha mode, double-sidedness and `KHR_materials_*` settings beside them (specular-glossiness
-  materials as their metal/rough equivalent); textures embedded,
-  with their wrap modes, UV set and texture transform; skins as a skin deformer with a cluster
-  per joint and a bind pose; morph targets as blend shapes with their weights; each animation
-  as its own stack, layer and take, stepped, linear and cubic keys kept as such and rotations
-  resampled as continuous Euler curves within 0.05 degrees of the quaternions; perspective and
-  orthographic cameras; `KHR_lights_punctual` lights; extras as user properties. Draco,
-  meshopt, sparse and quantized data are decoded. Points are left out: FBX has no point
-  geometry. The output is deterministic.
+- FBX export: `Document::to_fbx` and `Document::write_fbx` (the `fbx` feature) write binary
+  FBX 7.4, or 7.5 for files over 4 GiB, as the second fully supported output beside GLB.
+  - Nodes: names, transforms and hierarchy; instanced meshes share one geometry, and each
+    `EXT_mesh_gpu_instancing` instance becomes its own model.
+  - Meshes: normals, tangents and binormals, every UV and color set, per-polygon materials,
+    and line geometry. Points are left out, as FBX has no point geometry. Draco, meshopt,
+    sparse and quantized data are decoded first.
+  - Materials: Phong properties with the PBR values, alpha mode, double-sidedness and
+    `KHR_materials_*` settings beside them; specular-glossiness materials as their metal/rough
+    equivalent. Textures are embedded with their wrap modes, UV set and texture transform.
+  - Skins become a skin deformer with a cluster per joint and a bind pose; morph targets become
+    blend shapes with their weights.
+  - Each animation is its own stack, layer and take. Stepped, linear and cubic keys stay as
+    they are, and rotations are resampled as continuous Euler curves within 0.05 degrees of
+    the quaternions.
+  - Perspective and orthographic cameras, `KHR_lights_punctual` lights, and extras as user
+    properties.
+  - The output is deterministic. Every corpus model that loads round-trips through the reader,
+    apart from three that differ only between the reader's own samples or by a material default.
 - The FBX reader reads back what the writer adds beyond FBX's own properties: PBR values,
   alpha mode and the glTF extensions.
+- FBX animation: key times less than a microsecond apart (one frame written to two curves
+  through different float paths) are merged into one time, so no near-zero step reaches
+  per-frame velocities.
 - `examples/convert.rs` writes FBX when the output ends in `.fbx`.
+
+## 0.17.8
+
+- Polygons with holes (COLLADA `<ph>`, SketchUp inner loops) are triangulated by one shared
+  routine. A hole touching the outline or another hole is bridged where it touches, and holes
+  sharing a corner no longer drop most of the face, which fixes faces that came out overlapping
+  or partly missing. COLLADA polygons are triangulated in their own plane, so tilted faces with
+  holes are exact. Large faces with many holes triangulate up to twice as fast.
+
+## 0.17.7
+
+- Number parsing: every text reader (OBJ, OFF, COLLADA, 3MF, SMD, AC3D, DXF, AMF, MD5, `.x`,
+  ASCII FBX, HTR, ASF, TRC, WKT) goes through one fast float and integer parser. Numbers written
+  as `1.#INF`, `1.#QNAN` or `-1.#IND`, or with a decimal comma, are read instead of rejected.
+  COLLADA single-precision lists round once, correctly; its index lists read about 20% faster.
+- Internal: one quaternion module replaces the readers' own rotation math (normalizing,
+  slerp, Euler and axis-angle conversion, matrix to rotation), and glTF matrices are converted
+  to and from column order in one place. About 230 fewer lines. Output is unchanged.
+
+## 0.17.6
+
+- USDZ: a texture that inflates implausibly far (over 1 GiB, or 200 times its compressed size)
+  is left out instead of being read into memory, as SketchUp archive entries already were.
+- glTF 1.0: an accessor whose count runs past its buffer is an error before anything is
+  allocated, and one with a count but no `bufferView` is reported as corrupt.
+- A missing meshopt fallback buffer fails before room is made for the length it declares.
+- One pixel limit (16384 Ã— 16384) for every texture decoder; PNG, SketchUp and SGI images
+  were capped at a quarter of that. A large SGI image decodes only when the file holds its data.
+- Internal: the curve point budget, rotation resampling step, texture coordinate set and
+  joint influence limits, and the inflate caps are each defined once. Output is unchanged.
+
+## 0.17.5
+
+- 3ds: a spotlight whose hotspot or falloff angle is NaN no longer panics; it takes the widest
+  cone. Chunk lengths, counts and offsets past the end of the file take only what is there.
+- LAS: offsets near the end of the address range no longer overflow; data that runs past the end
+  of the file is reported as cut short.
+- OGRE binary meshes: a vertex element shorter than its declared type reads as zero instead of
+  indexing past it.
+- Internal: one bounds-checked binary cursor replaces the readers' own copies (3ds, b3d,
+  DirectX, IQM, LAS, MD2, MD3, MMD, MS3D, OFF, OGRE, OpenFlight, SketchUp). A count larger than
+  the file can hold fails before anything is allocated. Output is unchanged.
 
 ## 0.17.4
 
 - Writing a GLB is faster: accessors, buffer views and animations stay typed until the document
   is written, instead of being built as JSON and read back. Small animated models (IQM, B3D,
-  `.x`, SMD, MD5, BVH) convert 6–29% faster, and the GLB step alone is up to 2.4× faster.
+  `.x`, SMD, MD5, BVH) convert 6â€“29% faster, and the GLB step alone is up to 2.4Ã— faster.
   Output is unchanged.
 - `Document::json()` builds the full JSON on first use and keeps it.
 

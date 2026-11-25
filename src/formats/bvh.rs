@@ -36,7 +36,7 @@
 use serde_json::{Map, Value, json};
 
 use super::Input;
-use super::stream::{self, f32_from, f64_from};
+use super::stream::{self, f32_from, f64_from, trim};
 use crate::Result;
 use crate::document::{self, Animation, Builder, Document, Keep, Sampler};
 use crate::num::{f32_of, usize_of};
@@ -163,12 +163,6 @@ struct Hierarchy {
 /// Up to 40 characters of `s`, for an error message.
 fn show(s: &[u8]) -> String {
     String::from_utf8_lossy(s).chars().take(40).collect()
-}
-
-fn trim(s: &[u8]) -> &[u8] {
-    let start = s.iter().position(|&b| !stream::space(b)).unwrap_or(s.len());
-    let end = s.iter().rposition(|&b| !stream::space(b)).map_or(start, |e| e + 1);
-    &s[start..end]
 }
 
 /// The next token of `s` and what follows it. A brace is a token of its own, wherever it is.

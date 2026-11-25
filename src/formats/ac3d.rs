@@ -22,7 +22,7 @@ use std::sync::{Mutex, PoisonError};
 use serde_json::{Map, Value, json};
 
 use super::crease;
-use super::stream::f32_from;
+use super::stream::{self, f32_from};
 use crate::Result;
 use crate::assets::Assets;
 use crate::document::{Builder, Document, Keep};
@@ -129,28 +129,7 @@ struct Lines<'a> {
 impl<'a> Lines<'a> {
     /// The next line, without its line break; `None` at the end.
     fn next_line(&mut self) -> Option<&'a [u8]> {
-        if self.at >= self.d.len() {
-            return None;
-        }
-        let rest = &self.d[self.at..];
-        let n = rest
-            .iter()
-            .position(|&c| c == b'\n' || c == b'\r')
-            .unwrap_or(rest.len());
-        let line = &rest[..n];
-        self.at += n;
-        // A line ends at LF, CRLF or a lone CR.
-        match self.d.get(self.at) {
-            Some(b'\r') => {
-                self.at += 1;
-                if self.d.get(self.at) == Some(&b'\n') {
-                    self.at += 1;
-                }
-            }
-            Some(b'\n') => self.at += 1,
-            _ => {}
-        }
-        Some(line)
+        stream::next_line(self.d, &mut self.at)
     }
 
     /// The next line with something on it.
@@ -210,27 +189,20 @@ fn text(b: &[u8]) -> String {
     }
 }
 
-fn num(b: Option<&&[u8]>) -> Option<f32> {
-    b.and_then(|b| f32_from(b)).filter(|v| v.is_finite())
+/// A finite number.
+fn num(b: Option<&[u8]>) -> Option<f32> {
+    f32_from(b?).filter(|v| v.is_finite())
 }
 
 /// A whole number, decimal or `0x` hexadecimal.
-fn int(b: Option<&&[u8]>) -> Option<u32> {
-    int_of(b?)
-}
-
-fn int_of(b: &[u8]) -> Option<u32> {
-    let (digits, radix) = match b {
-        [b'0', b'x' | b'X', h @ ..] => (h, 16),
-        _ => (b, 10),
-    };
-    if digits.is_empty() {
-        return None;
+fn int(b: Option<&[u8]>) -> Option<u32> {
+    match b? {
+        [b'0', b'x' | b'X', h @ ..] if !h.is_empty() => h.iter().try_fold(0u32, |n, &c| {
+            let d = char::from(c).to_digit(16)?;
+            n.checked_mul(16)?.checked_add(d)
+        }),
+        b => stream::int(b),
     }
-    digits.iter().try_fold(0u32, |n, &c| {
-        let d = char::from(c).to_digit(radix)?;
-        n.checked_mul(radix)?.checked_add(d)
-    })
 }
 
 /// The words of a line without quotes: the fast way for vertex and corner lines.
@@ -238,14 +210,10 @@ fn fields(line: &[u8]) -> impl Iterator<Item = &[u8]> {
     line.split(u8::is_ascii_whitespace).filter(|w| !w.is_empty())
 }
 
-fn num_of(b: Option<&[u8]>) -> Option<f32> {
-    b.and_then(f32_from).filter(|v| v.is_finite())
-}
-
 fn nums<const N: usize>(w: &[&[u8]], from: usize) -> Option<[f32; N]> {
     let mut out = [0.0; N];
     for (k, o) in out.iter_mut().enumerate() {
-        *o = num(w.get(from + k))?;
+        *o = num(w.get(from + k).copied())?;
     }
     Some(out)
 }
@@ -269,11 +237,11 @@ fn mat_values(m: &mut Mat, w: &[&[u8]]) {
                 i += 4;
             }
             b"shi" => {
-                m.shi = num(w.get(i + 1)).unwrap_or(m.shi);
+                m.shi = num(w.get(i + 1).copied()).unwrap_or(m.shi);
                 i += 2;
             }
             b"trans" => {
-                m.trans = num(w.get(i + 1)).unwrap_or(m.trans);
+                m.trans = num(w.get(i + 1).copied()).unwrap_or(m.trans);
                 i += 2;
             }
             _ => {
@@ -359,7 +327,7 @@ fn parse(data: &[u8]) -> Result<Model> {
                 cur = Some(i);
             }
             b"kids" => {
-                let n = int(w.get(1)).unwrap_or(0) as usize;
+                let n = int(w.get(1).copied()).unwrap_or(0) as usize;
                 if let Some(c) = cur.take()
                     && n > 0
                 {
@@ -385,7 +353,7 @@ fn object_line(o: &mut Obj, w: &[&[u8]], lines: &mut Lines<'_>, unknown: &mut us
     match w[0] {
         b"name" => o.name = s(1),
         b"data" => {
-            let n = int(w.get(1)).unwrap_or(0) as usize;
+            let n = int(w.get(1).copied()).unwrap_or(0) as usize;
             let d = lines.take(n);
             o.data = Some(text(d));
         }
@@ -399,20 +367,20 @@ fn object_line(o: &mut Obj, w: &[&[u8]], lines: &mut Lines<'_>, unknown: &mut us
         b"rot" => o.rot = nums(w, 1),
         b"loc" => o.loc = nums(w, 1),
         b"url" => o.url = s(1),
-        b"crease" => o.crease = num(w.get(1)),
-        b"subdiv" => o.subdiv = int(w.get(1)),
+        b"crease" => o.crease = num(w.get(1).copied()),
+        b"subdiv" => o.subdiv = int(w.get(1).copied()),
         b"hidden" => o.hidden = true,
         b"locked" => o.locked = true,
         b"folded" => o.folded = true,
         b"numvert" => {
-            let n = int(w.get(1)).unwrap_or(0) as usize;
+            let n = int(w.get(1).copied()).unwrap_or(0) as usize;
             // Each vertex takes six bytes at least, so what's left bounds the count.
             o.verts.reserve(n.min(lines.d.len().saturating_sub(lines.at) / 6));
             for _ in 0..n {
                 let back = lines.at;
                 let Some(l) = lines.next_full() else { break };
                 let mut f = fields(l);
-                let v = (|| Some([num_of(f.next())?, num_of(f.next())?, num_of(f.next())?]))();
+                let v = (|| Some([num(f.next())?, num(f.next())?, num(f.next())?]))();
                 let Some(v) = v else {
                     // The vertices ran short: what's there belongs to the object.
                     lines.at = back;
@@ -422,7 +390,7 @@ fn object_line(o: &mut Obj, w: &[&[u8]], lines: &mut Lines<'_>, unknown: &mut us
             }
         }
         b"numsurf" => {
-            let n = int(w.get(1)).unwrap_or(0) as usize;
+            let n = int(w.get(1).copied()).unwrap_or(0) as usize;
             let mut done = 0;
             let mut flags = 0;
             let mut mat = 0;
@@ -430,7 +398,7 @@ fn object_line(o: &mut Obj, w: &[&[u8]], lines: &mut Lines<'_>, unknown: &mut us
                 let back = lines.at;
                 let Some(l) = lines.next_full() else { break };
                 let mut f = fields(l);
-                let (key, value) = (f.next(), f.next().and_then(int_of));
+                let (key, value) = (f.next(), int(f.next()));
                 match key {
                     Some(b"SURF") => flags = value.unwrap_or(0),
                     Some(b"mat") => mat = value.unwrap_or(0),
@@ -445,14 +413,14 @@ fn object_line(o: &mut Obj, w: &[&[u8]], lines: &mut Lines<'_>, unknown: &mut us
                                 break;
                             };
                             let mut f = fields(l);
-                            let Some(v) = f.next().and_then(int_of) else {
+                            let Some(v) = int(f.next()) else {
                                 // Not a corner: the corners ran short.
                                 lines.at = back;
                                 ok = false;
                                 break;
                             };
                             ok &= (v as usize) < o.verts.len();
-                            let uv = num_of(f.next()).zip(num_of(f.next())).map_or([0.0; 2], |(u, v)| [u, v]);
+                            let uv = num(f.next()).zip(num(f.next())).map_or([0.0; 2], |(u, v)| [u, v]);
                             o.refs.push((v, uv));
                         }
                         done += 1;
