@@ -347,7 +347,7 @@ mod tests {
         assert_eq!(u32::from_le_bytes(out[23..27].try_into().unwrap()), 7400);
         // The first record ends where its own header says.
         let end = u32::from_le_bytes(out[27..31].try_into().unwrap()) as usize;
-        let size = top[0].size(false, false) as usize;
+        let size = usize::try_from(top[0].size(false, false)).unwrap();
         assert_eq!(end, 27 + size);
         // The footer ends the file with its magic, the version 120 zeros before it.
         assert_eq!(&out[out.len() - 16..], &FOOT_MAGIC);

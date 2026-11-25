@@ -38,6 +38,9 @@ use crate::document::Document;
 use crate::{Result, quat};
 use records::{Node, p, p_f64, p_int, p_str, p_time, p_vec, props70};
 
+/// A translation, rotation quaternion and scale.
+type Trs = ([f64; 3], [f64; 4], [f64; 3]);
+
 /// FBX time units per second.
 pub(super) const KTIME: f64 = 46_186_158_000.0;
 
@@ -101,7 +104,7 @@ struct Model {
 
 impl Model {
     /// The model's translation, rotation and scale for the node's own, as FBX holds them.
-    fn fbx_trs(&self, t: [f64; 3], r: [f64; 4], s: [f64; 3]) -> ([f64; 3], [f64; 4], [f64; 3]) {
+    fn fbx_trs(&self, t: [f64; 3], r: [f64; 4], s: [f64; 3]) -> Trs {
         let (mut t, mut r, mut s) = (t, r, s);
         if let Some(b) = self.back {
             t = quat::rotate(b, t);
@@ -200,7 +203,7 @@ fn fbx_name(name: &str, class: &str) -> String {
 }
 
 /// A node's local transform as translation, rotation and scale.
-fn node_trs(node: &Value) -> ([f64; 3], [f64; 4], [f64; 3]) {
+fn node_trs(node: &Value) -> Trs {
     if let Some(m) = node.get("matrix").and_then(Value::as_array).filter(|m| m.len() == 16) {
         let flat: [f64; 16] = std::array::from_fn(|i| m[i].as_f64().unwrap_or(0.0));
         let d = decompose(&from_column_major(&flat));
@@ -216,7 +219,7 @@ fn node_trs(node: &Value) -> ([f64; 3], [f64; 4], [f64; 3]) {
 }
 
 /// The matrix of a translation, rotation and scale.
-fn trs_matrix((t, r, s): ([f64; 3], [f64; 4], [f64; 3])) -> M4 {
+fn trs_matrix((t, r, s): Trs) -> M4 {
     mul(&translate(t), &mul(&rotation(r), &scale(s)))
 }
 
@@ -279,25 +282,23 @@ impl<'d> Writer<'d> {
             .and_then(Value::as_u64)
             .and_then(|s| usize::try_from(s).ok())
             .or((!scenes.is_empty()).then_some(0));
-        let mut roots: Vec<usize> = match scene.and_then(|s| scenes.get(s)) {
-            Some(s) => s
-                .get("nodes")
+        let mut roots: Vec<usize> = if let Some(s) = scene.and_then(|s| scenes.get(s)) {
+            s.get("nodes")
                 .and_then(Value::as_array)
                 .into_iter()
                 .flatten()
                 .filter_map(|v| v.as_u64().and_then(|i| usize::try_from(i).ok()))
-                .collect(),
-            None => {
-                let mut child = vec![false; nodes.len()];
-                for n in nodes {
-                    for c in children(n) {
-                        if let Some(c) = child.get_mut(c) {
-                            *c = true;
-                        }
+                .collect()
+        } else {
+            let mut child = vec![false; nodes.len()];
+            for n in nodes {
+                for c in children(n) {
+                    if let Some(c) = child.get_mut(c) {
+                        *c = true;
                     }
                 }
-                (0..nodes.len()).filter(|&i| !child[i]).collect()
             }
+            (0..nodes.len()).filter(|&i| !child[i]).collect()
         };
         let mark = |roots: &[usize], keep: &mut Vec<bool>| {
             let mut stack: Vec<usize> = roots.to_vec();
@@ -417,7 +418,7 @@ impl<'d> Writer<'d> {
                     .map_or_else(|| format!("mesh_{mesh}"), str::to_owned);
                 if let Some(g) = self.geometry(mesh)? {
                     let model = self.helper(0, &name, "Mesh", ([0.0; 3], quat::IDENTITY, [1.0; 3]));
-                    self.draw(&g, model, &name)?;
+                    self.draw(&g, model, &name);
                 }
             }
         }
@@ -524,7 +525,7 @@ impl<'d> Writer<'d> {
 
     /// A new model under `parent` with `t`, `r` and `s` as its transform, for what a node holds that its own model
     /// can't.
-    fn helper(&mut self, parent: i64, name: &str, kind: &str, (t, r, s): ([f64; 3], [f64; 4], [f64; 3])) -> i64 {
+    fn helper(&mut self, parent: i64, name: &str, kind: &str, (t, r, s): Trs) -> i64 {
         let id = self.id();
         let props = vec![
             p_int("RotationActive", "bool", 1),
@@ -588,7 +589,7 @@ impl<'d> Writer<'d> {
             _ => vec![model],
         };
         for &host in &hosts {
-            self.draw(&g, host, &name)?;
+            self.draw(&g, host, &name);
         }
         if g.id.is_some() {
             if skinned {
@@ -602,11 +603,11 @@ impl<'d> Writer<'d> {
     }
 
     /// Connects geometry `g`, with its materials, to model `host`, which is named `name`.
-    fn draw(&mut self, g: &geometry::Geom, host: i64, name: &str) -> Result<()> {
+    fn draw(&mut self, g: &geometry::Geom, host: i64, name: &str) {
         if let Some(gid) = g.id {
             self.oo(gid, host);
             for slot in &g.slots {
-                let m = self.material(*slot)?;
+                let m = self.material(*slot);
                 self.oo(m, host);
             }
         }
@@ -623,14 +624,13 @@ impl<'d> Writer<'d> {
                 host
             };
             self.oo(line, host);
-            let m = self.material(mat)?;
+            let m = self.material(mat);
             self.oo(m, host);
         }
-        Ok(())
     }
 
     /// A node's `EXT_mesh_gpu_instancing` instances, as transforms within it: none when it has none.
-    fn instances(&self, node: &Value) -> Result<Option<Vec<([f64; 3], [f64; 4], [f64; 3])>>> {
+    fn instances(&self, node: &Value) -> Result<Option<Vec<Trs>>> {
         let Some(attrs) = node.pointer("/extensions/EXT_mesh_gpu_instancing/attributes") else {
             return Ok(None);
         };
@@ -804,7 +804,7 @@ impl<'d> Writer<'d> {
 
     fn global_settings(&self) -> Node {
         let (mode, custom) = anim::time_mode(self.fps);
-        let (start, stop) = self.span.unwrap_or((0, (KTIME * 10.0 / self.fps) as i64));
+        let (start, stop) = self.span.unwrap_or((0, anim::ktime(10.0 / self.fps)));
         Node::new("GlobalSettings")
             .child("Version", |n| n.i32(1000))
             .with(props70(vec![

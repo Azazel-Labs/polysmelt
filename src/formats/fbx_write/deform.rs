@@ -223,7 +223,7 @@ impl Writer<'_> {
                             .map_or([0.0; 3], |d| [d[0], d[1], d[2]].map(f64::from))
                     };
                     let (d, n) = (get(&pos), get(&nrm));
-                    if d == [0.0; 3] && n == [0.0; 3] {
+                    if d.iter().chain(&n).all(|&x| x == 0.0) {
                         continue;
                     }
                     let Ok(cp) = i32::try_from(base + v) else { break };

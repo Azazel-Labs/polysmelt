@@ -28,7 +28,7 @@ fn attribute(prim: &Value, name: &str) -> Option<usize> {
 
 /// How many sets of `prefix` (`TEXCOORD_`, `COLOR_`) a primitive has, numbered from 0 without a gap.
 fn sets(prim: &Value, prefix: &str) -> usize {
-    (0..)
+    (0..usize::MAX)
         .take_while(|k| attribute(prim, &format!("{prefix}{k}")).is_some())
         .count()
 }
@@ -135,17 +135,14 @@ impl Writer<'_> {
             let base = verts.len() / 3;
             fbx_index(base + n)?;
             tris.clear();
-            match index(prim, "indices") {
-                Some(a) => {
-                    let idx = doc.read_indices(a)?;
-                    triangles(mode(prim), &idx, &mut tris);
-                    // A triangle naming a vertex that isn't there is dropped, as glTF's readers do.
-                    tris.retain(|t| t.iter().all(|&i| (i as usize) < n));
-                }
-                None => {
-                    let idx: Vec<u32> = (0..u32::try_from(n).unwrap_or(u32::MAX)).collect();
-                    triangles(mode(prim), &idx, &mut tris);
-                }
+            if let Some(a) = index(prim, "indices") {
+                let idx = doc.read_indices(a)?;
+                triangles(mode(prim), &idx, &mut tris);
+                // A triangle naming a vertex that isn't there is dropped, as glTF's readers do.
+                tris.retain(|t| t.iter().all(|&i| (i as usize) < n));
+            } else {
+                let idx: Vec<u32> = (0..u32::try_from(n).unwrap_or(u32::MAX)).collect();
+                triangles(mode(prim), &idx, &mut tris);
             }
             if tris.is_empty() {
                 continue;

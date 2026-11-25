@@ -5,7 +5,6 @@ use serde_json::Value;
 
 use super::records::{Node, p, p_f64, p_int, p_str, p_vec, props70};
 use super::{Writer, fbx_name, index, list, number, numbers, to_srgb};
-use crate::Result;
 
 /// The glTF sampler constants for repeating and clamping.
 const REPEAT: i64 = 10497;
@@ -53,9 +52,9 @@ fn image_file(name: Option<&str>, i: usize, mime: Option<&str>) -> String {
 impl Writer<'_> {
     /// Material `m`'s object, written the first time it's asked for. Primitives without a material (`None`) get
     /// glTF's default one, white and fully metallic and rough, rather than whatever default a reader has.
-    pub(super) fn material(&mut self, m: Option<usize>) -> Result<i64> {
+    pub(super) fn material(&mut self, m: Option<usize>) -> i64 {
         if let Some(&id) = self.materials.get(&m) {
-            return Ok(id);
+            return id;
         }
         let mat = m.map_or(&Value::Null, |m| &list(self.json, "materials")[m]);
         let id = self.id();
@@ -336,22 +335,18 @@ impl Writer<'_> {
             }
         }
         for (info, prop) in links {
-            if let Some(t) = self.texture(info)? {
+            if let Some(t) = self.texture(info) {
                 self.op(t, id, prop);
             }
         }
-        Ok(id)
+        id
     }
 
     /// The texture object a material's texture reference makes, written the first time it's asked for; `None` when
     /// it names no image.
-    fn texture(&mut self, info: &Value) -> Result<Option<i64>> {
-        let Some((t, uv)) = tex_ref(info) else {
-            return Ok(None);
-        };
-        let Some(texture) = list(self.json, "textures").get(t) else {
-            return Ok(None);
-        };
+    fn texture(&mut self, info: &Value) -> Option<i64> {
+        let (t, uv) = tex_ref(info)?;
+        let texture = list(self.json, "textures").get(t)?;
         let source = index(texture, "source")
             .or_else(|| {
                 texture
@@ -364,9 +359,7 @@ impl Writer<'_> {
                     .and_then(as_index)
             })
             .filter(|&s| s < list(self.json, "images").len());
-        let Some(image) = source else {
-            return Ok(None);
-        };
+        let image = source?;
         let sampler = index(texture, "sampler").and_then(|s| list(self.json, "samplers").get(s));
         let gl = |k: &str| sampler.and_then(|s| s.get(k)).and_then(Value::as_i64);
         let (wrap_s, wrap_t) = (gl("wrapS").unwrap_or(REPEAT), gl("wrapT").unwrap_or(REPEAT));
@@ -380,9 +373,9 @@ impl Writer<'_> {
             gl("minFilter")
         );
         if let Some(&id) = self.textures.get(&key) {
-            return Ok(Some(id));
+            return Some(id);
         }
-        let video = self.video(image)?;
+        let video = self.video(image);
         let id = self.id();
         self.textures.insert(key, id);
         let img = &list(self.json, "images")[image];
@@ -390,12 +383,12 @@ impl Writer<'_> {
         let file = image_file(
             img.get("name").and_then(Value::as_str),
             image,
-            handle.as_ref().and_then(|h| h.mime()),
+            handle.as_ref().and_then(crate::images::ImageHandle::mime),
         );
         let file = handle
             .as_ref()
             .filter(|h| h.is_pending())
-            .and_then(|h| h.reference())
+            .and_then(crate::images::ImageHandle::reference)
             .map_or(file, str::to_owned);
         let name = texture
             .get("name")
@@ -453,18 +446,18 @@ impl Writer<'_> {
         if let Some(v) = video {
             self.oo(v, id);
         }
-        Ok(Some(id))
+        Some(id)
     }
 
     /// The video holding image `i`, written the first time it's asked for: its bytes embedded, or for an image
     /// not yet read, only its file name. `None` when its bytes can't be read.
-    fn video(&mut self, i: usize) -> Result<Option<i64>> {
+    fn video(&mut self, i: usize) -> Option<i64> {
         if let Some(&v) = self.videos.get(&i) {
-            return Ok(v);
+            return v;
         }
         let Some(handle) = self.doc.images().nth(i) else {
             self.videos.insert(i, None);
-            return Ok(None);
+            return None;
         };
         // An image whose bytes can't be had keeps its file name, as a pending one does.
         let bytes = if handle.is_pending() {
@@ -490,7 +483,7 @@ impl Writer<'_> {
         }
         self.object("Video", node);
         self.videos.insert(i, Some(id));
-        Ok(Some(id))
+        Some(id)
     }
 }
 

@@ -3101,8 +3101,8 @@ fn read_gltf(mat: &mut Full, p: &Props<'_>) -> bool {
         mat.emissive = e.map(|e| e * k);
     }
     mat.alpha = match f("alphaMode") {
-        Some(m) if m == 1.0 => Alpha::Mask(f("alphaCutoff").unwrap_or(0.5)),
-        Some(m) if m == 2.0 => Alpha::Blend,
+        Some(m) if (m - 1.0).abs() < 0.5 => Alpha::Mask(f("alphaCutoff").unwrap_or(0.5)),
+        Some(m) if (m - 2.0).abs() < 0.5 => Alpha::Blend,
         _ => Alpha::Opaque,
     };
     mat.double_sided = f("doubleSided").is_some_and(|d| d != 0.0);

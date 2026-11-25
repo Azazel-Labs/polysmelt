@@ -48,7 +48,7 @@ pub(super) fn time_mode(fps: f64) -> (i32, f64) {
 }
 
 /// Seconds as FBX time.
-fn ktime(t: f64) -> i64 {
+pub(super) fn ktime(t: f64) -> i64 {
     #[allow(clippy::cast_possible_truncation, reason = "rounded, and `as` saturates")]
     let k = (t * KTIME).round() as i64;
     k
@@ -103,8 +103,8 @@ fn curves(c: &Channel, width: usize, map: impl Fn([f64; 3]) -> [f64; 3]) -> Vec<
         if width == 3 { map(v) } else { v }
     };
     let mut out: Vec<Keys> = (0..width).map(|_| Keys::default()).collect();
-    for k in 0..n {
-        let t = f64::from(c.times[k]);
+    for (k, &t) in c.times.iter().enumerate() {
+        let t = f64::from(t);
         let (value, out_slope, next_in) = if cubic {
             let next = if k + 1 < n { at(k + 1, 0) } else { [0.0; 3] };
             (at(k, 1), at(k, 2), next)
@@ -134,8 +134,8 @@ fn weight_curves(c: &Channel, targets: usize) -> Vec<Keys> {
     (0..targets)
         .map(|j| {
             let mut keys = Keys::default();
-            for k in 0..n {
-                let t = f64::from(c.times[k]);
+            for (k, &t) in c.times.iter().enumerate() {
+                let t = f64::from(t);
                 if cubic {
                     let next_in = if k + 1 < n { at(k + 1, 0, j) } else { 0.0 };
                     keys.push(t, at(k, 1, j), flags, [at(k, 2, j), next_in]);
@@ -444,6 +444,7 @@ mod tests {
 
     #[test]
     fn rotation_curves_follow_the_quaternions() {
+        #[allow(clippy::cast_possible_truncation, reason = "test values fit")]
         let q = |deg: f64| quat::about_axis([0.6, 0.0, 0.8], deg.to_radians()).map(|x| x as f32);
         let c = Channel {
             node: 0,

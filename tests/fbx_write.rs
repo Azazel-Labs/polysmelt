@@ -1,6 +1,12 @@
 //! The FBX writer, checked by reading back what it writes: scenes built to cover each thing it writes, then the
 //! conformance corpus. Every file written is parsed by an independent FBX parser too.
 #![cfg(all(feature = "fbx", feature = "gltf"))]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    reason = "the scenes built here are small: counts, indices and grid steps fit any of these types"
+)]
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::hash::{Hash, Hasher};
