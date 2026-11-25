@@ -515,11 +515,11 @@ pub(crate) fn unescape(s: &str) -> Cow<'_, str> {
 /// digit, as the digits of hashes and colors come in no order.
 const HEX: [u8; 256] = {
     let mut t = [u8::MAX; 256];
-    let mut i = 0;
+    let mut i = 0u8;
     while i < 16 {
-        let d = b"0123456789abcdef"[i];
-        t[d as usize] = i as u8;
-        t[d.to_ascii_uppercase() as usize] = i as u8;
+        let d = b"0123456789abcdef"[i as usize];
+        t[d as usize] = i;
+        t[d.to_ascii_uppercase() as usize] = i;
         i += 1;
     }
     t
