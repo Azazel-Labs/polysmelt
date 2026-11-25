@@ -203,12 +203,9 @@ impl<'a, O: Order> Bin<'a, O> {
     /// The next `n` bytes.
     #[inline]
     pub fn bytes(&mut self, n: usize) -> Result<&'a [u8]> {
-        match self
-            .at
-            .checked_add(n)
-            .and_then(|end| Some((end, self.data.get(self.at..end)?)))
-        {
-            Some((end, s)) => {
+        match self.at.checked_add(n).filter(|&end| end <= self.data.len()) {
+            Some(end) => {
+                let s = &self.data[self.at..end];
                 self.at = end;
                 Ok(s)
             }
