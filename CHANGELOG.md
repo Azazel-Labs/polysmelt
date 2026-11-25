@@ -2,6 +2,11 @@
 
 Breaking changes are allowed in minor releases until 1.0.
 
+## 0.17.2
+
+- `Loader::open_with` and `Loader::read_with` borrow an `&dyn Assets` for one read, so assets
+  that aren't `Send`, `Sync` or `'static` work, and can be asked afterwards what was read.
+
 ## 0.17.1
 
 - `Error::new(kind, message)` and `Error::caused(kind, message, source)` are public, so an

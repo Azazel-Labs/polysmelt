@@ -135,12 +135,29 @@ impl Loader {
     /// As [`open`]'s.
     #[cfg(feature = "fs")]
     pub fn open(&self, path: impl AsRef<Path>) -> Result<Document> {
+        self.open_from(path.as_ref(), self.assets.as_deref().map(|a| a as &dyn Assets))
+    }
+
+    /// Reads the model at `path` as [`open`](Self::open) does, finding the files it refers to
+    /// through `assets` for this read alone. The assets are only borrowed, so they needn't be
+    /// `Send`, `Sync` or `'static`, and can be asked afterwards what was read.
+    ///
+    /// # Errors
+    ///
+    /// As [`open`]'s.
+    #[cfg(feature = "fs")]
+    pub fn open_with(&self, path: impl AsRef<Path>, assets: &dyn Assets) -> Result<Document> {
+        self.open_from(path.as_ref(), Some(assets))
+    }
+
+    #[cfg(feature = "fs")]
+    fn open_from(&self, path: &Path, assets: Option<&dyn Assets>) -> Result<Document> {
         // A bare file name's folder is the current one, which its references are found from.
-        let path = std::path::absolute(path.as_ref()).map_err(|e| crate::Error::from(e).at(path.as_ref()))?;
+        let path = std::path::absolute(path).map_err(|e| crate::Error::from(e).at(path))?;
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
         let folder;
-        let assets: &dyn Assets = if let Some(a) = &self.assets {
-            &**a
+        let assets: &dyn Assets = if let Some(a) = assets {
+            a
         } else {
             folder = crate::assets::Folder::new(path.parent().unwrap_or(&path));
             &folder
@@ -157,16 +174,27 @@ impl Loader {
     /// As [`read`]'s, and [`ErrorKind::MissingAsset`](crate::ErrorKind::MissingAsset) when a
     /// file the model refers to isn't among the assets.
     pub fn read(&self, bytes: impl Into<Bytes>, name: &str) -> Result<Document> {
-        let bytes = bytes.into();
-        let path = Path::new(name);
-        let input = Input::shared(&bytes, path);
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        let ext = super::extension_as(input, ext, self.format);
         let none = Memory::new();
         let assets: &dyn Assets = match &self.assets {
             Some(a) => &**a,
             None => &none,
         };
+        self.read_with(bytes, name, assets)
+    }
+
+    /// Reads a model in memory as [`read`](Self::read) does, finding the files it refers to
+    /// through `assets` for this read alone. The assets are only borrowed, so they needn't be
+    /// `Send`, `Sync` or `'static`.
+    ///
+    /// # Errors
+    ///
+    /// As [`read`](Self::read)'s.
+    pub fn read_with(&self, bytes: impl Into<Bytes>, name: &str, assets: &dyn Assets) -> Result<Document> {
+        let bytes = bytes.into();
+        let path = Path::new(name);
+        let input = Input::shared(&bytes, path);
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let ext = super::extension_as(input, ext, self.format);
         super::read_input(input, ext, assets, self.keep)
     }
 }
@@ -209,6 +237,48 @@ mod tests {
             .unwrap();
         assert!(doc.json().get("materials").is_none());
         assert!(format!("{loader:?}").contains("Loader"));
+    }
+
+    #[test]
+    fn borrowed_assets_can_be_asked_afterwards_what_was_found() {
+        use std::borrow::Cow;
+        use std::cell::RefCell;
+        use std::path::PathBuf;
+
+        // Not Sync, and kept by the caller: what `Loader::assets` can't take.
+        struct Seen {
+            files: Memory,
+            asked: RefCell<Vec<String>>,
+        }
+        impl Assets for Seen {
+            fn find(&self, reference: &str, model_dir: &Path) -> Option<PathBuf> {
+                self.asked.borrow_mut().push(reference.to_owned());
+                self.files.find(reference, model_dir)
+            }
+            fn read(&self, path: &Path) -> Option<Cow<'_, [u8]>> {
+                self.files.read(path)
+            }
+        }
+
+        let obj = b"mtllib a.mtl
+usemtl red
+v 0 0 0
+v 1 0 0
+v 0 1 0
+f 1 2 3
+";
+        let seen = Seen {
+            files: Memory::new().with(
+                "m/a.mtl",
+                &b"newmtl red
+Kd 1 0 0
+"[..],
+            ),
+            asked: RefCell::default(),
+        };
+        let doc = Loader::new().read_with(&obj[..], "m/a.obj", &seen).unwrap();
+        assert_eq!(doc.json()["materials"][0]["name"], "red");
+        assert_eq!(seen.asked.borrow().as_slice(), ["a.mtl"]);
     }
 
     #[cfg(feature = "gltf")]
