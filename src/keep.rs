@@ -1,6 +1,8 @@
 //! What a load keeps: [`Keep`], applied by [`Document::prune`].
 
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, PoisonError};
 
 use serde_json::{Map, Value};
 
@@ -248,13 +250,19 @@ impl Keep {
         allow(dead_code, reason = "only the OBJ and SPZ readers take threads")
     )]
     pub(crate) fn thread_count(self) -> usize {
-        if cfg!(all(target_family = "wasm", not(target_feature = "atomics"))) {
-            1
-        } else if self.threads == 0 {
-            std::thread::available_parallelism().map_or(1, std::num::NonZero::get)
-        } else {
-            self.threads
-        }
+        thread_count(self.threads)
+    }
+}
+
+/// Threads to use for a `threads` setting, at least 1: 0 takes one per core, and WebAssembly without shared memory
+/// has none to spare.
+pub(crate) fn thread_count(threads: usize) -> usize {
+    if cfg!(all(target_family = "wasm", not(target_feature = "atomics"))) {
+        1
+    } else if threads == 0 {
+        std::thread::available_parallelism().map_or(1, std::num::NonZero::get)
+    } else {
+        threads
     }
 }
 
@@ -273,9 +281,10 @@ thread_local! {
         feature = "pcd",
         feature = "xyz",
         feature = "e57",
-        feature = "ac3d"
+        feature = "ac3d",
+        feature = "fbx"
     )),
-    allow(dead_code, reason = "only the OBJ and SPZ readers take threads")
+    allow(dead_code, reason = "only some readers, and the FBX writer, take threads")
 )]
 pub(crate) fn spawn<'s>(s: &'s std::thread::Scope<'s, '_>, f: impl FnOnce() + Send + 's) -> bool {
     #[cfg(test)]
@@ -283,6 +292,49 @@ pub(crate) fn spawn<'s>(s: &'s std::thread::Scope<'s, '_>, f: impl FnOnce() + Se
         return false;
     }
     std::thread::Builder::new().spawn_scoped(s, f).is_ok()
+}
+
+/// `f` of each item, in order, spread over up to `threads` threads that each take the next item as they finish one.
+/// Each thread makes a state with `init` that `f` keeps using for the items it takes. Where no thread can be started,
+/// the calling thread does them all.
+#[cfg_attr(
+    not(any(feature = "ac3d", feature = "fbx")),
+    allow(dead_code, reason = "only the AC3D reader and the FBX writer share work this way")
+)]
+pub(crate) fn par_map_with<T: Sync, S, R: Send>(
+    items: &[T],
+    threads: usize,
+    init: impl Fn() -> S + Sync,
+    f: impl Fn(&mut S, &T) -> R + Sync,
+) -> Vec<R> {
+    if threads <= 1 || items.len() <= 1 {
+        let mut state = init();
+        return items.iter().map(|t| f(&mut state, t)).collect();
+    }
+    let next = AtomicUsize::new(0);
+    let done: Mutex<Vec<Option<R>>> = Mutex::new((0..items.len()).map(|_| None).collect());
+    let run = || {
+        let mut state = init();
+        loop {
+            let k = next.fetch_add(1, Ordering::Relaxed);
+            let Some(item) = items.get(k) else { break };
+            let r = f(&mut state, item);
+            done.lock().unwrap_or_else(PoisonError::into_inner)[k] = Some(r);
+        }
+    };
+    std::thread::scope(|s| {
+        for _ in 1..threads.min(items.len()) {
+            if !spawn(s, run) {
+                break;
+            }
+        }
+        run();
+    });
+    done.into_inner()
+        .unwrap_or_else(PoisonError::into_inner)
+        .into_iter()
+        .flatten()
+        .collect()
 }
 
 /// Calls `f` on each item of `obj[key]` that's an object.

@@ -1,6 +1,7 @@
 //! Binary FBX records: a tree of named nodes, each with typed attributes and children, sized up front and written in
 //! one pass. A node's attributes are encoded into its own byte buffer as they're added (arrays straight from their
-//! slices, deflated when that makes them smaller), so writing is a walk that copies buffers out.
+//! slices), so writing is a walk that copies buffers out. Big arrays are deflated once the tree is built, across
+//! threads, and kept so when that makes them smaller.
 //!
 //! The layout is FBX 7.4's: each record starts with the file offset of its end, its attribute count and their byte
 //! length (32 bits each; 64 in 7.5, chosen when the file outgrows 4 GiB), then its name, attributes and children, and a
@@ -8,8 +9,7 @@
 
 use std::io::Write;
 
-use flate2::Compression;
-use flate2::write::ZlibEncoder;
+use flate2::{Compress, Compression, FlushCompress, Status};
 
 use crate::{ErrorKind, Result};
 
@@ -33,6 +33,9 @@ const DEFLATE_FROM: usize = 128;
 /// mostly arrays.
 const LEVEL: u32 = 1;
 
+/// Below this many bytes of arrays to deflate in all, a tree is deflated on the calling thread alone.
+const PARALLEL_FROM: usize = 1 << 18;
+
 /// A record: its name, encoded attributes and children.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Node {
@@ -42,6 +45,8 @@ pub(crate) struct Node {
     children: Vec<Node>,
     /// Closed with a null record even without children, as the format writes some records.
     closed: bool,
+    /// Where in `props` the arrays still to deflate start: each at its encoding and stored length.
+    raw: Vec<usize>,
 }
 
 /// A number an FBX array holds, with its type code.
@@ -141,24 +146,13 @@ impl Node {
         self
     }
 
-    /// An array's encoding, its stored length and its bytes, deflated when that's smaller.
+    /// An array's encoding, its stored length and its bytes, stored as they are: [`deflate`] packs the big ones.
     fn array_bytes(&mut self, bytes: &[u8]) {
-        let at = self.props.len();
-        self.props.extend_from_slice(&[0; 8]);
         if bytes.len() >= DEFLATE_FROM {
-            let start = self.props.len();
-            let mut z = ZlibEncoder::new(&mut self.props, Compression::new(LEVEL));
-            // Writing into a Vec can't fail.
-            let ok = z.write_all(bytes).and_then(|()| z.finish().map(|_| ()));
-            let packed = self.props.len() - start;
-            if ok.is_ok() && packed < bytes.len() {
-                self.props[at..at + 4].copy_from_slice(&1u32.to_le_bytes());
-                self.props[at + 4..at + 8].copy_from_slice(&len32(packed).to_le_bytes());
-                return;
-            }
-            self.props.truncate(start);
+            self.raw.push(self.props.len());
         }
-        self.props[at + 4..at + 8].copy_from_slice(&len32(bytes.len()).to_le_bytes());
+        self.props.extend_from_slice(&0u32.to_le_bytes());
+        self.props.extend_from_slice(&len32(bytes.len()).to_le_bytes());
         self.props.extend_from_slice(bytes);
     }
 
@@ -242,6 +236,80 @@ fn null(w: &mut dyn Write, at: &mut u64, wide: bool) -> std::io::Result<()> {
     w.write_all(&[0; 25][..n])?;
     *at += n as u64;
     Ok(())
+}
+
+/// A record's attributes, with where the arrays among them still to deflate start.
+type Packing<'a> = (&'a mut Vec<u8>, &'a mut Vec<usize>);
+
+/// The stored length of the array whose encoding is at `at` in `props`.
+fn stored(props: &[u8], at: usize) -> usize {
+    u32::from_le_bytes(props[at + 4..at + 8].try_into().expect("four bytes")) as usize
+}
+
+/// Every record's attributes in `nodes` and below with arrays to deflate.
+fn to_pack<'a>(nodes: &'a mut [Node], out: &mut Vec<Packing<'a>>) {
+    for n in nodes {
+        let Node {
+            props, raw, children, ..
+        } = n;
+        if !raw.is_empty() {
+            out.push((props, raw));
+        }
+        to_pack(children, out);
+    }
+}
+
+/// Attributes `props` with the arrays starting at `raw` deflated, each kept so when that makes it smaller.
+fn pack(props: &[u8], raw: &[usize], z: &mut Compress) -> Vec<u8> {
+    let mut out = Vec::with_capacity(props.len());
+    let mut from = 0;
+    for &at in raw {
+        let len = stored(props, at);
+        out.extend_from_slice(&props[from..at]);
+        let head = out.len();
+        out.extend_from_slice(&[0; 8]);
+        // Room for no more than the array itself: a deflate that doesn't fit wouldn't be kept.
+        out.reserve_exact(len);
+        let start = out.len();
+        z.reset();
+        let done = matches!(
+            z.compress_vec(&props[at + 8..at + 8 + len], &mut out, FlushCompress::Finish),
+            Ok(Status::StreamEnd)
+        );
+        let packed = out.len() - start;
+        if done && packed < len {
+            out[head..head + 4].copy_from_slice(&1u32.to_le_bytes());
+            out[head + 4..head + 8].copy_from_slice(&len32(packed).to_le_bytes());
+        } else {
+            out.truncate(head);
+            out.extend_from_slice(&props[at..at + 8 + len]);
+        }
+        from = at + 8 + len;
+    }
+    out.extend_from_slice(&props[from..]);
+    out
+}
+
+/// Deflates the big arrays in `top` and below, each kept so when that makes it smaller, over up to `threads`
+/// threads. Each array deflates on its own, so the bytes are the same however many threads there are.
+pub(crate) fn deflate(top: &mut [Node], threads: usize) {
+    let mut records = Vec::new();
+    to_pack(top, &mut records);
+    let total: usize = records
+        .iter()
+        .map(|(props, raw)| raw.iter().map(|&at| stored(props, at)).sum::<usize>())
+        .sum();
+    let threads = if total < PARALLEL_FROM { 1 } else { threads };
+    let packed = crate::keep::par_map_with(
+        &records,
+        threads,
+        || Compress::new(Compression::new(LEVEL), true),
+        |z, (props, raw)| pack(props, raw, z),
+    );
+    for ((props, raw), p) in records.iter_mut().zip(packed) {
+        **props = p;
+        raw.clear();
+    }
 }
 
 /// The largest attribute buffer in a tree, which a 7.4 record's 32-bit length must hold.
@@ -375,7 +443,9 @@ mod tests {
 
     #[test]
     fn big_arrays_are_deflated_and_small_ones_stored() {
-        let n = Node::new("A").arr(&[7i32; 1000]);
+        let mut top = [Node::new("A").arr(&[7i32; 1000])];
+        deflate(&mut top, 1);
+        let [n] = top;
         // type, count, encoding, length
         assert_eq!(n.props[0], b'i');
         assert_eq!(u32::from_le_bytes(n.props[5..9].try_into().unwrap()), 1);

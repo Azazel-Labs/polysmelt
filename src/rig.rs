@@ -137,7 +137,7 @@ pub enum Interpolation {
 
 impl Interpolation {
     /// Its glTF name.
-    const fn name(self) -> &'static str {
+    pub(crate) const fn name(self) -> &'static str {
         match self {
             Self::Linear => "LINEAR",
             Self::Step => "STEP",

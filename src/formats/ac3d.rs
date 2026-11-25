@@ -16,8 +16,6 @@
 //! Its units are whatever the model's are, unknown, and lengths are kept as written. Colors are sRGB.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Mutex, PoisonError};
 
 use serde_json::{Map, Value, json};
 
@@ -621,33 +619,6 @@ fn build(o: &Obj, mats: &[usize], textured: bool, mut clip: u64) -> Vec<Prim> {
     prims
 }
 
-/// `f` of each item, in order, spread over up to `threads` threads.
-fn par_map<T: Sync, R: Send>(items: &[T], threads: usize, f: impl Fn(&T) -> R + Sync) -> Vec<R> {
-    let next = AtomicUsize::new(0);
-    let done: Mutex<Vec<Option<R>>> = Mutex::new((0..items.len()).map(|_| None).collect());
-    let run = || {
-        loop {
-            let k = next.fetch_add(1, Ordering::Relaxed);
-            let Some(item) = items.get(k) else { break };
-            let r = f(item);
-            done.lock().unwrap_or_else(PoisonError::into_inner)[k] = Some(r);
-        }
-    };
-    std::thread::scope(|s| {
-        for _ in 1..threads.min(items.len()) {
-            if !crate::keep::spawn(s, run) {
-                break;
-            }
-        }
-        run();
-    });
-    done.into_inner()
-        .unwrap_or_else(PoisonError::into_inner)
-        .into_iter()
-        .flatten()
-        .collect()
-}
-
 /// The glTF material for an AC3D one, with its texture and sides.
 fn material(m: &Mat, tex: Option<Tex>, two_sided: bool, extras: bool) -> Full {
     let lin = |c: [f32; 3]| c.map(|v| srgb_to_linear(v.clamp(0.0, 1.0)));
@@ -777,10 +748,15 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
 
     // Then the objects' primitives, on threads when there's enough to share.
     let threads = if corners > 200_000 { keep.thread_count() } else { 1 };
-    let built = par_map(&jobs, threads, |(oi, mats, clip)| {
-        let o = &m.objs[*oi];
-        build(o, mats, o.texture.is_some(), *clip)
-    });
+    let built = crate::keep::par_map_with(
+        &jobs,
+        threads,
+        || (),
+        |(), (oi, mats, clip)| {
+            let o = &m.objs[*oi];
+            build(o, mats, o.texture.is_some(), *clip)
+        },
+    );
     let mut triangles = 0;
     for ((oi, _, _), prims) in jobs.iter().zip(built) {
         let o = &m.objs[*oi];
