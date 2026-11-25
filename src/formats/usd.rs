@@ -3407,7 +3407,7 @@ impl Reader<'_> {
             })
             .or_else(|| {
                 let dir = self.file.parent().unwrap_or(Path::new(""));
-                self.images.file(assets, assets.find(reference, dir)?, reference)
+                self.images.find(assets, &[reference], &[dir])
             })
     }
 }

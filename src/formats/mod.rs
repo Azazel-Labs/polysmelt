@@ -745,7 +745,7 @@ fn linear_colors(input: Input<'_>, ext: &str) -> bool {
 
 /// The color texture by naming convention for a model at `path` that names none, added to
 /// `images`.
-#[cfg(any(feature = "obj", feature = "3ds", feature = "fbx"))]
+#[cfg(any(feature = "obj", feature = "3ds", feature = "fbx", feature = "md2"))]
 fn color_texture(path: &Path, assets: &dyn Assets, images: &mut crate::images::Images) -> Option<usize> {
     let p = assets.color_texture_for(path)?;
     let name = p

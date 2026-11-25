@@ -1842,7 +1842,6 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
     let m = parse(&data)?;
     let dir = input.dir();
     let mut images = Images::new(!keep.image_bytes, dir);
-    let mut image_of: HashMap<String, Option<usize>> = HashMap::new();
     let textures = keep.materials && keep.textures;
     let clip_file = |b: &Block| -> Option<String> {
         if let Some(f) = &b.file {
@@ -1858,18 +1857,12 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         None
     };
     // Relative to the object, or to the content folder above the object's folder.
-    let find = |name: &str| {
-        assets
-            .find(name, dir)
-            .or_else(|| assets.find(name, dir.parent().unwrap_or(dir)))
-    };
+    let dirs = [dir, dir.parent().unwrap_or(dir)];
     let mut image_for = |name: &str| -> Option<usize> {
         if !textures {
             return None;
         }
-        *image_of
-            .entry(name.to_owned())
-            .or_insert_with(|| images.file(assets, find(name)?, name))
+        images.find(assets, &[name], &dirs)
     };
 
     // The materials and looks, a surface's by its index; tags naming no surface get LightWave's default.
@@ -1892,7 +1885,11 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
             .or_else(|| color_blocks.last().copied());
         let image = block.and_then(|b| image_for(&clip_file(b)?));
         // A missing image is counted whether or not textures are kept, as a full read counts it.
-        let missing = || block.and_then(clip_file).is_none_or(|f| find(&f).is_none());
+        let missing = || {
+            block
+                .and_then(clip_file)
+                .is_none_or(|f| dirs.iter().all(|d| assets.find(&f, d).is_none()))
+        };
         if block.is_some() && image.is_none() && (textures || missing()) {
             dropped_textures += 1;
         }

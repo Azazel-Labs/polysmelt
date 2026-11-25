@@ -128,18 +128,15 @@ pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
     let mut images = Images::new(!keep.image_bytes, input.dir());
     let textured = !model.prim.uvs.is_empty();
     let skin = model.skins.first().filter(|s| !s.is_empty());
-    let found = skin.and_then(|s| assets.find(s, input.dir()).map(|p| (p, s.clone())));
-    let found = found.or_else(|| {
-        let p = assets.color_texture_for(input.path).filter(|_| textured)?;
-        let name = p
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        Some((p, name))
-    });
+    let found = skin.and_then(|s| Some((assets.find(s, input.dir())?, s)));
     let name = skin.cloned().unwrap_or_else(|| stem.clone());
     let mut material = Material::plain(&name, [1.0, 1.0, 1.0, 1.0]);
-    material.color_image = found.and_then(|(p, r)| images.file(assets, p, &r));
+    // A skin that isn't there gives way to a texture by name, as one the model doesn't name does.
+    material.color_image = match found {
+        Some((p, s)) => images.file(assets, p, s),
+        None if textured => super::color_texture(input.path, assets, &mut images),
+        None => None,
+    };
     scene.materials.push(material);
     scene.images = images.list;
 

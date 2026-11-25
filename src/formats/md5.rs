@@ -536,10 +536,7 @@ fn texture(shader: &str, input: &Input<'_>, assets: &dyn Assets, images: &mut Im
     }
     tries.push(format!("{shader}.tga"));
     tries.push(format!("{shader}_d.tga"));
-    tries
-        .iter()
-        .find_map(|t| assets.find(t, dir).map(|p| (p, t)))
-        .and_then(|(p, t)| images.file(assets, p, t))
+    images.find(assets, &tries, &[dir])
 }
 
 fn build_mesh(m: &MeshFile, stem: &str, input: &Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Scene> {

@@ -1607,7 +1607,7 @@ fn build(
         let mut mat = Material::plain(&name, base);
         if has_uv
             && let Some(t) = texture
-            && let Some(i) = assets.find(t, dir).and_then(|f| images.file(assets, f, t))
+            && let Some(i) = images.find(assets, &[t], &[dir])
         {
             mat.color_image = Some(i);
             mat.color = [1.0; 4];

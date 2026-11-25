@@ -109,7 +109,6 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
     // Brushes.
     let dir = input.dir();
     let mut images = Images::new(!keep.image_bytes, dir);
-    let mut found: HashMap<usize, Option<usize>> = HashMap::new();
     for b in &f.brushes {
         let unit = |c: f32| if c.is_finite() { c.clamp(0.0, 1.0) } else { 1.0 };
         let c = b.color.map(unit);
@@ -128,10 +127,7 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         if keep.textures
             && let Some(t) = texture
         {
-            m.color_image = *found.entry(t).or_insert_with(|| {
-                let name = &f.textures[t].file;
-                assets.find(name, dir).and_then(|path| images.file(assets, path, name))
-            });
+            m.color_image = images.find(assets, &[&f.textures[t].file], &[dir]);
         }
         scene.materials.push(m);
     }

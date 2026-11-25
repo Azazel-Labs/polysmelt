@@ -583,10 +583,7 @@ struct MaterialPost {
 
 /// Finds a texture a material names: from its script's folder, then the model's.
 fn texture(t: &material::TextureRef, input: &Input<'_>, assets: &dyn Assets, images: &mut Images) -> Option<usize> {
-    let p = assets
-        .find(&t.file, &t.dir)
-        .or_else(|| assets.find(&t.file, input.dir()))?;
-    images.file(assets, p, &t.file)
+    images.find(assets, &[&t.file], &[&t.dir, input.dir()])
 }
 
 /// Reads the material scripts the mesh may use.

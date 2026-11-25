@@ -693,10 +693,8 @@ impl Convert<'_> {
             && self.keep.textures
         {
             let dir = &self.dirs[g];
-            let image = graph.strs(t, "url").iter().find_map(|u| {
-                let found = self.assets.find(u, dir)?;
-                self.images.file(self.assets, found, u)
-            });
+            let urls = graph.strs(t, "url");
+            let image = urls.iter().find_map(|u| self.images.find(self.assets, &[u], &[dir]));
             if let Some(image) = image {
                 let mut tex = Tex::new(image);
                 tex.wrap = [graph.flag(t, "repeatS", true), graph.flag(t, "repeatT", true)]

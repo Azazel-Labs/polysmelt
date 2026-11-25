@@ -1092,8 +1092,7 @@ impl<'a> Build<'a> {
     /// The image a texture file name refers to, when it's found.
     fn texture(&mut self, name: &str) -> Option<usize> {
         let name = name.replace("\\\\", "\\");
-        let path = self.assets.find(&name, self.dir)?;
-        self.images.file(self.assets, path, &name)
+        self.images.find(self.assets, &[name], &[self.dir])
     }
 
     /// Adds an animation set: a channel for each kind of key each `Animation` gives its frame.

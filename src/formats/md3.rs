@@ -228,10 +228,7 @@ fn find_texture(name: &str, input: &Input<'_>, assets: &dyn Assets, images: &mut
     if std::path::Path::new(name).extension().is_none() {
         tries.push(format!("{name}.tga"));
     }
-    tries
-        .iter()
-        .find_map(|t| assets.find(t, input.dir()).map(|p| (p, t)))
-        .and_then(|(p, t)| images.file(assets, p, t))
+    images.find(assets, &tries, &[input.dir()])
 }
 
 /// The textures `<stem>_default.skin` beside the model gives its surfaces, by lowercase surface name; empty when

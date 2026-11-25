@@ -132,10 +132,8 @@ pub(crate) fn load(input: super::Input<'_>, ext: &str, assets: &dyn Assets, keep
         let mut images = Images::new(!keep.image_bytes, input.dir());
         for name in &smd.materials {
             let mut m = Material::plain(name, [1.0; 4]);
-            if keep.textures
-                && let Some(path) = assets.find(name, input.dir())
-            {
-                m.color_image = images.file(assets, path, name);
+            if keep.textures {
+                m.color_image = images.find(assets, &[name], &[input.dir()]);
             }
             scene.materials.push(m);
         }

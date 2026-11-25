@@ -172,6 +172,9 @@ pub(crate) struct Images {
     dir: PathBuf,
     /// The texture files read so far, so a file named twice is one image.
     files: std::collections::HashMap<PathBuf, Option<usize>>,
+    /// What [`find`](Self::find) made of each set of names and folders, so a texture many
+    /// materials name is looked for once.
+    found: std::collections::HashMap<(Vec<String>, Vec<PathBuf>), Option<usize>>,
 }
 
 #[cfg_attr(
@@ -195,6 +198,7 @@ impl Images {
             lazy,
             dir: dir.to_path_buf(),
             files: std::collections::HashMap::new(),
+            found: std::collections::HashMap::new(),
         }
     }
 
@@ -223,6 +227,56 @@ impl Images {
         }
         let i = self.read_file(assets, path.clone(), reference);
         self.files.insert(path, i);
+        i
+    }
+
+    #[cfg_attr(
+        not(any(feature = "ply", feature = "3ds", feature = "lwo", feature = "fbx", feature = "usd")),
+        allow(dead_code, reason = "only readers of texture files use it")
+    )]
+    /// The texture file a model names: the first of `names` the assets find, each looked for
+    /// from `dirs` in turn. Its index, or `None` when none is found or the one found isn't an
+    /// image the assets can embed; a later name isn't tried then, as the model named the first.
+    pub fn find(&mut self, assets: &dyn Assets, names: &[impl AsRef<str>], dirs: &[&Path]) -> Option<usize> {
+        let key = (
+            names.iter().map(|n| n.as_ref().to_owned()).collect(),
+            dirs.iter().map(|d| d.to_path_buf()).collect(),
+        );
+        if let Some(&i) = self.found.get(&key) {
+            return i;
+        }
+        let path = names.iter().find_map(|n| {
+            let n = n.as_ref();
+            Some((dirs.iter().find_map(|d| assets.find(n, d))?, n))
+        });
+        let i = path.and_then(|(p, n)| self.file(assets, p, n));
+        self.found.insert(key, i);
+        i
+    }
+
+    #[cfg_attr(
+        not(feature = "obj"),
+        allow(dead_code, reason = "only the OBJ reader reads texture files itself")
+    )]
+    /// What became of the texture file at `path`, when it has been asked for: its index, or
+    /// `None` for one that isn't an image the assets can embed.
+    #[allow(clippy::option_option, reason = "not asked for and not an image differ")]
+    pub fn known(&self, path: &Path) -> Option<Option<usize>> {
+        self.files.get(path).copied()
+    }
+
+    #[cfg_attr(
+        not(feature = "obj"),
+        allow(dead_code, reason = "only the OBJ reader reads texture files itself")
+    )]
+    /// The texture file at `path`, read by the caller as `img`: kept as that file's image, so
+    /// asking for the file again finds it rather than reading it twice.
+    pub fn read(&mut self, path: PathBuf, img: Image) -> usize {
+        if let Some(&Some(i)) = self.files.get(&path) {
+            return i;
+        }
+        let i = self.push(Source::Image(img));
+        self.files.insert(path, Some(i));
         i
     }
 

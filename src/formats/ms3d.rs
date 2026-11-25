@@ -112,11 +112,8 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         let mut out = Material::plain(&mat.name, [d[0], d[1], d[2], alpha]);
         out.emissive = std::array::from_fn(|k| srgb_to_linear(unit(mat.emissive[k], 0.0)));
         out.roughness = 1.0 - (unit(mat.shininess / 128.0, 0.0)).sqrt();
-        if keep.textures
-            && !mat.texture.is_empty()
-            && let Some(path) = assets.find(&mat.texture, dir)
-        {
-            out.color_image = images.file(assets, path, &mat.texture);
+        if keep.textures && !mat.texture.is_empty() {
+            out.color_image = images.find(assets, &[&mat.texture], &[dir]);
             // The texture tints the glow as it does the rest of the lighting.
             if out.emissive.iter().any(|&c| c > 0.0) {
                 out.emissive_image = out.color_image;

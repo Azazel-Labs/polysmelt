@@ -1,7 +1,6 @@
 //! Irrlicht's attribute lists: the typed `<kind name="..." value="..."/>` elements that hold a node's settings,
 //! an animator's or a material's, and the materials made from them.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value, json};
@@ -222,7 +221,6 @@ pub(super) struct Patch {
 pub(super) struct Textures<'a> {
     assets: &'a dyn Assets,
     pub images: Images,
-    found: HashMap<(PathBuf, String), Option<usize>>,
     root: PathBuf,
     keep: bool,
 }
@@ -232,7 +230,6 @@ impl<'a> Textures<'a> {
         Self {
             assets,
             images: Images::new(!keep.image_bytes, root),
-            found: HashMap::new(),
             root: root.to_path_buf(),
             keep: keep.textures,
         }
@@ -243,17 +240,8 @@ impl<'a> Textures<'a> {
         if !self.keep || name.trim().is_empty() {
             return None;
         }
-        let key = (dir.to_path_buf(), name.to_owned());
-        if let Some(&f) = self.found.get(&key) {
-            return f;
-        }
-        let path = self
-            .assets
-            .find(name, dir)
-            .or_else(|| (dir != self.root).then(|| self.assets.find(name, &self.root)).flatten());
-        let image = path.and_then(|p| self.images.file(self.assets, p, name));
-        self.found.insert(key, image);
-        image
+        let dirs: &[&Path] = if dir == self.root { &[dir] } else { &[dir, &self.root] };
+        self.images.find(self.assets, &[name], dirs)
     }
 }
 

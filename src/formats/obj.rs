@@ -2959,7 +2959,6 @@ pub(crate) fn obj(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<D
         textured[m] |= !g.prim.uvs.is_empty();
     }
     let mut images = Images::new(!keep.image_bytes, dir);
-    let mut image_of: HashMap<PathBuf, Option<usize>> = HashMap::new();
     // The images packed so far, by what they're packed from.
     let mut packs: HashMap<[Channel; 3], Option<usize>> = HashMap::new();
     let mut out_materials = Vec::new();
@@ -2992,28 +2991,21 @@ pub(crate) fn obj(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<D
             let reference = reference?;
             let found = assets.find(&reference.file, dir)?;
             let image = match make {
-                Make::File => {
-                    (*image_of
-                        .entry(found.clone())
-                        .or_insert_with(|| images.file(assets, found, &reference.file)))?
-                }
+                Make::File => images.file(assets, found, &reference.file)?,
                 // An image already read shows whether it's gray; one only named is read to see.
-                Make::Gray => match image_of.get(&found) {
+                Make::Gray => match images.known(&found) {
                     Some(None) => return None,
-                    Some(&Some(i)) if matches!(&images.list[i], Source::Image(img) if !gray(&img.bytes)) => {
+                    Some(Some(i)) if matches!(&images.list[i], Source::Image(img) if !gray(&img.bytes)) => {
                         return None;
                     }
-                    Some(&Some(i)) if matches!(&images.list[i], Source::Image(_)) => i,
+                    Some(Some(i)) if matches!(&images.list[i], Source::Image(_)) => i,
                     _ => {
                         let img = assets.load_image(&found).filter(|img| gray(&img.bytes))?;
-                        (*image_of.entry(found.clone()).or_insert_with(|| {
-                            if keep.image_bytes {
-                                images.list.push(Source::Image(img));
-                                Some(images.list.len() - 1)
-                            } else {
-                                images.file(assets, found, &reference.file)
-                            }
-                        }))?
+                        if keep.image_bytes {
+                            images.read(found, img)
+                        } else {
+                            images.file(assets, found, &reference.file)?
+                        }
                     }
                 },
                 Make::Pack(planes) => {

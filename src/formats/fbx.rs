@@ -3501,8 +3501,7 @@ fn texture_image(id: i64, objs: &Objects<'_>, dir: &Path, assets: &dyn Assets, i
             }
         }
     }
-    let (name, path) = names.iter().find_map(|n| Some((n, assets.find(n, dir)?)))?;
-    images.file(assets, path, name)
+    images.find(assets, &names, &[dir])
 }
 
 /// `part` of `file`, sharing its bytes, when it lies inside them and is at least a quarter of them: a small texture

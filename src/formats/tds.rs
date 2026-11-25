@@ -1157,6 +1157,8 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
     let mut by_name: HashMap<String, usize> = HashMap::new();
     let dir = input.dir();
     let mut images = Images::new(!keep.image_bytes, dir);
+    // Texture names whatever their case, as 3DS's DOS-era names are: `WOOD.JPG` and `wood.jpg` are one image even
+    // where the two find different paths.
     let mut image_of: HashMap<String, Option<usize>> = HashMap::new();
     // Whether each bump map file is a normal map.
     let mut normal_of: HashMap<String, bool> = HashMap::new();
@@ -1186,7 +1188,7 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
                     }
                     *image_of
                         .entry(f.to_lowercase())
-                        .or_insert_with(|| images.file(assets, assets.find(f, dir)?, f))
+                        .or_insert_with(|| images.find(assets, &[f], &[dir]))
                 };
                 let image = m.texture.as_deref().and_then(&mut image_for);
                 let maps = m.raw.get("maps").and_then(Value::as_object);

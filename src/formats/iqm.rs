@@ -481,10 +481,7 @@ fn texture(name: &str, input: &Input<'_>, assets: &dyn Assets, images: &mut Imag
     if std::path::Path::new(name).extension().is_none() {
         tries.push(format!("{name}.png"));
     }
-    tries
-        .iter()
-        .find_map(|t| assets.find(t, input.dir()).map(|p| (p, t)))
-        .and_then(|(p, t)| images.file(assets, p, t))
+    images.find(assets, &tries, &[input.dir()])
 }
 
 fn build(f: &File, stem: &str, input: &Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Scene> {
