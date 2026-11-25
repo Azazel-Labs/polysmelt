@@ -51,6 +51,7 @@ use serde_json::{Map, json};
 
 use super::Input;
 use super::scene::{self, Animation, Channel, Interp, M4, Node, Path, Primitive, Scene, SceneMesh, Skin, Z_UP_TO_Y_UP};
+use super::stream::{self, f64_from};
 use crate::Result;
 use crate::assets::Assets;
 use crate::document::{Document, Keep};
@@ -212,19 +213,14 @@ impl<'a> Lex<'a> {
 
     fn num(&mut self) -> Result<f64> {
         let w = self.word()?;
-        std::str::from_utf8(w)
-            .ok()
-            .and_then(|s| s.parse::<f64>().ok())
+        f64_from(w)
             .filter(|v| v.is_finite())
             .ok_or_else(|| self.err(&format!("{:?} isn't a number", String::from_utf8_lossy(w))))
     }
 
     fn int(&mut self) -> Result<i64> {
         let w = self.word()?;
-        std::str::from_utf8(w)
-            .ok()
-            .and_then(|s| s.parse::<i64>().ok())
-            .ok_or_else(|| self.err(&format!("{:?} isn't a whole number", String::from_utf8_lossy(w))))
+        stream::int(w).ok_or_else(|| self.err(&format!("{:?} isn't a whole number", String::from_utf8_lossy(w))))
     }
 
     /// A count or index: a whole number that isn't negative.

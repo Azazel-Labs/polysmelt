@@ -147,7 +147,7 @@ fn header<'a>(c: &mut Cursor<'a>) -> Result<(Layout, String, Option<&'a [u8]>)> 
             String::from_utf8_lossy(&first[..first.len() - rest.len()]).into_owned(),
             (!rest.is_empty()).then_some(rest),
         )
-    } else if int(first).is_some() {
+    } else if stream::int::<i64>(first).is_some() {
         // No keyword: the counts come first.
         layout = Layout {
             dim: 3,
@@ -169,7 +169,7 @@ fn header<'a>(c: &mut Cursor<'a>) -> Result<(Layout, String, Option<&'a [u8]>)> 
     if ndim && !layout.binary {
         let n = c
             .token(true)
-            .and_then(int)
+            .and_then(stream::int::<i64>)
             .context(ErrorKind::Corrupt, "OFF dimension missing")?;
         ensure!((1..=32).contains(&n), Unsupported, "OFF dimension {n} is out of range");
         layout.dim = usize::try_from(n).unwrap_or(3);
@@ -182,13 +182,13 @@ fn header<'a>(c: &mut Cursor<'a>) -> Result<(Layout, String, Option<&'a [u8]>)> 
 /// The ASCII body: the counts, then the vertices and faces.
 fn ascii(c: &mut Cursor<'_>, layout: Layout, leftover: Option<&[u8]>, limit: usize, m: &mut Model) -> Result<()> {
     let nv = match leftover {
-        Some(t) => int(t),
-        None => c.token(true).and_then(int),
+        Some(t) => stream::int::<i64>(t),
+        None => c.token(true).and_then(stream::int::<i64>),
     }
     .context(ErrorKind::Corrupt, "OFF vertex count missing")?;
     let nf = c
         .token(true)
-        .and_then(int)
+        .and_then(stream::int::<i64>)
         .context(ErrorKind::Corrupt, "OFF face count missing")?;
     ensure!(nv >= 0 && nf >= 0, Corrupt, "OFF counts are negative");
     // The edge count, when there is one, and anything else on the line.
@@ -210,7 +210,8 @@ fn ascii(c: &mut Cursor<'_>, layout: Layout, leftover: Option<&[u8]>, limit: usi
                 m.short = true;
                 break;
             };
-            vals[n] = num(t);
+            // One that isn't a number reads as NaN, so faces using it drop.
+            vals[n] = stream::f32_from(t).unwrap_or(f32::NAN);
             n += 1;
         }
         if m.short {
@@ -218,7 +219,7 @@ fn ascii(c: &mut Cursor<'_>, layout: Layout, leftover: Option<&[u8]>, limit: usi
         }
         while n < vals.len() {
             let Some(t) = c.token(false) else { break };
-            vals[n] = num(t);
+            vals[n] = stream::f32_from(t).unwrap_or(f32::NAN);
             n += 1;
         }
         c.end_line();
@@ -247,7 +248,7 @@ fn ascii(c: &mut Cursor<'_>, layout: Layout, leftover: Option<&[u8]>, limit: usi
             m.short = true;
             break;
         };
-        let count = int(count).and_then(|n| usize::try_from(n).ok());
+        let count = stream::int::<usize>(count);
         corners.clear();
         let mut ok = count.is_some();
         for _ in 0..count.unwrap_or(0) {
@@ -255,7 +256,7 @@ fn ascii(c: &mut Cursor<'_>, layout: Layout, leftover: Option<&[u8]>, limit: usi
                 m.short = true;
                 break;
             };
-            match int(t).and_then(|i| u32::try_from(i).ok()) {
+            match stream::int::<u32>(t) {
                 Some(i) if (i as usize) < m.positions.len() => corners.push(i),
                 _ => ok = false,
             }
@@ -568,34 +569,6 @@ fn build(m: Model) -> Prim {
         }
     }
     p
-}
-
-/// A number token; one that isn't reads as NaN, so faces using it drop.
-#[inline]
-fn num(t: &[u8]) -> f32 {
-    stream::f32_from(t).unwrap_or(f32::NAN)
-}
-
-/// An integer as written: an optional sign and up to 18 digits.
-#[inline]
-fn int(w: &[u8]) -> Option<i64> {
-    let (neg, d) = match w.first()? {
-        b'-' => (true, &w[1..]),
-        b'+' => (false, &w[1..]),
-        _ => (false, w),
-    };
-    if d.is_empty() || d.len() > 18 {
-        return None;
-    }
-    let mut n: i64 = 0;
-    for &c in d {
-        let k = c.wrapping_sub(b'0');
-        if k > 9 {
-            return None;
-        }
-        n = n * 10 + i64::from(k);
-    }
-    Some(if neg { -n } else { n })
 }
 
 /// Text read a token at a time, `#` comments skipped, and line ends (LF, CR LF or a lone CR)

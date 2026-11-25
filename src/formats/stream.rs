@@ -399,6 +399,157 @@ pub(crate) fn f64_from(s: &[u8]) -> Option<f64> {
     std::str::from_utf8(s).ok()?.parse().ok()
 }
 
+/// `s` as an `f64` like [`f64_from`], or failing that, in the spellings some writers use: `1.#INF` and
+/// `-1.#INF` (infinite) or `1.#QNAN`, `1.#SNAN` and `-1.#IND` (not a number), as old Windows runtimes print
+/// them, and `1,5` with a decimal comma.
+#[inline]
+pub(crate) fn f64_lenient(s: &[u8]) -> Option<f64> {
+    f64_from(s).or_else(|| lenient(s))
+}
+
+/// `s` as an `f32`, like [`f64_lenient`].
+#[inline]
+pub(crate) fn f32_lenient(s: &[u8]) -> Option<f32> {
+    f32_from(s).or_else(|| lenient(s))
+}
+
+/// The spellings [`f64_lenient`] takes past the standard parser's: off the fast path, as they are rare.
+#[cold]
+#[inline(never)]
+fn lenient<T: std::str::FromStr + From<f32>>(s: &[u8]) -> Option<T> {
+    let t = std::str::from_utf8(s).ok()?;
+    if t.contains("INF") {
+        let inf = if t.starts_with('-') {
+            f32::NEG_INFINITY
+        } else {
+            f32::INFINITY
+        };
+        return Some(T::from(inf));
+    }
+    if let Some((_, tag)) = t.split_once('#')
+        && ["IND", "QNAN", "SNAN", "NAN"].iter().any(|k| tag.starts_with(k))
+    {
+        return Some(T::from(f32::NAN));
+    }
+    // `1,5`: one comma and no point, as writers set to such a locale put it.
+    let mut commas = t.match_indices(',');
+    if commas.next().is_some() && commas.next().is_none() && !t.contains('.') {
+        return t.replace(',', ".").parse().ok();
+    }
+    None
+}
+
+/// A whole number as written, an optional sign and digits, as a `T` if it fits; `None` for anything else,
+/// spaces and points included. It reads what `str::parse::<i64>` does, and `-0` as 0 for unsigned types.
+#[inline]
+pub(crate) fn int<T: TryFrom<i64>>(s: &[u8]) -> Option<T> {
+    let (neg, mut d) = match s.first()? {
+        b'-' => (true, &s[1..]),
+        b'+' => (false, &s[1..]),
+        _ => (false, s),
+    };
+    if d.len() > 18 {
+        let zeros = d.iter().take_while(|&&c| c == b'0').count();
+        d = &d[zeros.min(d.len() - 1)..];
+        if d.len() > 18 {
+            // Too many digits to add up without overflow checks.
+            return long(s);
+        }
+    }
+    if d.is_empty() {
+        return None;
+    }
+    let mut n: i64 = 0;
+    for &c in d {
+        let k = c.wrapping_sub(b'0');
+        if k > 9 {
+            return None;
+        }
+        n = n * 10 + i64::from(k);
+    }
+    T::try_from(if neg { -n } else { n }).ok()
+}
+
+/// [`int`] past 18 digits, read by the standard parser, which checks for overflow.
+#[cold]
+#[inline(never)]
+fn long<T: TryFrom<i64>>(s: &[u8]) -> Option<T> {
+    T::try_from(std::str::from_utf8(s).ok()?.parse::<i64>().ok()?).ok()
+}
+
+/// `s` as an `f32` with spaces around it ignored, as `str::trim` and `str::parse` read it.
+pub(crate) fn num(s: &[u8]) -> Option<f32> {
+    // Failing that, with other Unicode spaces trimmed too, as `str::trim` takes them.
+    f32_from(s.trim_ascii()).or_else(|| std::str::from_utf8(s).ok()?.trim().parse().ok())
+}
+
+/// `s` as a whole number with spaces around it ignored, like [`num`]: what [`int`] takes, or else what
+/// `str::trim` and `str::parse` do.
+pub(crate) fn whole<T: TryFrom<i64> + std::str::FromStr>(s: &[u8]) -> Option<T> {
+    int(s.trim_ascii()).or_else(|| std::str::from_utf8(s).ok()?.trim().parse().ok())
+}
+
+/// `s` without the bytes [`space`] takes at its ends: spaces and control characters, so a line that
+/// [`tokens`] finds nothing in trims to nothing.
+#[inline]
+pub(crate) fn trim(s: &[u8]) -> &[u8] {
+    let start = s.iter().position(|&b| !space(b)).unwrap_or(s.len());
+    let end = s.iter().rposition(|&b| !space(b)).map_or(start, |e| e + 1);
+    &s[start..end]
+}
+
+/// The whitespace-separated tokens of `text`: split at ASCII spaces and control characters.
+pub(crate) fn tokens(text: &[u8]) -> Tokens<'_> {
+    Tokens { text, at: 0 }
+}
+
+/// The iterator [`tokens`] returns. A scan a byte at a time, which beats `split` and a filter for
+/// the short tokens number lists hold.
+pub(crate) struct Tokens<'a> {
+    text: &'a [u8],
+    at: usize,
+}
+
+impl<'a> Iterator for Tokens<'a> {
+    type Item = &'a [u8];
+
+    #[inline]
+    fn next(&mut self) -> Option<&'a [u8]> {
+        let t = self.text;
+        let mut i = self.at;
+        while i < t.len() && space(t[i]) {
+            i += 1;
+        }
+        let start = i;
+        while i < t.len() && !space(t[i]) {
+            i += 1;
+        }
+        self.at = i;
+        (i > start).then(|| &t[start..i])
+    }
+}
+
+/// The line at `*at` in `d`, without its end (`\n`, `\r\n` or a lone `\r`), moving `at` past it; `None` at
+/// the end of `d`.
+#[inline]
+pub(crate) fn next_line<'d>(d: &'d [u8], at: &mut usize) -> Option<&'d [u8]> {
+    let rest = d.get(*at..).filter(|r| !r.is_empty())?;
+    let n = rest
+        .iter()
+        .position(|&b| b == b'\n' || b == b'\r')
+        .unwrap_or(rest.len());
+    let mut end = *at + n;
+    if end < d.len() {
+        end += if d[end] == b'\r' && d.get(end + 1) == Some(&b'\n') {
+            2
+        } else {
+            1
+        };
+    }
+    *at = end;
+    Some(&rest[..n])
+}
+
 #[cfg(all(test, feature = "fs"))]
 mod tests {
     use super::*;
@@ -575,6 +726,167 @@ mod tests {
         for s in ["1.5\\", "2#", "nan", "", "-", "1e", "1.5/2"] {
             assert!(f32_lead(s.as_bytes()).is_none(), "{s:?}");
         }
+    }
+
+    #[test]
+    fn lenient_numbers_take_old_windows_spellings_and_decimal_commas() {
+        let bits = |v: Option<f64>| v.map(f64::to_bits);
+        // Whatever the standard parser takes reads as it does.
+        for s in [
+            "0.1",
+            "-2.5e-3",
+            "+1",
+            ".5",
+            "5.",
+            "inf",
+            "-Infinity",
+            "NaN",
+            "123456789012345678901234",
+        ] {
+            assert_eq!(bits(f64_lenient(s.as_bytes())), bits(s.parse().ok()), "{s}");
+            assert_eq!(
+                f32_lenient(s.as_bytes()).map(f32::to_bits),
+                s.parse::<f32>().ok().map(f32::to_bits),
+                "{s}"
+            );
+        }
+        for (s, want) in [
+            ("1.#INF", f32::INFINITY),
+            ("1.#INF00", f32::INFINITY),
+            ("-1.#INF", f32::NEG_INFINITY),
+            ("1,5", 1.5),
+            ("-0,25", -0.25),
+            ("1,5e3", 1500.0),
+        ] {
+            assert_eq!(f64_lenient(s.as_bytes()), Some(f64::from(want)), "{s}");
+            assert_eq!(f32_lenient(s.as_bytes()), Some(want), "{s}");
+        }
+        // A decimal comma rounds once, to the type asked for.
+        assert_eq!(f32_lenient(b"0,1"), Some(0.1));
+        assert_eq!(f64_lenient(b"0,1"), Some(0.1));
+        for s in ["1.#QNAN", "1.#QNAN0", "-1.#IND", "-1.#IND00", "1.#SNAN"] {
+            assert!(f64_lenient(s.as_bytes()).is_some_and(f64::is_nan), "{s}");
+            assert!(f32_lenient(s.as_bytes()).is_some_and(f32::is_nan), "{s}");
+        }
+        for s in ["", "-", "x", "1,5,6", "1.5,2", ",", "1.#", "1.#FOO", "1e", "1 2"] {
+            assert_eq!(f64_lenient(s.as_bytes()), None, "{s}");
+            assert_eq!(f32_lenient(s.as_bytes()), None, "{s}");
+        }
+    }
+
+    #[test]
+    fn whole_numbers_read_like_the_standard_parser() {
+        // Every token as the standard parser reads it for each type.
+        for s in [
+            "0",
+            "-0",
+            "+0",
+            "7",
+            "-12",
+            "+34",
+            "007",
+            "999999999999999999",
+            "-999999999999999999",
+            "0000000000000000000000000042",
+            "-000000000000000000000000042",
+            "4294967295",
+            "4294967296",
+            "-1",
+            "2147483648",
+            "-2147483649",
+            "",
+            "-",
+            "+",
+            "--1",
+            "+-1",
+            "1.0",
+            "1e3",
+            " 1",
+            "1 ",
+            "0x10",
+            "1_000",
+            "12a",
+        ] {
+            let b = s.as_bytes();
+            assert_eq!(int::<i64>(b), s.parse().ok(), "i64 {s:?}");
+            assert_eq!(int::<i32>(b), s.parse().ok(), "i32 {s:?}");
+            // Unsigned types take `-0` too, where the standard parser doesn't.
+            let zero = s.len() > 1 && s.starts_with('-') && s[1..].bytes().all(|c| c == b'0');
+            let want = if zero { Some(0) } else { s.parse().ok() };
+            assert_eq!(int::<u32>(b), want, "u32 {s:?}");
+            let want = if zero { Some(0) } else { s.parse().ok() };
+            assert_eq!(int::<usize>(b), want, "usize {s:?}");
+        }
+        // Past 18 digits, up to the ends of `i64`.
+        assert_eq!(int::<i64>(b"1234567890123456789"), Some(1_234_567_890_123_456_789));
+        assert_eq!(int::<i64>(b"-9223372036854775808"), Some(i64::MIN));
+        assert_eq!(int::<i64>(b"+9223372036854775807"), Some(i64::MAX));
+        assert_eq!(int::<i64>(b"9223372036854775808"), None);
+        assert_eq!(int::<i64>(b"1234567890123456789x"), None);
+        assert_eq!(int::<u32>(b"1234567890123456789"), None);
+    }
+
+    #[test]
+    fn trimmed_numbers_read_like_str_trim_and_parse() {
+        for s in [
+            "1.5",
+            " 1.5 ",
+            "\t-2\r\n",
+            "+.5",
+            "5.",
+            "1E+05",
+            " inf ",
+            "-infinity",
+            "nan",
+            "\u{a0}2.5",
+            "3\u{3000}",
+            "",
+            "  ",
+            "1 2",
+            "1,5",
+            "x",
+        ] {
+            assert_eq!(
+                num(s.as_bytes()).map(f32::to_bits),
+                s.trim().parse::<f32>().ok().map(f32::to_bits),
+                "{s:?}"
+            );
+        }
+        for s in [
+            "42",
+            " 42\t",
+            "+7",
+            "\u{a0}7",
+            "0000000000000000000000009 ",
+            "-1",
+            "1.0",
+            "",
+            " ",
+        ] {
+            assert_eq!(whole::<u32>(s.as_bytes()), s.trim().parse().ok(), "{s:?}");
+            assert_eq!(whole::<i64>(s.as_bytes()), s.trim().parse().ok(), "{s:?}");
+        }
+    }
+
+    #[test]
+    fn tokens_trims_and_lines() {
+        let t: Vec<&[u8]> = tokens(b"  1 2\t\t3\r\n4\x005  ").collect();
+        assert_eq!(t, [&b"1"[..], b"2", b"3", b"4", b"5"]);
+        assert_eq!(tokens(b" \n ").count(), 0);
+        assert_eq!(trim(b"\x00 a b\x1a\r\n"), b"a b");
+        assert_eq!(trim(b" \t "), b"");
+        let d = b"a\r\nb\rc\n\nd";
+        let mut at = 0;
+        let mut lines = Vec::new();
+        while let Some(l) = next_line(d, &mut at) {
+            lines.push(l);
+        }
+        assert_eq!(lines, [&b"a"[..], b"b", b"c", b"", b"d"]);
+        assert_eq!(at, d.len());
+        let mut at = 0;
+        assert_eq!(next_line(b"", &mut at), None);
+        assert_eq!(next_line(b"x\r", &mut at), Some(&b"x"[..]));
+        assert_eq!(next_line(b"x\r", &mut at), None);
     }
 
     #[test]
