@@ -2,6 +2,24 @@
 
 Breaking changes are allowed in minor releases until 1.0.
 
+## 0.18.4
+
+- FBX export allocates less: key arrays are sized up front and the rotation curve fitting
+  reuses one work list, about 1.1 times faster on animated characters. The bytes written are
+  unchanged.
+- AMF and 3MF read units with the same names as the other readers: 3MF takes spellings such
+  as `mm`, `millimeters` or `metre` beside the specification's own, and both now know
+  decimeters, kilometers, yards and the other lengths the rest of the crate reads.
+- A 1-bit or 4-bit BMP whose pixel data is cut short is refused when padding it out would
+  make a large image from a few bytes, as 24-bit ones already were.
+- IQM files whose frames animate no channels are refused past 65,536 poses (frames times
+  joints): such frames take no room in the file, so a tiny file could ask for 160 MB of them.
+- Readers that look up textures by name (B3D, DirectX, FBX, IQM, Irrlicht, LightWave, MD2,
+  MD3, MD5, MilkShape, OBJ, Ogre, PLY, SMD, 3DS, USD and X3D) share one lookup, so a texture
+  named by many materials is found and read once. An OBJ texture that is also a material's
+  gray roughness map is now read once rather than twice.
+- The FBX reader and the glTF flattening are split into modules. No behavior changes.
+
 ## 0.18.3
 
 - OFF files with face colors no longer take time that grows with the square of their size to
