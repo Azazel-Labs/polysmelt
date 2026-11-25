@@ -912,16 +912,27 @@ fn floats(doc: &Document, a: usize) -> Result<(Vec<f32>, usize)> {
     );
     let count = usize_of(get(acc, "count"));
     let n = components(acc.get("type").and_then(Value::as_str).unwrap_or("SCALAR"));
+    // 1.0 requires a view: without one, an accessor's count isn't backed by any data.
     let Some(v) = acc.get("bufferView").and_then(Value::as_u64) else {
-        return Ok((vec![0.0; count * n], count));
+        ensure!(count == 0, Corrupt, "glTF 1.0 accessor {a} has no bufferView");
+        return Ok((Vec::new(), 0));
     };
     let view = &doc.json()["bufferViews"][usize_of(v)];
     let stride = match usize_of(get(view, "byteStride")) {
         0 => n * 4,
         s => s,
     };
-    let start = usize_of(get(view, "byteOffset") + get(acc, "byteOffset"));
+    let start = usize_of(get(view, "byteOffset").saturating_add(get(acc, "byteOffset")));
     let buf = doc.buffer(usize_of(get(view, "buffer")))?;
+    // The last element must be in the buffer before room is made for them all.
+    let end = count.checked_sub(1).map_or(Some(start), |last| {
+        last.checked_mul(stride)?.checked_add(start)?.checked_add(n * 4)
+    });
+    ensure!(
+        end.is_some_and(|e| e <= buf.len()),
+        Truncated,
+        "glTF 1.0 accessor {a} runs past the end of its buffer"
+    );
     let mut out = Vec::with_capacity(count * n);
     for i in 0..count {
         for k in 0..n {
@@ -953,6 +964,63 @@ mod tests {
             ("BATCHID", "_BATCHID"),
         ] {
             assert_eq!(semantic(a, "VEC3"), b);
+        }
+    }
+
+    /// A glTF 1.0 file of one triangle whose positions have no bounds, so they're read for them, with `accessor`'s
+    /// fields over the position accessor's.
+    fn triangle(accessor: &Value) -> Result<Document> {
+        use base64::Engine as _;
+        let floats: Vec<u8> = [0f32, 0., 0., 1., 0., 0., 0., 1., 0.]
+            .iter()
+            .flat_map(|f| f.to_le_bytes())
+            .collect();
+        let uri = format!(
+            "data:application/octet-stream;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(&floats)
+        );
+        let mut position =
+            json!({ "bufferView": "v", "byteOffset": 0, "componentType": 5126, "count": 3, "type": "VEC3" });
+        for (k, v) in accessor.as_object().unwrap() {
+            if v.is_null() {
+                position.as_object_mut().unwrap().remove(k);
+            } else {
+                position[k] = v.clone();
+            }
+        }
+        let gltf = json!({
+            "asset": { "version": "1.0" },
+            "buffers": { "b": { "byteLength": 36, "uri": uri } },
+            "bufferViews": { "v": { "buffer": "b", "byteOffset": 0, "byteLength": 36 } },
+            "accessors": { "p": position },
+            "meshes": { "m": { "primitives": [{ "attributes": { "POSITION": "p" }, "mode": 4 }] } },
+            "nodes": { "n": { "meshes": ["m"] } },
+            "scenes": { "s": { "nodes": ["n"] } },
+            "scene": "s"
+        });
+        let bytes = serde_json::to_vec(&gltf).unwrap();
+        crate::formats::load_bytes(
+            &bytes,
+            "x.gltf",
+            "gltf",
+            &crate::assets::Memory::new(),
+            crate::document::Keep::ALL,
+        )
+    }
+
+    #[test]
+    fn huge_counts_are_errors_not_allocations() {
+        let doc = triangle(&json!({})).unwrap();
+        assert_eq!(doc.json()["accessors"][0]["max"], json!([1.0, 1.0, 0.0]));
+        // Counts no buffer holds, with and without a view, and offsets past any buffer.
+        for bad in [
+            json!({ "count": 1u64 << 40 }),
+            json!({ "count": u64::MAX }),
+            json!({ "count": 1u64 << 40, "bufferView": null }),
+            json!({ "byteOffset": u64::MAX }),
+            json!({ "count": 4 }),
+        ] {
+            assert!(triangle(&bad).is_err(), "{bad}");
         }
     }
 

@@ -49,7 +49,7 @@ use serde_json::{Map, Value, json};
 use zip::ZipArchive;
 
 use super::Input;
-use super::xform::{IDENTITY, M4, column_major, inverse, mul, scale, set_transform, translate};
+use super::xform::{IDENTITY, M4, inverse, mul, scale, set_transform, to_column_major, translate};
 use crate::assets::Assets;
 use crate::document::{Builder, Document, Keep, Part};
 use crate::images::Images;
@@ -69,8 +69,7 @@ const MAX_NODES: usize = 1 << 20;
 /// The largest archive entry read.
 const MAX_ENTRY: u64 = 1 << 31;
 
-/// The most joints that move a vertex: four sets of glTF's four.
-const MAX_INFLUENCES: usize = 16;
+use crate::mesh::MAX_INFLUENCES;
 
 /// The most other documents a document's URLs bring in, theirs included.
 const MAX_DOCUMENTS: usize = 64;
@@ -1282,7 +1281,7 @@ impl Reader<'_> {
             let m = ibm.as_ref().and_then(|a| a.get(u32_of(k))).map_or(IDENTITY, matrix_of);
             let mut m = mul(&m, &bind_shape);
             m[3] = [0.0, 0.0, 0.0, 1.0];
-            out.extend(column_major(&m).map(f32_of));
+            out.extend(to_column_major(&m).map(f32_of));
         }
         out
     }

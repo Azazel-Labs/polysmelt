@@ -10,8 +10,7 @@ use super::{
 use crate::Result;
 pub(super) use crate::formats::xml::{El, Xml};
 
-/// The most texture coordinate sets a geometry keeps.
-const MAX_UV_SETS: usize = 8;
+use crate::formats::scene::MAX_UV_SETS;
 
 /// What OGRE reads from an element's attributes beyond the shared reader's.
 trait Attrs {

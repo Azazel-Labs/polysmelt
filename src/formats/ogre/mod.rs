@@ -44,6 +44,7 @@ use crate::assets::Assets;
 use crate::document::{Document, Keep};
 use crate::images::Images;
 use crate::mesh::{Material, srgb_to_linear};
+use crate::quat;
 use crate::source::{Axis, Fact, Handedness};
 
 /// The most morph target and weights animation floats kept: offsets for every target's vertices, and every key's
@@ -314,7 +315,7 @@ fn add_bones(scene: &mut Scene, skel: &SkeletonFile) -> Bones {
     for (k, b) in skel.bones.iter().enumerate() {
         let mut node = Node::named(b.name.clone(), None);
         node.translation = b.position;
-        node.rotation = scene::normalize(b.rotation.map(f64::from));
+        node.rotation = quat::normalize(b.rotation.map(f64::from));
         node.scale = b.scale;
         nodes.push(scene.add(node));
         by_handle.entry(b.handle).or_insert(k);
@@ -424,7 +425,7 @@ fn add_skeleton_animations(
             let rotation: Vec<f32> = t
                 .keys
                 .iter()
-                .flat_map(|key| scene::normalize(scene::quat_mul(bind, key.rotation.map(f64::from))))
+                .flat_map(|key| quat::normalize(quat::mul(bind, key.rotation.map(f64::from))))
                 .collect();
             #[allow(clippy::float_cmp, reason = "a scale of exactly 1 everywhere needs no channel")]
             let scaled = t.keys.iter().any(|key| key.scale != [1.0; 3]);

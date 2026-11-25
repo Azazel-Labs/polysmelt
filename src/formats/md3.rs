@@ -50,6 +50,7 @@ use crate::document::{Document, Keep};
 use crate::images::Images;
 use crate::mesh::Material;
 use crate::num::{f32_of, u32_of};
+use crate::quat;
 use crate::source::{Axis, Fact};
 
 /// Frames a second, as the format stores none.
@@ -334,7 +335,7 @@ fn parse(data: &[u8], morphs: bool) -> Result<File> {
                 let axes = [b.vec3()?, b.vec3()?, b.vec3()?];
                 // The axes are the rotation's columns, which is how the matrix is laid out.
                 let m: [f64; 9] = std::array::from_fn(|i| f64::from(axes[i / 3][i % 3]));
-                let q = scene::normalize(scene::matrix_quat(&m));
+                let q = quat::normalize(quat::from_matrix(&m));
                 if f == 0 {
                     tags.push(Tag {
                         name,

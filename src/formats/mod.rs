@@ -88,7 +88,7 @@ mod md5;
 mod mmd;
 #[cfg(feature = "ms3d")]
 mod ms3d;
-#[cfg(any(feature = "dxf", feature = "fbx"))]
+#[cfg(any(feature = "dxf", feature = "fbx", feature = "usd"))]
 mod nurbs;
 #[cfg(feature = "obj")]
 mod obj;
@@ -228,8 +228,14 @@ mod vrm;
 mod wkt;
 #[cfg(feature = "x3d")]
 mod x3d;
-#[cfg(any(feature = "fbx", feature = "usd", feature = "3ds", feature = "dae"))]
-mod xform;
+#[cfg_attr(
+    not(all(feature = "minimal", feature = "fbx", feature = "usd", feature = "dae")),
+    allow(
+        dead_code,
+        reason = "each reader uses the parts it needs; the flat mesh only the column-major ones"
+    )
+)]
+pub(crate) mod xform;
 #[cfg(feature = "xgl")]
 mod xgl;
 #[cfg_attr(
@@ -372,6 +378,37 @@ pub(crate) trait ReadSeek: io::Read + io::Seek {}
 
 #[cfg(any(feature = "3mf", feature = "usd", feature = "las", feature = "e57", feature = "amf"))]
 impl<T: io::Read + io::Seek> ReadSeek for T {}
+
+/// The largest ZIP entry [`inflate_capped`] reads: real `SketchUp` `model.dat` files and `.usdz` textures run to
+/// tens of megabytes.
+#[cfg(any(feature = "skp", feature = "usd"))]
+const MAX_ENTRY_BYTES: u64 = 1 << 30;
+
+/// How far past its `compressed` size [`inflate_capped`] lets an entry inflate: real entries compress about 10:1,
+/// so twenty times that is a decompression bomb, not a model.
+#[cfg(any(feature = "skp", feature = "usd"))]
+const MAX_RATIO: u64 = 200;
+
+/// The bytes of ZIP entry `name`, read from `inflated` (its data as it inflates), when they're no more than
+/// [`MAX_RATIO`] times its `compressed` size (and a megabyte) and [`MAX_ENTRY_BYTES`]: past that is an error, found
+/// before more than the cap is inflated.
+#[cfg(any(feature = "skp", feature = "usd"))]
+pub(crate) fn inflate_capped(inflated: impl io::Read, compressed: u64, name: &str) -> Result<Vec<u8>> {
+    use crate::Context as _;
+    use io::Read as _;
+    let limit = MAX_ENTRY_BYTES.min(compressed.saturating_mul(MAX_RATIO).saturating_add(1 << 20));
+    let mut out = Vec::new();
+    inflated
+        .take(limit + 1)
+        .read_to_end(&mut out)
+        .with_context(crate::ErrorKind::Corrupt, || format!("inflating {name}"))?;
+    ensure!(
+        (out.len() as u64) <= limit,
+        LimitExceeded,
+        "ZIP entry {name} inflates implausibly far"
+    );
+    Ok(out)
+}
 
 #[allow(dead_code)]
 impl<'a> Input<'a> {

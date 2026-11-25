@@ -131,9 +131,8 @@ const MAX_ROW: usize = 1 << 19;
 /// How many bytes of rows [`sample`] decodes before it stops: the top of a huge image stands for all of it.
 #[cfg(feature = "3ds")]
 const SAMPLE_BYTES: usize = 1 << 24;
-/// The most pixels [`decode`] makes: 8192 by 8192.
 #[cfg(feature = "obj")]
-const MAX_PIXELS: usize = 1 << 26;
+use crate::images::MAX_PIXELS;
 
 /// A PNG's header and its compressed rows: gray, RGB, palette and alpha kinds of 8 or 16 bits, not interlaced.
 #[cfg(any(feature = "3ds", feature = "obj"))]

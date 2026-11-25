@@ -2,6 +2,30 @@
 
 Breaking changes are allowed in minor releases until 1.0.
 
+## 0.17.6
+
+- USDZ: a texture that inflates implausibly far (over 1 GiB, or 200 times its compressed size)
+  is left out instead of being read into memory, as SketchUp archive entries already were.
+- glTF 1.0: an accessor whose count runs past its buffer is an error before anything is
+  allocated, and one with a count but no `bufferView` is reported as corrupt.
+- A missing meshopt fallback buffer fails before room is made for the length it declares.
+- One pixel limit (16384 × 16384) for every texture decoder; PNG, SketchUp and SGI images
+  were capped at a quarter of that. A large SGI image decodes only when the file holds its data.
+- Internal: the curve point budget, rotation resampling step, texture coordinate set and
+  joint influence limits, and the inflate caps are each defined once. Output is unchanged.
+
+## 0.17.5
+
+- 3ds: a spotlight whose hotspot or falloff angle is NaN no longer panics; it takes the widest
+  cone. Chunk lengths, counts and offsets past the end of the file take only what is there.
+- LAS: offsets near the end of the address range no longer overflow; data that runs past the end
+  of the file is reported as cut short.
+- OGRE binary meshes: a vertex element shorter than its declared type reads as zero instead of
+  indexing past it.
+- Internal: one bounds-checked binary cursor replaces the readers' own copies (3ds, b3d,
+  DirectX, IQM, LAS, MD2, MD3, MMD, MS3D, OFF, OGRE, OpenFlight, SketchUp). A count larger than
+  the file can hold fails before anything is allocated. Output is unchanged.
+
 ## 0.17.4
 
 - Writing a GLB is faster: accessors, buffer views and animations stay typed until the document

@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 use super::{Transform, floats64, geometry, xml};
 use crate::formats::xform::{IDENTITY, M4, decompose, mul};
 use crate::num::f32_of;
+use crate::quat;
 
 /// How deeply animations nest.
 const MAX_NESTING: usize = 32;
@@ -182,12 +183,6 @@ fn continuous(q: [f64; 4], prev: Option<[f64; 4]>) -> [f64; 4] {
         Some(p) if p.iter().zip(&q).map(|(a, b)| a * b).sum::<f64>() < 0.0 => q.map(|c| -c),
         _ => q,
     }
-}
-
-/// The angle between two unit quaternions.
-fn turn(a: [f64; 4], b: [f64; 4]) -> f64 {
-    let d = a.iter().zip(&b).map(|(x, y)| x * y).sum::<f64>().abs().min(1.0);
-    2.0 * d.acos()
 }
 
 impl super::Reader<'_> {
@@ -461,7 +456,7 @@ impl super::Reader<'_> {
             for k in 0..times.len() {
                 cut.push(times[k]);
                 if k + 1 < times.len() && cut.len() < MAX_SAMPLES {
-                    let angle = turn(quats[k], quats[k + 1]);
+                    let angle = quat::angle(quats[k], quats[k + 1]);
                     if angle > MAX_TURN {
                         #[allow(
                             clippy::cast_possible_truncation,

@@ -58,6 +58,7 @@ use crate::document::{Document, Keep};
 use crate::images::Images;
 use crate::mesh::Material;
 use crate::num::{f32_of, u32_of};
+use crate::quat;
 use crate::source::{Axis, Fact};
 
 /// The frame rate taken when a file gives none that's usable: the engine's.
@@ -275,10 +276,6 @@ fn quat(xyz: [f64; 3]) -> [f64; 4] {
     let t = 1.0 - xyz[0] * xyz[0] - xyz[1] * xyz[1] - xyz[2] * xyz[2];
     let w = if t > 0.0 { -t.sqrt() } else { 0.0 };
     [xyz[0], xyz[1], xyz[2], w]
-}
-
-fn conj(q: [f64; 4]) -> [f64; 4] {
-    [-q[0], -q[1], -q[2], q[3]]
 }
 
 /// What a file holds.
@@ -561,19 +558,19 @@ fn build_mesh(m: &MeshFile, stem: &str, input: &Input<'_>, assets: &dyn Assets, 
     let mut worlds: Vec<M4> = Vec::with_capacity(n);
     for (i, j) in m.joints.iter().enumerate() {
         let parent = usize::try_from(j.parent).ok().filter(|&p| p != i);
-        let rot = scene::normalize(j.rot).map(f64::from);
+        let rot = quat::normalize(j.rot).map(f64::from);
         let mut node = Node::named(j.name.clone(), parent);
         let (t, r) = match parent {
             Some(p) => {
                 let pj = &m.joints[p];
-                let pr = conj(scene::normalize(pj.rot).map(f64::from));
+                let pr = quat::conjugate(quat::normalize(pj.rot).map(f64::from));
                 let d = [j.pos[0] - pj.pos[0], j.pos[1] - pj.pos[1], j.pos[2] - pj.pos[2]];
-                (scene::rotate(pr, d), scene::quat_mul(pr, rot))
+                (quat::rotate(pr, d), quat::mul(pr, rot))
             }
             None => (j.pos, rot),
         };
         node.translation = t.map(f32_of);
-        node.rotation = scene::normalize(r);
+        node.rotation = quat::normalize(r);
         scene.add(node);
         worlds.push(scene::trs(j.pos.map(f32_of), rot.map(f32_of), [1.0; 3]));
     }
@@ -616,7 +613,7 @@ fn build_mesh(m: &MeshFile, stem: &str, input: &Input<'_>, assets: &dyn Assets, 
             let mut set: Vec<(u32, f32)> = Vec::new();
             for w in &block.weights[v.start..v.start + v.count] {
                 let j = &m.joints[w.joint];
-                let o = scene::rotate(scene::normalize(j.rot).map(f64::from), w.pos);
+                let o = quat::rotate(quat::normalize(j.rot).map(f64::from), w.pos);
                 for k in 0..3 {
                     p[k] += w.bias * (j.pos[k] + o[k]);
                 }
@@ -793,7 +790,7 @@ fn build_anim(a: &AnimFile, stem: &str) -> Result<Scene> {
             None => *base,
         };
         node.translation = [v[0], v[1], v[2]].map(f32_of);
-        node.rotation = scene::normalize(quat([v[3], v[4], v[5]]));
+        node.rotation = quat::normalize(quat([v[3], v[4], v[5]]));
         scene.add(node);
     }
     let times: Vec<f32> = (0..a.frames.len())
@@ -809,7 +806,7 @@ fn build_anim(a: &AnimFile, stem: &str) -> Result<Scene> {
         for f in &a.frames {
             let v = pose(base, *flags, *start, f);
             ts.extend([v[0], v[1], v[2]].map(f32_of));
-            rs.extend(scene::normalize(quat([v[3], v[4], v[5]])));
+            rs.extend(quat::normalize(quat([v[3], v[4], v[5]])));
         }
         if flags & 0b111 != 0 {
             channels.push(Channel {

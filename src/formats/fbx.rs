@@ -35,7 +35,10 @@ use crate::num::f32_of;
 use crate::source::{Axis, Fact, Handedness, SourceInfo};
 use crate::vec3;
 
-use super::xform::{IDENTITY, M4, Trs, column_major, decompose, det3, inverse, mul, scale, set_transform, translate};
+use super::xform::{
+    IDENTITY, M4, Trs, decompose, det3, from_column_major, inverse, mul, scale, set_transform, to_column_major,
+    translate,
+};
 
 /// Euler rotation in degrees, FBX rotation order (0 = XYZ: X applied first).
 fn rotate(deg: [f64; 3], order: i32) -> M4 {
@@ -298,13 +301,8 @@ impl Layer {
 /// FBX time units per second.
 const KTIME: f64 = 46_186_158_000.0;
 
-/// The most points NURBS curves add to a file; past them, a curve is drawn through its control points. Each control
-/// point is a few bytes of the file but up to 32 segments, so this bounds what a file of curves costs.
-const MAX_CURVE_POINTS: usize = 1 << 22;
-
-/// The most degrees a rotation curve may turn between two samples: FBX interpolates Euler
-/// angles, glTF quaternions, so long turns are cut into steps short enough to agree.
-const MAX_STEP_DEGREES: f64 = 10.0;
+use super::nurbs::MAX_CURVE_POINTS;
+use super::xform::MAX_STEP_DEGREES;
 
 /// The scene's frame rate, from `TimeMode` (the FBX SDK's `EMode`), or `CustomFrameRate` when that's the mode.
 fn frame_rate(settings: &Props<'_>) -> Fact<f64> {
@@ -2182,14 +2180,9 @@ impl Reader<'_, '_, '_> {
             let matrix = |name: &str| {
                 child_attr(node, name)
                     .and_then(floats)
-                    .filter(|v| v.len() == 16 && v.iter().all(|x| x.is_finite()))
-                    .map(|v| {
-                        let mut m = IDENTITY;
-                        for (k, x) in v.iter().enumerate() {
-                            m[k % 4][k / 4] = *x;
-                        }
-                        m
-                    })
+                    .and_then(|v| <[f64; 16]>::try_from(&v[..]).ok())
+                    .filter(|v| v.iter().all(|x| x.is_finite()))
+                    .map(|v| from_column_major(&v))
             };
             // `Transform` takes the model's space to the bone's at bind time: the file stores it relative to
             // `TransformLink` (the bone's bind-time world), though the FBX SDK hands back `TransformLink ·
@@ -2199,13 +2192,13 @@ impl Reader<'_, '_, '_> {
                 mul(&inverse(&link), &self.world_of(m))
             });
             // The vertex goes geometry → model → bone space.
-            ibms.extend(column_major(&mul(&transform, geometric)).map(f32_of));
+            ibms.extend(to_column_major(&mul(&transform, geometric)).map(f32_of));
             joints.push(self.node_of[&bone]);
         }
         // The model's own node: at bind time it's where `Transform` says, so its inverse bind matrix is the
         // geometric transform.
         joints.push(self.node_of[&m]);
-        ibms.extend(column_major(geometric).map(f32_of));
+        ibms.extend(to_column_major(geometric).map(f32_of));
         let acc = self.b.floats(ibms, "MAT4", false);
         let mut out = json!({ "joints": joints, "inverseBindMatrices": acc });
         // glTF skins blend linearly; a skin meant to blend otherwise (dual quaternion, or a mix) says so.

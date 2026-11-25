@@ -28,6 +28,7 @@ use crate::document::{Builder, Document};
 use crate::images::Source;
 use crate::material::{Alpha, CLAMP, Full, REPEAT, Tex};
 use crate::mesh::{GRAY, Image, Material, Prim, linear_rgba};
+use crate::quat;
 use crate::source::{Axis, Fact, SourceInfo};
 use crate::{Context as _, ErrorKind, Result, Within as _};
 
@@ -1237,12 +1238,9 @@ impl Place<'_> {
     #[allow(clippy::float_cmp, reason = "only an exact identity is left out")]
     fn push(&mut self, mut node: Value, at: Option<&Instance>) -> usize {
         if let Some(i) = at {
-            let [x, y, z] = i.turn.map(|d| (d.to_radians() / 2.0).sin_cos());
+            let [x, y, z] = i.turn.map(f64::to_radians);
             // Turned about x, then y, then z: z * y * x.
-            let qx = [x.0, 0.0, 0.0, x.1];
-            let qy = [0.0, y.0, 0.0, y.1];
-            let qz = [0.0, 0.0, z.0, z.1];
-            let q = mul(mul(qz, qy), qx);
+            let q = quat::mul(quat::mul(quat::about(2, z), quat::about(1, y)), quat::about(0, x));
             if q != [0.0, 0.0, 0.0, 1.0] {
                 node["rotation"] = json!(q);
             }
@@ -1306,16 +1304,6 @@ impl Place<'_> {
         }
         Some(self.push(node, at))
     }
-}
-
-/// The product of quaternions (x, y, z, w).
-fn mul(a: [f64; 4], b: [f64; 4]) -> [f64; 4] {
-    [
-        a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1],
-        a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
-        a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3],
-        a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2],
-    ]
 }
 
 #[cfg(test)]

@@ -35,7 +35,7 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
-use std::io::{self, Read as _};
+use std::io;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -52,13 +52,16 @@ use openusd_schemas::shade::{self, MaterialBindingAPI};
 use serde_json::{Map, Value, json};
 
 use super::Input;
-use super::xform::{IDENTITY, M4, Trs, decompose, inverse, mul, scale, set_transform, translate};
+use super::xform::{
+    IDENTITY, M4, Trs, decompose, from_column_major, inverse, mul, rotation, scale, set_transform, translate,
+};
 use crate::assets::{Assets, memory_key};
 use crate::document::{self, Animation, Builder, Document, Keep, Part, Sampler};
 use crate::images::{Images, Location, gray};
 use crate::material::{self, Alpha, Clearcoat, Factor, Full, Specular, Tex, UvTransform};
 use crate::mesh::{GRAY, Material, Prim, triangulate};
 use crate::num::f32_of;
+use crate::quat;
 use crate::source::{Axis, Fact, Handedness, SourceInfo};
 use crate::vec3::{self, cross, dot};
 
@@ -89,10 +92,7 @@ const GPRIMS: &[&str] = &[
 /// The steps each segment of a cubic curve is sampled at.
 const CURVE_STEPS: u16 = 8;
 
-/// The most points sampled curves add to a stage: each control point is a few bytes of the file but
-/// [`CURVE_STEPS`] points drawn, so this bounds what a stage of curves costs. Past it, a curve is drawn through its
-/// control points.
-const MAX_CURVE_POINTS: usize = 1 << 22;
+use super::nurbs::MAX_CURVE_POINTS;
 
 /// The highest order of NURBS curve sampled, where its control points' weights still fit a [`Sample`]: degree
 /// seven, past the cubics nearly every curve is. Higher orders are drawn through their control points.
@@ -102,8 +102,7 @@ const MAX_ORDER: usize = 8;
 /// a bound on what a file with thousands of primvars costs.
 const MAX_SETS: usize = 8;
 
-/// The longest turn between two animation samples, in degrees: longer ones are cut into steps.
-const MAX_STEP_DEGREES: f64 = 10.0;
+use super::xform::MAX_STEP_DEGREES;
 
 /// The most nodes a stage makes: point instancers can place millions of instances.
 const MAX_NODES: usize = 1 << 20;
@@ -350,45 +349,17 @@ fn leaf(path: &str) -> &str {
 
 /// A USD matrix (row vectors) as an [`M4`] (column vectors): its transpose.
 fn m4(m: &gf::Matrix4d) -> M4 {
-    std::array::from_fn(|i| std::array::from_fn(|j| m.0[j * 4 + i]))
-}
-
-/// The rotation for a unit quaternion (x, y, z, w).
-fn rotation([x, y, z, w]: [f64; 4]) -> M4 {
-    [
-        [
-            1.0 - 2.0 * (y * y + z * z),
-            2.0 * (x * y - w * z),
-            2.0 * (x * z + w * y),
-            0.0,
-        ],
-        [
-            2.0 * (x * y + w * z),
-            1.0 - 2.0 * (x * x + z * z),
-            2.0 * (y * z - w * x),
-            0.0,
-        ],
-        [
-            2.0 * (x * z - w * y),
-            2.0 * (y * z + w * x),
-            1.0 - 2.0 * (x * x + y * y),
-            0.0,
-        ],
-        [0.0, 0.0, 0.0, 1.0],
-    ]
+    from_column_major(&m.0)
 }
 
 /// A quaternion (w, x, y, z), as USD lists one, as glTF's unit (x, y, z, w); `None` when it has no length.
 fn unit_quaternion([w, x, y, z]: [f32; 4]) -> Option<[f64; 4]> {
-    let q = [x, y, z, w].map(f64::from);
-    let len = q.iter().map(|c| c * c).sum::<f64>().sqrt();
-    (len > 0.0 && len.is_finite()).then(|| q.map(|c| c / len))
+    quat::unit_above([x, y, z, w].map(f64::from), 0.0)
 }
 
 /// The angle between two unit quaternions' rotations, in degrees.
 fn turn(a: &[f64; 4], b: &[f64; 4]) -> f64 {
-    let dot: f64 = (0..4).map(|k| a[k] * b[k]).sum();
-    2.0 * dot.abs().min(1.0).acos().to_degrees()
+    quat::angle(*a, *b).to_degrees()
 }
 
 /// Times sorted, without repeats or ones that aren't finite.
@@ -3246,29 +3217,13 @@ fn instance_matrix(s: [f32; 3], q: [f32; 4], t: [f32; 3]) -> gf::Matrix4d {
     } else {
         [1.0, 0.0, 0.0, 0.0]
     };
-    // The rotation for column vectors; row vectors take its transpose.
-    let r = [
-        [
-            1.0 - 2.0 * (y * y + z * z),
-            2.0 * (x * y - w * z),
-            2.0 * (x * z + w * y),
-        ],
-        [
-            2.0 * (x * y + w * z),
-            1.0 - 2.0 * (x * x + z * z),
-            2.0 * (y * z - w * x),
-        ],
-        [
-            2.0 * (x * z - w * y),
-            2.0 * (y * z + w * x),
-            1.0 - 2.0 * (x * x + y * y),
-        ],
-    ];
+    // The rotation for column vectors, column-major; row vectors take its transpose.
+    let r = quat::matrix([x, y, z, w]);
     let mut m = gf::Matrix4d::IDENTITY;
     for row in 0..3 {
         // USD matrices are row vectors, so row `row` of the transform is column `row` of `r`.
-        for (col, r_col) in r.iter().enumerate() {
-            m.0[row * 4 + col] = f64::from(s[row]) * r_col[row];
+        for col in 0..3 {
+            m.0[row * 4 + col] = f64::from(s[row]) * r[row * 3 + col];
         }
         m.0[12 + row] = f64::from(t[row]);
     }
@@ -3481,9 +3436,10 @@ impl<'a> Usdz<'a> {
                 .iter()
                 .find(|n| n.rsplit('/').next().is_some_and(|f| f.to_lowercase() == name))
         })?;
-        let mut f = self.0.by_name(entry).ok()?;
-        let mut bytes = Vec::new();
-        f.read_to_end(&mut bytes).ok()?;
+        // Entries are meant to be stored, but one deflated is read too, as far as is plausible.
+        let f = self.0.by_name(entry).ok()?;
+        let packed = f.compressed_size();
+        let bytes = super::inflate_capped(f, packed, entry).ok()?;
         Some((entry.clone(), bytes))
     }
 }
@@ -4498,5 +4454,32 @@ def HermiteCurves "Wave"
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_usdz_texture_that_inflates_implausibly_far_is_left_out() {
+        use std::io::Write as _;
+        // 64 MiB of zeros deflates to about 64 KB: a thousand times over, past any real texture.
+        let mut zip = zip::ZipWriter::new(io::Cursor::new(Vec::new()));
+        let deflated = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        let stored = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        zip.start_file("bomb.png", deflated).unwrap();
+        let zeros = vec![0u8; 1 << 20];
+        for _ in 0..64 {
+            zip.write_all(&zeros).unwrap();
+        }
+        zip.start_file("small.png", deflated).unwrap();
+        zip.write_all(&zeros[..4096]).unwrap();
+        zip.start_file("plain.png", stored).unwrap();
+        zip.write_all(b"not really a png").unwrap();
+        let bytes = zip.finish().unwrap().into_inner();
+        let stream: Box<dyn super::super::ReadSeek> = Box::new(io::Cursor::new(bytes));
+        let mut usdz = Usdz(zip::ZipArchive::new(stream).unwrap());
+        assert!(usdz.read("bomb.png").is_none());
+        assert_eq!(usdz.read("textures/small.png").map(|(_, b)| b.len()), Some(4096));
+        assert_eq!(
+            usdz.read("plain.png"),
+            Some(("plain.png".to_owned(), b"not really a png".to_vec()))
+        );
     }
 }

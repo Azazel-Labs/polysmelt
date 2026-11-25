@@ -50,6 +50,8 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value, json};
 
+use super::xform::col::{self, IDENTITY, M4, mul, scaling, translation};
+use super::xform::set_trs;
 use crate::Result;
 use crate::assets::Assets;
 use crate::document::{Builder, Document, Keep, Limits, Part};
@@ -57,11 +59,10 @@ use crate::images::Images;
 use crate::material::Full;
 use crate::mesh::FastMap;
 use crate::num::f32_of;
+use crate::quat;
 use crate::source::{Axis, Converted, Fact, Handedness, SourceInfo};
 use ddl::{ROOT, Tree};
-use math::{
-    IDENTITY, M4, is_identity, mul, place, quat_axis, quat_matrix, quat_unit, scaling, set_trs, translation, trs,
-};
+use math::{is_identity, place, trs};
 
 /// The structures that are nodes.
 const NODE_KINDS: [&str; 5] = ["Node", "BoneNode", "GeometryNode", "LightNode", "CameraNode"];
@@ -358,7 +359,7 @@ fn matrix(kind: Kind, v: &[f64], angle: f64) -> M4 {
             scaling(s)
         }
         Kind::Scale(Comp::All) => scaling([v[0], v[1], v[2]]),
-        Kind::Rotate(r) => quat_matrix(rotation(r, v, angle)),
+        Kind::Rotate(r) => col::rotation(rotation(r, v, angle)),
     }
 }
 
@@ -368,10 +369,10 @@ fn rotation(r: Rot, v: &[f64], angle: f64) -> [f64; 4] {
         Rot::Axis(k) => {
             let mut axis = [0.0; 3];
             axis[k] = 1.0;
-            quat_axis(axis, v[0] * angle)
+            quat::about_axis(axis, v[0] * angle)
         }
-        Rot::AxisAngle => axis_of(v).map_or([0.0, 0.0, 0.0, 1.0], |a| quat_axis(a, v[0] * angle)),
-        Rot::Quaternion => quat_unit([v[0], v[1], v[2], v[3]]),
+        Rot::AxisAngle => axis_of(v).map_or([0.0, 0.0, 0.0, 1.0], |a| quat::about_axis(a, v[0] * angle)),
+        Rot::Quaternion => quat::unit([v[0], v[1], v[2], v[3]]),
     }
 }
 

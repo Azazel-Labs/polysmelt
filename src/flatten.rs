@@ -51,6 +51,7 @@ use crate::mesh::{
     Texture, UvTransform, Volume,
 };
 use crate::num::{f32_of, u32_of, usize_of};
+use crate::quat;
 use crate::vec3;
 use crate::{Context as _, ErrorKind, Result, Within as _};
 
@@ -582,12 +583,8 @@ fn component(ctype: u64, normalized: bool, b: &[u8]) -> f32 {
     }
 }
 
-/// A 4x4 matrix, column-major as glTF writes it.
-pub(crate) type M4 = [f64; 16];
-
-pub(crate) const IDENTITY: M4 = [
-    1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
-];
+/// 4x4 matrices, column-major as glTF writes them.
+pub(crate) use crate::formats::xform::col::{IDENTITY, M4, mul};
 
 /// Where one mesh is drawn: its transforms (several for instances), morph weights and skin.
 struct Use {
@@ -1554,45 +1551,18 @@ fn put<const N: usize>(
     }));
 }
 
-pub(crate) fn mul(a: &M4, b: &M4) -> M4 {
-    let mut r = [0.0; 16];
-    for c in 0..4 {
-        for row in 0..4 {
-            r[c * 4 + row] = (0..4).map(|k| a[k * 4 + row] * b[c * 4 + k]).sum();
-        }
-    }
-    r
-}
-
 /// Translation, rotation (a quaternion x y z w) and scale as one matrix.
 pub(crate) fn trs(t: [f64; 3], q: [f64; 4], s: [f64; 3]) -> M4 {
-    let len = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]).sqrt();
-    let [x, y, z, w] = if len > 0.0 {
-        q.map(|c| c / len)
+    let q = if quat::length(q) > 0.0 {
+        quat::unit_unchecked(q)
     } else {
-        [0.0, 0.0, 0.0, 1.0]
+        quat::IDENTITY
     };
-    let r = [
-        [
-            1.0 - 2.0 * (y * y + z * z),
-            2.0 * (x * y - z * w),
-            2.0 * (x * z + y * w),
-        ],
-        [
-            2.0 * (x * y + z * w),
-            1.0 - 2.0 * (x * x + z * z),
-            2.0 * (y * z - x * w),
-        ],
-        [
-            2.0 * (x * z - y * w),
-            2.0 * (y * z + x * w),
-            1.0 - 2.0 * (x * x + y * y),
-        ],
-    ];
+    let r = quat::matrix(q);
     let mut m = IDENTITY;
     for col in 0..3 {
         for row in 0..3 {
-            m[col * 4 + row] = r[row][col] * s[col];
+            m[col * 4 + row] = r[col * 3 + row] * s[col];
         }
     }
     m[12..15].copy_from_slice(&t);
@@ -1636,47 +1606,7 @@ pub(crate) fn decompose(m: &M4) -> ([f64; 3], [f64; 4], [f64; 3]) {
         return (t, [0.0, 0.0, 0.0, 1.0], s.map(|x| if x.is_finite() { x } else { 0.0 }));
     }
     // The rotation's rows and columns: each column over its scale.
-    let r = |row: usize, c: usize| m[c * 4 + row] / s[c];
-    let trace = r(0, 0) + r(1, 1) + r(2, 2);
-    let q = if trace > 0.0 {
-        let k = 0.5 / (trace + 1.0).sqrt();
-        [
-            (r(2, 1) - r(1, 2)) * k,
-            (r(0, 2) - r(2, 0)) * k,
-            (r(1, 0) - r(0, 1)) * k,
-            0.25 / k,
-        ]
-    } else if r(0, 0) > r(1, 1) && r(0, 0) > r(2, 2) {
-        let k = 2.0 * (1.0 + r(0, 0) - r(1, 1) - r(2, 2)).max(0.0).sqrt();
-        [
-            0.25 * k,
-            (r(0, 1) + r(1, 0)) / k,
-            (r(0, 2) + r(2, 0)) / k,
-            (r(2, 1) - r(1, 2)) / k,
-        ]
-    } else if r(1, 1) > r(2, 2) {
-        let k = 2.0 * (1.0 + r(1, 1) - r(0, 0) - r(2, 2)).max(0.0).sqrt();
-        [
-            (r(0, 1) + r(1, 0)) / k,
-            0.25 * k,
-            (r(1, 2) + r(2, 1)) / k,
-            (r(0, 2) - r(2, 0)) / k,
-        ]
-    } else {
-        let k = 2.0 * (1.0 + r(2, 2) - r(0, 0) - r(1, 1)).max(0.0).sqrt();
-        [
-            (r(0, 2) + r(2, 0)) / k,
-            (r(1, 2) + r(2, 1)) / k,
-            0.25 * k,
-            (r(1, 0) - r(0, 1)) / k,
-        ]
-    };
-    let n = q.iter().map(|c| c * c).sum::<f64>().sqrt();
-    let q = if n > 0.0 && n.is_finite() {
-        q.map(|c| c / n)
-    } else {
-        [0.0, 0.0, 0.0, 1.0]
-    };
+    let q = quat::unit(quat::of_rotation_reciprocal(|row, c| m[c * 4 + row] / s[c]));
     (t, q, s)
 }
 
@@ -3437,7 +3367,10 @@ pub(crate) fn sample_after(
                     *o = h[0] * f(v0) + h[1] * f(b0) + h[2] * f(v1) + h[3] * f(a1);
                 }
             }
-            _ if rotation && w == 4 => slerp(value(k), value(k + 1), s, out),
+            _ if rotation && w == 4 => {
+                let q = |v: &[f32]| std::array::from_fn(|c| f64::from(v[c]));
+                out.copy_from_slice(&quat::slerp(q(value(k)), q(value(k + 1)), s));
+            }
             _ => {
                 for ((o, &x), &y) in out.iter_mut().zip(value(k)).zip(value(k + 1)) {
                     let (x, y) = (f64::from(x), f64::from(y));
@@ -3455,24 +3388,6 @@ pub(crate) fn sample_after(
         }
     }
     true
-}
-
-/// Spherical linear interpolation between unit quaternions, the short way round, into `out`.
-fn slerp(a: &[f32], b: &[f32], s: f64, out: &mut [f64]) {
-    let mut d: f64 = a.iter().zip(b).map(|(&x, &y)| f64::from(x) * f64::from(y)).sum();
-    let sign = if d < 0.0 { -1.0 } else { 1.0 };
-    d *= sign;
-    let (wa, wb) = if d > 0.9995 {
-        // Nearly the same rotation: a straight line is as good, and stable.
-        (1.0 - s, s)
-    } else {
-        let theta = d.acos();
-        let sin = theta.sin();
-        (((1.0 - s) * theta).sin() / sin, (s * theta).sin() / sin)
-    };
-    for ((o, &x), &y) in out.iter_mut().zip(a).zip(b) {
-        *o = wa * f64::from(x) + wb * sign * f64::from(y);
-    }
 }
 
 #[cfg(all(test, feature = "fs"))]

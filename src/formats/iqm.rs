@@ -51,6 +51,7 @@ use crate::document::{Document, Keep};
 use crate::images::Images;
 use crate::mesh::{Material, srgb_to_linear};
 use crate::num::{f32_of, u32_of};
+use crate::quat;
 use crate::source::{Axis, Fact, Handedness};
 
 /// The frame rate taken when an animation gives none that's usable.
@@ -500,7 +501,7 @@ fn build(f: &File, stem: &str, input: &Input<'_>, assets: &dyn Assets, keep: Kee
         );
         let mut node = Node::named(j.name.clone(), parent);
         node.translation = j.t;
-        node.rotation = scene::normalize(j.r.map(f64::from));
+        node.rotation = quat::normalize(j.r.map(f64::from));
         node.scale = j.s;
         let local = node.matrix();
         worlds.push(parent.map_or(local, |p| scene::mul(&worlds[p], &local)));
@@ -724,11 +725,11 @@ fn finish_anims(mut scene: Scene, f: &File, keep: bool) -> Result<Scene> {
         let mut channels = Vec::new();
         for (j, joint) in f.joints.iter().enumerate() {
             let value = |fr: usize, c: usize| f.frames[(fr * n + j) * 10 + c];
-            let rest = scene::normalize(joint.r.map(f64::from));
+            let rest = quat::normalize(joint.r.map(f64::from));
             let t: Vec<f32> = frames.clone().flat_map(|fr| [0, 1, 2].map(|c| value(fr, c))).collect();
             let r: Vec<f32> = frames
                 .clone()
-                .flat_map(|fr| scene::normalize([3, 4, 5, 6].map(|c| f64::from(value(fr, c)))))
+                .flat_map(|fr| quat::normalize([3, 4, 5, 6].map(|c| f64::from(value(fr, c)))))
                 .collect();
             let s: Vec<f32> = frames.clone().flat_map(|fr| [7, 8, 9].map(|c| value(fr, c))).collect();
             let same = |v: &[f32], rest: &[f32]| v.chunks(rest.len()).all(|k| close(k, rest));

@@ -16,6 +16,7 @@ use crate::document::{Document, Keep};
 use crate::formats::scene::{self, Animation, Channel, Interp, M4, Node, Path as Key, Primitive};
 use crate::formats::xml::{El, Xml};
 use crate::mesh::srgb_to_linear;
+use crate::quat;
 use crate::vec3::{cross, dot, sub, unit};
 
 /// The most keys a channel has.
@@ -213,11 +214,7 @@ pub(super) fn load(text: &str, dir: &Path, limit: usize, assets: &dyn Assets, ke
 
 /// Irrlicht's rotation in degrees (about X, then Y, then Z) as a quaternion.
 fn euler(d: [f64; 3]) -> [f32; 4] {
-    let [x, y, z] = d.map(f64::to_radians);
-    scene::normalize(scene::quat_mul(
-        scene::about(2, z),
-        scene::quat_mul(scene::about(1, y), scene::about(0, x)),
-    ))
+    quat::normalize(quat::euler_xyz(d.map(f64::to_radians)))
 }
 
 fn wide(v: [f32; 3]) -> [f64; 3] {
@@ -1121,7 +1118,7 @@ mod tests {
         assert!((common(&[3000.0, 2000.0]) - 6000.0).abs() < 1e-9);
         // Irrlicht's rotation: about X, then Y, then Z.
         let q = euler([0.0, 90.0, 0.0]).map(f64::from);
-        let v = scene::rotate(q, [1.0, 0.0, 0.0]);
+        let v = quat::rotate(q, [1.0, 0.0, 0.0]);
         assert!((v[2] + 1.0).abs() < 1e-6, "{v:?}");
     }
 }

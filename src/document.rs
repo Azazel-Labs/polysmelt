@@ -411,12 +411,24 @@ impl Blob {
         if let Some(s) = self.slice(off, len) {
             return Ok(Bytes::copy_from_slice(s));
         }
+        self.holds_data()?;
         let mut out = Vec::new();
         out.try_reserve_exact(usize_of(len))
             .map_err(|_| err!(LimitExceeded, "glTF data of {len} bytes"))?;
         out.resize(usize_of(len), 0);
         self.read_at(off, &mut out)?;
         Ok(out.into())
+    }
+
+    /// Whether the buffer has bytes: a missing fallback buffer has only its declared length, which room isn't made
+    /// for.
+    fn holds_data(&self) -> Result<()> {
+        ensure!(
+            !matches!(self, Blob::Missing(_)),
+            Corrupt,
+            "glTF data is in a meshopt fallback buffer, which holds none"
+        );
+        Ok(())
     }
 
     /// Copies the bytes from `off` into `out`.
@@ -610,6 +622,7 @@ impl Document {
         if let Some(s) = b.slice(0, b.len()) {
             return Ok(Cow::Borrowed(s));
         }
+        b.holds_data()?;
         let mut out = vec![0; usize_of(b.len())];
         b.read_at(0, &mut out)?;
         Ok(Cow::Owned(out))
@@ -1502,6 +1515,22 @@ impl Builder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A missing meshopt fallback buffer is an error when its bytes are asked for, before room is made for the length
+    /// it declares.
+    #[test]
+    fn a_missing_fallback_buffer_is_not_allocated() {
+        let big = 1u64 << 42;
+        let json = json!({
+            "asset": { "version": "2.0" },
+            "buffers": [{ "byteLength": big }],
+            "bufferViews": [{ "buffer": 0, "byteLength": big }]
+        });
+        let json = json.as_object().unwrap().clone();
+        let doc = Document::new(json, vec![Blob::Missing(big)], Map::new(), Refs::new());
+        assert_eq!(doc.buffer(0).unwrap_err().kind(), ErrorKind::Corrupt);
+        assert_eq!(doc.view_shared(0).unwrap_err().kind(), ErrorKind::Corrupt);
+    }
 
     /// Compressing a document straight from its parts gives the bytes compressing its GLB does.
     #[test]
