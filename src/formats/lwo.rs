@@ -39,6 +39,7 @@ use crate::material::{Alpha, CLAMP, Clearcoat, Factor, Full, MIRROR, REPEAT, Tex
 use crate::mesh::{FastMap, Prim, srgb_to_linear};
 use crate::num::u32_of;
 use crate::source::{Axis, Fact, Handedness, SourceInfo};
+use crate::vec3;
 
 const FORM: [u8; 4] = *b"FORM";
 /// The id of the chunk holding an LWO3 form's own data.
@@ -1577,15 +1578,8 @@ struct Built {
 fn face_normal(l: &Layer, p: &Poly) -> [f32; 3] {
     let s = p.start as usize;
     let cs = l.corners.get(s..s + usize::from(p.len)).unwrap_or(&[]);
-    let mut n = [0.0f32; 3];
-    for (i, &a) in cs.iter().enumerate() {
-        let a = l.points[a as usize];
-        let b = l.points[cs[(i + 1) % cs.len()] as usize];
-        n[0] += (a[1] - b[1]) * (a[2] + b[2]);
-        n[1] += (a[2] - b[2]) * (a[0] + b[0]);
-        n[2] += (a[0] - b[0]) * (a[1] + b[1]);
-    }
-    crease::unit([n[0], n[1], -n[2]]).unwrap_or([0.0, 1.0, 0.0])
+    let n = vec3::newell(cs.iter().map(|&a| l.points[a as usize]));
+    vec3::unit([n[0], n[1], -n[2]]).unwrap_or([0.0, 1.0, 0.0])
 }
 
 /// The bits of a vertex's attributes, which vertices are shared by.
@@ -1745,7 +1739,7 @@ fn build(l: &Layer, looks: &[Look], look_of: &[usize], budget: &mut Budget) -> R
                     let given = norms
                         .as_ref()
                         .and_then(|n| n.get(pu, c))
-                        .and_then(|v| crease::unit([v[0], v[1], -v[2]]));
+                        .and_then(|v| vec3::unit([v[0], v[1], -v[2]]));
                     given.unwrap_or_else(|| if look.cos.is_some() { smooth[s + j] } else { face[p] })
                 } else {
                     [0.0; 3]

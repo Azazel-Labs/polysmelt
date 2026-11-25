@@ -2,39 +2,13 @@
 //! openskp's `triangulator.cpp` and `earcut.cpp`, with an O(n²) ear walk instead of restarting the search after
 //! every ear, and each triangle turned to face the same way as the face.
 
+use crate::vec3::{self, cross, dot, sub, unit};
+
 type V3 = [f64; 3];
 
-pub(crate) fn sub(a: V3, b: V3) -> V3 {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-
-pub(crate) fn dot(a: V3, b: V3) -> f64 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-
-pub(crate) fn cross(a: V3, b: V3) -> V3 {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
-}
-
-pub(crate) fn normalize(a: V3) -> Option<V3> {
-    let len = dot(a, a).sqrt();
-    (len > 1e-12 && len.is_finite()).then(|| [a[0] / len, a[1] / len, a[2] / len])
-}
-
-/// The normal of a loop by Newell's method, which copes with concave and slightly non-planar loops.
+/// The unit normal of a loop by Newell's method, which copes with concave and slightly non-planar loops.
 pub(crate) fn newell(points: &[V3]) -> Option<V3> {
-    let mut n = [0.0; 3];
-    for (i, a) in points.iter().enumerate() {
-        let b = points[(i + 1) % points.len()];
-        n[0] += (a[1] - b[1]) * (a[2] + b[2]);
-        n[1] += (a[2] - b[2]) * (a[0] + b[0]);
-        n[2] += (a[0] - b[0]) * (a[1] + b[1]);
-    }
-    normalize(n)
+    unit(vec3::newell(points.iter().copied()))
 }
 
 /// A 2D point and its index into the face's concatenated loops.
@@ -75,7 +49,7 @@ fn point_in_polygon(x: f64, y: f64, poly: &[P]) -> bool {
 /// that order. Each triangle winds counter-clockwise seen from the side `normal` points to.
 pub(crate) fn triangulate(loops: &[Vec<V3>], normal: V3) -> Vec<[usize; 3]> {
     let Some(outer) = loops.first() else { return Vec::new() };
-    let Some(n) = normalize(normal).or_else(|| newell(outer)) else {
+    let Some(n) = unit(normal).or_else(|| newell(outer)) else {
         return Vec::new();
     };
     let points: Vec<V3> = loops.iter().flatten().copied().collect();
@@ -90,7 +64,7 @@ pub(crate) fn triangulate(loops: &[Vec<V3>], normal: V3) -> Vec<[usize; 3]> {
         } else {
             [0.0, 1.0, 0.0]
         };
-        let Some(u) = normalize(cross(n, seed)) else {
+        let Some(u) = unit(cross(n, seed)) else {
             return Vec::new();
         };
         let v = cross(n, u);

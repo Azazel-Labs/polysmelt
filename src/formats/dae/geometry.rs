@@ -7,6 +7,7 @@ use std::rc::Rc;
 use super::xml::{self, Dom};
 use crate::mesh::{Prim, srgb_to_linear, triangulate};
 use crate::num::u32_of;
+use crate::vec3::{self, cross};
 
 /// The values of a `<source>`, read through its accessor: `width` numbers to an element.
 #[derive(Debug, Default)]
@@ -593,7 +594,9 @@ impl Corners {
             let at = |k: usize| v.get(k).copied().filter(|x| x.is_finite()).unwrap_or(0.0);
             match s.sem {
                 Sem::Position => self.positions.push([at(0), at(1), at(2)]),
-                Sem::Normal => self.normals.push(unit([at(0), at(1), at(2)])),
+                Sem::Normal => self
+                    .normals
+                    .push(vec3::unit([at(0), at(1), at(2)]).unwrap_or([0.0, 0.0, 1.0])),
                 Sem::Tangent => self.tangents.push([at(0), at(1), at(2)]),
                 Sem::Binormal => self.binormals.push([at(0), at(1), at(2)]),
                 Sem::Texcoord => self.uvs[slot].push([at(0), 1.0 - at(1)]),
@@ -782,23 +785,6 @@ fn hash(key: &[u32]) -> usize {
     }
     // The high bits mix best.
     usize::try_from(h >> 32).unwrap_or(0) ^ usize::try_from(h & 0xFFFF_FFFF).unwrap_or(0).rotate_left(16)
-}
-
-fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
-}
-
-fn unit(v: [f32; 3]) -> [f32; 3] {
-    let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
-    if len > 1e-20 && len.is_finite() {
-        [v[0] / len, v[1] / len, v[2] / len]
-    } else {
-        [0.0, 0.0, 1.0]
-    }
 }
 
 /// Polygons with holes past this many corners are fanned rather than clipped.

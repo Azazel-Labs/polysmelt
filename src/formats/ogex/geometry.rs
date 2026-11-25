@@ -8,6 +8,7 @@ use crate::Result;
 use crate::document::{Builder, Part};
 use crate::mesh::{FastMap, Prim};
 use crate::num::{f32_of, u32_of};
+use crate::vec3::{cross, dot, unit};
 
 /// The most morph targets a mesh keeps.
 const MAX_TARGETS: usize = 256;
@@ -310,7 +311,7 @@ fn vec3(p: &[f64], fill: f64) -> [f32; 3] {
 /// A normal at unit length; +Z when it has none.
 fn unit_normal(p: &[f64]) -> [f32; 3] {
     let v = [0, 1, 2].map(|k| p.get(k).copied().unwrap_or(0.0));
-    super::math::unit(v).map_or([0.0, 0.0, 1.0], |u| u.map(f32_of))
+    unit(v).map_or([0.0, 0.0, 1.0], |u| u.map(f32_of))
 }
 
 /// What one index array draws: triangles, line segments or points.
@@ -502,8 +503,8 @@ fn build(c: &mut Ctx<'_>, g: u32, need_uv: usize) -> Result<Option<Geom>> {
                 } else if let Some((bv, bw)) = bitangents {
                     // The handedness: whether the bitangent agrees with normal × tangent.
                     let nrm = p.normals[i].map(f64::from);
-                    let cr = super::math::cross(nrm, d.map(f64::from));
-                    super::math::dot(
+                    let cr = cross(nrm, d.map(f64::from));
+                    dot(
                         cr,
                         [0, 1, 2].map(|k| bv[i * bw..i * bw + bw].get(k).copied().unwrap_or(0.0)),
                     )

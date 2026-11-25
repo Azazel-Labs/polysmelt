@@ -16,6 +16,7 @@ use crate::document::{Document, Keep};
 use crate::formats::scene::{self, Animation, Channel, Interp, M4, Node, Path as Key, Primitive};
 use crate::formats::xml::{El, Xml};
 use crate::mesh::srgb_to_linear;
+use crate::vec3::{cross, dot, sub, unit};
 
 /// The most keys a channel has.
 const MAX_KEYS: usize = 4096;
@@ -217,27 +218,6 @@ fn euler(d: [f64; 3]) -> [f32; 4] {
         scene::about(2, z),
         scene::quat_mul(scene::about(1, y), scene::about(0, x)),
     ))
-}
-
-fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-
-fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
-}
-
-fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-
-fn unit(a: [f64; 3]) -> Option<[f64; 3]> {
-    let l = dot(a, a).sqrt();
-    (l > 1e-12 && l.is_finite()).then(|| a.map(|c| c / l))
 }
 
 fn wide(v: [f32; 3]) -> [f64; 3] {

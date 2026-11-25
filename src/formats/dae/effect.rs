@@ -7,7 +7,7 @@ use std::path::Path;
 use super::xml;
 use crate::images::Location;
 use crate::material::{Alpha, CLAMP, Factor, Full, MIRROR, REPEAT, Specular, Tex, UvTransform};
-use crate::mesh::srgb_to_linear;
+use crate::mesh::linear_rgba as linear;
 use crate::num::f32_of;
 
 /// What a shading channel (`diffuse`, `emission`, ...) holds.
@@ -22,11 +22,6 @@ enum Channel {
 /// The share of red, green and blue in luminance.
 fn luminance(c: [f32; 4]) -> f32 {
     0.212_671 * c[0] + 0.715_160 * c[1] + 0.072_169 * c[2]
-}
-
-/// A color with its RGB made linear.
-fn linear(c: [f32; 4]) -> [f32; 4] {
-    [srgb_to_linear(c[0]), srgb_to_linear(c[1]), srgb_to_linear(c[2]), c[3]]
 }
 
 impl super::Reader<'_> {

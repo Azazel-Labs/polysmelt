@@ -146,6 +146,11 @@ mod png;
 mod raster;
 #[cfg(test)]
 mod test_rng;
+#[cfg_attr(
+    not(all(feature = "3mf", feature = "x3d")),
+    allow(dead_code, reason = "each reader uses the parts it needs")
+)]
+mod vec3;
 #[cfg(feature = "webp")]
 mod webp;
 

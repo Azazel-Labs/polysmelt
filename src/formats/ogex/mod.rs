@@ -339,7 +339,7 @@ fn expand(v: &[f64], width: usize) -> M4 {
 
 /// The unit axis an axis-angle rotation's values name, if they name one.
 fn axis_of(v: &[f64]) -> Option<[f64; 3]> {
-    math::unit([v[1], v[2], v[3]])
+    crate::vec3::unit([v[1], v[2], v[3]])
 }
 
 /// The matrix of a transform of `kind` with values `v`, angles in units of `angle` radians.
