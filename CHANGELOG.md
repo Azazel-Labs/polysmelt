@@ -2,6 +2,18 @@
 
 Breaking changes are allowed in minor releases until 1.0.
 
+## 0.18.2
+
+- FBX export is faster: rotation curves are fit in one pass over the keys instead of searching
+  them for every sample, and big arrays are deflated after the tree is built, reusing one
+  compressor. On the calling thread alone it's about 1.3 to 2 times faster.
+- `Document::to_fbx_with` and `Document::write_fbx_with` take `FbxOptions`, whose `threads`
+  shares the rotation curves and the deflating across threads (0 for one per core). The bytes
+  written are the same however many threads there are. `to_fbx` and `write_fbx` stay on the
+  calling thread.
+- FBX export samples rotations in double precision, so the Euler curves are a little closer
+  to the quaternions.
+
 ## 0.18.1
 
 - FBX export: a skinned mesh read from FBX is written back on its own model rather than on a

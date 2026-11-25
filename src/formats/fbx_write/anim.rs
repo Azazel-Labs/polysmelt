@@ -165,15 +165,26 @@ fn of_euler(e: [f64; 3]) -> [f64; 4] {
 
 /// Rotation channel `c` as Euler curves keyed densely enough to follow it, each rotation through `map` first.
 fn rotation_curves(c: &Channel, map: impl Fn([f64; 4]) -> [f64; 4]) -> Vec<Keys> {
-    let n = c.times.len();
-    let mut buf = Vec::new();
+    let (times, n) = (&c.times[..], c.times.len());
+    let interpolation = c.interpolation.name();
+    if crate::flatten::width(times, &c.values, interpolation) != Some(4) {
+        return Vec::new();
+    }
+    // Samples come in time order, near the last: how many keys are at or before the last one's time is walked to,
+    // not searched for.
+    let mut keyed = 0;
     let mut at = |t: f64| -> Option<[f64; 4]> {
         #[allow(clippy::cast_possible_truncation, reason = "a key time, which is f32 already")]
-        let ok = c.sample_into(t as f32, &mut buf);
-        (ok && buf.len() == 4).then(|| {
-            let q = [buf[0], buf[1], buf[2], buf[3]].map(f64::from);
-            map(quat::unit_above(q, 1e-12).unwrap_or(quat::IDENTITY))
-        })
+        let t = t as f32;
+        while keyed < n && times[keyed] <= t {
+            keyed += 1;
+        }
+        while keyed > 0 && times[keyed - 1] > t {
+            keyed -= 1;
+        }
+        let mut q = [0.0; 4];
+        crate::flatten::sample_after(times, &c.values, interpolation, t, true, keyed, &mut q)
+            .then(|| map(quat::unit_above(q, 1e-12).unwrap_or(quat::IDENTITY)))
     };
     let mut keys: Vec<(f64, [f64; 3])> = Vec::with_capacity(n);
     let Some(first) = c.times.first().map(|&t| f64::from(t)) else {
@@ -188,7 +199,9 @@ fn rotation_curves(c: &Channel, map: impl Fn([f64; 4]) -> [f64; 4]) -> Vec<Keys>
     } else {
         LINEAR
     };
-    let tolerance = TOLERANCE_DEGREES.to_radians();
+    // Rotations within the tolerance of each other: the cosine of half the angle between them is above this.
+    let within = (TOLERANCE_DEGREES.to_radians() / 2.0).cos();
+    let dot = |a: [f64; 4], b: [f64; 4]| a.iter().zip(&b).map(|(x, y)| x * y).sum::<f64>().abs();
     for w in c.times.windows(2) {
         let end = f64::from(w[1]);
         let mut pending = vec![end];
@@ -206,7 +219,7 @@ fn rotation_curves(c: &Channel, map: impl Fn([f64; 4]) -> [f64; 4]) -> Vec<Keys>
                 && [0.25, 0.5, 0.75].into_iter().any(|f| {
                     let t = a + (b - a) * f;
                     let e: [f64; 3] = std::array::from_fn(|k| ea[k] + (eb[k] - ea[k]) * f);
-                    at(t).is_some_and(|q| quat::angle(of_euler(e), q) > tolerance)
+                    at(t).is_some_and(|q| dot(of_euler(e), q) < within)
                 });
             if strays {
                 pending.push(a + (b - a) / 2.0);
@@ -262,6 +275,27 @@ fn curve_node(id: i64, keys: &Keys, default: f64) -> Node {
         .child("KeyAttrFlags", |n| n.arr(&flags))
         .child("KeyAttrDataFloat", |n| n.arr(&data))
         .child("KeyAttrRefCount", |n| n.arr(&counts))
+}
+
+/// How a node's rotation becomes its model's: turned back to the model's parent, then by the model's own turn.
+#[derive(Clone, Copy)]
+struct Turned {
+    back: Option<[f64; 4]>,
+    turn: Option<[f64; 4]>,
+}
+
+impl Turned {
+    fn apply(self, q: [f64; 4]) -> [f64; 4] {
+        let q = self.back.map_or(q, |b| quat::mul(b, q));
+        self.turn.map_or(q, |t| quat::mul(q, t))
+    }
+}
+
+fn turned(m: &Model) -> Turned {
+    Turned {
+        back: m.back,
+        turn: m.turn.map(|t| t.q),
+    }
 }
 
 /// A model's value at rest of a transform property, as its `Lcl` property holds it.
@@ -332,10 +366,28 @@ impl Writer<'_> {
                     list.push(c);
                 }
             }
-            for (node, channels) in by_node {
-                for c in channels {
-                    self.channel(node, c, layer);
-                }
+            let order: Vec<(usize, &Channel)> = by_node
+                .into_iter()
+                .flat_map(|(n, cs)| cs.into_iter().map(move |c| (n, c)))
+                .collect();
+            // Keying rotations takes most of an animation's time, and each is on its own: they're done first, over
+            // the threads there are.
+            let turns: Vec<Option<Turned>> = order
+                .iter()
+                .map(|&(n, c)| {
+                    let m = self.models.get(n).and_then(Option::as_ref)?;
+                    (c.property == Property::Rotation).then(|| turned(m))
+                })
+                .collect();
+            let jobs: Vec<(&Channel, Option<Turned>)> = order.iter().map(|&(_, c)| c).zip(turns).collect();
+            let rotations = crate::keep::par_map_with(
+                &jobs,
+                self.threads,
+                || (),
+                |(), &(c, turn)| turn.map(|t| rotation_curves(c, |q| t.apply(q))),
+            );
+            for ((node, c), rotation) in order.into_iter().zip(rotations) {
+                self.channel(node, c, layer, rotation);
             }
             self.takes.push((name, start, stop));
         }
@@ -343,8 +395,8 @@ impl Writer<'_> {
         Ok(())
     }
 
-    /// Writes channel `c` of node `node` as a curve node on `layer`.
-    fn channel(&mut self, node: usize, c: &Channel, layer: i64) {
+    /// Writes channel `c` of node `node` as a curve node on `layer`, with its rotation curves when it's keyed already.
+    fn channel(&mut self, node: usize, c: &Channel, layer: i64, rotation: Option<Vec<Keys>>) {
         // Weights go to the node's blend shape channels, which a folded node has without a model of its own.
         if c.property == Property::Weights {
             let targets = self.channels.get(&node).cloned().unwrap_or_default();
@@ -385,13 +437,10 @@ impl Writer<'_> {
                 let perm = m.turn.map(|t| t.perm);
                 curves(c, 3, |v| perm.map_or(v, |p| p.map(|i| v[i])))
             }
-            _ => {
-                let (back, turn) = (m.back, m.turn.map(|t| t.q));
-                rotation_curves(c, |q| {
-                    let q = back.map_or(q, |b| quat::mul(b, q));
-                    turn.map_or(q, |t| quat::mul(q, t))
-                })
-            }
+            _ => rotation.unwrap_or_else(|| {
+                let t = turned(m);
+                rotation_curves(c, |q| t.apply(q))
+            }),
         };
         if keys.len() != 3 {
             return;

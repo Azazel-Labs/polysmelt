@@ -35,6 +35,41 @@ use crate::{Context as _, ErrorKind, Result, Within as _};
 
 pub use crate::keep::Keep;
 
+/// How [`Document::to_fbx_with`] and [`Document::write_fbx_with`] write FBX.
+///
+/// ```
+/// use polysmelt::FbxOptions;
+///
+/// assert_eq!(FbxOptions::default().threads, 1);
+/// assert_eq!(FbxOptions::default().with_threads(0).threads, 0);
+/// ```
+#[cfg(feature = "fbx")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub struct FbxOptions {
+    /// Threads the writer may share its work over: deflating arrays and keying rotations. 1, the default, writes on
+    /// the calling thread; 0 takes one per core. The bytes are the same either way. Where threads can't be had
+    /// (WebAssembly without shared memory, or a platform that refuses to start one), it writes on the calling thread.
+    pub threads: usize,
+}
+
+#[cfg(feature = "fbx")]
+impl Default for FbxOptions {
+    fn default() -> Self {
+        Self { threads: 1 }
+    }
+}
+
+#[cfg(feature = "fbx")]
+impl FbxOptions {
+    /// With [`FbxOptions::threads`] set to `threads`.
+    #[must_use]
+    pub const fn with_threads(mut self, threads: usize) -> Self {
+        self.threads = threads;
+        self
+    }
+}
+
 mod typed;
 
 pub(crate) use typed::{Accessor, Animation, Limits, Tables, View};
@@ -765,8 +800,26 @@ impl Document {
     /// indexes (2^31), or a single array would be over 4 GiB.
     #[cfg(feature = "fbx")]
     pub fn to_fbx(&self) -> Result<Vec<u8>> {
+        self.to_fbx_with(&FbxOptions::default())
+    }
+
+    /// [`Document::to_fbx`] with options: threads to share the work over. The bytes are the same whatever they are.
+    ///
+    /// ```
+    /// use polysmelt::FbxOptions;
+    /// # let doc = polysmelt::read(&b"v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n"[..], "t.obj")?;
+    /// let fbx = doc.to_fbx_with(&FbxOptions::default().with_threads(0))?;
+    /// assert_eq!(fbx, doc.to_fbx()?);
+    /// # Ok::<(), polysmelt::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// As [`Document::to_fbx`].
+    #[cfg(feature = "fbx")]
+    pub fn to_fbx_with(&self, options: &FbxOptions) -> Result<Vec<u8>> {
         let mut out = Vec::new();
-        crate::formats::fbx_write::write(self, &mut out)?;
+        crate::formats::fbx_write::write(self, &mut out, crate::keep::thread_count(options.threads))?;
         Ok(out)
     }
 
@@ -784,8 +837,18 @@ impl Document {
     ///
     /// As [`Document::to_fbx`], and when writing fails.
     #[cfg(feature = "fbx")]
-    pub fn write_fbx<W: Write>(&self, mut w: W) -> Result<()> {
-        crate::formats::fbx_write::write(self, &mut w)?;
+    pub fn write_fbx<W: Write>(&self, w: W) -> Result<()> {
+        self.write_fbx_with(w, &FbxOptions::default())
+    }
+
+    /// [`Document::write_fbx`] with options, as [`Document::to_fbx_with`] takes them.
+    ///
+    /// # Errors
+    ///
+    /// As [`Document::to_fbx`], and when writing fails.
+    #[cfg(feature = "fbx")]
+    pub fn write_fbx_with<W: Write>(&self, mut w: W, options: &FbxOptions) -> Result<()> {
+        crate::formats::fbx_write::write(self, &mut w, crate::keep::thread_count(options.threads))?;
         w.flush()?;
         Ok(())
     }

@@ -70,6 +70,8 @@ pub use ::bytes::Bytes;
 /// The JSON a [`Document`] is, from the `serde_json` crate, as [`Document::json`] hands it out.
 pub use serde_json;
 
+#[cfg(feature = "fbx")]
+pub use document::FbxOptions;
 pub use document::{Document, Keep};
 #[cfg(feature = "fs")]
 pub use formats::open;

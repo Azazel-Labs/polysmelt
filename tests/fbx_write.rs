@@ -1181,6 +1181,88 @@ fn cameras_lights_and_extras_come_back() {
     assert_eq!(cam.pointer("/extras/stops").and_then(Value::as_f64), Some(4.0), "{cam}");
 }
 
+/// Four grids, each big enough on its own that writing deflates them across threads, on nodes a long clip turns.
+fn heavy_scene() -> Document {
+    const SIDE: usize = 120;
+    const KEYS: usize = 240;
+    let mut g = Glb::default();
+    let mut idx = Vec::new();
+    for y in 0..SIDE - 1 {
+        for x in 0..SIDE - 1 {
+            let i = (y * SIDE + x) as u16;
+            let (r, d) = (i + 1, i + SIDE as u16);
+            idx.extend_from_slice(&[i, r, d, r, d + 1, d]);
+        }
+    }
+    let idx = g.u16s(&idx, "SCALAR");
+    let times: Vec<f32> = (0..KEYS).map(|k| k as f32 / 30.0).collect();
+    let times = g.floats(&times, "SCALAR");
+    let (mut nodes, mut meshes, mut samplers, mut channels) = (vec![], vec![], vec![], vec![]);
+    for m in 0..4 {
+        let mut pos = Vec::with_capacity(SIDE * SIDE * 3);
+        for y in 0..SIDE {
+            for x in 0..SIDE {
+                let (fx, fy) = (x as f32, y as f32);
+                pos.extend_from_slice(&[fx, fy, (fx * 0.37 + fy * 0.11 + m as f32).sin()]);
+            }
+        }
+        let pos = g.floats(&pos, "VEC3");
+        let mut turns = Vec::with_capacity(KEYS * 4);
+        for k in 0..KEYS {
+            let k = k as f32;
+            turns.extend_from_slice(&quat([(k * 0.1).sin(), 1.0, (k * 0.07).cos()], k * (3.0 + m as f32)));
+        }
+        let turns = g.floats(&turns, "VEC4");
+        nodes.push(json!({"name": format!("Grid{m}"), "mesh": m, "translation": [m as f32 * 200.0, 0.0, 0.0]}));
+        meshes.push(json!({"name": format!("Sheet{m}"), "primitives": [
+            {"attributes": {"POSITION": pos}, "indices": idx}]}));
+        samplers.push(json!({"input": times, "output": turns}));
+        channels.push(json!({"sampler": m, "target": {"node": m, "path": "rotation"}}));
+    }
+    g.build(json!({
+        "scene": 0,
+        "scenes": [{"nodes": [0, 1, 2, 3]}],
+        "nodes": nodes,
+        "meshes": meshes,
+        "animations": [{"name": "Tumble", "samplers": samplers, "channels": channels}]
+    }))
+}
+
+#[test]
+fn writing_on_more_threads_writes_the_same_bytes() {
+    let doc = heavy_scene();
+    let one = doc.to_fbx().unwrap();
+    for threads in [0, 2, 3, 8] {
+        let many = doc
+            .to_fbx_with(&polysmelt::FbxOptions::default().with_threads(threads))
+            .unwrap();
+        assert!(one == many, "{threads} threads wrote other bytes");
+    }
+    // Too many alike triangles for `diff` to pair up once they move: the rest pose is compared, then how far each
+    // node turns from where it should.
+    let (_, back) = round_trip(&doc, "heavy");
+    let (rest, rest_back) = (
+        doc.flatten(Pose::Rest).unwrap().unwrap(),
+        back.flatten(Pose::Rest).unwrap().unwrap(),
+    );
+    let d = mesh_diff(&rest, &rest_back, false, STILL);
+    assert!(d.is_empty(), "differs in {d:?}");
+    let (ra, rb) = (doc.rig().unwrap(), back.rig().unwrap());
+    for i in 0..=2390 {
+        let t = i as f32 / 300.0;
+        let (wa, wb) = (worlds(&ra, Some(0), t), worlds(&rb, Some(0), t));
+        for (name, m) in &wa {
+            let n = &wb[name];
+            let trace: f64 = (0..3)
+                .flat_map(|c| (0..3).map(move |r| c * 4 + r))
+                .map(|k| f64::from(m[k]) * f64::from(n[k]))
+                .sum();
+            let degrees = ((trace - 1.0) / 2.0).clamp(-1.0, 1.0).acos().to_degrees();
+            assert!(degrees < 0.051, "{name} at {t}: {degrees} degrees off");
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------------------------------------------
 // The corpus.
 

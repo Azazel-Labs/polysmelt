@@ -45,9 +45,10 @@ type Trs = ([f64; 3], [f64; 4], [f64; 3]);
 /// FBX time units per second.
 pub(super) const KTIME: f64 = 46_186_158_000.0;
 
-/// Writes `doc` as binary FBX to `w`.
-pub(crate) fn write(doc: &Document, w: &mut dyn Write) -> Result<()> {
+/// Writes `doc` as binary FBX to `w`, over up to `threads` threads.
+pub(crate) fn write(doc: &Document, w: &mut dyn Write, threads: usize) -> Result<()> {
     let mut s = Writer::new(doc);
+    s.threads = threads.max(1);
     s.scene()?;
     let top = s.finish();
     records::write_file(&top, w)
@@ -152,6 +153,8 @@ struct Writer<'d> {
     fps: f64,
     /// The scene's time span, in FBX time.
     span: Option<(i64, i64)>,
+    /// Threads the work may be shared over.
+    threads: usize,
 }
 
 /// An array of the JSON, or nothing.
@@ -248,6 +251,7 @@ impl<'d> Writer<'d> {
             channels: HashMap::new(),
             takes: Vec::new(),
             fps: 30.0,
+            threads: 1,
             span: None,
         }
     }
@@ -774,6 +778,7 @@ impl<'d> Writer<'d> {
         for l in links {
             top[9].push(l);
         }
+        records::deflate(&mut top, self.threads);
         if records::wide(&top) {
             top[0] = self.header(7500);
         }
