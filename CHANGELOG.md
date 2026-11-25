@@ -2,6 +2,18 @@
 
 Breaking changes are allowed in minor releases until 1.0.
 
+## 0.17.6
+
+- USDZ: a texture that inflates implausibly far (over 1 GiB, or 200 times its compressed size)
+  is left out instead of being read into memory, as SketchUp archive entries already were.
+- glTF 1.0: an accessor whose count runs past its buffer is an error before anything is
+  allocated, and one with a count but no `bufferView` is reported as corrupt.
+- A missing meshopt fallback buffer fails before room is made for the length it declares.
+- One pixel limit (16384 × 16384) for every texture decoder; PNG, SketchUp and SGI images
+  were capped at a quarter of that. A large SGI image decodes only when the file holds its data.
+- Internal: the curve point budget, rotation resampling step, texture coordinate set and
+  joint influence limits, and the inflate caps are each defined once. Output is unchanged.
+
 ## 0.17.5
 
 - 3ds: a spotlight whose hotspot or falloff angle is NaN no longer panics; it takes the widest
