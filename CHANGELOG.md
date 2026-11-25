@@ -2,6 +2,18 @@
 
 Breaking changes are allowed in minor releases until 1.0.
 
+## 0.17.5
+
+- 3ds: a spotlight whose hotspot or falloff angle is NaN no longer panics; it takes the widest
+  cone. Chunk lengths, counts and offsets past the end of the file take only what is there.
+- LAS: offsets near the end of the address range no longer overflow; data that runs past the end
+  of the file is reported as cut short.
+- OGRE binary meshes: a vertex element shorter than its declared type reads as zero instead of
+  indexing past it.
+- Internal: one bounds-checked binary cursor replaces the readers' own copies (3ds, b3d,
+  DirectX, IQM, LAS, MD2, MD3, MMD, MS3D, OFF, OGRE, OpenFlight, SketchUp). A count larger than
+  the file can hold fails before anything is allocated. Output is unchanged.
+
 ## 0.17.4
 
 - Writing a GLB is faster: accessors, buffer views and animations stay typed until the document
