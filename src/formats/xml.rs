@@ -511,14 +511,24 @@ pub(crate) fn unescape(s: &str) -> Cow<'_, str> {
     }
 }
 
+/// Each byte's value as a hexadecimal digit, `u8::MAX` for any other: a table, with no branch on which kind of
+/// digit, as the digits of hashes and colors come in no order.
+const HEX: [u8; 256] = {
+    let mut t = [u8::MAX; 256];
+    let mut i = 0;
+    while i < 16 {
+        let d = b"0123456789abcdef"[i];
+        t[d as usize] = i as u8;
+        t[d.to_ascii_uppercase() as usize] = i as u8;
+        i += 1;
+    }
+    t
+};
+
 /// A hexadecimal digit's value.
 pub(crate) fn hex_digit(c: u8) -> Option<u8> {
-    match c {
-        b'0'..=b'9' => Some(c - b'0'),
-        b'a'..=b'f' => Some(c - b'a' + 10),
-        b'A'..=b'F' => Some(c - b'A' + 10),
-        _ => None,
-    }
+    let d = HEX[usize::from(c)];
+    (d != u8::MAX).then_some(d)
 }
 
 /// Bytes from hexadecimal text, whitespace ignored; `None` when it isn't hexadecimal or a digit is left over.

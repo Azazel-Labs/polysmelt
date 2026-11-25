@@ -1219,9 +1219,14 @@ fn hex_rgba(s: &str) -> Option<[u8; 4]> {
     if h.len() != 6 && h.len() != 8 {
         return None;
     }
-    let byte = |i: usize| Some(hex_digit(h[i])? << 4 | hex_digit(h[i + 1])?);
-    let a = if h.len() == 8 { byte(6)? } else { 255 };
-    Some([byte(0)?, byte(2)?, byte(4)?, a])
+    let mut v = 0u32;
+    for &c in h {
+        v = v << 4 | u32::from(hex_digit(c)?);
+    }
+    if h.len() == 6 {
+        v = v << 8 | 0xFF;
+    }
+    Some(v.to_be_bytes())
 }
 
 fn hex_color(s: &str) -> Option<[u8; 3]> {
