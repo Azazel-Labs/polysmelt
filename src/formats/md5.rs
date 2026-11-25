@@ -50,9 +50,7 @@ use std::collections::HashMap;
 use serde_json::{Map, json};
 
 use super::Input;
-use super::scene::{
-    self, Animation, Channel, Interp, M4, MAX_INFLUENCES, Node, Path, Primitive, Scene, SceneMesh, Skin, Z_UP_TO_Y_UP,
-};
+use super::scene::{self, Animation, Channel, Interp, M4, Node, Path, Primitive, Scene, SceneMesh, Skin, Z_UP_TO_Y_UP};
 use crate::Result;
 use crate::assets::Assets;
 use crate::document::{Document, Keep};
@@ -633,8 +631,7 @@ fn build_mesh(m: &MeshFile, stem: &str, input: &Input<'_>, assets: &dyn Assets, 
                 }
             }
             set.retain(|s| s.1 > 0.0 && s.1.is_finite());
-            set.sort_by(|a, b| b.1.total_cmp(&a.1));
-            set.truncate(MAX_INFLUENCES);
+            scene::strongest(&mut set);
             positions.push(p.map(f32_of));
             sets.push(set);
         }
