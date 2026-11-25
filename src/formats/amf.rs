@@ -658,7 +658,7 @@ fn close(a: &mut Amf, s: &mut State, t: Tag, parent: Option<Tag>, limit: usize) 
         }
         Tag::Texture => {
             if let Some(mut t) = s.texture.take() {
-                if let Some(pixels) = base64(&s.text) {
+                if let Some(pixels) = crate::gltf::decode_base64(&s.text) {
                     t.pixels = pixels;
                     a.textures.push(t);
                 } else {
@@ -712,17 +712,6 @@ fn close(a: &mut Amf, s: &mut State, t: Tag, parent: Option<Tag>, limit: usize) 
         _ => {}
     }
     Ok(())
-}
-
-/// Base64 text (whitespace and padding as they come) as bytes.
-fn base64(text: &[u8]) -> Option<Vec<u8>> {
-    use base64::Engine as _;
-    use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
-    let clean: Vec<u8> = text.iter().copied().filter(|c| !c.is_ascii_whitespace()).collect();
-    let config = GeneralPurposeConfig::new().with_decode_padding_mode(DecodePaddingMode::Indifferent);
-    GeneralPurpose::new(&base64::alphabet::STANDARD, config)
-        .decode(clean)
-        .ok()
 }
 
 /// Moves the model's metadata of the kinds [`SourceInfo`] has from `metadata` into `info`: the standard's

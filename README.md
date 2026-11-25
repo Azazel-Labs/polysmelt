@@ -216,7 +216,7 @@ Early. What exists today:
 | `c3d` | C3D motion capture markers | none |
 | `trc` | TRC motion capture markers | none |
 | `htr` | HTR motion capture | none |
-| `fbx` | FBX | `base64`, `flate2` |
+| `fbx` | FBX | `flate2` |
 | `3mf` | 3MF | `zip`, `quick-xml` |
 | `usd` | USD | `openusd`, `openusd-schemas`, `zip` |
 | `dae` | COLLADA `.dae`, `.zae` and `.kmz` | `zip`, `quick-xml` |
@@ -235,7 +235,7 @@ Early. What exists today:
 | `pcd` | PCD point clouds | none |
 | `xyz` | Text point clouds: `.xyz`, `.pts`, `.ptx`, `.asc` | none |
 | `e57` | E57 scans | `e57` |
-| `amf` | AMF, plain or zipped | `quick-xml`, `zip`, `base64`, `flate2` |
+| `amf` | AMF, plain or zipped | `quick-xml`, `zip`, `flate2` |
 | `lwo` | LightWave objects (`.lwo`) | none |
 | `ac3d` | AC3D (`.ac`) | none |
 | `ogre` | OGRE `.mesh` and `.skeleton`, binary (v1.10 to v1.100) and XML, with `.material` scripts | none |

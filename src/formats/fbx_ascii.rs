@@ -7,7 +7,6 @@
 use std::borrow::Cow;
 
 use crate::{Context as _, ErrorKind, Result};
-use base64::Engine as _;
 
 #[cfg(test)]
 use super::fbx_tree::{Array, BINARY_MAGIC, Elem, NodeHandle};
@@ -493,11 +492,8 @@ fn attributes<'a>(name: &str, parent: &str, vals: &mut Vec<Val<'a>>, out: &mut V
             .filter_map(|v| if let Val::Raw(s) = v { Some(*s) } else { None })
             .flatten()
             .copied()
-            .filter(|c| !c.is_ascii_whitespace())
             .collect();
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(joined)
-            .unwrap_or_default();
+        let bytes = crate::gltf::decode_base64(&joined).unwrap_or_default();
         out.push(Attr::Binary(Cow::Owned(bytes)));
         vals.clear();
         return;
