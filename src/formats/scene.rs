@@ -23,8 +23,11 @@ use crate::mesh::Material;
 use crate::num::{f32_of, u32_of};
 use crate::source::SourceInfo;
 
-/// The most influences a vertex keeps: four sets of joints and weights.
-pub(crate) const MAX_INFLUENCES: usize = 16;
+pub(crate) use crate::mesh::MAX_INFLUENCES;
+
+/// The most texture coordinate sets a mesh keeps, as `TEXCOORD_0` to `TEXCOORD_7`: past what any real model has,
+/// and a bound on what a file that declares hundreds costs.
+pub(crate) const MAX_UV_SETS: usize = 8;
 
 /// A node: a name, a parent, a transform, and what it carries.
 #[derive(Debug, Clone)]

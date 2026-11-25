@@ -40,6 +40,14 @@ pub const TRIANGLE_CEILING: usize = 1 << 30;
 /// clouds: [`Keep::max_points`](crate::document::Keep::max_points) raises or lowers it.
 pub const MAX_POINTS: usize = 16_000_000;
 
+/// The most joints that move one vertex, whichever reader merges a vertex's influences: four sets of glTF's four
+/// `JOINTS_n` and `WEIGHTS_n`, past what models are rigged with. The strongest are kept.
+#[cfg_attr(
+    not(feature = "dae"),
+    allow(dead_code, reason = "COLLADA and the scene readers use it")
+)]
+pub(crate) const MAX_INFLUENCES: usize = 16;
+
 /// One material's worth of triangles, and of the lines and points drawn on the same vertices.
 ///
 /// Every per-vertex list is either empty or as long as `positions`. Build one with a struct

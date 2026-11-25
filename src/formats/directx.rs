@@ -67,8 +67,7 @@ const MAX_DEPTH: usize = 256;
 const MAX_INFLATED: usize = 1 << 30;
 /// Ticks per second when the file doesn't say.
 const DEFAULT_TICKS: f64 = 4800.0;
-/// The most texture coordinate sets a mesh keeps.
-const MAX_UV_SETS: usize = 8;
+use super::scene::MAX_UV_SETS;
 
 /// Reads the model.
 pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document> {
