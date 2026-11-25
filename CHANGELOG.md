@@ -2,6 +2,25 @@
 
 Breaking changes are allowed in minor releases until 1.0.
 
+## Unreleased
+
+- FBX export: `Document::to_fbx` and `Document::write_fbx` (the `fbx` feature) write binary FBX
+  7.4, or 7.5 for files over 4 GiB. Written: the node tree with names, transforms and shared
+  geometry for instanced meshes, with a model per `EXT_mesh_gpu_instancing` instance; normals, tangents and binormals, every UV and color set, and
+  per-polygon materials; line geometry; materials as Phong properties with the PBR values,
+  alpha mode, double-sidedness and `KHR_materials_*` settings beside them (specular-glossiness
+  materials as their metal/rough equivalent); textures embedded,
+  with their wrap modes, UV set and texture transform; skins as a skin deformer with a cluster
+  per joint and a bind pose; morph targets as blend shapes with their weights; each animation
+  as its own stack, layer and take, stepped, linear and cubic keys kept as such and rotations
+  resampled as continuous Euler curves within 0.05 degrees of the quaternions; perspective and
+  orthographic cameras; `KHR_lights_punctual` lights; extras as user properties. Draco,
+  meshopt, sparse and quantized data are decoded. Points are left out: FBX has no point
+  geometry. The output is deterministic.
+- The FBX reader reads back what the writer adds beyond FBX's own properties: PBR values,
+  alpha mode and the glTF extensions.
+- `examples/convert.rs` writes FBX when the output ends in `.fbx`.
+
 ## 0.17.4
 
 - Writing a GLB is faster: accessors, buffer views and animations stay typed until the document
