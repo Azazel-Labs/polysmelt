@@ -11,6 +11,7 @@ use super::{
     PoseOffset, SkeletonAnimation, SkeletonFile, SubMesh, Track,
 };
 use crate::Result;
+use crate::bytes::{self, Bin, Endian, Order as _};
 use crate::num::usize_of;
 
 /// Mesh chunk ids.
@@ -103,107 +104,61 @@ pub(super) fn header(data: &[u8]) -> Option<(bool, String)> {
         [0x10, 0x00] => true,
         _ => return None,
     };
-    let mut r = Reader { data, at: 2, be };
-    let line = r.string();
+    let line = reader(data, be).string();
     line.starts_with('[').then_some((be, line))
 }
 
-/// A binary file being read: its bytes, where the reader is, and its byte order.
-struct Reader<'a> {
-    data: &'a [u8],
-    at: usize,
-    be: bool,
+/// A binary file being read, in its byte order.
+type Reader<'a> = Bin<'a, Endian>;
+
+/// A reader just past a file's 16-bit header id, which `header` has seen.
+fn reader(data: &[u8], be: bool) -> Reader<'_> {
+    let mut r = Bin::with_order(data, "OGRE", Endian { big: be });
+    r.at = 2;
+    r
 }
 
-impl<'a> Reader<'a> {
-    fn left(&self) -> usize {
-        self.data.len() - self.at
-    }
-
-    fn bytes(&mut self, n: usize) -> Result<&'a [u8]> {
-        ensure!(
-            n <= self.left(),
-            Truncated,
-            "OGRE file is cut short at byte {}",
-            self.at
-        );
-        let b = &self.data[self.at..self.at + n];
-        self.at += n;
-        Ok(b)
-    }
-
-    fn array<const N: usize>(&mut self) -> Result<[u8; N]> {
-        let mut a = [0; N];
-        a.copy_from_slice(self.bytes(N)?);
-        Ok(a)
-    }
-
-    fn bool(&mut self) -> Result<bool> {
-        Ok(self.array::<1>()?[0] != 0)
-    }
-
-    fn u16(&mut self) -> Result<u16> {
-        let a = self.array()?;
-        Ok(if self.be {
-            u16::from_be_bytes(a)
-        } else {
-            u16::from_le_bytes(a)
-        })
-    }
-
-    fn u32(&mut self) -> Result<u32> {
-        let a = self.array()?;
-        Ok(if self.be {
-            u32::from_be_bytes(a)
-        } else {
-            u32::from_le_bytes(a)
-        })
-    }
-
-    fn f32(&mut self) -> Result<f32> {
-        self.u32().map(f32::from_bits)
-    }
-
-    fn vec3(&mut self) -> Result<[f32; 3]> {
-        Ok([self.f32()?, self.f32()?, self.f32()?])
-    }
-
-    fn vec4(&mut self) -> Result<[f32; 4]> {
-        Ok([self.f32()?, self.f32()?, self.f32()?, self.f32()?])
-    }
-
+/// The strings, chunks and counts both layouts share.
+trait Chunks {
     /// A string: the bytes up to a line feed (or the end), without a carriage return before it.
-    fn string(&mut self) -> String {
-        let rest = &self.data[self.at..];
-        let end = rest.iter().position(|&b| b == b'\n');
-        let line = &rest[..end.unwrap_or(rest.len())];
-        self.at += end.map_or(rest.len(), |e| e + 1);
-        let line = line.strip_suffix(b"\r").unwrap_or(line);
-        crate::formats::scene::text(line)
-    }
-
+    fn string(&mut self) -> String;
     /// The next chunk's id and length, without reading them.
-    fn peek(&self) -> Option<(u16, usize)> {
-        let mut r = Reader {
-            data: self.data,
-            at: self.at,
-            be: self.be,
-        };
-        Some((r.u16().ok()?, usize_of(u64::from(r.u32().ok()?))))
+    fn peek(&self) -> Option<(u16, usize)>;
+    /// Reads the next chunk's header when its id is one of `ids`: its id, where it starts and its length.
+    fn chunk(&mut self, ids: &[u16]) -> Option<(u16, usize, usize)>;
+    /// The next chunk's header, which must have id `id`.
+    fn expect(&mut self, id: u16, what: &str) -> Result<(usize, usize)>;
+    /// Moves past a chunk that starts at `start` and is `len` long.
+    fn skip_chunk(&mut self, start: usize, len: usize) -> Result<()>;
+    /// `n` items of `size` bytes each, checked against what's left.
+    fn items(&self, n: u32, size: usize) -> Result<usize>;
+    /// `n` indices, 16 or 32 bits each.
+    fn index_list(&mut self, n: u32, idx32: bool) -> Result<Vec<u32>>;
+}
+
+impl Chunks for Reader<'_> {
+    fn string(&mut self) -> String {
+        let line = self.until(b'\n');
+        crate::formats::scene::text(line.strip_suffix(b"\r").unwrap_or(line))
     }
 
-    /// Reads the next chunk's header when its id is one of `ids`: its id, where it starts and its length.
+    fn peek(&self) -> Option<(u16, usize)> {
+        let id = self.u16_at(self.at)?;
+        let len = self.u32_at(self.at.checked_add(2)?)?;
+        Some((id, usize_of(u64::from(len))))
+    }
+
     fn chunk(&mut self, ids: &[u16]) -> Option<(u16, usize, usize)> {
         let (id, len) = self.peek()?;
         if !ids.contains(&id) {
             return None;
         }
         let start = self.at;
+        // `peek` saw all six header bytes.
         self.at += HEADER;
         Some((id, start, len))
     }
 
-    /// The next chunk's header, which must have id `id`.
     fn expect(&mut self, id: u16, what: &str) -> Result<(usize, usize)> {
         match self.chunk(&[id]) {
             Some((_, start, len)) => Ok((start, len)),
@@ -211,7 +166,6 @@ impl<'a> Reader<'a> {
         }
     }
 
-    /// Moves past a chunk that starts at `start` and is `len` long.
     fn skip_chunk(&mut self, start: usize, len: usize) -> Result<()> {
         let end = start.saturating_add(len);
         ensure!(
@@ -223,8 +177,7 @@ impl<'a> Reader<'a> {
         Ok(())
     }
 
-    /// `n` items of `size` bytes each, checked against what's left.
-    fn count(&self, n: u32, size: usize) -> Result<usize> {
+    fn items(&self, n: u32, size: usize) -> Result<usize> {
         let n = usize_of(u64::from(n));
         ensure!(
             n.checked_mul(size).is_some_and(|b| b <= self.left()),
@@ -235,46 +188,10 @@ impl<'a> Reader<'a> {
         Ok(n)
     }
 
-    /// `n` vectors of three floats.
-    fn vec3s(&mut self, n: usize) -> Result<Vec<[f32; 3]>> {
-        let b = self.bytes(n.saturating_mul(12))?;
-        let be = self.be;
-        Ok(b.chunks_exact(12)
-            .map(|v| [0, 4, 8].map(|o| f32::from_bits(word(&v[o..o + 4], be))))
-            .collect())
-    }
-
-    /// `n` indices, 16 or 32 bits each.
-    fn indices(&mut self, n: u32, idx32: bool) -> Result<Vec<u32>> {
+    fn index_list(&mut self, n: u32, idx32: bool) -> Result<Vec<u32>> {
         let size = if idx32 { 4 } else { 2 };
-        let n = self.count(n, size)?;
-        let b = self.bytes(n * size)?;
-        let be = self.be;
-        Ok(if idx32 {
-            b.chunks_exact(4).map(|c| word(c, be)).collect()
-        } else {
-            b.chunks_exact(2).map(|c| u32::from(half_word(c, be))).collect()
-        })
-    }
-}
-
-/// A 32-bit word from four bytes.
-fn word(b: &[u8], be: bool) -> u32 {
-    let a = [b[0], b[1], b[2], b[3]];
-    if be {
-        u32::from_be_bytes(a)
-    } else {
-        u32::from_le_bytes(a)
-    }
-}
-
-/// A 16-bit word from two bytes.
-fn half_word(b: &[u8], be: bool) -> u16 {
-    let a = [b[0], b[1]];
-    if be {
-        u16::from_be_bytes(a)
-    } else {
-        u16::from_le_bytes(a)
+        let n = self.items(n, size)?;
+        self.indices(n, size)
     }
 }
 
@@ -302,7 +219,7 @@ fn mesh_version(line: &str) -> Result<Version> {
 pub(super) fn mesh(data: &[u8]) -> Result<MeshFile> {
     let (be, line) = header(data).ok_or_else(|| err!(UnknownFormat, "not an OGRE mesh"))?;
     let version = mesh_version(&line)?;
-    let mut r = Reader { data, at: 2, be };
+    let mut r = reader(data, be);
     r.string();
     let mut file = MeshFile {
         version: line.trim_matches(['[', ']']).to_owned(),
@@ -381,7 +298,7 @@ fn submesh(r: &mut Reader<'_>, version: Version, file: &mut MeshFile) -> Result<
     let count = r.u32()?;
     let idx32 = r.bool()?;
     if count > 0 {
-        s.indices = Some(r.indices(count, idx32)?);
+        s.indices = Some(r.index_list(count, idx32)?);
     }
     if !s.shared {
         r.expect(M_GEOMETRY, "submesh geometry")?;
@@ -430,12 +347,12 @@ fn geometry(r: &mut Reader<'_>, version: Version, file: &mut MeshFile) -> Result
             let bind = r.u16()?;
             let size = usize::from(r.u16()?);
             r.expect(M_GEOMETRY_VERTEX_BUFFER_DATA, "vertex buffer data")?;
-            let n = r.count(count, size)?;
+            let n = r.items(count, size)?;
             buffers.push((bind, size, r.bytes(n * size)?));
         }
     }
     let n = usize_of(u64::from(count));
-    decode(n, &elements, &buffers, r.be, file)
+    decode(n, &elements, &buffers, r.order.big, file)
 }
 
 /// The bytes and component count of a vertex element type; `None` for a type there isn't.
@@ -477,13 +394,16 @@ fn element(b: &[u8], ty: u16, be: bool, short_unsigned: bool) -> [f32; 4] {
     let Some((_, n)) = element_size(ty) else {
         return out;
     };
-    let w32 = |i: usize| word(&b[4 * i..4 * i + 4], be);
-    let w16 = |i: usize| half_word(&b[2 * i..2 * i + 2], be);
+    // `b` holds the element's bytes, as `element_size` says, so no read falls past it.
+    let order = Endian { big: be };
+    let w32 = |i: usize| bytes::array_at(b, 4 * i).map_or(0, |w| order.u32(w));
+    let w16 = |i: usize| bytes::array_at(b, 2 * i).map_or(0, |w| order.u16(w));
+    let b4: [u8; 4] = bytes::array_at(b, 0).unwrap_or_default();
     match ty {
         0..=3 => (0..n).for_each(|i| out[i] = f32::from_bits(w32(i))),
         4 | 10 | 11 => {
             // Packed colors are 32-bit words: their bytes swapped in a big-endian file.
-            let mut c = [b[0], b[1], b[2], b[3]];
+            let mut c = b4;
             if be {
                 c.reverse();
             }
@@ -496,26 +416,20 @@ fn element(b: &[u8], ty: u16, be: bool, short_unsigned: bool) -> [f32; 4] {
         5..=8 if short_unsigned => (0..n).for_each(|i| out[i] = f32::from(w16(i)) / 65535.0),
         #[allow(clippy::cast_possible_wrap, reason = "the bits are a signed integer")]
         5..=8 => (0..n).for_each(|i| out[i] = f32::from(w16(i) as i16)),
-        9 => out = [b[0], b[1], b[2], b[3]].map(f32::from),
+        9 => out = b4.map(f32::from),
         12..=15 => (0..n).for_each(|i| {
-            let mut a = [0; 8];
-            a.copy_from_slice(&b[8 * i..8 * i + 8]);
-            let v = if be {
-                f64::from_be_bytes(a)
-            } else {
-                f64::from_le_bytes(a)
-            };
-            out[i] = crate::num::f32_of(v);
+            let v = bytes::array_at(b, 8 * i).map_or(0, |w| order.u64(w));
+            out[i] = crate::num::f32_of(f64::from_bits(v));
         }),
         16..=19 => (0..n).for_each(|i| out[i] = f32::from(w16(i))),
         #[allow(clippy::cast_possible_wrap, reason = "the bits are a signed integer")]
         20..=23 => (0..n).for_each(|i| out[i] = crate::num::f32_of(f64::from(w32(i) as i32))),
         24..=27 => (0..n).for_each(|i| out[i] = crate::num::f32_of(f64::from(w32(i)))),
         #[allow(clippy::cast_possible_wrap, reason = "the bits are signed bytes")]
-        28 => out = [b[0], b[1], b[2], b[3]].map(|x| f32::from(x as i8)),
+        28 => out = b4.map(|x| f32::from(x as i8)),
         #[allow(clippy::cast_possible_wrap, reason = "the bits are signed bytes")]
-        29 => out = [b[0], b[1], b[2], b[3]].map(|x| (f32::from(x as i8) / 127.0).max(-1.0)),
-        30 => out = [b[0], b[1], b[2], b[3]].map(|x| f32::from(x) / 255.0),
+        29 => out = b4.map(|x| (f32::from(x as i8) / 127.0).max(-1.0)),
+        30 => out = b4.map(|x| f32::from(x) / 255.0),
         #[allow(clippy::cast_possible_wrap, reason = "the bits are a signed integer")]
         31 | 32 => (0..n).for_each(|i| out[i] = (f32::from(w16(i) as i16) / 32767.0).max(-1.0)),
         33 | 34 => (0..n).for_each(|i| out[i] = f32::from(w16(i)) / 65535.0),
@@ -602,10 +516,11 @@ fn decode(
         }
         seen.push((e.semantic, e.index));
         let texcoord = e.semantic == VES_TEXTURE_COORDINATES;
-        let vertices = (0..count).map(|v| {
-            let at = v * stride + offset;
-            element(&data[at..at + size], e.ty, be, texcoord)
-        });
+        // Each buffer holds `count` vertices of `stride` bytes, and the element fits in one.
+        let vertices = data
+            .chunks_exact(stride)
+            .take(count)
+            .map(|v| element(v.get(offset..offset + size).unwrap_or_default(), e.ty, be, texcoord));
         let bytes = matches!(e.ty, 4 | 9..=11);
         match e.semantic {
             VES_POSITION => g.positions = vertices.map(|v| [v[0], v[1], v[2]]).collect(),
@@ -641,7 +556,7 @@ fn decode(
 /// A geometry chunk from before version 1.30: positions, then normal, color and texture coordinate chunks.
 fn old_geometry(r: &mut Reader<'_>, version: Version) -> Result<Geometry> {
     let count = r.u32()?;
-    let n = r.count(count, 12)?;
+    let n = r.items(count, 12)?;
     let mut g = Geometry {
         positions: r.vec3s(n)?,
         ..Geometry::default()
@@ -649,11 +564,11 @@ fn old_geometry(r: &mut Reader<'_>, version: Version) -> Result<Geometry> {
     while let Some((id, _, _)) = r.chunk(&[M_GEOMETRY_NORMALS, M_GEOMETRY_COLOURS, M_GEOMETRY_TEXCOORDS]) {
         match id {
             M_GEOMETRY_NORMALS => {
-                r.count(count, 12)?;
+                r.items(count, 12)?;
                 g.normals = r.vec3s(n)?;
             }
             M_GEOMETRY_COLOURS => {
-                r.count(count, 4)?;
+                r.items(count, 4)?;
                 let mut colors = Vec::with_capacity(n);
                 for _ in 0..n {
                     colors.push(r.u32()?.to_le_bytes().map(|c| f32::from(c) / 255.0));
@@ -667,20 +582,14 @@ fn old_geometry(r: &mut Reader<'_>, version: Version) -> Result<Geometry> {
                     Corrupt,
                     "OGRE texture coordinates have {dim} dimensions"
                 );
-                r.count(count, 4 * dim)?;
-                let b = r.bytes(n * 4 * dim)?;
-                let be = r.be;
+                r.items(count, 4 * dim)?;
+                let all = r.f32s(n * dim)?;
                 let flip = version == Version::V110 && dim == 2;
-                let set = b
-                    .chunks_exact(4 * dim)
+                let set = all
+                    .chunks_exact(dim)
                     .map(|c| {
-                        let u = f32::from_bits(word(c, be));
-                        let v = if dim > 1 {
-                            f32::from_bits(word(&c[4..], be))
-                        } else {
-                            0.0
-                        };
-                        [u, if flip { 1.0 - v } else { v }]
+                        let v = if dim > 1 { c[1] } else { 0.0 };
+                        [c[0], if flip { 1.0 - v } else { v }]
                     })
                     .collect();
                 if g.uvs.len() < MAX_UV_SETS {
@@ -717,7 +626,7 @@ fn lod(r: &mut Reader<'_>, version: Version, file: &mut MeshFile) -> Result<()> 
                         let idx32 = r.bool()?;
                         let n = r.u32()?;
                         let size = if idx32 { 4 } else { 2 };
-                        let n = r.count(n, size)?;
+                        let n = r.items(n, size)?;
                         r.bytes(n * size)?;
                     }
                 }
@@ -740,7 +649,7 @@ fn lod(r: &mut Reader<'_>, version: Version, file: &mut MeshFile) -> Result<()> 
                 let n = r.u32()?;
                 let idx32 = r.bool()?;
                 let size = if idx32 { 4 } else { 2 };
-                let n = r.count(n, size)?;
+                let n = r.items(n, size)?;
                 r.bytes(n * size)?;
             }
         }
@@ -763,14 +672,14 @@ fn edge_lists(r: &mut Reader<'_>, version: Version, file: &mut MeshFile) -> Resu
         }
         let triangles = r.u32()?;
         let groups = r.u32()?;
-        let n = r.count(triangles, 48)?;
+        let n = r.items(triangles, 48)?;
         r.bytes(n * 48)?;
         let group_header = if version >= Version::V140 { 12 } else { 4 };
         for _ in 0..groups {
             r.expect(M_EDGE_GROUP, "edge group")?;
             r.bytes(group_header)?;
             let edges = r.u32()?;
-            let n = r.count(edges, 25)?;
+            let n = r.items(edges, 25)?;
             r.bytes(n * 25)?;
         }
     }
@@ -831,7 +740,7 @@ fn animations(r: &mut Reader<'_>, version: Version, file: &mut MeshFile) -> Resu
                             bail!(Corrupt, "OGRE morph track targets geometry {target}, which isn't there");
                         };
                         let width = if normals { 24 } else { 12 };
-                        let n = r.count(u32::try_from(n).unwrap_or(u32::MAX), width)?;
+                        let n = r.items(u32::try_from(n).unwrap_or(u32::MAX), width)?;
                         let all = r.vec3s(n * width / 12)?;
                         let (positions, normals) = if normals {
                             all.chunks_exact(2).map(|p| (p[0], p[1])).unzip()
@@ -875,7 +784,7 @@ pub(super) fn skeleton(data: &[u8]) -> Result<SkeletonFile> {
         Unsupported,
         "unknown OGRE skeleton version {line}"
     );
-    let mut r = Reader { data, at: 2, be };
+    let mut r = reader(data, be);
     r.string();
     let mut file = SkeletonFile {
         version: line.trim_matches(['[', ']']).to_owned(),
@@ -977,5 +886,39 @@ pub(super) mod tests {
         assert_eq!(element(&0xffffu16.to_le_bytes(), 5, false, true), [1.0, 0.0, 0.0, 1.0]);
         assert_eq!(element(&0xffffu16.to_be_bytes(), 5, true, false), [-1.0, 0.0, 0.0, 1.0]);
         assert_eq!(element(&[0, 0x3c], 36, false, false), [1.0, 0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn short_elements_read_as_zero_not_a_panic() {
+        for ty in 0..=40 {
+            for len in 0..8 {
+                let _ = element(&[0x7f; 8][..len], ty, len % 2 == 0, len % 3 == 0);
+            }
+        }
+        assert_eq!(element(&[1, 0], 2, false, false), [0.0, 0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn chunks_and_counts_stop_at_the_end() {
+        // The header, a line, then a chunk header cut short.
+        let mut data = vec![0x00, 0x10];
+        data.extend(b"[MeshSerializer_v1.100]\n");
+        let line_end = data.len();
+        data.extend([0x00, 0x30, 0xFF, 0xFF]);
+        let mut r = reader(&data, false);
+        assert_eq!(r.string(), "[MeshSerializer_v1.100]");
+        assert_eq!(r.peek(), None);
+        assert!(r.chunk(&[0x3000]).is_none());
+        assert!(r.expect(0x3000, "mesh").is_err());
+        assert!(r.skip_chunk(line_end, usize::MAX).is_err());
+        let e = r.items(u32::MAX, 4).unwrap_err();
+        assert_eq!(e.kind(), crate::ErrorKind::Truncated);
+        assert!(e.to_string().contains("runs past the end"), "{e}");
+        assert!(r.index_list(u32::MAX, true).is_err());
+        assert!(r.index_list(3, false).is_err());
+        assert_eq!(r.index_list(2, false).unwrap(), [0x3000, 0xFFFF]);
+        let e = r.u32().unwrap_err();
+        assert!(e.to_string().contains("cut short"), "{e}");
+        assert_eq!(r.string(), "");
     }
 }
