@@ -89,10 +89,7 @@ const GPRIMS: &[&str] = &[
 /// The steps each segment of a cubic curve is sampled at.
 const CURVE_STEPS: u16 = 8;
 
-/// The most points sampled curves add to a stage: each control point is a few bytes of the file but
-/// [`CURVE_STEPS`] points drawn, so this bounds what a stage of curves costs. Past it, a curve is drawn through its
-/// control points.
-const MAX_CURVE_POINTS: usize = 1 << 22;
+use super::nurbs::MAX_CURVE_POINTS;
 
 /// The highest order of NURBS curve sampled, where its control points' weights still fit a [`Sample`]: degree
 /// seven, past the cubics nearly every curve is. Higher orders are drawn through their control points.
@@ -102,8 +99,7 @@ const MAX_ORDER: usize = 8;
 /// a bound on what a file with thousands of primvars costs.
 const MAX_SETS: usize = 8;
 
-/// The longest turn between two animation samples, in degrees: longer ones are cut into steps.
-const MAX_STEP_DEGREES: f64 = 10.0;
+use super::xform::MAX_STEP_DEGREES;
 
 /// The most nodes a stage makes: point instancers can place millions of instances.
 const MAX_NODES: usize = 1 << 20;

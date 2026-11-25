@@ -1,5 +1,14 @@
 //! NURBS curves drawn as polylines, for the readers that draw curves as lines.
 
+#![cfg_attr(
+    not(any(feature = "dxf", feature = "fbx")),
+    allow(dead_code, reason = "USD samples its own curves and shares only the budget")
+)]
+
+/// The most points drawn curves add to a file, whichever reader draws them; past them, a curve is drawn through its
+/// control points (an arc as its chord). Each control point is a few bytes of the file but up to 32 segments, so this
+/// bounds what a file of curves costs: 4M points is 48 MiB of positions as `f32`.
+pub(super) const MAX_CURVE_POINTS: usize = 1 << 22;
 /// The highest degree a curve is drawn at; past it, a curve is its control points.
 pub(super) const MAX_DEGREE: usize = 11;
 /// The turn each segment of a curve stands for, at most: a sixteenth of a half turn.

@@ -88,7 +88,7 @@ mod md5;
 mod mmd;
 #[cfg(feature = "ms3d")]
 mod ms3d;
-#[cfg(any(feature = "dxf", feature = "fbx"))]
+#[cfg(any(feature = "dxf", feature = "fbx", feature = "usd"))]
 mod nurbs;
 #[cfg(feature = "obj")]
 mod obj;
