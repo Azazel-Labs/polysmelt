@@ -40,7 +40,7 @@ pub(crate) struct Node {
     count: u32,
     props: Vec<u8>,
     children: Vec<Node>,
-    /// Closed with a null record even without children, as the FBX SDK writes some records.
+    /// Closed with a null record even without children, as the format writes some records.
     closed: bool,
 }
 

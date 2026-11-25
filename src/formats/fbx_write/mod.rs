@@ -1072,7 +1072,7 @@ fn user_props(extras: &Map<String, Value>, out: &mut Vec<Node>) {
     }
 }
 
-/// The property template of a class: the FBX SDK's defaults for the properties its objects leave out.
+/// The property template of a class: the format's defaults for the properties its objects leave out.
 fn template(class: &str) -> Option<(&'static str, Vec<Node>)> {
     Some(match class {
         "Model" => (
