@@ -334,16 +334,7 @@ fn influence(v: &Vertex, ids: &HashMap<i64, usize>, out: &mut Vec<(u32, f32)>) {
     {
         out.push((u32_of(p), 1.0 - sum));
     }
-    out.sort_by_key(|l| l.0);
-    out.dedup_by(|later, kept| {
-        let same = later.0 == kept.0;
-        if same {
-            kept.1 += later.1;
-        }
-        same
-    });
-    out.sort_by(|a, b| b.1.total_cmp(&a.1));
-    out.truncate(scene::MAX_INFLUENCES);
+    scene::strongest(out);
 }
 
 /// The bones' keys, frame by frame from the first frame's time: a bone a frame leaves out holds its last pose.

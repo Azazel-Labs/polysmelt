@@ -1055,37 +1055,43 @@ pub(crate) fn data_uri(uri: &str) -> Result<(Option<String>, Vec<u8>)> {
     };
     let mime = mime.split(';').next().filter(|m| !m.is_empty()).map(str::to_owned);
     let bytes = if base64 {
-        decode_base64(payload)?
+        decode_base64(payload.as_bytes()).context(ErrorKind::Corrupt, "bad base64 in data URI")?
     } else {
         percent_decode_bytes(payload)
     };
     Ok((mime, bytes))
 }
 
-/// Standard or URL-safe base64, padding optional.
-fn decode_base64(s: &str) -> Result<Vec<u8>> {
-    let mut out = Vec::with_capacity(s.len() / 4 * 3 + 3);
-    let (mut acc, mut bits) = (0u32, 0u32);
-    for &c in s.as_bytes() {
-        let v = match c {
-            b'A'..=b'Z' => c - b'A',
-            b'a'..=b'z' => c - b'a' + 26,
-            b'0'..=b'9' => c - b'0' + 52,
-            b'+' | b'-' => 62,
-            b'/' | b'_' => 63,
+/// Bytes from base64 text, as models embed it (data URIs, XML text, ASCII FBX): the standard or URL-safe alphabet,
+/// even mixed, whitespace anywhere, padding optional and ending the text, and the bits of a short last group that
+/// make no whole byte dropped. `None` when a character is none of those.
+pub(crate) fn decode_base64(text: &[u8]) -> Option<Vec<u8>> {
+    use base64::Engine as _;
+    use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
+    const LENIENT: GeneralPurpose = GeneralPurpose::new(
+        &base64::alphabet::STANDARD,
+        GeneralPurposeConfig::new()
+            .with_decode_padding_mode(DecodePaddingMode::Indifferent)
+            .with_decode_allow_trailing_bits(true),
+    );
+    let mut clean = Vec::with_capacity(text.len());
+    for &c in text {
+        match c {
             b'=' => break,
-            b' ' | b'\t' | b'\r' | b'\n' => continue,
-            _ => bail!(Corrupt, "bad base64 in data URI"),
-        };
-        acc = (acc << 6) | u32::from(v);
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            #[allow(clippy::cast_possible_truncation, reason = "the low byte is the decoded one")]
-            out.push((acc >> bits) as u8);
+            b'-' => clean.push(b'+'),
+            b'_' => clean.push(b'/'),
+            c if c.is_ascii_whitespace() => {}
+            c => clean.push(c),
         }
     }
-    Ok(out)
+    // A lone character after the last group of four holds no whole byte; the engine takes it for a bad length.
+    if clean.len() % 4 == 1 {
+        let last = clean.pop()?;
+        if !(last.is_ascii_alphanumeric() || last == b'+' || last == b'/') {
+            return None;
+        }
+    }
+    LENIENT.decode(clean).ok()
 }
 
 fn percent_decode_bytes(s: &str) -> Vec<u8> {
@@ -1479,21 +1485,25 @@ mod tests {
     }
 
     fn base64(b: &[u8]) -> String {
-        const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        let mut s = String::new();
-        for c in b.chunks(3) {
-            let n = (u32::from(c[0]) << 16)
-                | (u32::from(*c.get(1).unwrap_or(&0)) << 8)
-                | u32::from(*c.get(2).unwrap_or(&0));
-            for k in 0..4 {
-                s.push(if k <= c.len() {
-                    T[(n >> (18 - 6 * k)) as usize & 63] as char
-                } else {
-                    '='
-                });
-            }
-        }
-        s
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.encode(b)
+    }
+
+    #[test]
+    fn base64_takes_what_models_write() {
+        let d = |s: &str| decode_base64(s.as_bytes());
+        assert_eq!(d("aGk/Pz8+").as_deref(), Some(&b"hi???>"[..]));
+        // URL-safe, mixed with standard, wrapped, unpadded, or with a stray character after the last group.
+        assert_eq!(d("aGk_Pz8-").as_deref(), Some(&b"hi???>"[..]));
+        assert_eq!(d(" aGk/\r\n\tPz8-\x0c").as_deref(), Some(&b"hi???>"[..]));
+        assert_eq!(d("aGk").as_deref(), Some(&b"hi"[..]));
+        assert_eq!(d("aGk=").as_deref(), Some(&b"hi"[..]));
+        assert_eq!(d("aGk==anything").as_deref(), Some(&b"hi"[..]));
+        assert_eq!(d("aGkhQ").as_deref(), Some(&b"hi!"[..]));
+        assert_eq!(d("").as_deref(), Some(&b""[..]));
+        assert_eq!(d("aGk*"), None);
+        assert_eq!(d("aGkh*"), None);
+        assert_eq!(d("aGké"), None);
     }
 
     #[test]

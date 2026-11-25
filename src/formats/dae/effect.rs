@@ -367,18 +367,9 @@ impl super::Reader<'_> {
     /// The image at a URI: a `data:` URI, an entry of the archive, or a file beside the model.
     fn uri_image(&mut self, uri: &str) -> Option<usize> {
         let assets = self.assets;
-        if let Some(data) = uri.strip_prefix("data:") {
-            let (head, body) = data.split_once(',')?;
-            let bytes = if head.ends_with(";base64") {
-                xml::from_base64(body.as_bytes())?
-            } else {
-                xml::percent_decode(body).into_bytes()
-            };
-            let ext = head
-                .split(';')
-                .next()
-                .and_then(|m| m.strip_prefix("image/"))
-                .unwrap_or("png");
+        if uri.starts_with("data:") {
+            let (mime, bytes) = crate::gltf::data_uri(uri).ok()?;
+            let ext = mime.as_deref().and_then(|m| m.strip_prefix("image/")).unwrap_or("png");
             let file = format!("image.{ext}");
             return self.images.bytes(Cow::Owned(bytes), &file, Location::Embedded, |b| {
                 assets.image(b, Path::new(&file))
