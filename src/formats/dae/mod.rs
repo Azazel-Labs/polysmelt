@@ -52,6 +52,7 @@ use super::Input;
 use super::xform::{IDENTITY, M4, inverse, mul, scale, set_transform, to_column_major, translate};
 use crate::assets::Assets;
 use crate::document::{Builder, Document, Keep, Part};
+use crate::gltf::percent_decode;
 use crate::images::Images;
 use crate::material::Full;
 use crate::num::{f32_of, u32_of};
@@ -148,7 +149,7 @@ pub(super) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
         dom: &dom,
         assets,
         dir: input.dir(),
-        base: dom.attr(root, "base").map(xml::percent_decode),
+        base: dom.attr(root, "base").map(percent_decode),
         keep,
         meters,
         archive,
@@ -301,7 +302,7 @@ fn root_entry(zip: &mut ZipArchive<Cursor<&[u8]>>) -> Option<String> {
     };
     // The entry a path names, from the folder `dir` (empty or with a trailing `/`), any case.
     let entry = |dir: &str, path: &str| {
-        let path = xml::percent_decode(path.trim());
+        let path = percent_decode(path.trim());
         let path = path.split(['#', '?']).next().unwrap_or("");
         let full = effect::normalize(&format!("{dir}{path}"));
         names
@@ -377,7 +378,7 @@ fn read_document(path: &str, archive: Option<&mut Archive<'_>>, assets: &dyn Ass
 fn source_info(dom: &Dom<'_>, root: usize, asset: Option<usize>, meters: f64, up: &str) -> Map<String, Value> {
     let text = |e: usize, name: &str| {
         dom.child(e, name)
-            .map(|c| xml::unescape(dom.text(c)).trim().to_owned())
+            .map(|c| String::from_utf8_lossy(dom.text(c)).trim().to_owned())
             .filter(|s| !s.is_empty())
     };
     let declared_unit = asset.and_then(|a| unit(dom, a)).is_some();

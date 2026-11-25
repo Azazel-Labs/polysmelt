@@ -335,7 +335,7 @@ impl super::Reader<'_> {
         let name = dom.attr(el, "name").or_else(|| dom.attr(el, "id")).unwrap_or("image");
         let init = dom.child(el, "init_from");
         if let Some(hex) = init.and_then(|i| dom.child(i, "hex")).or_else(|| dom.child(el, "data")) {
-            let bytes = xml::from_hex(dom.text(hex))?;
+            let bytes = crate::formats::xml::from_hex(dom.text(hex))?;
             let format = dom.attr(hex, "format").unwrap_or("png").to_ascii_lowercase();
             let file = format!("{name}.{format}");
             let assets = self.assets;
@@ -370,7 +370,7 @@ impl super::Reader<'_> {
                 assets.image(b, Path::new(&file))
             });
         }
-        let decoded = xml::percent_decode(uri).replace('\\', "/");
+        let decoded = crate::gltf::percent_decode(uri).replace('\\', "/");
         let path = if let Some(rest) = decoded.strip_prefix("file:///") {
             if rest.as_bytes().get(1) == Some(&b':') {
                 rest.to_owned()

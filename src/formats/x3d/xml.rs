@@ -8,6 +8,7 @@ use quick_xml::events::{BytesStart, Event};
 
 use super::{Graph, MAX_DEPTH, Proto, Val};
 use crate::formats::stream::f64_from;
+use crate::formats::xml::{attr, attrs, unescape_bytes};
 
 /// What an open element is.
 #[derive(Clone, Copy)]
@@ -106,8 +107,8 @@ impl Parser {
                 let proto = self.g.protos[i].name.clone();
                 let typ = text(b"type").unwrap_or_default();
                 let v = attr(e, b"value").map(|raw| match typ.as_str() {
-                    "MFString" => Val::Strs(strings(unescape(&raw).trim_ascii())),
-                    "SFString" => Val::Strs(vec![String::from_utf8_lossy(&unescape(&raw)).into_owned()]),
+                    "MFString" => Val::Strs(strings(raw.trim_ascii())),
+                    "SFString" => Val::Strs(vec![String::from_utf8_lossy(&raw).into_owned()]),
                     _ => value(name.as_bytes(), &raw),
                 });
                 if matches!(typ.as_str(), "SFString" | "MFString") {
@@ -130,7 +131,7 @@ impl Parser {
                 };
                 let stringy = self.strings.contains(&(self.g.nodes[n].kind.clone(), name.clone()));
                 let v = match attr(e, b"value") {
-                    Some(raw) if stringy => Val::Strs(strings(unescape(&raw).trim_ascii())),
+                    Some(raw) if stringy => Val::Strs(strings(raw.trim_ascii())),
                     Some(raw) => value(name.as_bytes(), &raw),
                     None => Val::Nodes(Vec::new()),
                 };
@@ -179,7 +180,7 @@ impl Parser {
             }
             b"ExternProtoDeclare" => {
                 if let Some(name) = text(b"name") {
-                    let urls = attr(e, b"url").map(|u| strings(unescape(&u).trim_ascii()));
+                    let urls = attr(e, b"url").map(|u| strings(u.trim_ascii()));
                     self.g.externs.push((name, urls.unwrap_or_default()));
                 }
                 return Frame::Skip;
@@ -203,23 +204,24 @@ impl Parser {
         let mut container: Option<String> = None;
         let mut def: Option<Vec<u8>> = None;
         let mut fields: Vec<(String, Val)> = Vec::new();
-        for a in e.attributes().with_checks(false).flatten() {
-            let key = a.key.local_name();
-            let key = key.as_ref();
+        for (key, raw) in attrs(e) {
             match key {
-                b"DEF" => def = Some(unescape(&a.value).into_owned()),
+                b"DEF" => def = Some(unescape_bytes(&raw).into_owned()),
                 b"USE" => {
                     // An instance: the node named, with nothing of its own.
-                    let name = unescape(&a.value);
+                    let name = unescape_bytes(&raw);
                     if let Some(&id) = self.defs.get(name.trim_ascii()) {
                         self.place(parent, &kind, container.as_deref(), id, e);
                     }
                     return Frame::Skip;
                 }
-                b"containerField" => container = Some(String::from_utf8_lossy(&unescape(&a.value)).into_owned()),
+                b"containerField" => container = Some(String::from_utf8_lossy(&unescape_bytes(&raw)).into_owned()),
                 b"class" | b"id" | b"style" | b"xmlns" => {}
                 b"name" if instance => {}
-                _ => fields.push((String::from_utf8_lossy(key).into_owned(), value(key, &a.value))),
+                _ => fields.push((
+                    String::from_utf8_lossy(key).into_owned(),
+                    value(key, &unescape_bytes(&raw)),
+                )),
             }
         }
         let name = def
@@ -262,15 +264,6 @@ impl Parser {
             Some(Frame::Skip | Frame::Proto(_) | Frame::Interface(_) | Frame::Is(_)) => {}
         }
     }
-}
-
-/// An attribute's value, its entities undone.
-fn attr(e: &BytesStart<'_>, name: &[u8]) -> Option<Vec<u8>> {
-    e.attributes()
-        .with_checks(false)
-        .flatten()
-        .find(|a| a.key.local_name().as_ref() == name)
-        .map(|a| unescape(&a.value).into_owned())
 }
 
 /// The field a child node goes in when it doesn't say.
@@ -317,56 +310,14 @@ fn default_container(kind: &str) -> &'static str {
     }
 }
 
-/// Text with XML's entities undone (borrowed when it has none).
-fn unescape(s: &[u8]) -> std::borrow::Cow<'_, [u8]> {
-    if !s.contains(&b'&') {
-        return s.into();
-    }
-    let mut out = Vec::with_capacity(s.len());
-    let mut i = 0;
-    while i < s.len() {
-        if s[i] == b'&'
-            && let Some(len) = s[i..].iter().take(12).position(|&c| c == b';')
-        {
-            let name = &s[i + 1..i + len];
-            let ch = match name {
-                b"amp" => Some('&'),
-                b"lt" => Some('<'),
-                b"gt" => Some('>'),
-                b"quot" => Some('"'),
-                b"apos" => Some('\''),
-                [b'#', b'x' | b'X', hex @ ..] => std::str::from_utf8(hex)
-                    .ok()
-                    .and_then(|h| u32::from_str_radix(h, 16).ok())
-                    .and_then(char::from_u32),
-                [b'#', dec @ ..] => std::str::from_utf8(dec)
-                    .ok()
-                    .and_then(|d| d.parse().ok())
-                    .and_then(char::from_u32),
-                _ => None,
-            };
-            if let Some(c) = ch {
-                let mut buf = [0; 4];
-                out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
-                i += len + 1;
-                continue;
-            }
-        }
-        out.push(s[i]);
-        i += 1;
-    }
-    out.into()
-}
-
 /// Whether `b` separates the values in an attribute.
 fn gap(b: u8) -> bool {
     b <= b' ' || b == b','
 }
 
-/// An attribute's value, its type told from how it's written: quoted strings for `url` and
-/// any value starting with a quote, numbers, `true` and `false`, or else text.
-fn value(key: &[u8], raw: &[u8]) -> Val {
-    let text = unescape(raw);
+/// An attribute's value (its references decoded), its type told from how it's written: quoted strings for
+/// `url` and any value starting with a quote, numbers, `true` and `false`, or else text.
+fn value(key: &[u8], text: &[u8]) -> Val {
     let t = text.trim_ascii();
     if key == b"url" || t.first() == Some(&b'"') {
         return Val::Strs(strings(t));

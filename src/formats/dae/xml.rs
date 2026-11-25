@@ -9,6 +9,8 @@ use quick_xml::Reader;
 use quick_xml::events::Event;
 
 use crate::formats::stream::{self, f32_lenient, f64_lenient, tokens};
+use crate::formats::xml as shared;
+use crate::gltf::percent_decode;
 use crate::num::u32_of;
 
 /// No element: the end of a list of children.
@@ -134,8 +136,9 @@ impl<'a> Dom<'a> {
                 }
                 Event::GeneralRef(r) if skipped == 0 => {
                     if let Some(&top) = stack.last() {
-                        let resolved = resolve_reference(&r);
-                        dom.append(top, Cow::Owned(resolved));
+                        let mut text = Vec::new();
+                        shared::push_reference(&r, &mut text);
+                        dom.append(top, Cow::Owned(text));
                     }
                 }
                 _ => {}
@@ -559,7 +562,7 @@ fn split_borrowed<'a>(b: &'a [u8], attrs: &mut Vec<Attr<'a>>) -> Cow<'a, [u8]> {
             &b[v0..i]
         };
         if !key.is_empty() {
-            attrs.push((Cow::Borrowed(local(key)), unescape(value)));
+            attrs.push((Cow::Borrowed(local(key)), shared::unescape_lossy(value)));
         }
     }
     Cow::Borrowed(name)
@@ -577,57 +580,6 @@ fn local(name: &[u8]) -> &[u8] {
     }
 }
 
-/// An attribute value, or text, with its references resolved.
-pub(super) fn unescape(v: &[u8]) -> Cow<'_, str> {
-    if !v.contains(&b'&') {
-        return String::from_utf8_lossy(v);
-    }
-    let mut out = Vec::with_capacity(v.len());
-    let mut i = 0;
-    while i < v.len() {
-        if v[i] == b'&'
-            && let Some(len) = v[i + 1..].iter().take(12).position(|&c| c == b';')
-        {
-            out.extend(resolve_reference(&v[i + 1..i + 1 + len]));
-            i += len + 2;
-            continue;
-        }
-        out.push(v[i]);
-        i += 1;
-    }
-    Cow::Owned(String::from_utf8_lossy(&out).into_owned())
-}
-
-/// The text an entity or character reference (without `&` and `;`) stands for; an unknown one
-/// as it was written.
-fn resolve_reference(name: &[u8]) -> Vec<u8> {
-    let fixed: &[u8] = match name {
-        b"amp" => b"&",
-        b"lt" => b"<",
-        b"gt" => b">",
-        b"quot" => b"\"",
-        b"apos" => b"'",
-        _ => {
-            let code = match name {
-                [b'#', b'x' | b'X', hex @ ..] => std::str::from_utf8(hex)
-                    .ok()
-                    .and_then(|h| u32::from_str_radix(h, 16).ok()),
-                [b'#', dec @ ..] => std::str::from_utf8(dec).ok().and_then(|d| d.parse().ok()),
-                _ => None,
-            };
-            if let Some(c) = code.and_then(char::from_u32) {
-                return c.to_string().into_bytes();
-            }
-            let mut v = Vec::with_capacity(name.len() + 2);
-            v.push(b'&');
-            v.extend_from_slice(name);
-            v.push(b';');
-            return v;
-        }
-    };
-    fixed.to_vec()
-}
-
 /// `path` taken from the folder `dir` (empty, or with a trailing `/`), its `.` and `..` parts
 /// resolved, `..` past the top kept.
 pub(super) fn join(dir: &str, path: &str) -> String {
@@ -642,50 +594,6 @@ pub(super) fn join(dir: &str, path: &str) -> String {
         }
     }
     parts.join("/")
-}
-
-/// `s` with `%XX` escapes decoded.
-pub(super) fn percent_decode(s: &str) -> String {
-    if !s.contains('%') {
-        return s.to_owned();
-    }
-    let b = s.as_bytes();
-    let mut out = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] == b'%'
-            && i + 2 < b.len()
-            && let (Some(h), Some(l)) = (hex(b[i + 1]), hex(b[i + 2]))
-        {
-            out.push(h * 16 + l);
-            i += 3;
-            continue;
-        }
-        out.push(b[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-fn hex(c: u8) -> Option<u8> {
-    match c {
-        b'0'..=b'9' => Some(c - b'0'),
-        b'a'..=b'f' => Some(c - b'a' + 10),
-        b'A'..=b'F' => Some(c - b'A' + 10),
-        _ => None,
-    }
-}
-
-/// Bytes from hexadecimal text (whitespace ignored); `None` when it isn't hexadecimal.
-pub(super) fn from_hex(text: &[u8]) -> Option<Vec<u8>> {
-    let digits: Vec<u8> = text.iter().copied().filter(|c| !c.is_ascii_whitespace()).collect();
-    if !digits.len().is_multiple_of(2) {
-        return None;
-    }
-    digits
-        .chunks_exact(2)
-        .map(|p| Some(hex(p[0])? * 16 + hex(p[1])?))
-        .collect()
 }
 
 /// The numbers in whitespace-separated text, as `f64`: anything that isn't one reads as 0.

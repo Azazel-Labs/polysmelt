@@ -14,6 +14,8 @@ use std::borrow::Cow;
 use std::io::{self, BufRead, Read};
 
 use crate::Result;
+#[cfg(any(feature = "ogre", feature = "irr", feature = "xgl"))]
+use crate::formats::stream;
 
 /// Whether `head`, the start of an XML document, is UTF-16: little-endian or not, and the length of its byte
 /// order mark.
@@ -424,47 +426,157 @@ fn memchr(c: u8, b: &[u8]) -> Option<usize> {
     b.iter().position(|&x| x == c)
 }
 
-/// Decodes the entities in text or an attribute value.
-pub(crate) fn unescape(s: &str) -> Cow<'_, str> {
-    if !s.contains('&') {
+/// The longest reference name looked for after an `&`: `#x10FFFF` with leading zeros to spare. A `;` further on
+/// leaves the `&` as it is, so a stray one doesn't send the search far ahead.
+const MAX_REFERENCE: usize = 11;
+
+/// The character an entity or character reference stands for, given its name without the `&` and `;`: one of
+/// the five named entities, `#` and a decimal code, or `#x` (or `#X`) and a hexadecimal one. `None` for any other
+/// name, a code that is no character, or no code at all.
+pub(crate) fn reference(name: &[u8]) -> Option<char> {
+    let (digits, radix) = match name {
+        b"lt" => return Some('<'),
+        b"gt" => return Some('>'),
+        b"amp" => return Some('&'),
+        b"quot" => return Some('"'),
+        b"apos" => return Some('\''),
+        [b'#', b'x' | b'X', hex @ ..] => (hex, 16),
+        [b'#', dec @ ..] => (dec, 10),
+        _ => return None,
+    };
+    let code = u32::from_str_radix(std::str::from_utf8(digits).ok()?, radix).ok()?;
+    char::from_u32(code)
+}
+
+/// Appends the text a reference stands for (its name without the `&` and `;`), for a reader that reports
+/// references apart from the text around them: an unknown one as it was written.
+pub(crate) fn push_reference(name: &[u8], out: &mut Vec<u8>) {
+    if let Some(c) = reference(name) {
+        out.extend_from_slice(c.encode_utf8(&mut [0; 4]).as_bytes());
+    } else {
+        out.push(b'&');
+        out.extend_from_slice(name);
+        out.push(b';');
+    }
+}
+
+/// Text or an attribute value with its references decoded, borrowed when it has none. An `&` that starts no
+/// reference [`reference`] knows stays as it is.
+pub(crate) fn unescape_bytes(s: &[u8]) -> Cow<'_, [u8]> {
+    if !s.contains(&b'&') {
         return Cow::Borrowed(s);
     }
-    let mut out = String::with_capacity(s.len());
+    let mut out = Vec::with_capacity(s.len());
     let mut rest = s;
-    while let Some(p) = rest.find('&') {
-        out.push_str(&rest[..p]);
-        rest = &rest[p..];
-        let Some(end) = rest.find(';').filter(|&e| e <= 12) else {
-            out.push('&');
-            rest = &rest[1..];
-            continue;
-        };
-        let name = &rest[1..end];
-        let c = match name {
-            "lt" => Some('<'),
-            "gt" => Some('>'),
-            "amp" => Some('&'),
-            "quot" => Some('"'),
-            "apos" => Some('\''),
-            _ => name
-                .strip_prefix("#x")
-                .or_else(|| name.strip_prefix("#X"))
-                .map_or_else(
-                    || name.strip_prefix('#').and_then(|d| d.parse::<u32>().ok()),
-                    |h| u32::from_str_radix(h, 16).ok(),
-                )
-                .and_then(char::from_u32),
-        };
-        if let Some(c) = c {
-            out.push(c);
-            rest = &rest[end + 1..];
+    while let Some(p) = memchr(b'&', rest) {
+        out.extend_from_slice(&rest[..p]);
+        rest = &rest[p + 1..];
+        let found = rest
+            .iter()
+            .take(MAX_REFERENCE + 1)
+            .position(|&c| c == b';')
+            .and_then(|n| Some((reference(&rest[..n])?, n)));
+        if let Some((c, n)) = found {
+            out.extend_from_slice(c.encode_utf8(&mut [0; 4]).as_bytes());
+            rest = &rest[n + 1..];
         } else {
-            out.push('&');
-            rest = &rest[1..];
+            out.push(b'&');
         }
     }
-    out.push_str(rest);
+    out.extend_from_slice(rest);
     Cow::Owned(out)
+}
+
+/// Text as a string, bytes that aren't UTF-8 replaced with U+FFFD.
+pub(crate) fn lossy(b: Cow<'_, [u8]>) -> Cow<'_, str> {
+    match b {
+        Cow::Borrowed(b) => String::from_utf8_lossy(b),
+        Cow::Owned(v) => {
+            Cow::Owned(String::from_utf8(v).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned()))
+        }
+    }
+}
+
+/// [`unescape_bytes`] as a string, bytes that aren't UTF-8 replaced with U+FFFD.
+pub(crate) fn unescape_lossy(s: &[u8]) -> Cow<'_, str> {
+    lossy(unescape_bytes(s))
+}
+
+/// [`unescape_bytes`] for a string.
+pub(crate) fn unescape(s: &str) -> Cow<'_, str> {
+    match unescape_bytes(s.as_bytes()) {
+        Cow::Borrowed(_) => Cow::Borrowed(s),
+        // Characters replace only whole ASCII references, so it's still UTF-8.
+        owned @ Cow::Owned(_) => lossy(owned),
+    }
+}
+
+/// A hexadecimal digit's value.
+pub(crate) fn hex_digit(c: u8) -> Option<u8> {
+    match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        b'A'..=b'F' => Some(c - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Bytes from hexadecimal text, whitespace ignored; `None` when it isn't hexadecimal or a digit is left over.
+pub(crate) fn from_hex(text: &[u8]) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(text.len() / 2);
+    let mut high = None;
+    for &c in text {
+        if c.is_ascii_whitespace() {
+            continue;
+        }
+        let d = hex_digit(c)?;
+        match high.take() {
+            None => high = Some(d),
+            Some(h) => out.push(h << 4 | d),
+        }
+    }
+    high.is_none().then_some(out)
+}
+
+/// The attributes of a tag a streaming reader gives: each one's name without its namespace prefix, and its value
+/// as written, references and all.
+#[cfg(any(feature = "x3d", feature = "amf", feature = "3mf"))]
+pub(crate) fn attrs<'e>(
+    e: &'e quick_xml::events::BytesStart<'_>,
+) -> impl Iterator<Item = (&'e [u8], Cow<'e, [u8]>)> + use<'e> {
+    let mut all = e.attributes();
+    all.with_checks(false);
+    all.flatten().map(|a| {
+        let key = a.key.into_inner();
+        (
+            key.iter().position(|&c| c == b':').map_or(key, |i| &key[i + 1..]),
+            a.value,
+        )
+    })
+}
+
+/// Calls `f` with each of a tag's [`attrs`], its value's references decoded.
+#[cfg(any(feature = "x3d", feature = "amf", feature = "3mf"))]
+pub(crate) fn each_attr(e: &quick_xml::events::BytesStart<'_>, mut f: impl FnMut(&[u8], &[u8])) {
+    for (k, v) in attrs(e) {
+        f(k, &unescape_bytes(&v));
+    }
+}
+
+/// The value of a tag's attribute named `name` (without a namespace prefix), references decoded; the first
+/// when it's given twice.
+#[cfg(any(feature = "x3d", feature = "amf", feature = "3mf"))]
+pub(crate) fn attr<'e>(e: &'e quick_xml::events::BytesStart<'_>, name: &[u8]) -> Option<Cow<'e, [u8]>> {
+    attrs(e).find(|(k, _)| *k == name).map(|(_, v)| match v {
+        Cow::Borrowed(v) => unescape_bytes(v),
+        Cow::Owned(v) => Cow::Owned(unescape_bytes(&v).into_owned()),
+    })
+}
+
+/// [`attr`] as a string, bytes that aren't UTF-8 replaced with U+FFFD.
+#[cfg(any(feature = "x3d", feature = "amf", feature = "3mf"))]
+pub(crate) fn attr_string(e: &quick_xml::events::BytesStart<'_>, name: &[u8]) -> Option<String> {
+    attr(e, name).map(|v| lossy(v).into_owned())
 }
 
 impl<'d, 'a> El<'d, 'a> {
@@ -508,18 +620,21 @@ impl<'d, 'a> El<'d, 'a> {
     }
 
     /// An attribute as a float: 0 when it's missing or isn't a number.
+    #[cfg(any(feature = "ogre", feature = "irr", feature = "xgl"))]
     pub(crate) fn f32(&self, name: &str) -> f32 {
-        self.attr(name).and_then(|v| v.trim().parse().ok()).unwrap_or(0.0)
+        self.attr(name).and_then(|v| stream::num(v.as_bytes())).unwrap_or(0.0)
     }
 
     /// An attribute as a float, `None` when it's missing.
+    #[cfg(any(feature = "ogre", feature = "irr", feature = "xgl"))]
     pub(crate) fn opt_f32(&self, name: &str) -> Option<f32> {
-        self.attr(name).map(|v| v.trim().parse().unwrap_or(0.0))
+        self.attr(name).map(|v| stream::num(v.as_bytes()).unwrap_or(0.0))
     }
 
     /// An attribute as a whole number: `None` when it's missing or isn't one.
+    #[cfg(any(feature = "ogre", feature = "irr", feature = "xgl"))]
     pub(crate) fn u32(&self, name: &str) -> Option<u32> {
-        self.attr(name).and_then(|v| v.trim().parse().ok())
+        self.attr(name).and_then(|v| stream::whole(v.as_bytes()))
     }
 
     /// What's between the element's tags, as it's written: child elements, comments and all.
@@ -610,6 +725,136 @@ impl<'d, 'a> El<'d, 'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn named_references() {
+        for (name, c) in [("lt", '<'), ("gt", '>'), ("amp", '&'), ("quot", '"'), ("apos", '\'')] {
+            assert_eq!(reference(name.as_bytes()), Some(c), "{name}");
+        }
+        assert_eq!(
+            unescape("a &lt;b&gt; &amp; &quot;c&quot; &apos;d&apos;"),
+            "a <b> & \"c\" 'd'"
+        );
+        // Names are case-sensitive, and HTML's aren't XML's.
+        assert_eq!(reference(b"AMP"), None);
+        assert_eq!(reference(b"nbsp"), None);
+    }
+
+    #[test]
+    fn character_references() {
+        assert_eq!(reference(b"#65"), Some('A'));
+        assert_eq!(reference(b"#0065"), Some('A'));
+        assert_eq!(reference(b"#x41"), Some('A'));
+        assert_eq!(reference(b"#X41"), Some('A'));
+        assert_eq!(reference(b"#x6a"), Some('j'));
+        assert_eq!(reference(b"#x1F600"), Some('\u{1F600}'));
+        assert_eq!(reference(b"#1114111"), Some('\u{10FFFF}'));
+        assert_eq!(unescape("&#65;&#x42;&#X43;&#x00000044;"), "ABCD");
+        assert_eq!(unescape("&#233;t&#xE9;"), "\u{e9}t\u{e9}");
+    }
+
+    #[test]
+    fn invalid_references() {
+        for name in [
+            "",
+            "#",
+            "#x",
+            "#X",
+            "#-1",
+            "#x-1",
+            "# 65",
+            "#6 5",
+            "#x41g",
+            "#a",
+            "#x110000",
+            "#1114112",
+            "#xD800",
+            "#55296",
+            "#99999999999",
+            "bogus",
+            "lt ",
+        ] {
+            assert_eq!(reference(name.as_bytes()), None, "{name:?}");
+        }
+        // What isn't a reference stays as it was written.
+        for s in [
+            "&",
+            "a & b",
+            "&;",
+            "&#;",
+            "&#x;",
+            "&bogus;",
+            "&lt",
+            "&amp",
+            "&#65",
+            "&#xD800;",
+            "&#x110000;",
+            "&#000000000065;",
+            "fish &chips; peas",
+        ] {
+            assert_eq!(unescape(s), s, "{s:?}");
+        }
+        // A bad reference doesn't swallow the good one after it.
+        assert_eq!(unescape("&a&lt;"), "&a<");
+        assert_eq!(unescape("&&amp;&"), "&&&");
+        assert_eq!(unescape("&#;&#65;"), "&#;A");
+        assert_eq!(unescape("&lt;auto&gt; &#65;&#x42; &bogus; &"), "<auto> AB &bogus; &");
+        // The name may be as long as `#x10FFFF` with three leading zeros, and no longer.
+        assert_eq!(unescape("&#x00010FFFF;"), "\u{10FFFF}");
+        assert_eq!(unescape("&#x000010FFFF;"), "&#x000010FFFF;");
+        assert_eq!(unescape("&#0000000065;"), "A");
+    }
+
+    #[test]
+    fn unescape_borrows_and_keeps_utf8() {
+        assert!(matches!(unescape("plain text"), Cow::Borrowed("plain text")));
+        assert!(matches!(unescape_bytes(b"no refs"), Cow::Borrowed(b"no refs")));
+        assert_eq!(unescape("\u{e9}&amp;\u{1F600}"), "\u{e9}&\u{1F600}");
+        assert_eq!(unescape_lossy(b"a\xff&amp;"), "a\u{FFFD}&");
+        assert_eq!(&*unescape_bytes(b"\xff&lt;"), b"\xff<");
+    }
+
+    #[test]
+    fn pushes_references() {
+        let mut out = b"x".to_vec();
+        for name in [&b"amp"[..], b"#x42", b"#67", b"bogus", b"#xD800", b""] {
+            push_reference(name, &mut out);
+        }
+        assert_eq!(out, b"x&BC&bogus;&#xD800;&;");
+    }
+
+    #[test]
+    fn hex() {
+        assert_eq!(hex_digit(b'0'), Some(0));
+        assert_eq!(hex_digit(b'9'), Some(9));
+        assert_eq!(hex_digit(b'a'), Some(10));
+        assert_eq!(hex_digit(b'F'), Some(15));
+        for c in [b'g', b'G', b'+', b'-', b' ', b'x', 0xff] {
+            assert_eq!(hex_digit(c), None, "{c}");
+        }
+        assert_eq!(from_hex(b"00ff 7F\n\t1a"), Some(vec![0, 255, 127, 26]));
+        assert_eq!(from_hex(b""), Some(vec![]));
+        assert_eq!(from_hex(b"abc"), None);
+        assert_eq!(from_hex(b"0g"), None);
+        assert_eq!(from_hex(b"+f"), None);
+    }
+
+    #[cfg(any(feature = "x3d", feature = "amf", feature = "3mf"))]
+    #[test]
+    fn streaming_attributes() {
+        let tag = r#"m p:a="1 &amp; 2" b='&#x41;&bogus;' a="second" c="""#;
+        let e = quick_xml::events::BytesStart::from_content(tag, 1);
+        let keys: Vec<&[u8]> = attrs(&e).map(|(k, _)| k).collect();
+        assert_eq!(keys, [&b"a"[..], b"b", b"a", b"c"]);
+        assert_eq!(attr(&e, b"a").as_deref(), Some(&b"1 & 2"[..]));
+        assert_eq!(attr_string(&e, b"b").as_deref(), Some("A&bogus;"));
+        assert_eq!(attr_string(&e, b"c").as_deref(), Some(""));
+        assert_eq!(attr(&e, b"p:a"), None);
+        assert_eq!(attr(&e, b"d"), None);
+        let mut seen = Vec::new();
+        each_attr(&e, |k, v| seen.push((k.to_vec(), v.to_vec())));
+        assert_eq!(seen[0], (b"a".to_vec(), b"1 & 2".to_vec()));
+    }
 
     #[test]
     fn parses_xml() {

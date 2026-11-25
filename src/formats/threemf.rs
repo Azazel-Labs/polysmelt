@@ -28,11 +28,12 @@ use std::collections::{HashMap, HashSet};
 use std::io::{BufReader, Read};
 
 use super::stream::{self, f32_from};
+use super::xml::{attr_string as attr, each_attr, hex_digit, push_reference};
 use crate::document::{Builder, Document, Keep};
 use crate::images::{Images, Location};
 use crate::source::{Axis, Fact, Handedness, SourceInfo};
 use crate::{Context as _, ErrorKind, Result, Within as _};
-use quick_xml::events::{BytesStart, Event};
+use quick_xml::events::Event;
 use serde_json::{Map, Value, json};
 use zip::ZipArchive;
 
@@ -1181,22 +1182,6 @@ fn text(zip: &mut Zip<'_>, names: &HashMap<String, String>, name: &str, limit: u
     Some(s)
 }
 
-fn each_attr(e: &BytesStart<'_>, mut f: impl FnMut(&[u8], &[u8])) {
-    for a in e.attributes().with_checks(false).flatten() {
-        f(a.key.local_name().as_ref(), &a.value);
-    }
-}
-
-fn attr(e: &BytesStart<'_>, name: &[u8]) -> Option<String> {
-    let mut out = None;
-    each_attr(e, |k, v| {
-        if k == name {
-            out = Some(String::from_utf8_lossy(v).into_owned());
-        }
-    });
-    out
-}
-
 /// An attribute's number, with spaces around it, as `str::trim` and `str::parse` read it.
 fn num<T: Num>(v: &[u8]) -> Option<T> {
     T::of(v)
@@ -1230,11 +1215,11 @@ fn transform(v: &[u8]) -> Mat {
 
 /// `#RRGGBB` or `#RRGGBBAA`.
 fn hex_rgba(s: &str) -> Option<[u8; 4]> {
-    let h = s.trim().strip_prefix('#')?;
+    let h = s.trim().strip_prefix('#')?.as_bytes();
     if h.len() != 6 && h.len() != 8 {
         return None;
     }
-    let byte = |i: usize| u8::from_str_radix(h.get(i..i + 2)?, 16).ok();
+    let byte = |i: usize| Some(hex_digit(h[i])? << 4 | hex_digit(h[i + 1])?);
     let a = if h.len() == 8 { byte(6)? } else { 255 };
     Some([byte(0)?, byte(2)?, byte(4)?, a])
 }
@@ -1268,8 +1253,9 @@ fn parse_part(r: impl Read, triangles: &mut usize, limit: usize) -> Result<Part>
     // The display properties whose entries are being read.
     let mut display: Option<u32> = None;
     let mut in_build = false;
-    // The `<metadata name>` whose text is being read.
+    // The `<metadata name>` whose text is being read, its text so far, and whether it has any.
     let mut meta: Option<String> = None;
+    let (mut meta_text, mut meta_seen) = (Vec::new(), false);
     // Inside an object's `<beamlattice>`, and inside one of its `<beamset>`s.
     let (mut in_lattice, mut in_set) = (false, false);
     loop {
@@ -1280,9 +1266,25 @@ fn parse_part(r: impl Read, triangles: &mut usize, limit: usize) -> Result<Part>
             Event::Start(e) => (e, false),
             Event::Empty(e) => (e, true),
             Event::Text(t) => {
-                if let Some(name) = meta.take() {
-                    let text = String::from_utf8_lossy(&t).trim().to_owned();
-                    part.metadata.push((name, text));
+                if meta.is_some() {
+                    meta_text.extend_from_slice(&t);
+                    meta_seen = true;
+                }
+                buf.clear();
+                continue;
+            }
+            Event::CData(t) => {
+                if meta.is_some() {
+                    meta_text.extend_from_slice(&t);
+                    meta_seen = true;
+                }
+                buf.clear();
+                continue;
+            }
+            Event::GeneralRef(r) => {
+                if meta.is_some() {
+                    push_reference(&r, &mut meta_text);
+                    meta_seen = true;
                 }
                 buf.clear();
                 continue;
@@ -1307,7 +1309,15 @@ fn parse_part(r: impl Read, triangles: &mut usize, limit: usize) -> Result<Part>
                         display = None;
                     }
                     b"build" => in_build = false,
-                    b"metadata" => meta = None,
+                    b"metadata" => {
+                        if let Some(name) = meta.take()
+                            && std::mem::take(&mut meta_seen)
+                        {
+                            part.metadata
+                                .push((name, String::from_utf8_lossy(&meta_text).trim().to_owned()));
+                        }
+                        meta_text.clear();
+                    }
                     b"beamlattice" => in_lattice = false,
                     b"beamset" => in_set = false,
                     _ => {}
@@ -1820,9 +1830,6 @@ fn resolve(groups: &mut HashMap<u32, Group>) {
 /// subdivisions in hex, its nibbles read from the end: the low two bits of a node say how many sides it splits (none:
 /// a leaf; else into that many plus one), the high two a leaf's filament (3: the next nibble plus 3).
 fn paint_state(code: &[u8]) -> u8 {
-    fn hex(c: u8) -> Option<u8> {
-        char::from(c).to_digit(16).and_then(|d| u8::try_from(d).ok())
-    }
     fn walk(n: &impl Fn(usize) -> Option<u8>, pos: &mut usize, w: f32, area: &mut [f32; 19], depth: u32) -> Option<()> {
         let code = n(*pos)?;
         *pos += 1;
@@ -1847,17 +1854,17 @@ fn paint_state(code: &[u8]) -> u8 {
         Some(())
     }
     let mut area = [0.0f32; 19];
-    if code.iter().all(|&c| hex(c).is_some()) {
+    if code.iter().all(|&c| hex_digit(c).is_some()) {
         // Read in place, the usual case.
         walk(
-            &|i| code.len().checked_sub(i + 1).and_then(|k| hex(code[k])),
+            &|i| code.len().checked_sub(i + 1).and_then(|k| hex_digit(code[k])),
             &mut 0,
             1.0,
             &mut area,
             0,
         );
     } else {
-        let nibbles: Vec<u8> = code.iter().rev().filter_map(|&c| hex(c)).collect();
+        let nibbles: Vec<u8> = code.iter().rev().filter_map(|&c| hex_digit(c)).collect();
         walk(&|i| nibbles.get(i).copied(), &mut 0, 1.0, &mut area, 0);
     }
     let mut best = 0;
@@ -2063,7 +2070,7 @@ mod tests {
     fn base_material_colors_and_build_transforms() {
         let model = format!(
             r##"<?xml version="1.0"?><model unit="millimeter" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">
-            <metadata name="Application">Test Exporter</metadata>
+            <metadata name="Application"> Test &amp; <![CDATA[<Exporter>]]>&#33; </metadata>
             <resources><basematerials id="1"><base name="Red" displaycolor="#FF0000"/><base name="Blue" displaycolor="#0000FFFF"/></basematerials>
             <object id="2" type="model" pid="1" pindex="0"><mesh>{QUAD}<triangles><triangle v1="0" v2="1" v3="2"/><triangle v1="0" v2="2" v3="3" pid="1" p1="1" p2="1" p3="1"/></triangles></mesh></object></resources>
             <build><item objectid="2" transform="1 0 0 0 1 0 0 0 1 100 0 0"/><item objectid="2"/></build></model>"##
@@ -2075,7 +2082,8 @@ mod tests {
         assert_eq!(facts["objects"], 2);
         assert_eq!(facts["colors"], 2);
         let info = doc.source_info();
-        assert_eq!(info.tool.as_deref(), Some("Test Exporter"));
+        // The text around references and CDATA, all of it.
+        assert_eq!(info.tool.as_deref(), Some("Test & <Exporter>!"));
         assert!(doc.json()["asset"]["extras"]["source"].get("metadata").is_none());
         assert_eq!(info.meters_per_unit, Fact::Declared(0.001));
         assert_eq!(info.unit.as_deref(), Some("millimeter"));
