@@ -58,6 +58,8 @@ mod fbx;
 mod fbx_ascii;
 #[cfg(feature = "fbx")]
 mod fbx_tree;
+#[cfg(feature = "fbx")]
+pub(crate) mod fbx_write;
 #[cfg(feature = "flt")]
 mod flt;
 mod format;

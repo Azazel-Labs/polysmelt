@@ -49,7 +49,7 @@ fn main() -> polysmelt::Result<()> {
 }
 ```
 
-`cargo run --example convert -- in.fbx out.glb` converts a model, and
+`cargo run --example convert -- in.fbx out.glb` converts a model (to FBX for an `.fbx` output), and
 `cargo run --example inspect -- in.fbx` prints what it holds.
 
 ## Status
@@ -139,6 +139,16 @@ Early. What exists today:
   `Keep::threads` reads large OBJ files on several threads (`0` for one per core) and inflates
   SPZ files on one thread while unpacking them on another, with the same result as one thread;
   it is `1`, one thread, by default.
+- **FBX out** (`fbx`): `Document::to_fbx` and `Document::write_fbx` write binary FBX 7.4
+  (7.5 when a file passes 4 GiB), the other format written in full besides GLB. The node tree
+  goes out with its names, transforms and instancing (a mesh is one geometry, however many
+  models draw it); meshes with every UV and color set, normals and tangents, per-polygon
+  materials, and lines; PBR materials with their textures embedded, wrap modes, UV sets and
+  texture transforms; skins as clusters with a bind pose; morph targets as blend shapes; each
+  animation as its own take, rotations as Euler curves keyed closely enough to follow the
+  quaternions; cameras, `KHR_lights_punctual` lights, and extras as user properties.
+  Draco, meshopt, sparse and quantized data are decoded on the way. Points have no FBX form
+  and are left out. The output is the same bytes every time.
 - **Conformance corpus**: 1155 cases under `tests/corpus`, each a file and the GLB it must
   become. They cover every format above and the variants exporters really write: OBJ's face
   forms and MTL dialects, both PLY byte orders, every FBX version and axis system, and USD's

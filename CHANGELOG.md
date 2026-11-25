@@ -2,6 +2,34 @@
 
 Breaking changes are allowed in minor releases until 1.0.
 
+## 0.18.0
+
+- FBX export: `Document::to_fbx` and `Document::write_fbx` (the `fbx` feature) write binary
+  FBX 7.4, or 7.5 for files over 4 GiB, as the second fully supported output beside GLB.
+  - Nodes: names, transforms and hierarchy; instanced meshes share one geometry, and each
+    `EXT_mesh_gpu_instancing` instance becomes its own model.
+  - Meshes: normals, tangents and binormals, every UV and color set, per-polygon materials,
+    and line geometry. Points are left out, as FBX has no point geometry. Draco, meshopt,
+    sparse and quantized data are decoded first.
+  - Materials: Phong properties with the PBR values, alpha mode, double-sidedness and
+    `KHR_materials_*` settings beside them; specular-glossiness materials as their metal/rough
+    equivalent. Textures are embedded with their wrap modes, UV set and texture transform.
+  - Skins become a skin deformer with a cluster per joint and a bind pose; morph targets become
+    blend shapes with their weights.
+  - Each animation is its own stack, layer and take. Stepped, linear and cubic keys stay as
+    they are, and rotations are resampled as continuous Euler curves within 0.05 degrees of
+    the quaternions.
+  - Perspective and orthographic cameras, `KHR_lights_punctual` lights, and extras as user
+    properties.
+  - The output is deterministic. Every corpus model that loads round-trips through the reader,
+    apart from three that differ only between the reader's own samples or by a material default.
+- The FBX reader reads back what the writer adds beyond FBX's own properties: PBR values,
+  alpha mode and the glTF extensions.
+- FBX animation: key times less than a microsecond apart (one frame written to two curves
+  through different float paths) are merged into one time, so no near-zero step reaches
+  per-frame velocities.
+- `examples/convert.rs` writes FBX when the output ends in `.fbx`.
+
 ## 0.17.8
 
 - Polygons with holes (COLLADA `<ph>`, SketchUp inner loops) are triangulated by one shared
