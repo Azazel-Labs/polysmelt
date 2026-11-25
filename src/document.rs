@@ -746,6 +746,50 @@ impl Document {
         Ok(())
     }
 
+    /// The document as binary FBX (7.4; 7.5 when it's over 4 GiB), the other format written in full beside GLB:
+    /// the default scene's nodes as models, meshes as geometry with every UV and color set, materials (with their
+    /// glTF parameters kept alongside the classic ones), embedded textures, skins with their bind pose, morph targets
+    /// as blend shapes, every animation as an animation stack of its own, cameras, lights and node extras. Points
+    /// aren't written: FBX has no geometry for them. The same document always gives the same bytes.
+    ///
+    /// ```
+    /// # let doc = polysmelt::read(&b"v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n"[..], "t.obj")?;
+    /// let fbx = doc.to_fbx()?;
+    /// assert!(fbx.starts_with(b"Kaydara FBX Binary"));
+    /// # Ok::<(), polysmelt::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// When an accessor or buffer the scene uses is malformed or doesn't decode, a mesh has more vertices than FBX
+    /// indexes (2^31), or a single array would be over 4 GiB.
+    #[cfg(feature = "fbx")]
+    pub fn to_fbx(&self) -> Result<Vec<u8>> {
+        let mut out = Vec::new();
+        crate::formats::fbx_write::write(self, &mut out)?;
+        Ok(out)
+    }
+
+    /// Writes the document as binary FBX, as [`Document::to_fbx`] makes it. The file is assembled before it's
+    /// written, then written a record at a time: wrap a file in a [`BufWriter`](std::io::BufWriter).
+    ///
+    /// ```no_run
+    /// let doc = polysmelt::open("models/Fox.glb")?;
+    /// let file = std::fs::File::create("Fox.fbx")?;
+    /// doc.write_fbx(std::io::BufWriter::new(file))?;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// As [`Document::to_fbx`], and when writing fails.
+    #[cfg(feature = "fbx")]
+    pub fn write_fbx<W: Write>(&self, mut w: W) -> Result<()> {
+        crate::formats::fbx_write::write(self, &mut w)?;
+        w.flush()?;
+        Ok(())
+    }
+
     /// The GLB as it will be written: its JSON chunk, and where each buffer goes in its binary
     /// chunk.
     #[allow(
