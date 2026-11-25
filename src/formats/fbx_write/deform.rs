@@ -1,9 +1,10 @@
-//! Skins as skin deformers with a cluster per joint and a bind pose.
+//! Skins as skin deformers with a cluster per joint and a bind pose; morph targets as blend shapes, a channel and
+//! a shape per target.
 
 use serde_json::Value;
 
 use super::geometry::Geom;
-use super::records::Node;
+use super::records::{Node, p_f64, props70};
 use super::{Writer, fbx_name, index, list};
 use crate::Result;
 use crate::formats::xform::{IDENTITY, M4, from_column_major, inverse, mul, to_column_major};
@@ -161,9 +162,115 @@ impl Writer<'_> {
         Ok(())
     }
 
-    /// Writes mesh `mesh`'s morph targets, on node `i`.
-    #[allow(clippy::unnecessary_wraps, clippy::unused_self, reason = "written in a later step")]
-    pub(super) fn morphs(&mut self, _i: usize, _mesh: usize, _g: &Geom) -> Result<()> {
+    /// Writes mesh `mesh`'s morph targets, as node `i` draws them, as a blend shape of geometry `g`: a channel per
+    /// target, at the node's weight, holding a shape of the control points the target moves.
+    pub(super) fn morphs(&mut self, i: usize, mesh: usize, g: &Geom) -> Result<()> {
+        let Some(gid) = g.id else { return Ok(()) };
+        let mesh_json = &list(self.json, "meshes")[mesh];
+        let node = &list(self.json, "nodes")[i];
+        let prims = mesh_json
+            .get("primitives")
+            .and_then(Value::as_array)
+            .map_or(&[][..], Vec::as_slice);
+        let targets = prims
+            .iter()
+            .filter_map(|p| p.get("targets").and_then(Value::as_array).map(Vec::len))
+            .max()
+            .unwrap_or(0);
+        let weights: Vec<f64> = node
+            .get("weights")
+            .or_else(|| mesh_json.get("weights"))
+            .and_then(Value::as_array)
+            .map(|w| w.iter().map(|v| v.as_f64().unwrap_or(0.0)).collect())
+            .unwrap_or_default();
+        let names = mesh_json.pointer("/extras/targetNames").and_then(Value::as_array);
+        let model_name = self.models[i].as_ref().expect("a written node").name.clone();
+        let bs = self.id();
+        let blend = Node::new("Deformer")
+            .i64(bs)
+            .str(&fbx_name(&model_name, "Deformer"))
+            .str("BlendShape")
+            .child("Version", |n| n.i32(100));
+        self.object("Deformer", blend);
+        self.oo(bs, gid);
+        let mut channels = Vec::with_capacity(targets);
+        for t in 0..targets {
+            let mut ix: Vec<i32> = Vec::new();
+            let mut dv: Vec<f64> = Vec::new();
+            let mut dn: Vec<f64> = Vec::new();
+            let mut normals = false;
+            for (p, prim) in prims.iter().enumerate() {
+                let Some(base) = g.bases.get(p).copied().flatten() else {
+                    continue;
+                };
+                let Some(target) = prim.get("targets").and_then(Value::as_array).and_then(|a| a.get(t)) else {
+                    continue;
+                };
+                let pos = match index(target, "POSITION") {
+                    Some(a) => Some(self.doc.read_floats(a)?).filter(|r| r.0 == 3).map(|r| r.1),
+                    None => None,
+                };
+                let nrm = match index(target, "NORMAL") {
+                    Some(a) => Some(self.doc.read_floats(a)?).filter(|r| r.0 == 3).map(|r| r.1),
+                    None => None,
+                };
+                normals |= nrm.is_some();
+                let count = pos.as_ref().or(nrm.as_ref()).map_or(0, |v| v.len() / 3);
+                for v in 0..count {
+                    let get = |a: &Option<Vec<f32>>| {
+                        a.as_ref()
+                            .and_then(|a| a.get(v * 3..v * 3 + 3))
+                            .map_or([0.0; 3], |d| [d[0], d[1], d[2]].map(f64::from))
+                    };
+                    let (d, n) = (get(&pos), get(&nrm));
+                    if d == [0.0; 3] && n == [0.0; 3] {
+                        continue;
+                    }
+                    let Ok(cp) = i32::try_from(base + v) else { break };
+                    ix.push(cp);
+                    dv.extend_from_slice(&d);
+                    dn.extend_from_slice(&n);
+                }
+            }
+            // A target that moves nothing still holds a point, so it keeps its place among the channels.
+            if ix.is_empty() {
+                ix.push(0);
+                dv.extend_from_slice(&[0.0; 3]);
+                dn.extend_from_slice(&[0.0; 3]);
+            }
+            let name = names
+                .and_then(|n| n.get(t))
+                .and_then(Value::as_str)
+                .map_or_else(|| format!("target_{t}"), str::to_owned);
+            let percent = weights.get(t).copied().unwrap_or(0.0) * 100.0;
+            let ch = self.id();
+            let channel = Node::new("Deformer")
+                .i64(ch)
+                .str(&fbx_name(&name, "SubDeformer"))
+                .str("BlendShapeChannel")
+                .child("Version", |n| n.i32(100))
+                .with(props70(vec![p_f64("DeformPercent", "Number", "A", percent)]))
+                .child("DeformPercent", |n| n.f64(percent))
+                .child("FullWeights", |n| n.arr(&[100.0f64]));
+            self.object("Deformer", channel);
+            self.oo(ch, bs);
+            let sid = self.id();
+            let mut shape = Node::new("Geometry")
+                .i64(sid)
+                .str(&fbx_name(&name, "Geometry"))
+                .str("Shape")
+                .with(props70(Vec::new()))
+                .child("Version", |n| n.i32(100))
+                .child("Indexes", |n| n.arr(&ix))
+                .child("Vertices", |n| n.arr(&dv));
+            if normals {
+                shape = shape.child("Normals", |n| n.arr(&dn));
+            }
+            self.object("Geometry", shape);
+            self.oo(sid, ch);
+            channels.push(ch);
+        }
+        self.channels.insert(i, channels);
         Ok(())
     }
 }
