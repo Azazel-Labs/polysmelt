@@ -557,7 +557,8 @@ fn build(m: Model) -> Prim {
         let mut seen: FastMap<u64, u32> = FastMap::default();
         for (k, &v) in flat.iter().enumerate() {
             let face = tri_colors[k / 3];
-            let key = (u64::from(v) << 32) | u64::from(face);
+            // The vertex in the low bits, which the hash's buckets come from: there are only a few face colors.
+            let key = (u64::from(face) << 32) | u64::from(v);
             let r = if let Some(&r) = seen.get(&key) {
                 r
             } else {
