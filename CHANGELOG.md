@@ -4,6 +4,10 @@ Breaking changes are allowed in minor releases until 1.0.
 
 ## 0.17.7
 
+- Number parsing: every text reader (OBJ, OFF, COLLADA, 3MF, SMD, AC3D, DXF, AMF, MD5, `.x`,
+  ASCII FBX, HTR, ASF, TRC, WKT) goes through one fast float and integer parser. Numbers written
+  as `1.#INF`, `1.#QNAN` or `-1.#IND`, or with a decimal comma, are read instead of rejected.
+  COLLADA single-precision lists round once, correctly; its index lists read about 20% faster.
 - Internal: one quaternion module replaces the readers' own rotation math (normalizing,
   slerp, Euler and axis-angle conversion, matrix to rotation), and glTF matrices are converted
   to and from column order in one place. About 230 fewer lines. Output is unchanged.
