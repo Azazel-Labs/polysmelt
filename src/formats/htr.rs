@@ -40,6 +40,7 @@ use super::scene::{self, Animation, Channel, Interp, Node, Path, Scene};
 use crate::Result;
 use crate::document::{Document, Keep};
 use crate::num::f32_of;
+use crate::quat;
 use crate::source::{Axis, Fact, meters_in};
 
 /// Segments a file may have: far past any capture rig.
@@ -102,11 +103,11 @@ fn up_rotation(axis: &str) -> Option<[f64; 4]> {
     let a = axis.trim().to_ascii_uppercase();
     let q = match a.trim_start_matches('+') {
         "Y" => [0.0, 0.0, 0.0, 1.0],
-        "-Y" => scene::about(0, PI),
-        "Z" => scene::about(0, -FRAC_PI_2),
-        "-Z" => scene::about(0, FRAC_PI_2),
-        "X" => scene::about(2, FRAC_PI_2),
-        "-X" => scene::about(2, -FRAC_PI_2),
+        "-Y" => quat::about(0, PI),
+        "Z" => quat::about(0, -FRAC_PI_2),
+        "-Z" => quat::about(0, FRAC_PI_2),
+        "X" => quat::about(2, FRAC_PI_2),
+        "-X" => quat::about(2, -FRAC_PI_2),
         _ => return None,
     };
     Some(q)
@@ -116,7 +117,7 @@ fn up_rotation(axis: &str) -> Option<[f64; 4]> {
 fn euler(order: &[usize; 3], angles: [f64; 3]) -> [f64; 4] {
     let mut q = [0.0, 0.0, 0.0, 1.0];
     for &a in order {
-        q = scene::quat_mul(q, scene::about(a, angles[a]));
+        q = quat::mul(q, quat::about(a, angles[a]));
     }
     q
 }
@@ -325,7 +326,7 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document> {
     for (s, &parent) in segments.iter().zip(&parents) {
         let mut node = Node::named(s.name.clone(), parent);
         node.translation = [s.base[0], s.base[1], s.base[2]].map(f32_of);
-        node.rotation = scene::normalize(base_rotation(s));
+        node.rotation = quat::normalize(base_rotation(s));
         scene.add(node);
     }
     for (i, s) in segments.iter().enumerate() {
@@ -352,7 +353,7 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document> {
         for r in &s.rows {
             translations.extend([s.base[0] + r[0], s.base[1] + r[1], s.base[2] + r[2]].map(f32_of));
             let qf = euler(&order, [r[3] * angle, r[4] * angle, r[5] * angle]);
-            rotations.extend(scene::normalize(scene::quat_mul(qb, qf)));
+            rotations.extend(quat::normalize(quat::mul(qb, qf)));
         }
         channels.push(Channel {
             node: i,
@@ -430,7 +431,7 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document> {
     scene.scale(f32_of(meters.unwrap_or(1.0)));
     // Y up needs no turn; every other axis's quaternion has w below 1.
     if let Some(q) = up.filter(|q| q[3] < 1.0) {
-        scene.rotate_roots(scene::normalize(q));
+        scene.rotate_roots(quat::normalize(q));
     }
     scene.finish(keep)
 }
@@ -501,9 +502,9 @@ knee 0 -400 0 0 0 90 300
         assert!(near(&pose[0].translation, &[0.1, 1.0, 0.0]));
         assert!(near(&pose[0].rotation, &[0.0, s, 0.0, s]));
         // knee: the base's 90° about Z, then the row's 90° about X.
-        let want = scene::normalize(scene::quat_mul(
-            scene::about(2, std::f64::consts::FRAC_PI_2),
-            scene::about(0, std::f64::consts::FRAC_PI_2),
+        let want = quat::normalize(quat::mul(
+            quat::about(2, std::f64::consts::FRAC_PI_2),
+            quat::about(0, std::f64::consts::FRAC_PI_2),
         ));
         assert!(near(&pose[1].rotation, &want), "{:?}", pose[1].rotation);
         assert_eq!(rig.animations[0].channels[0].times, [0.0, 0.1]);
@@ -516,9 +517,9 @@ knee 0 -400 0 0 0 90 300
             &[2, 1, 0],
             [std::f64::consts::FRAC_PI_2, 0.0, std::f64::consts::FRAC_PI_2],
         );
-        let v = scene::rotate(q, [0.0, 1.0, 0.0]);
+        let v = quat::rotate(q, [0.0, 1.0, 0.0]);
         assert!(near(&v.map(f32_of), &[0.0, 0.0, 1.0]));
-        let v = scene::rotate(q, [1.0, 0.0, 0.0]);
+        let v = quat::rotate(q, [1.0, 0.0, 0.0]);
         assert!(near(&v.map(f32_of), &[0.0, 1.0, 0.0]));
     }
 

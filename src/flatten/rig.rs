@@ -8,6 +8,7 @@ use serde_json::Value;
 use super::{Reader, floats, index, items, list, list_of};
 use crate::document::Document;
 use crate::num::f32_of;
+use crate::quat;
 use crate::rig::{Animation, Channel, Interpolation, Node, Property, Rig, Skin, Trs};
 use crate::{Context as _, ErrorKind, Result};
 
@@ -175,30 +176,8 @@ fn decompose(m: &[f64; 16]) -> Trs {
     }
     let unit = |v: [f64; 3], k: f64| if k == 0.0 { [0.0; 3] } else { v.map(|c| c / k) };
     let (x, y, z) = (unit(x, s[0]), unit(y, s[1]), unit(z, s[2]));
-    // Element (row, column) of the rotation.
-    let (m00, m01, m02) = (x[0], y[0], z[0]);
-    let (m10, m11, m12) = (x[1], y[1], z[1]);
-    let (m20, m21, m22) = (x[2], y[2], z[2]);
-    let trace = m00 + m11 + m22;
-    let q = if trace > 0.0 {
-        let k = 0.5 / (trace + 1.0).sqrt();
-        [(m21 - m12) * k, (m02 - m20) * k, (m10 - m01) * k, 0.25 / k]
-    } else if m00 > m11 && m00 > m22 {
-        let k = 2.0 * (1.0 + m00 - m11 - m22).sqrt();
-        [0.25 * k, (m01 + m10) / k, (m02 + m20) / k, (m21 - m12) / k]
-    } else if m11 > m22 {
-        let k = 2.0 * (1.0 + m11 - m00 - m22).sqrt();
-        [(m01 + m10) / k, 0.25 * k, (m12 + m21) / k, (m02 - m20) / k]
-    } else {
-        let k = 2.0 * (1.0 + m22 - m00 - m11).sqrt();
-        [(m02 + m20) / k, (m12 + m21) / k, 0.25 * k, (m10 - m01) / k]
-    };
-    let ql = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]).sqrt();
-    let q = if ql > 0.0 {
-        q.map(|c| c / ql)
-    } else {
-        [0.0, 0.0, 0.0, 1.0]
-    };
+    // The rotation's columns are x, y and z.
+    let q = quat::unit(quat::of_rotation_reciprocal(|r, c| [x, y, z][c][r]));
     Trs {
         translation: [m[12], m[13], m[14]].map(f32_of),
         rotation: q.map(f32_of),

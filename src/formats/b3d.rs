@@ -24,6 +24,7 @@ use crate::document::{Document, Keep};
 use crate::images::Images;
 use crate::mesh::{Material, srgb_to_linear};
 use crate::num::{f32_of, u32_of};
+use crate::quat;
 use crate::source::{Axis, Fact, Handedness};
 
 /// How deep nodes may nest.
@@ -554,7 +555,7 @@ fn node(body: &[u8], parent: Option<usize>, depth: usize, f: &mut B3d) -> Result
 /// A rotation as the file stores it (w first, turning row vectors) in glTF's order, turning column vectors.
 fn turn([w, x, y, z]: [f32; 4]) -> [f32; 4] {
     let q = [-x, -y, -z, w].map(f64::from);
-    scene::normalize(q)
+    quat::normalize(q)
 }
 
 fn keys(body: &[u8], k: &mut Keys) -> Result<()> {
@@ -766,7 +767,7 @@ mod tests {
         // -Z; glTF's quarter turn about +Y takes +X to -Z.
         let half = std::f32::consts::FRAC_1_SQRT_2;
         let q = scene::mirror_quat(turn([half, 0.0, half, 0.0]));
-        let v = scene::rotate(q.map(f64::from), [1.0, 0.0, 0.0]);
+        let v = quat::rotate(q.map(f64::from), [1.0, 0.0, 0.0]);
         assert!((v[2] + 1.0).abs() < 1e-6, "{v:?}");
     }
 

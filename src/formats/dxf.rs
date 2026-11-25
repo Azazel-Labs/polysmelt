@@ -49,6 +49,7 @@ use crate::Result;
 use crate::document::{Builder, Document};
 use crate::mesh::{FastMap, Material, Prim, linear_u8, triangulate};
 use crate::num::{f32_of, u32_of};
+use crate::quat;
 use crate::source::{Axis, Fact, Handedness, SourceInfo};
 use crate::vec3::{self, cross};
 
@@ -1490,10 +1491,7 @@ impl Build {
             rgb: self.resolve(ins.spec, layer, ctx),
         };
         let [ax, ay, az] = axes(ins.extrusion);
-        let rotation = mul(
-            from_axes(ax, ay, az),
-            [0.0, 0.0, (ins.angle / 2.0).sin(), (ins.angle / 2.0).cos()],
-        );
+        let rotation = quat::positive_w(quat::mul(from_axes(ax, ay, az), quat::about(2, ins.angle)));
         let base = self.m.spaces[b].base;
         let s = ins.scale;
         let (sin, cos) = ins.angle.sin_cos();
@@ -1695,37 +1693,9 @@ fn axes(extrusion: [f64; 3]) -> [[f64; 3]; 3] {
     [ax, ay, n]
 }
 
-/// The rotation whose matrix has columns `x`, `y` and `z`, as a quaternion.
+/// The rotation whose matrix has columns `x`, `y` and `z`, as a quaternion, `w` not negative.
 fn from_axes(x: [f64; 3], y: [f64; 3], z: [f64; 3]) -> [f64; 4] {
-    let (m00, m11, m22) = (x[0], y[1], z[2]);
-    let trace = m00 + m11 + m22;
-    let q = if trace > 0.0 {
-        let s = (trace + 1.0).sqrt() * 2.0;
-        [(y[2] - z[1]) / s, (z[0] - x[2]) / s, (x[1] - y[0]) / s, s / 4.0]
-    } else if m00 > m11 && m00 > m22 {
-        let s = (1.0 + m00 - m11 - m22).sqrt() * 2.0;
-        [s / 4.0, (y[0] + x[1]) / s, (z[0] + x[2]) / s, (y[2] - z[1]) / s]
-    } else if m11 > m22 {
-        let s = (1.0 + m11 - m00 - m22).sqrt() * 2.0;
-        [(y[0] + x[1]) / s, s / 4.0, (z[1] + y[2]) / s, (z[0] - x[2]) / s]
-    } else {
-        let s = (1.0 + m22 - m00 - m11).sqrt() * 2.0;
-        [(z[0] + x[2]) / s, (z[1] + y[2]) / s, s / 4.0, (x[1] - y[0]) / s]
-    };
-    let n = q.iter().map(|c| c * c).sum::<f64>().sqrt();
-    let q = q.map(|c| c / n);
-    if q[3] < 0.0 { q.map(|c| -c) } else { q }
-}
-
-/// The quaternion product `a b` (`b` turned, then `a`).
-fn mul(a: [f64; 4], b: [f64; 4]) -> [f64; 4] {
-    let q = [
-        a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1],
-        a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
-        a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3],
-        a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2],
-    ];
-    if q[3] < 0.0 { q.map(|c| -c) } else { q }
+    quat::positive_w(quat::unit_unchecked(quat::of_rotation(|r, c| [x, y, z][c][r])))
 }
 
 #[cfg(test)]

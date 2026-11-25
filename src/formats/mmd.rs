@@ -47,6 +47,7 @@ use crate::document::{Document, Keep};
 use crate::images::Images;
 use crate::mesh::{Material, srgb_to_linear};
 use crate::num::{f32_of, u32_of};
+use crate::quat;
 use crate::source::{Axis, Fact, Handedness, SourceInfo};
 
 /// Meters per MMD unit.
@@ -1030,7 +1031,7 @@ fn morph_extras(i: usize, morph: &Morph, bone: &dyn Fn(i32) -> Option<usize>) ->
             let offsets: Vec<Value> = v
                 .iter()
                 .filter_map(|(b, t, q)| {
-                    let q = scene::mirror_quat(scene::normalize(q.map(f64::from)));
+                    let q = scene::mirror_quat(quat::normalize(q.map(f64::from)));
                     Some(json!({ "bone": bone(*b)?, "translation": pt(*t), "rotation": q }))
                 })
                 .collect();
@@ -1509,24 +1510,6 @@ fn straight(c: [u8; 4]) -> bool {
     c[0] == c[1] && c[2] == c[3]
 }
 
-/// Spherical interpolation, the short way round.
-fn slerp(a: [f64; 4], b: [f64; 4], t: f64) -> [f64; 4] {
-    let mut d: f64 = (0..4).map(|k| a[k] * b[k]).sum();
-    let b = if d < 0.0 {
-        d = -d;
-        b.map(|c| -c)
-    } else {
-        b
-    };
-    if d > 0.9995 {
-        return std::array::from_fn(|k| a[k] + (b[k] - a[k]) * t);
-    }
-    let th = d.clamp(-1.0, 1.0).acos();
-    let s = th.sin();
-    let (wa, wb) = (((1.0 - t) * th).sin() / s, (t * th).sin() / s);
-    std::array::from_fn(|k| a[k] * wa + b[k] * wb)
-}
-
 /// The steps a span of `gap` frames is sampled at when its curves bend: one a frame, at most [`MAX_SAMPLES`].
 fn steps(gap: u32) -> u32 {
     gap.clamp(1, MAX_SAMPLES)
@@ -1536,7 +1519,7 @@ fn steps(gap: u32) -> u32 {
 fn bone_keys(keys: &[BoneKey]) -> (Keys, Keys) {
     let (mut tt, mut tv, mut rt, mut rv) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let quat = |k: &BoneKey| {
-        let q = scene::normalize(k.rotation.map(f64::from));
+        let q = quat::normalize(k.rotation.map(f64::from));
         q.map(f64::from)
     };
     for (i, k) in keys.iter().enumerate() {
@@ -1561,7 +1544,7 @@ fn bone_keys(keys: &[BoneKey]) -> (Keys, Keys) {
                 for s in 1..n {
                     let x = f64::from(s) / f64::from(n);
                     rt.push(f32_of((f64::from(p.frame) + f64::from(gap) * x) / FPS));
-                    rv.extend(scene::normalize(slerp(q0, q1, bezier(curve(k, 3), x))));
+                    rv.extend(quat::normalize(quat::slerp_stepped(q0, q1, bezier(curve(k, 3), x))));
                 }
             }
         }
@@ -1569,7 +1552,7 @@ fn bone_keys(keys: &[BoneKey]) -> (Keys, Keys) {
         tt.push(t);
         tv.extend(k.position);
         rt.push(t);
-        rv.extend(scene::normalize(quat(k)));
+        rv.extend(quat::normalize(quat(k)));
     }
     ((tt, tv), (rt, rv))
 }

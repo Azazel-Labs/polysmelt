@@ -2,10 +2,11 @@
 
 use serde_json::{Value, json};
 
-use super::math::{IDENTITY, M4, inverse, mul};
+use super::math::inverse;
 use super::{Ctx, Morphs, expand, referenced};
 use crate::Result;
 use crate::document::{Builder, Part};
+use crate::formats::xform::col::{IDENTITY, M4, mul};
 use crate::mesh::{FastMap, Prim};
 use crate::num::{f32_of, u32_of};
 use crate::vec3::{cross, dot, unit};

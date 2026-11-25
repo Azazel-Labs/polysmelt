@@ -52,13 +52,16 @@ use openusd_schemas::shade::{self, MaterialBindingAPI};
 use serde_json::{Map, Value, json};
 
 use super::Input;
-use super::xform::{IDENTITY, M4, Trs, decompose, inverse, mul, scale, set_transform, translate};
+use super::xform::{
+    IDENTITY, M4, Trs, decompose, from_column_major, inverse, mul, rotation, scale, set_transform, translate,
+};
 use crate::assets::{Assets, memory_key};
 use crate::document::{self, Animation, Builder, Document, Keep, Part, Sampler};
 use crate::images::{Images, Location, gray};
 use crate::material::{self, Alpha, Clearcoat, Factor, Full, Specular, Tex, UvTransform};
 use crate::mesh::{GRAY, Material, Prim, triangulate};
 use crate::num::f32_of;
+use crate::quat;
 use crate::source::{Axis, Fact, Handedness, SourceInfo};
 use crate::vec3::{self, cross, dot};
 
@@ -346,45 +349,17 @@ fn leaf(path: &str) -> &str {
 
 /// A USD matrix (row vectors) as an [`M4`] (column vectors): its transpose.
 fn m4(m: &gf::Matrix4d) -> M4 {
-    std::array::from_fn(|i| std::array::from_fn(|j| m.0[j * 4 + i]))
-}
-
-/// The rotation for a unit quaternion (x, y, z, w).
-fn rotation([x, y, z, w]: [f64; 4]) -> M4 {
-    [
-        [
-            1.0 - 2.0 * (y * y + z * z),
-            2.0 * (x * y - w * z),
-            2.0 * (x * z + w * y),
-            0.0,
-        ],
-        [
-            2.0 * (x * y + w * z),
-            1.0 - 2.0 * (x * x + z * z),
-            2.0 * (y * z - w * x),
-            0.0,
-        ],
-        [
-            2.0 * (x * z - w * y),
-            2.0 * (y * z + w * x),
-            1.0 - 2.0 * (x * x + y * y),
-            0.0,
-        ],
-        [0.0, 0.0, 0.0, 1.0],
-    ]
+    from_column_major(&m.0)
 }
 
 /// A quaternion (w, x, y, z), as USD lists one, as glTF's unit (x, y, z, w); `None` when it has no length.
 fn unit_quaternion([w, x, y, z]: [f32; 4]) -> Option<[f64; 4]> {
-    let q = [x, y, z, w].map(f64::from);
-    let len = q.iter().map(|c| c * c).sum::<f64>().sqrt();
-    (len > 0.0 && len.is_finite()).then(|| q.map(|c| c / len))
+    quat::unit_above([x, y, z, w].map(f64::from), 0.0)
 }
 
 /// The angle between two unit quaternions' rotations, in degrees.
 fn turn(a: &[f64; 4], b: &[f64; 4]) -> f64 {
-    let dot: f64 = (0..4).map(|k| a[k] * b[k]).sum();
-    2.0 * dot.abs().min(1.0).acos().to_degrees()
+    quat::angle(*a, *b).to_degrees()
 }
 
 /// Times sorted, without repeats or ones that aren't finite.
@@ -3242,29 +3217,13 @@ fn instance_matrix(s: [f32; 3], q: [f32; 4], t: [f32; 3]) -> gf::Matrix4d {
     } else {
         [1.0, 0.0, 0.0, 0.0]
     };
-    // The rotation for column vectors; row vectors take its transpose.
-    let r = [
-        [
-            1.0 - 2.0 * (y * y + z * z),
-            2.0 * (x * y - w * z),
-            2.0 * (x * z + w * y),
-        ],
-        [
-            2.0 * (x * y + w * z),
-            1.0 - 2.0 * (x * x + z * z),
-            2.0 * (y * z - w * x),
-        ],
-        [
-            2.0 * (x * z - w * y),
-            2.0 * (y * z + w * x),
-            1.0 - 2.0 * (x * x + y * y),
-        ],
-    ];
+    // The rotation for column vectors, column-major; row vectors take its transpose.
+    let r = quat::matrix([x, y, z, w]);
     let mut m = gf::Matrix4d::IDENTITY;
     for row in 0..3 {
         // USD matrices are row vectors, so row `row` of the transform is column `row` of `r`.
-        for (col, r_col) in r.iter().enumerate() {
-            m.0[row * 4 + col] = f64::from(s[row]) * r_col[row];
+        for col in 0..3 {
+            m.0[row * 4 + col] = f64::from(s[row]) * r[row * 3 + col];
         }
         m.0[12 + row] = f64::from(t[row]);
     }

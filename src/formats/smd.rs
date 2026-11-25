@@ -22,6 +22,7 @@ use crate::document::{Document, Keep};
 use crate::images::Images;
 use crate::mesh::{FastMap, Material};
 use crate::num::{f32_of, u32_of};
+use crate::quat;
 use crate::source::{Axis, Fact, Handedness};
 
 /// Frames a second: the compilers' default.
@@ -168,11 +169,7 @@ pub(crate) fn load(input: super::Input<'_>, ext: &str, assets: &dyn Assets, keep
 
 /// The rotation Euler angles `p[3..6]` (radians) make: about X, then Y, then Z.
 fn euler(p: Pose) -> [f32; 4] {
-    let [x, y, z] = [p[3], p[4], p[5]].map(f64::from);
-    scene::normalize(scene::quat_mul(
-        scene::about(2, z),
-        scene::quat_mul(scene::about(1, y), scene::about(0, x)),
-    ))
+    quat::normalize(quat::euler_xyz([p[3], p[4], p[5]].map(f64::from)))
 }
 
 /// Frames in time order, two frames at one time made one (the later poses winning), and each frame's poses in bone

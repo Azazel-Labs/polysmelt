@@ -12,6 +12,7 @@ use serde_json::{Map, Value, json};
 use super::{Acc, Reader, Tabs, index, items, list, retain_groups, segments, triangles};
 use crate::document::{Accessor, Blob, Document, Limits, Tables, View};
 use crate::num::{f32_of, usize_of};
+use crate::quat;
 
 /// The largest a unit vector's length may be off by before it's rewritten: well inside the
 /// validator's 0.00674, so lengths that pass it are left alone.
@@ -1513,19 +1514,13 @@ fn unit_tangents(f: &mut [f32]) -> bool {
     true
 }
 
-/// Makes a quaternion unit length (the identity for a zero one); whether it changed.
+/// Makes a quaternion (four floats) unit length (the identity for a zero one); whether it changed.
 fn unit_quaternion(q: &mut [f32]) -> bool {
-    let l = (q.iter().map(|&x| f64::from(x) * f64::from(x)).sum::<f64>()).sqrt();
-    if !off_unit(l) {
+    let q64 = std::array::from_fn(|k| f64::from(q[k]));
+    if !off_unit(quat::length(q64)) {
         return false;
     }
-    if l > 1e-12 && l.is_finite() {
-        for x in q.iter_mut() {
-            *x = f32_of(f64::from(*x) / l);
-        }
-    } else {
-        q.copy_from_slice(&[0.0, 0.0, 0.0, 1.0]);
-    }
+    q.copy_from_slice(&quat::unit(q64).map(f32_of));
     true
 }
 

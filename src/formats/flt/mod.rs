@@ -40,6 +40,8 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value, json};
 
+use super::xform::col::{self, IDENTITY, mul, scaling, translation};
+use super::xform::set_trs;
 use crate::Result;
 use crate::assets::Assets;
 use crate::document::{Animation, Builder, Channel, Document, Keep, Limits, Part, Sampler};
@@ -47,6 +49,7 @@ use crate::images::{Images, Location};
 use crate::material::{Alpha, Full, Tex};
 use crate::mesh::{FastMap, Image, Prim, linear_u8, srgb_to_linear};
 use crate::num::{f32_of, u32_of};
+use crate::quat;
 use crate::source::{Axis, Converted, Fact, Handedness, SourceInfo};
 use crate::vec3::{self, cross, dot, sub, unit};
 use parse::{Db, F_HIDDEN, F_PACKED, Face, Kind, Shape, V_INDEX, V_NORMAL, V_PACKED, V_UV};
@@ -307,7 +310,7 @@ fn expand(c: &mut Ctx<'_>) -> Result<Scene> {
         let mut m = local_matrix(node, it.copy);
         if let Kind::Light { pos, yaw, pitch, .. } = node.kind {
             let d = light_direction(yaw, pitch);
-            let r = quat_matrix(from_to([0.0, 0.0, -1.0], d));
+            let r = col::rotation(from_to([0.0, 0.0, -1.0], d));
             m = mul(&m, &mul(&translation(pos), &r));
         }
         if top {
@@ -706,34 +709,6 @@ fn light_direction(yaw: f32, pitch: f32) -> [f64; 3] {
 
 // Matrices are column-major, as glTF's: `m[col * 4 + row]`.
 
-const IDENTITY: [f64; 16] = [
-    1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
-];
-
-fn mul(a: &[f64; 16], b: &[f64; 16]) -> [f64; 16] {
-    let mut m = [0.0; 16];
-    for col in 0..4 {
-        for row in 0..4 {
-            m[col * 4 + row] = (0..4).map(|k| a[k * 4 + row] * b[col * 4 + k]).sum();
-        }
-    }
-    m
-}
-
-fn translation(t: [f64; 3]) -> [f64; 16] {
-    let mut m = IDENTITY;
-    m[12..15].copy_from_slice(&t);
-    m
-}
-
-fn scaling(s: [f64; 3]) -> [f64; 16] {
-    let mut m = IDENTITY;
-    m[0] = s[0];
-    m[5] = s[1];
-    m[10] = s[2];
-    m
-}
-
 /// A rotation of `deg` degrees about axis `axis` (0 x, 1 y, 2 z).
 fn rotation(axis: usize, deg: f64) -> [f64; 16] {
     let (s, c) = deg.to_radians().sin_cos();
@@ -748,29 +723,6 @@ fn rotation(axis: usize, deg: f64) -> [f64; 16] {
     m[b * 4 + a] = -s;
     m[b * 4 + b] = c;
     m
-}
-
-/// The rotation matrix of a unit quaternion `[x, y, z, w]`.
-fn quat_matrix(q: [f64; 4]) -> [f64; 16] {
-    let [x, y, z, w] = q;
-    [
-        1.0 - 2.0 * (y * y + z * z),
-        2.0 * (x * y + z * w),
-        2.0 * (x * z - y * w),
-        0.0,
-        2.0 * (x * y - z * w),
-        1.0 - 2.0 * (x * x + z * z),
-        2.0 * (y * z + x * w),
-        0.0,
-        2.0 * (x * z + y * w),
-        2.0 * (y * z - x * w),
-        1.0 - 2.0 * (x * x + y * y),
-        0.0,
-        0.0,
-        0.0,
-        0.0,
-        1.0,
-    ]
 }
 
 /// The shortest rotation taking unit vector `a` to `b`, as a quaternion.
@@ -885,58 +837,8 @@ fn place(j: &mut Value, m: &[f64; 16]) {
     for k in 0..3 {
         cols[k] = cols[k].map(|v| v / s[k]);
     }
-    let q = quat_of(cols);
-    if t.iter().any(|&v| v != 0.0) {
-        j["translation"] = json!(t);
-    }
-    if (q[3] - 1.0).abs() > 1e-12 {
-        j["rotation"] = json!(q);
-    }
-    if s.iter().any(|&v| (v - 1.0).abs() > 1e-12) {
-        j["scale"] = json!(s);
-    }
-}
-
-/// The unit quaternion of a rotation's columns.
-fn quat_of(c: [[f64; 3]; 3]) -> [f64; 4] {
-    let (m00, m11, m22) = (c[0][0], c[1][1], c[2][2]);
-    let trace = m00 + m11 + m22;
-    let q = if trace > 0.0 {
-        let s = (trace + 1.0).sqrt() * 2.0;
-        [
-            (c[1][2] - c[2][1]) / s,
-            (c[2][0] - c[0][2]) / s,
-            (c[0][1] - c[1][0]) / s,
-            0.25 * s,
-        ]
-    } else if m00 > m11 && m00 > m22 {
-        let s = (1.0 + m00 - m11 - m22).sqrt() * 2.0;
-        [
-            0.25 * s,
-            (c[1][0] + c[0][1]) / s,
-            (c[2][0] + c[0][2]) / s,
-            (c[1][2] - c[2][1]) / s,
-        ]
-    } else if m11 > m22 {
-        let s = (1.0 + m11 - m00 - m22).sqrt() * 2.0;
-        [
-            (c[1][0] + c[0][1]) / s,
-            0.25 * s,
-            (c[2][1] + c[1][2]) / s,
-            (c[2][0] - c[0][2]) / s,
-        ]
-    } else {
-        let s = (1.0 + m22 - m00 - m11).sqrt() * 2.0;
-        [
-            (c[2][0] + c[0][2]) / s,
-            (c[2][1] + c[1][2]) / s,
-            0.25 * s,
-            (c[0][1] - c[1][0]) / s,
-        ]
-    };
-    let l = q.iter().map(|v| v * v).sum::<f64>().sqrt();
-    let q = q.map(|v| v / l);
-    if q[3] < 0.0 { q.map(|v| -v) } else { q }
+    let q = quat::positive_w(quat::unit_unchecked(quat::of_rotation(|r, c| cols[c][r])));
+    set_trs(j, (t, q, s));
 }
 
 /// The color of palette entry `index` (with its intensity in the low 7 bits), as sRGB bytes.

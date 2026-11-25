@@ -44,6 +44,7 @@ use super::scene::{self, Animation, Channel, Interp, Node, Path, Scene};
 use crate::Result;
 use crate::document::{Document, Keep};
 use crate::num::f32_of;
+use crate::quat;
 use crate::source::{Axis, Fact, meters_in};
 
 /// Frames per second when neither the header nor `POINT:RATE` gives one.
@@ -310,7 +311,7 @@ fn screen_rotation(x: [f64; 3], y: [f64; 3]) -> Option<[f64; 4]> {
             m[c * 3 + r] = *v;
         }
     }
-    Some(scene::matrix_quat(&m))
+    Some(quat::from_matrix(&m))
 }
 
 /// Reads a C3D file.
@@ -547,7 +548,7 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document> {
     }
     scene.source = source;
     scene.scale(f32_of(meters.unwrap_or(1.0)));
-    scene.rotate_roots(scene::normalize(turn));
+    scene.rotate_roots(quat::normalize(turn));
     scene.finish(keep)
 }
 
@@ -687,7 +688,7 @@ mod tests {
                 // Z-up millimeters: (100, 200, 300) mm is (0.1, 0.3, -0.2) m in glTF.
                 let pose = rig.pose(Some(0), 0.0);
                 let world =
-                    |i: usize| scene::rotate(pose[0].rotation.map(f64::from), pose[i].translation.map(f64::from));
+                    |i: usize| quat::rotate(pose[0].rotation.map(f64::from), pose[i].translation.map(f64::from));
                 assert!(
                     near(&world(1).map(f32_of), &[0.1, 0.3, -0.2]),
                     "{p:?} {scale}: {:?}",
@@ -695,7 +696,7 @@ mod tests {
                 );
                 let pose = rig.pose(Some(0), 0.2);
                 let world =
-                    |i: usize| scene::rotate(pose[0].rotation.map(f64::from), pose[i].translation.map(f64::from));
+                    |i: usize| quat::rotate(pose[0].rotation.map(f64::from), pose[i].translation.map(f64::from));
                 assert!(near(&world(2).map(f32_of), &[0.0, 1.0, -0.01]), "{p:?} {scale}");
                 assert_eq!(rig.animations[0].channels[1].times, [0.1, 0.2]);
             }
@@ -723,9 +724,9 @@ mod tests {
         assert!(near(&rig.nodes[0].rest.rotation, &[0.0, 0.0, 0.0, 1.0]));
         // Screen right -Y and up +Z: file -Y is glTF X, +Z is Y, so +X is glTF Z... (−Y)×Z = −X toward the viewer.
         let q = screen_rotation(axis("-Y").unwrap(), axis("+Z").unwrap()).unwrap();
-        assert!(near(&scene::rotate(q, [0.0, -1.0, 0.0]).map(f32_of), &[1.0, 0.0, 0.0]));
-        assert!(near(&scene::rotate(q, [0.0, 0.0, 1.0]).map(f32_of), &[0.0, 1.0, 0.0]));
-        assert!(near(&scene::rotate(q, [-1.0, 0.0, 0.0]).map(f32_of), &[0.0, 0.0, 1.0]));
+        assert!(near(&quat::rotate(q, [0.0, -1.0, 0.0]).map(f32_of), &[1.0, 0.0, 0.0]));
+        assert!(near(&quat::rotate(q, [0.0, 0.0, 1.0]).map(f32_of), &[0.0, 1.0, 0.0]));
+        assert!(near(&quat::rotate(q, [-1.0, 0.0, 0.0]).map(f32_of), &[0.0, 0.0, 1.0]));
         assert!(screen_rotation(axis("+Z").unwrap(), axis("-Z").unwrap()).is_none());
     }
 

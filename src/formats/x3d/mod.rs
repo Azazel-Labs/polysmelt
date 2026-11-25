@@ -59,6 +59,7 @@ use crate::images::Images;
 use crate::material::{Alpha, CLAMP, Full, REPEAT, Tex};
 use crate::mesh::{GRAY, Material, srgb_to_linear};
 use crate::num::f32_of;
+use crate::quat::{self, rotate};
 use crate::source::{Axis, Converted, Fact, Handedness, SourceInfo};
 
 /// An absent index.
@@ -1066,24 +1067,7 @@ fn quat(r: [f64; 4]) -> [f64; 4] {
     if !(len > 1e-12 && len.is_finite() && r[3].is_finite()) {
         return [0.0, 0.0, 0.0, 1.0];
     }
-    let (s, c) = (r[3] / 2.0).sin_cos();
-    [r[0] / len * s, r[1] / len * s, r[2] / len * s, c]
-}
-
-/// `v` turned by unit quaternion `q`.
-fn rotate(q: [f64; 4], v: [f64; 3]) -> [f64; 3] {
-    let [x, y, z, w] = q;
-    // v + 2w(u × v) + 2u × (u × v), u the vector part.
-    let t = [
-        2.0 * (y * v[2] - z * v[1]),
-        2.0 * (z * v[0] - x * v[2]),
-        2.0 * (x * v[1] - y * v[0]),
-    ];
-    [
-        v[0] + w * t[0] + (y * t[2] - z * t[1]),
-        v[1] + w * t[1] + (z * t[0] - x * t[2]),
-        v[2] + w * t[2] + (x * t[1] - y * t[0]),
-    ]
+    quat::about_axis([r[0] / len, r[1] / len, r[2] / len], r[3])
 }
 
 /// The turn from -Z, where glTF lights and cameras point, to `d`; `None` for none or no

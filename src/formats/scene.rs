@@ -21,6 +21,7 @@ use crate::document::{self, Accessor, Builder, Document, Keep, Limits, Part, Sam
 use crate::images::Source;
 use crate::mesh::Material;
 use crate::num::{f32_of, u32_of};
+use crate::quat::{self, normalize};
 use crate::source::SourceInfo;
 
 pub(crate) use crate::mesh::MAX_INFLUENCES;
@@ -183,12 +184,8 @@ pub(crate) struct Scene {
     pub facts: Map<String, Value>,
 }
 
-/// A 4×4 matrix, column-major.
-pub(crate) type M4 = [f64; 16];
-
-pub(crate) const IDENTITY: M4 = [
-    1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
-];
+/// 4×4 matrices, column-major.
+pub(crate) use super::xform::col::{IDENTITY, M4, mul};
 
 impl Scene {
     /// Adds a node; returns its index.
@@ -349,8 +346,8 @@ impl Scene {
             if !root || n.skin.is_some() {
                 continue;
             }
-            n.translation = rotate(qd, n.translation.map(f64::from)).map(f32_of);
-            n.rotation = normalize(quat_mul(qd, n.rotation.map(f64::from)));
+            n.translation = quat::rotate(qd, n.translation.map(f64::from)).map(f32_of);
+            n.rotation = normalize(quat::mul(qd, n.rotation.map(f64::from)));
         }
         for a in &mut self.animations {
             for c in &mut a.channels {
@@ -359,11 +356,11 @@ impl Scene {
                 }
                 match c.path {
                     Path::Translation => c.values.chunks_exact_mut(3).for_each(|k| {
-                        let r = rotate(qd, [k[0], k[1], k[2]].map(f64::from)).map(f32_of);
+                        let r = quat::rotate(qd, [k[0], k[1], k[2]].map(f64::from)).map(f32_of);
                         k.copy_from_slice(&r);
                     }),
                     Path::Rotation => c.values.chunks_exact_mut(4).for_each(|k| {
-                        let r = normalize(quat_mul(qd, [k[0], k[1], k[2], k[3]].map(f64::from)));
+                        let r = normalize(quat::mul(qd, [k[0], k[1], k[2], k[3]].map(f64::from)));
                         k.copy_from_slice(&r);
                     }),
                     Path::Scale | Path::Weights => {}
@@ -1241,48 +1238,6 @@ fn fix_normals(normals: &mut [[f32; 3]], positions: &[[f32; 3]], indices: &[u32]
 
 // Math, in double precision.
 
-/// The Hamilton product `a·b` of quaternions `[x, y, z, w]`: rotating by `b`, then by `a`.
-pub(crate) fn quat_mul(a: [f64; 4], b: [f64; 4]) -> [f64; 4] {
-    let [ax, ay, az, aw] = a;
-    let [bx, by, bz, bw] = b;
-    [
-        aw * bx + ax * bw + ay * bz - az * by,
-        aw * by - ax * bz + ay * bw + az * bx,
-        aw * bz + ax * by - ay * bx + az * bw,
-        aw * bw - ax * bx - ay * by - az * bz,
-    ]
-}
-
-/// `q` at unit length, in single precision; the identity for a zero or broken one.
-pub(crate) fn normalize(q: [f64; 4]) -> [f32; 4] {
-    let l = q.iter().map(|c| c * c).sum::<f64>().sqrt();
-    if l > 0.0 && l.is_finite() {
-        q.map(|c| f32_of(c / l))
-    } else {
-        [0.0, 0.0, 0.0, 1.0]
-    }
-}
-
-/// The rotation by `radians` about axis `axis` (0, 1 or 2 for X, Y or Z).
-pub(crate) fn about(axis: usize, radians: f64) -> [f64; 4] {
-    let (s, c) = (radians * 0.5).sin_cos();
-    let mut q = [0.0, 0.0, 0.0, c];
-    q[axis] = s;
-    q
-}
-
-/// `v` rotated by unit quaternion `q`.
-pub(crate) fn rotate(q: [f64; 4], v: [f64; 3]) -> [f64; 3] {
-    let [x, y, z, w] = q;
-    let [a, b, c] = v;
-    let t = [2.0 * (y * c - z * b), 2.0 * (z * a - x * c), 2.0 * (x * b - y * a)];
-    [
-        a + w * t[0] + (y * t[2] - z * t[1]),
-        b + w * t[1] + (z * t[0] - x * t[2]),
-        c + w * t[2] + (x * t[1] - y * t[0]),
-    ]
-}
-
 /// The quaternion mirrored through the XY plane: the same turn seen in a Z-negated world.
 pub(crate) fn mirror_quat(q: [f32; 4]) -> [f32; 4] {
     [-q[0], -q[1], q[2], q[3]]
@@ -1302,20 +1257,9 @@ pub(crate) fn mirror_matrix(m: &M4) -> M4 {
     out
 }
 
-/// `a·b`.
-pub(crate) fn mul(a: &M4, b: &M4) -> M4 {
-    let mut out = [0.0; 16];
-    for c in 0..4 {
-        for r in 0..4 {
-            out[c * 4 + r] = (0..4).map(|k| a[k * 4 + r] * b[c * 4 + k]).sum();
-        }
-    }
-    out
-}
-
 /// The transform of translation `t`, rotation `q` and scale `s`.
 pub(crate) fn trs(t: [f32; 3], q: [f32; 4], s: [f32; 3]) -> M4 {
-    let r = quat_matrix(q.map(f64::from));
+    let r = quat::matrix(q.map(f64::from));
     let s = s.map(f64::from);
     let mut m = IDENTITY;
     for c in 0..3 {
@@ -1327,67 +1271,6 @@ pub(crate) fn trs(t: [f32; 3], q: [f32; 4], s: [f32; 3]) -> M4 {
     m[13] = f64::from(t[1]);
     m[14] = f64::from(t[2]);
     m
-}
-
-/// The 3×3 rotation of unit quaternion `q`, column-major.
-pub(crate) fn quat_matrix(q: [f64; 4]) -> [f64; 9] {
-    let [x, y, z, w] = q;
-    [
-        1.0 - 2.0 * (y * y + z * z),
-        2.0 * (x * y + z * w),
-        2.0 * (x * z - y * w),
-        2.0 * (x * y - z * w),
-        1.0 - 2.0 * (x * x + z * z),
-        2.0 * (y * z + x * w),
-        2.0 * (x * z + y * w),
-        2.0 * (y * z - x * w),
-        1.0 - 2.0 * (x * x + y * y),
-    ]
-}
-
-/// The quaternion of a 3×3 rotation, column-major.
-pub(crate) fn matrix_quat(m: &[f64; 9]) -> [f64; 4] {
-    let at = |r: usize, c: usize| m[c * 3 + r];
-    let trace = at(0, 0) + at(1, 1) + at(2, 2);
-    let q = if trace > 0.0 {
-        let s = (trace + 1.0).sqrt() * 2.0;
-        [
-            (at(2, 1) - at(1, 2)) / s,
-            (at(0, 2) - at(2, 0)) / s,
-            (at(1, 0) - at(0, 1)) / s,
-            0.25 * s,
-        ]
-    } else if at(0, 0) > at(1, 1) && at(0, 0) > at(2, 2) {
-        let s = (1.0 + at(0, 0) - at(1, 1) - at(2, 2)).sqrt() * 2.0;
-        [
-            0.25 * s,
-            (at(0, 1) + at(1, 0)) / s,
-            (at(0, 2) + at(2, 0)) / s,
-            (at(2, 1) - at(1, 2)) / s,
-        ]
-    } else if at(1, 1) > at(2, 2) {
-        let s = (1.0 + at(1, 1) - at(0, 0) - at(2, 2)).sqrt() * 2.0;
-        [
-            (at(0, 1) + at(1, 0)) / s,
-            0.25 * s,
-            (at(1, 2) + at(2, 1)) / s,
-            (at(0, 2) - at(2, 0)) / s,
-        ]
-    } else {
-        let s = (1.0 + at(2, 2) - at(0, 0) - at(1, 1)).sqrt() * 2.0;
-        [
-            (at(0, 2) + at(2, 0)) / s,
-            (at(1, 2) + at(2, 1)) / s,
-            0.25 * s,
-            (at(1, 0) - at(0, 1)) / s,
-        ]
-    };
-    let l = q.iter().map(|c| c * c).sum::<f64>().sqrt();
-    if l > 0.0 && l.is_finite() {
-        q.map(|c| c / l)
-    } else {
-        [0.0, 0.0, 0.0, 1.0]
-    }
 }
 
 /// A transform split into translation, rotation and scale. A mirroring transform takes a negative X scale; shear is
@@ -1410,7 +1293,7 @@ pub(crate) fn decompose(m: &M4) -> ([f32; 3], [f32; 4], [f32; 3]) {
             r[c * 3 + row] = v[row] / k;
         }
     }
-    let q = matrix_quat(&r);
+    let q = quat::from_matrix(&r);
     (t, normalize(q), s.map(f32_of))
 }
 

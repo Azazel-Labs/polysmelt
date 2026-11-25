@@ -28,6 +28,7 @@ use crate::Result;
 use crate::assets::Assets;
 use crate::document::{Document, Keep};
 use crate::mesh::{Material, srgb_to_linear};
+use crate::quat;
 use crate::source::{Axis, Fact, Handedness};
 
 pub(crate) fn load(input: super::Input<'_>, ext: &str, _assets: &dyn Assets, keep: Keep) -> Result<Document> {
@@ -616,7 +617,7 @@ fn toward(dir: [f64; 3]) -> [f32; 4] {
         from[2] * d[0] - from[0] * d[2],
         from[0] * d[1] - from[1] * d[0],
     ];
-    scene::normalize([c[0], c[1], c[2], 1.0 + dot])
+    quat::normalize([c[0], c[1], c[2], 1.0 + dot])
 }
 
 #[cfg(test)]
@@ -678,7 +679,7 @@ mod tests {
             .iter()
             .map(|v| v.as_f64().unwrap())
             .collect::<Vec<_>>();
-        let d = scene::rotate([q[0], q[1], q[2], q[3]], [0.0, 0.0, -1.0]);
+        let d = quat::rotate([q[0], q[1], q[2], q[3]], [0.0, 0.0, -1.0]);
         assert!((d[1] + 1.0).abs() < 1e-6, "{d:?}");
         // Object a: +Z forward along +X, so local +X (up × forward) points to -Z; scaled 2, at z = 10.
         let a = j["nodes"]
@@ -693,7 +694,7 @@ mod tests {
             .iter()
             .map(|v| v.as_f64().unwrap())
             .collect::<Vec<_>>();
-        let x = scene::rotate([q[0], q[1], q[2], q[3]], [1.0, 0.0, 0.0]);
+        let x = quat::rotate([q[0], q[1], q[2], q[3]], [1.0, 0.0, 0.0]);
         assert!((x[2] + 1.0).abs() < 1e-6, "{x:?}");
         assert_eq!(a["scale"][0], 2.0);
         assert_eq!(j["asset"]["extras"]["source"]["backgroundColor"][0], 1.0);
