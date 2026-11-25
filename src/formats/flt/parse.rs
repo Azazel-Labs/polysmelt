@@ -8,6 +8,7 @@ use std::borrow::Cow;
 use serde_json::{Map, Value, json};
 
 use crate::Result;
+use crate::bytes::array_at as arr;
 use crate::mesh::FastMap;
 use crate::num::u32_of;
 
@@ -93,11 +94,6 @@ const G_BACKWARD: u32 = 0x8000_0000 >> 6;
 
 /// The most levels push records nest; deeper ones are read as if at this level.
 const MAX_LEVELS: usize = 4096;
-
-#[inline]
-fn arr<const N: usize>(d: &[u8], at: usize) -> Option<[u8; N]> {
-    d.get(at..at.checked_add(N)?)?.try_into().ok()
-}
 
 #[inline]
 pub(super) fn u8_at(d: &[u8], at: usize) -> u8 {

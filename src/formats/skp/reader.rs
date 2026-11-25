@@ -1,5 +1,6 @@
 //! Bounds-checked little-endian reads, so malformed files fail with an error rather than a panic.
 
+pub(crate) use crate::bytes::{f64_at, u16_at, u32_at};
 use crate::{Context, ErrorKind, Result};
 
 /// The three bytes that open every length-prefixed UTF-16 string in a `SketchUp` file.
@@ -103,23 +104,6 @@ pub(crate) fn decode_utf16le(bytes: &[u8]) -> String {
     char::decode_utf16(units)
         .map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER))
         .collect()
-}
-
-pub(crate) fn u16_at(d: &[u8], at: usize) -> Option<u16> {
-    let b = d.get(at..at.checked_add(2)?)?;
-    Some(u16::from_le_bytes([b[0], b[1]]))
-}
-
-pub(crate) fn u32_at(d: &[u8], at: usize) -> Option<u32> {
-    let b = d.get(at..at.checked_add(4)?)?;
-    Some(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-}
-
-pub(crate) fn f64_at(d: &[u8], at: usize) -> Option<f64> {
-    let b = d.get(at..at.checked_add(8)?)?;
-    let mut a = [0; 8];
-    a.copy_from_slice(b);
-    Some(f64::from_le_bytes(a))
 }
 
 pub(crate) fn marker_at(d: &[u8], at: usize) -> bool {

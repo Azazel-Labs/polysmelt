@@ -23,6 +23,7 @@ use serde_json::{Map, Value, json};
 
 use super::Input;
 use super::stream;
+use crate::bytes::Bin;
 use crate::document::Document;
 use crate::mesh::{FastMap, GRAY, Material, Prim, smooth_normals, srgb_to_linear, triangulate};
 use crate::num::u32_of;
@@ -386,17 +387,18 @@ fn face(m: &mut Model, corners: &[u32], color: Option<[f32; 4]>, pts: &mut Vec<[
 
 /// The binary body, from `at`: big-endian counts, vertices and faces.
 fn binary(d: &[u8], at: usize, mut layout: Layout, limit: usize, m: &mut Model) -> Result<()> {
-    let mut r = Be { d, at };
+    let mut r = Bin::be(d, "OFF");
+    r.at = at;
     if layout.dim == 0 {
-        let n = r.int().context(ErrorKind::Corrupt, "OFF dimension missing")?;
+        let n = r.i32().ok().context(ErrorKind::Corrupt, "OFF dimension missing")?;
         ensure!((1..=32).contains(&n), Unsupported, "OFF dimension {n} is out of range");
         layout.dim = usize::try_from(n).context(ErrorKind::Unsupported, "OFF dimension is out of range")?;
     }
-    let nv = usize::try_from(r.int().context(ErrorKind::Corrupt, "OFF counts missing")?)
+    let nv = usize::try_from(r.i32().ok().context(ErrorKind::Corrupt, "OFF counts missing")?)
         .context(ErrorKind::Corrupt, "OFF counts are negative")?;
-    let nf = usize::try_from(r.int().context(ErrorKind::Corrupt, "OFF counts missing")?)
+    let nf = usize::try_from(r.i32().ok().context(ErrorKind::Corrupt, "OFF counts missing")?)
         .context(ErrorKind::Corrupt, "OFF counts are negative")?;
-    r.int().context(ErrorKind::Corrupt, "OFF counts missing")?;
+    r.i32().ok().context(ErrorKind::Corrupt, "OFF counts missing")?;
     let floats = layout.dim
         + usize::from(layout.homogeneous)
         + if layout.normal { layout.dim } else { 0 }
@@ -410,7 +412,7 @@ fn binary(d: &[u8], at: usize, mut layout: Layout, limit: usize, m: &mut Model) 
     let mut vals = vec![0f32; floats];
     for _ in 0..nv.min(room) {
         for v in &mut vals {
-            *v = r.float().unwrap_or(0.0);
+            *v = r.f32().unwrap_or(0.0);
         }
         // The binary color is four floats between the normal and the texture coordinates.
         let dim = layout.dim + usize::from(layout.homogeneous);
@@ -445,7 +447,7 @@ fn binary(d: &[u8], at: usize, mut layout: Layout, limit: usize, m: &mut Model) 
         if m.short {
             break;
         }
-        let Some(count) = r.int() else {
+        let Some(count) = r.i32().ok() else {
             m.short = true;
             break;
         };
@@ -457,18 +459,18 @@ fn binary(d: &[u8], at: usize, mut layout: Layout, limit: usize, m: &mut Model) 
         corners.clear();
         let mut ok = true;
         for _ in 0..count {
-            match r.int().and_then(|i| u32::try_from(i).ok()) {
+            match r.i32().ok().and_then(|i| u32::try_from(i).ok()) {
                 Some(i) if (i as usize) < m.positions.len() => corners.push(i),
                 _ => ok = false,
             }
         }
-        let Some(nc) = r.int() else {
+        let Some(nc) = r.i32().ok() else {
             m.short = true;
             break;
         };
         let mut col = [0f32; 4];
         for k in 0..usize::try_from(nc).unwrap_or(0).min(16) {
-            let v = r.float().unwrap_or(0.0);
+            let v = r.f32().unwrap_or(0.0);
             if let Some(c) = col.get_mut(k) {
                 *c = v;
             }
@@ -650,28 +652,6 @@ impl<'a> Cursor<'a> {
             i += 1;
         }
         self.at = i;
-    }
-}
-
-/// Big-endian binary read from `at`.
-struct Be<'a> {
-    d: &'a [u8],
-    at: usize,
-}
-
-impl Be<'_> {
-    fn word(&mut self) -> Option<[u8; 4]> {
-        let w = self.d.get(self.at..self.at.checked_add(4)?)?.try_into().ok()?;
-        self.at += 4;
-        Some(w)
-    }
-
-    fn int(&mut self) -> Option<i32> {
-        self.word().map(i32::from_be_bytes)
-    }
-
-    fn float(&mut self) -> Option<f32> {
-        self.word().map(f32::from_be_bytes)
     }
 }
 
