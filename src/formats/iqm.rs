@@ -60,6 +60,9 @@ const DEFAULT_RATE: f32 = 24.0;
 /// The most pose values (frames times joints) decoded.
 const MAX_POSE_FRAMES: usize = 1 << 22;
 
+/// The most pose values decoded when the frames animate nothing: then the file holds no frame data to back them.
+const MAX_STILL_POSE_FRAMES: usize = 1 << 16;
+
 /// The header's size.
 const HEADER: usize = 124;
 
@@ -422,6 +425,12 @@ fn parse(data: &[u8], frames: bool) -> Result<File> {
                 .is_some_and(|n| n <= MAX_POSE_FRAMES),
             LimitExceeded,
             "IQM file has {num_frames} frames of {} joints, more than can be read",
+            poses.len()
+        );
+        ensure!(
+            channels > 0 || num_frames * poses.len() <= MAX_STILL_POSE_FRAMES,
+            LimitExceeded,
+            "IQM file has {num_frames} frames of {} joints that animate nothing, more than are read",
             poses.len()
         );
         b.seek(usize_of(ofs_frames))?;
@@ -844,5 +853,26 @@ mod tests {
         assert_eq!(info.up_axis, Fact::Assumed(Axis::PosZ));
         assert_eq!(info.meters_per_unit, Fact::Unknown);
         assert!(info.converted.up_axis);
+    }
+
+    #[test]
+    fn frames_that_animate_nothing_are_not_made_from_nothing() {
+        let mut bytes = include_bytes!("../../tests/corpus/iqm/skinned_animated/rig.iqm").to_vec();
+        let get = |b: &[u8], field: usize| u32::from_le_bytes(b[16 + 4 * field..20 + 4 * field].try_into().unwrap());
+        let set =
+            |b: &mut Vec<u8>, field: usize, v: u32| b[16 + 4 * field..20 + 4 * field].copy_from_slice(&v.to_le_bytes());
+        // Every pose's channel mask cleared, so the frames hold nothing.
+        let (poses, at) = (get(&bytes, 15) as usize, get(&bytes, 16) as usize);
+        for p in 0..poses {
+            bytes[at + 88 * p + 4..at + 88 * p + 8].fill(0);
+        }
+        set(&mut bytes, 20, 0);
+        let load = |b: &[u8]| load(Input::memory(b, "rig.iqm"), &crate::assets::Memory::new(), Keep::ALL);
+        // As many frames as the poses' frames are kept: still rotations, read.
+        assert!(load(&bytes).is_ok());
+        // Within the limit on frames that are there, but each of these would be made from no data.
+        set(&mut bytes, 19, u32::try_from(MAX_POSE_FRAMES / poses).unwrap());
+        let err = load(&bytes).unwrap_err();
+        assert_eq!(err.kind(), crate::ErrorKind::LimitExceeded, "{err}");
     }
 }
