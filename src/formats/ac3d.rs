@@ -29,8 +29,9 @@ use crate::document::{Builder, Document, Keep};
 use crate::images::Images;
 use crate::material::{Alpha, Full, Tex};
 use crate::mesh::{FastMap, Prim, srgb_to_linear};
-use crate::num::u32_of;
+use crate::num::{f32_of, u32_of};
 use crate::source::{Axis, Fact, Handedness, SourceInfo};
+use crate::vec3;
 
 /// AC3D's crease angle, in degrees, for an object that gives none.
 const DEFAULT_CREASE: f32 = 61.0;
@@ -511,16 +512,8 @@ fn strip(o: &mut Obj, flags: u32, mat: u32, start: usize) {
 
 /// The normal of a polygon (Newell's method), up when it has none.
 fn face_normal(pos: &[[f32; 3]], corners: &[(u32, [f32; 2])]) -> [f32; 3] {
-    let mut n = [0.0f64; 3];
-    for (k, &(a, _)) in corners.iter().enumerate() {
-        let b = corners[(k + 1) % corners.len()].0;
-        let (p, q) = (pos[a as usize].map(f64::from), pos[b as usize].map(f64::from));
-        n[0] += (p[1] - q[1]) * (p[2] + q[2]);
-        n[1] += (p[2] - q[2]) * (p[0] + q[0]);
-        n[2] += (p[0] - q[0]) * (p[1] + q[1]);
-    }
-    #[allow(clippy::cast_possible_truncation, reason = "a direction, made unit just after")]
-    crease::unit(n.map(|c| c as f32)).unwrap_or([0.0, 1.0, 0.0])
+    let n = vec3::newell(corners.iter().map(|&(a, _)| pos[a as usize].map(f64::from)));
+    vec3::unit(n.map(f32_of)).unwrap_or([0.0, 1.0, 0.0])
 }
 
 /// A material: the AC3D material's index (or none for AC3D's default), the texture's image, and two sides.

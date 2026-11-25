@@ -8,6 +8,7 @@ use super::{Graph, NONE, idx, quat, rotate};
 use crate::Result;
 use crate::mesh::{FastMap, Prim, face_normal, smooth_normals, triangulate};
 use crate::num::{f32_of, u32_of};
+use crate::vec3::{self, cross, dot, length, sub};
 
 /// How a set's vertex normals are found.
 #[derive(Clone, Copy, PartialEq)]
@@ -474,32 +475,6 @@ fn same<const N: usize>(a: [f64; N], b: [f64; N]) -> bool {
     a == b
 }
 
-fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-
-fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
-}
-
-fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-
-fn length(a: [f64; 3]) -> f64 {
-    dot(a, a).sqrt()
-}
-
-/// `a` made one long; `None` for no length.
-fn norm(a: [f64; 3]) -> Option<[f64; 3]> {
-    let len = length(a);
-    (len > 1e-12 && len.is_finite()).then(|| a.map(|c| c / len))
-}
-
 /// The axes (X, Y, Z) of the spine-aligned cross-section plane at each spine point, as the
 /// specification computes them: Y along the spine at the point, Z square to the spine's bend
 /// there (the last bend's at a straight stretch, the first's before any), turned to keep with
@@ -530,18 +505,18 @@ fn spine_planes(spine: &[[f64; 3]]) -> Vec<[[f64; 3]; 3]> {
             (i.checked_sub(1).map(|k| points[k]), points.get(i + 1).copied())
         };
         let y = match (prev, next) {
-            (Some(p), Some(q)) => norm(sub(q, p)),
+            (Some(p), Some(q)) => vec3::unit(sub(q, p)),
             _ => None,
         };
         let step = next.map_or_else(|| sub(here, prev.unwrap_or(here)), |q| sub(q, here));
-        ys.push(y.or_else(|| norm(step)).unwrap_or([0.0, 1.0, 0.0]));
+        ys.push(y.or_else(|| vec3::unit(step)).unwrap_or([0.0, 1.0, 0.0]));
         zs.push(match (prev, next) {
             (Some(p), Some(q)) => {
                 let (a, b) = (sub(q, here), sub(p, here));
                 let c = cross(a, b);
                 // Not where the spine runs straight on.
                 if length(c) > 1e-9 * length(a) * length(b) {
-                    norm(c)
+                    vec3::unit(c)
                 } else {
                     None
                 }
@@ -559,13 +534,13 @@ fn spine_planes(spine: &[[f64; 3]]) -> Vec<[[f64; 3]; 3]> {
                 z = if dot(zi, z) < 0.0 { zi.map(|c| -c) } else { zi };
             }
             // Square to Y, as the specification's rules make it but at a straight stretch.
-            let zy = norm(sub(z, y.map(|c| c * dot(z, y)))).unwrap_or(z);
+            let zy = vec3::unit(sub(z, y.map(|c| c * dot(z, y)))).unwrap_or(z);
             out.push([cross(y, zy), y, zy]);
         }
         out
     } else {
         // A straight spine: the turn from +Y to its direction.
-        let d = norm(sub(points[1], points[0])).unwrap_or([0.0, 1.0, 0.0]);
+        let d = vec3::unit(sub(points[1], points[0])).unwrap_or([0.0, 1.0, 0.0]);
         let q = if d[1] < -1.0 + 1e-12 {
             quat([1.0, 0.0, 0.0, std::f64::consts::PI])
         } else {
@@ -1070,28 +1045,13 @@ fn crease_normals(
 }
 
 /// A polygon's unit normal by Newell's method.
-fn newell(points: impl Iterator<Item = [f32; 3]> + Clone) -> [f32; 3] {
-    let mut n = [0f32; 3];
-    let first = points.clone().next().unwrap_or([0.0; 3]);
-    let mut prev: Option<[f32; 3]> = None;
-    for q in points.chain(std::iter::once(first)) {
-        if let Some(a) = prev {
-            n[0] += (a[1] - q[1]) * (a[2] + q[2]);
-            n[1] += (a[2] - q[2]) * (a[0] + q[0]);
-            n[2] += (a[0] - q[0]) * (a[1] + q[1]);
-        }
-        prev = Some(q);
-    }
-    unit(n)
+fn newell(points: impl Iterator<Item = [f32; 3]>) -> [f32; 3] {
+    unit(vec3::newell(points))
 }
 
+/// `n` at unit length; up when it has no length or isn't finite.
 fn unit(n: [f32; 3]) -> [f32; 3] {
-    let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
-    if len > 0.0 && len.is_finite() {
-        n.map(|x| x / len)
-    } else {
-        [0.0, 1.0, 0.0]
-    }
+    vec3::unit_above(n, 0.0).unwrap_or([0.0, 1.0, 0.0])
 }
 
 /// X3D's default texture coordinates for a face set: the bounding box's longest side is `s`,

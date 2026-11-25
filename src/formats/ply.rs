@@ -40,6 +40,7 @@ use crate::images::Images;
 use crate::mesh::{FastMap, Material, Mesh, Prim, quad, smooth_normals, srgb_to_linear, triangulate};
 use crate::num::{f32_of, u32_of};
 use crate::source::SourceInfo;
+use crate::vec3;
 use crate::{Context as _, ErrorKind, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -518,12 +519,6 @@ fn splat_color(vals: &[f64], dc: [usize; 3], opacity: Option<usize>) -> [f32; 4]
 #[allow(clippy::float_cmp, reason = "the placeholder is written exactly")]
 fn is_zero(n: [f32; 3]) -> bool {
     n == [0.0; 3]
-}
-
-/// `n` made unit length; `None` for a zero or broken one, which says nothing.
-fn unit(n: [f32; 3]) -> Option<[f32; 3]> {
-    let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
-    (len > 0.0 && len.is_finite()).then(|| n.map(|c| c / len))
 }
 
 /// Where an element's properties are, and which of them the reader uses.
@@ -1211,10 +1206,11 @@ impl Floats {
         v.pos.extend(rows().map(|r| self.xyz.map(|at| f(r, at))));
         if let Some(n) = self.n {
             for r in rows() {
-                v.nrm.push(unit(n.map(|at| f(r, at))).unwrap_or_else(|| {
-                    body.zero_normals += 1;
-                    [0.0; 3]
-                }));
+                v.nrm
+                    .push(vec3::unit_above(n.map(|at| f(r, at)), 0.0).unwrap_or_else(|| {
+                        body.zero_normals += 1;
+                        [0.0; 3]
+                    }));
             }
         }
         for (col, &at) in v.extra.iter_mut().zip(&self.extra) {
@@ -1293,7 +1289,7 @@ fn vertex(cur: &mut Cursor, el: &Element, plan: &Plan, body: &mut Body) -> Got<(
     let g = |s: usize| f32_of(vals[s]);
     v.pos.push(plan.xyz.map(g));
     if let Some(n) = plan.n {
-        v.nrm.push(unit(n.map(g)).unwrap_or_else(|| {
+        v.nrm.push(vec3::unit_above(n.map(g), 0.0).unwrap_or_else(|| {
             body.zero_normals += 1;
             [0.0; 3]
         }));

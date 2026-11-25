@@ -10,7 +10,8 @@ use crate::{Context as _, ErrorKind, Result};
 use serde_json::{Value, json};
 
 use super::model::{Definition, Face, Id, Instance, Model};
-use super::triangulate::{cross, dot, newell, normalize, sub, triangulate};
+use super::triangulate::{newell, triangulate};
+use crate::vec3::{cross, dot, sub, unit};
 
 const INCH: f64 = 0.0254;
 /// More nodes than any real model has; a file that nests big instance arrays inside each other could otherwise ask
@@ -621,7 +622,7 @@ impl<'m> Writer<'m> {
 
 /// A face's unit normal: the one the file gives, or failing that its outer loop's.
 fn face_normal(face: &Face) -> Option<[f64; 3]> {
-    normalize(face.normal).or_else(|| face.loops.first().and_then(|l| newell(l)))
+    unit(face.normal).or_else(|| face.loops.first().and_then(|l| newell(l)))
 }
 
 /// The root of `x`'s set, halving the path on the way.
@@ -730,7 +731,7 @@ fn smooth_normals(faces: &[&Face]) -> Option<Vec<[f64; 3]>> {
     for c in 0..count {
         let root = find(&mut parent, c) as usize;
         let n = flat[c as usize];
-        if let Some(s) = normalize(sums[root]).filter(|s| dot(*s, n) > 0.0) {
+        if let Some(s) = unit(sums[root]).filter(|s| dot(*s, n) > 0.0) {
             flat[c as usize] = s;
         }
     }
@@ -1053,7 +1054,7 @@ mod tests {
         wall.normal = [1.0, 0.0, 0.0];
         wall.smooth = vec![true, false, false];
         let n = smooth_normals(&[&floor, &wall]).unwrap();
-        let want = normalize([1.0, 0.0, 2.0]).unwrap();
+        let want = unit([1.0, 0.0, 2.0]).unwrap();
         assert!((0..3).all(|i| (n[0][i] - want[i]).abs() < 1e-12), "{:?}", n[0]);
     }
 

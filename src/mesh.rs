@@ -25,6 +25,7 @@
 use crate::Result;
 use crate::document::Document;
 use crate::num::u32_of;
+use crate::vec3;
 
 /// The most triangles a load accepts by default, against hostile or runaway files:
 /// [`Keep::max_triangles`](crate::document::Keep::max_triangles) raises or lowers it.
@@ -494,12 +495,7 @@ pub fn smooth_normals(positions: &[[f32; 3]], indices: &[u32]) -> Vec<[f32; 3]> 
         }
     }
     for n in &mut nrm {
-        let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
-        *n = if len > 0.0 {
-            [n[0] / len, n[1] / len, n[2] / len]
-        } else {
-            [0.0, 1.0, 0.0]
-        };
+        *n = vec3::unit_or(*n, [0.0, 1.0, 0.0]);
     }
     nrm
 }
@@ -517,19 +513,7 @@ pub(crate) fn single(p: Prim) -> Mesh {
 }
 
 pub(crate) fn face_normal(a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> [f32; 3] {
-    let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
-    let v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
-    let n = [
-        u[1] * v[2] - u[2] * v[1],
-        u[2] * v[0] - u[0] * v[2],
-        u[0] * v[1] - u[1] * v[0],
-    ];
-    let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
-    if len > 0.0 {
-        [n[0] / len, n[1] / len, n[2] / len]
-    } else {
-        [0.0, 1.0, 0.0]
-    }
+    vec3::unit_or(vec3::cross(vec3::sub(b, a), vec3::sub(c, a)), [0.0, 1.0, 0.0])
 }
 
 /// Builds a primitive from triangles given as corner positions, storing each distinct point
@@ -679,11 +663,7 @@ pub(crate) fn triangulate(corners: &[[f32; 3]], out: &mut Vec<[u32; 3]>) {
         return;
     }
     // The plane's normal (Newell), then 2D coordinates along its two other axes.
-    let mut nrm = [0f64; 3];
-    for (i, a) in corners.iter().enumerate() {
-        let b = corners[if i + 1 == n { 0 } else { i + 1 }];
-        newell(&mut nrm, a.map(f64::from), b.map(f64::from));
-    }
+    let nrm = vec3::newell(corners.iter().map(|c| c.map(f64::from)));
     let axis = plane_axis(nrm);
     if nrm[axis] == 0.0 || n > 4096 {
         out.extend((1..u32_of(n) - 1).map(|k| [0, k, k + 1]));
@@ -729,14 +709,6 @@ pub(crate) fn triangulate(corners: &[[f32; 3]], out: &mut Vec<[u32; 3]>) {
     fan(out, &idx);
 }
 
-/// A step of Newell's normal: the edge from `a` to `b`.
-#[inline]
-fn newell(nrm: &mut [f64; 3], a: [f64; 3], b: [f64; 3]) {
-    nrm[0] += (a[1] - b[1]) * (a[2] + b[2]);
-    nrm[1] += (a[2] - b[2]) * (a[0] + b[0]);
-    nrm[2] += (a[0] - b[0]) * (a[1] + b[1]);
-}
-
 /// The axis a polygon with normal `nrm` faces most: the last of the largest.
 #[inline]
 fn plane_axis(nrm: [f64; 3]) -> usize {
@@ -779,10 +751,10 @@ pub(crate) fn quad(c: &[[f32; 3]; 4]) -> Option<[[u32; 3]; 2]> {
         c[3].map(f64::from),
     ];
     let mut nrm = [0f64; 3];
-    newell(&mut nrm, p[0], p[1]);
-    newell(&mut nrm, p[1], p[2]);
-    newell(&mut nrm, p[2], p[3]);
-    newell(&mut nrm, p[3], p[0]);
+    vec3::newell_edge(&mut nrm, p[0], p[1]);
+    vec3::newell_edge(&mut nrm, p[1], p[2]);
+    vec3::newell_edge(&mut nrm, p[2], p[3]);
+    vec3::newell_edge(&mut nrm, p[3], p[0]);
     let axis = plane_axis(nrm);
     if nrm[axis] == 0.0 {
         return Some(FAN);

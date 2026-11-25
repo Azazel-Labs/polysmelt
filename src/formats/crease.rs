@@ -1,6 +1,8 @@
 //! Normals smoothed across the polygons that meet at a point, up to a crease angle: for formats that store a
 //! smoothing angle rather than normals.
 
+use crate::vec3::{dot, unit};
+
 /// The most polygons around one point that are compared. The corners of a point shared by more stay flat, so a
 /// hostile file can't cost the square of its size.
 const MAX_AROUND: usize = 512;
@@ -72,16 +74,6 @@ pub(crate) fn corner_normals(
         }
     }
     out
-}
-
-fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-
-/// `v` scaled to length one, or `None` when it has none.
-pub(crate) fn unit(v: [f32; 3]) -> Option<[f32; 3]> {
-    let len = dot(v, v).sqrt();
-    (len > 1e-20 && len.is_finite()).then(|| [v[0] / len, v[1] / len, v[2] / len])
 }
 
 #[cfg(test)]

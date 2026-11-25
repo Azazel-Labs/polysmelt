@@ -50,6 +50,7 @@ use crate::document::{Builder, Document};
 use crate::mesh::{FastMap, Material, Prim, srgb_to_linear, triangulate};
 use crate::num::{f32_of, u32_of};
 use crate::source::{Axis, Fact, Handedness, SourceInfo};
+use crate::vec3::{self, cross};
 
 /// What a binary DXF file starts with.
 const SENTINEL: &[u8] = b"AutoCAD Binary DXF\r\n\x1a\0";
@@ -1682,18 +1683,7 @@ fn segments(sweep: f64, step: f64) -> usize {
 
 /// The object coordinate system's axes for an extrusion (the arbitrary axis algorithm).
 fn axes(extrusion: [f64; 3]) -> [[f64; 3]; 3] {
-    let unit = |v: [f64; 3]| {
-        let n = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
-        (n > 1e-12 && n.is_finite()).then(|| v.map(|x| x / n))
-    };
-    let cross = |a: [f64; 3], b: [f64; 3]| {
-        [
-            a[1] * b[2] - a[2] * b[1],
-            a[2] * b[0] - a[0] * b[2],
-            a[0] * b[1] - a[1] * b[0],
-        ]
-    };
-    let Some(n) = unit(extrusion) else {
+    let Some(n) = vec3::unit(extrusion) else {
         return [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
     };
     let ax = if n[0].abs() < 1.0 / 64.0 && n[1].abs() < 1.0 / 64.0 {
@@ -1701,8 +1691,8 @@ fn axes(extrusion: [f64; 3]) -> [[f64; 3]; 3] {
     } else {
         cross([0.0, 0.0, 1.0], n)
     };
-    let ax = unit(ax).unwrap_or([1.0, 0.0, 0.0]);
-    let ay = unit(cross(n, ax)).unwrap_or([0.0, 1.0, 0.0]);
+    let ax = vec3::unit(ax).unwrap_or([1.0, 0.0, 0.0]);
+    let ay = vec3::unit(cross(n, ax)).unwrap_or([0.0, 1.0, 0.0]);
     [ax, ay, n]
 }
 

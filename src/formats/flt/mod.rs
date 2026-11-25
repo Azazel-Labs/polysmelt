@@ -48,6 +48,7 @@ use crate::material::{Alpha, Full, Tex};
 use crate::mesh::{FastMap, Image, Prim, srgb_to_linear};
 use crate::num::{f32_of, u32_of};
 use crate::source::{Axis, Converted, Fact, Handedness, SourceInfo};
+use crate::vec3::{self, cross, dot, sub, unit};
 use parse::{Db, F_HIDDEN, F_PACKED, Face, Kind, Shape, V_INDEX, V_NORMAL, V_PACKED, V_UV};
 
 /// The most glTF nodes a scene expands to (instances and references multiply them).
@@ -796,27 +797,6 @@ fn from_to(a: [f64; 3], b: [f64; 3]) -> [f64; 4] {
     q.map(|v| v / l)
 }
 
-fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-
-fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
-}
-
-fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-
-fn unit(v: [f64; 3]) -> Option<[f64; 3]> {
-    let l = dot(v, v).sqrt();
-    (l > 1e-12 && l.is_finite()).then(|| v.map(|c| c / l))
-}
-
 /// A node's own placement: its degree of freedom at its current values, under its matrix
 /// record (for a replicated copy, the matrix raised to the power `copy - 1`).
 fn local_matrix(n: &parse::Node, copy: u16) -> [f64; 16] {
@@ -1141,15 +1121,7 @@ fn texture_image(c: &mut Ctx<'_>, file: u32, index: i16) -> Option<Found> {
 
 /// Newell's normal of a polygon, unit length; `None` when it has no area.
 fn face_normal(db: &Db, corners: &[u32]) -> Option<[f64; 3]> {
-    let mut n = [0.0; 3];
-    for (k, &a) in corners.iter().enumerate() {
-        let p = db.verts[a as usize].pos;
-        let q = db.verts[corners[(k + 1) % corners.len()] as usize].pos;
-        n[0] += (p[1] - q[1]) * (p[2] + q[2]);
-        n[1] += (p[2] - q[2]) * (p[0] + q[0]);
-        n[2] += (p[0] - q[0]) * (p[1] + q[1]);
-    }
-    unit(n)
+    unit(vec3::newell(corners.iter().map(|&a| db.verts[a as usize].pos)))
 }
 
 /// A node's faces as a mesh, a primitive per material.
