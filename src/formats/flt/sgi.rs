@@ -4,8 +4,7 @@
 //! An SGI image is a 512-byte big-endian header, then each channel's rows, bottom row first:
 //! stored as they are, or run-length encoded with a table of where each row starts.
 
-/// The most pixels an image may have.
-const MAX_PIXELS: usize = 1 << 26;
+use crate::images::{FREE, MAX_PIXELS};
 
 /// Whether `name` is an SGI image by its extension.
 pub(super) fn is_sgi_name(name: &str) -> bool {
@@ -38,6 +37,18 @@ pub(super) fn decode(b: &[u8]) -> Option<(u32, u32, usize, Vec<u8>)> {
     }
     let channels = zsize.min(4);
     if w == 0 || h == 0 || channels == 0 || w * h > MAX_PIXELS {
+        return None;
+    }
+    // A big image is decoded only when the file holds data for it: half its samples stored, or runs that could
+    // make them all (a run is 127 samples at most, from two samples' bytes).
+    let samples = w * h * channels;
+    let data = b.len() - 512;
+    let most = if rle {
+        data.saturating_mul(127) / (2 * bpc)
+    } else {
+        data.saturating_mul(2) / bpc
+    };
+    if samples > FREE && samples > most {
         return None;
     }
     let mut out = vec![0u8; w * h * channels];
@@ -289,6 +300,38 @@ mod tests {
             let png = png(w, h, channels, &px).unwrap();
             assert!(png.starts_with(b"\x89PNG"));
         }
+    }
+
+    #[test]
+    fn a_huge_image_needs_its_data() {
+        // A bare header claiming 8192 by 8192 RGBA: 256 MB from 512 bytes, refused whether stored or run-length
+        // encoded (with a row table that lists every row as the same run).
+        let header = |rle: bool, side: u16| {
+            let mut b = vec![0u8; 512];
+            b[0..2].copy_from_slice(&474u16.to_be_bytes());
+            b[2] = u8::from(rle);
+            b[3] = 1;
+            b[4..6].copy_from_slice(&3u16.to_be_bytes());
+            b[6..8].copy_from_slice(&side.to_be_bytes());
+            b[8..10].copy_from_slice(&side.to_be_bytes());
+            b[10..12].copy_from_slice(&4u16.to_be_bytes());
+            b
+        };
+        assert!(decode(&header(false, 8192)).is_none());
+        let mut rle = header(true, 8192);
+        let rows = 8192 * 4;
+        let run = u32::try_from(512 + rows * 8).unwrap();
+        for _ in 0..rows {
+            rle.extend_from_slice(&run.to_be_bytes());
+        }
+        for _ in 0..rows {
+            rle.extend_from_slice(&2u32.to_be_bytes());
+        }
+        rle.extend_from_slice(&[0x7F, 0xFF]);
+        assert!(decode(&rle).is_none());
+        // A small one is padded as before.
+        let (w, h, c, px) = decode(&header(false, 64)).unwrap();
+        assert_eq!((w, h, c, px.len()), (64, 64, 4, 64 * 64 * 4));
     }
 
     #[test]
