@@ -444,7 +444,17 @@ pub(crate) fn reference(name: &[u8]) -> Option<char> {
         [b'#', dec @ ..] => (dec, 10),
         _ => return None,
     };
-    let code = u32::from_str_radix(std::str::from_utf8(digits).ok()?, radix).ok()?;
+    if digits.is_empty() {
+        return None;
+    }
+    let mut code = 0u32;
+    for &c in digits {
+        let d = u32::from(hex_digit(c)?);
+        if d >= radix {
+            return None;
+        }
+        code = code.checked_mul(radix)?.checked_add(d)?;
+    }
     char::from_u32(code)
 }
 
@@ -463,25 +473,38 @@ pub(crate) fn push_reference(name: &[u8], out: &mut Vec<u8>) {
 /// Text or an attribute value with its references decoded, borrowed when it has none. An `&` that starts no
 /// reference [`reference`] knows stays as it is.
 pub(crate) fn unescape_bytes(s: &[u8]) -> Cow<'_, [u8]> {
-    if !s.contains(&b'&') {
+    let Some(first) = memchr(b'&', s) else {
         return Cow::Borrowed(s);
-    }
+    };
     let mut out = Vec::with_capacity(s.len());
-    let mut rest = s;
-    while let Some(p) = memchr(b'&', rest) {
+    out.extend_from_slice(&s[..first]);
+    let mut rest = &s[first + 1..];
+    loop {
+        // Only `#` and the first letters of the five names can start a reference, so a stray `&` costs one look.
+        let found = match rest.first() {
+            Some(b'#' | b'l' | b'g' | b'a' | b'q') => rest
+                .iter()
+                .take(MAX_REFERENCE + 1)
+                .position(|&c| c == b';')
+                .and_then(|n| Some((reference(&rest[..n])?, n))),
+            _ => None,
+        };
+        match found {
+            Some((c, n)) => {
+                if let Ok(b) = u8::try_from(c)
+                    && b.is_ascii()
+                {
+                    out.push(b);
+                } else {
+                    out.extend_from_slice(c.encode_utf8(&mut [0; 4]).as_bytes());
+                }
+                rest = &rest[n + 1..];
+            }
+            None => out.push(b'&'),
+        }
+        let Some(p) = memchr(b'&', rest) else { break };
         out.extend_from_slice(&rest[..p]);
         rest = &rest[p + 1..];
-        let found = rest
-            .iter()
-            .take(MAX_REFERENCE + 1)
-            .position(|&c| c == b';')
-            .and_then(|n| Some((reference(&rest[..n])?, n)));
-        if let Some((c, n)) = found {
-            out.extend_from_slice(c.encode_utf8(&mut [0; 4]).as_bytes());
-            rest = &rest[n + 1..];
-        } else {
-            out.push(b'&');
-        }
     }
     out.extend_from_slice(rest);
     Cow::Owned(out)
@@ -773,6 +796,8 @@ mod tests {
             "#X",
             "#-1",
             "#x-1",
+            "#+65",
+            "#x+41",
             "# 65",
             "#6 5",
             "#x41g",
