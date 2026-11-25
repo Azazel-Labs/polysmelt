@@ -28,7 +28,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::{BufReader, Read};
 
 use super::stream::{self, f32_from};
-use super::xml::{attr_string as attr, each_attr, hex_digit, push_reference};
+use super::xml::{attr_string as attr, each_attr, hex_digit, push_reference, unescape_lossy};
 use crate::document::{Builder, Document, Keep};
 use crate::images::{Images, Location};
 use crate::source::{Axis, Fact, Handedness, SourceInfo};
@@ -1340,9 +1340,9 @@ fn parse_part(r: impl Read, triangles: &mut usize, limit: usize) -> Result<Part>
                     b"id" => id = num(v),
                     b"pid" => o.pid = num(v),
                     b"pindex" => o.pindex = num(v),
-                    b"name" => o.name = Some(String::from_utf8_lossy(v).into_owned()),
-                    b"type" => o.kind = Some(String::from_utf8_lossy(v).into_owned()),
-                    b"partnumber" => o.partnumber = Some(String::from_utf8_lossy(v).into_owned()),
+                    b"name" => o.name = Some(unescape_lossy(v).into_owned()),
+                    b"type" => o.kind = Some(unescape_lossy(v).into_owned()),
+                    b"partnumber" => o.partnumber = Some(unescape_lossy(v).into_owned()),
                     _ => {}
                 });
                 if let Some(id) = id {
@@ -1518,7 +1518,7 @@ fn parse_part(r: impl Read, triangles: &mut usize, limit: usize) -> Result<Part>
                     each_attr(&e, |k, v| match k {
                         b"objectid" => c.id = num(v).unwrap_or(u32::MAX),
                         b"transform" => c.transform = transform(v),
-                        b"path" => c.path = Some(String::from_utf8_lossy(v).into_owned()),
+                        b"path" => c.path = Some(unescape_lossy(v).into_owned()),
                         _ => {}
                     });
                     o.components.push(c);
@@ -1666,8 +1666,8 @@ fn parse_part(r: impl Read, triangles: &mut usize, limit: usize) -> Result<Part>
                 each_attr(&e, |k, v| match k {
                     b"objectid" => id = num(v),
                     b"transform" => transform_ = transform(v),
-                    b"path" => path = Some(String::from_utf8_lossy(v).into_owned()),
-                    b"partnumber" => partnumber = Some(String::from_utf8_lossy(v).into_owned()),
+                    b"path" => path = Some(unescape_lossy(v).into_owned()),
+                    b"partnumber" => partnumber = Some(unescape_lossy(v).into_owned()),
                     _ => {}
                 });
                 if let Some(id) = id {

@@ -555,11 +555,12 @@ pub(crate) fn attrs<'e>(
     })
 }
 
-/// Calls `f` with each of a tag's [`attrs`], its value's references decoded.
+/// Calls `f` with each of a tag's [`attrs`], its value as written: for the hot paths of numbers and keywords,
+/// where a reference would be no number anyway. Text goes through [`unescape_lossy`].
 #[cfg(any(feature = "x3d", feature = "amf", feature = "3mf"))]
 pub(crate) fn each_attr(e: &quick_xml::events::BytesStart<'_>, mut f: impl FnMut(&[u8], &[u8])) {
     for (k, v) in attrs(e) {
-        f(k, &unescape_bytes(&v));
+        f(k, &v);
     }
 }
 
@@ -853,7 +854,7 @@ mod tests {
         assert_eq!(attr(&e, b"d"), None);
         let mut seen = Vec::new();
         each_attr(&e, |k, v| seen.push((k.to_vec(), v.to_vec())));
-        assert_eq!(seen[0], (b"a".to_vec(), b"1 & 2".to_vec()));
+        assert_eq!(seen[0], (b"a".to_vec(), b"1 &amp; 2".to_vec()));
     }
 
     #[test]
