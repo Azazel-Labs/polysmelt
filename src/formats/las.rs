@@ -25,6 +25,7 @@ use serde_json::{Map, Value, json};
 use super::Input;
 use super::dates;
 use super::points::{self, Cloud, Column};
+use crate::bytes;
 use crate::document::{Document, Keep};
 use crate::keep::spawn;
 use crate::num::{f32_of, usize_of};
@@ -160,29 +161,31 @@ struct Header {
     evlrs: u32,
 }
 
+// The values at a byte offset, 0 where the bytes end first.
 fn u16_at(b: &[u8], at: usize) -> u16 {
-    b.get(at..at + 2).map_or(0, |s| u16::from_le_bytes([s[0], s[1]]))
+    bytes::u16_at(b, at).unwrap_or(0)
 }
 
 fn u32_at(b: &[u8], at: usize) -> u32 {
-    b.get(at..at + 4)
-        .map_or(0, |s| u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
+    bytes::u32_at(b, at).unwrap_or(0)
 }
 
 fn u64_at(b: &[u8], at: usize) -> u64 {
-    b.get(at..at + 8)
-        .and_then(|s| s.try_into().ok())
-        .map_or(0, u64::from_le_bytes)
+    bytes::u64_at(b, at).unwrap_or(0)
 }
 
 fn f64_at(b: &[u8], at: usize) -> f64 {
-    f64::from_bits(u64_at(b, at))
+    bytes::f64_at(b, at).unwrap_or(0.0)
 }
 
 /// A fixed-size text field: up to its first NUL, trimmed.
 fn text(b: &[u8]) -> String {
-    let end = b.iter().position(|&c| c == 0).unwrap_or(b.len());
-    String::from_utf8_lossy(&b[..end]).trim().to_string()
+    String::from_utf8_lossy(bytes::until_nul(b)).trim().to_string()
+}
+
+/// Where job `job`'s records start, or `None` past what a file can hold.
+fn job_start(h: &Header, job: Job) -> Option<u64> {
+    job.first.checked_mul(h.record as u64)?.checked_add(h.data_offset)
 }
 
 impl Header {
@@ -290,13 +293,13 @@ fn records(src: &Source<'_>, h: &Header, len: u64) -> Result<Vec<Record>> {
     // Every record takes at least its header, so the count is bounded by the room before the
     // points.
     for _ in 0..h.vlrs {
-        if at + VLR as u64 > h.data_offset.min(len) {
+        if at.saturating_add(VLR as u64) > h.data_offset.min(len) {
             break;
         }
         let head = src.at(at, VLR)?;
         let n = usize::from(u16_at(&head, 20));
         at += VLR as u64;
-        let data = if at + n as u64 <= len {
+        let data = if at.saturating_add(n as u64) <= len {
             src.at(at, n)?.into_owned()
         } else {
             Vec::new()
@@ -704,7 +707,10 @@ fn read(src: &Source<'_>, h: &Header, keep: Keep) -> Result<Document> {
         // A file is read on this thread, then decoded on the workers.
         if let Source::File(_) = src {
             for (w, job) in workers.iter().zip(these) {
-                let raw = src.at(h.data_offset + job.first * h.record as u64, job.count * h.record)?;
+                let raw = src.at(
+                    job_start(h, *job).context(ErrorKind::Truncated, "LAS data is cut short")?,
+                    job.count.saturating_mul(h.record),
+                )?;
                 let mut w = w.lock().unwrap_or_else(PoisonError::into_inner);
                 w.scratch.raw.clear();
                 w.scratch.raw.extend_from_slice(&raw);
@@ -717,9 +723,8 @@ fn read(src: &Source<'_>, h: &Header, keep: Keep) -> Result<Document> {
                 let s = &mut w.scratch;
                 match mode {
                     Mode::Slice(b) => {
-                        let at = usize_of(h.data_offset + job.first * h.record as u64);
-                        let raw = b
-                            .get(at..at + job.count * h.record)
+                        let raw = job_start(h, job)
+                            .and_then(|at| b.get(usize_of(at)..)?.get(..job.count.checked_mul(h.record)?))
                             .context(ErrorKind::Truncated, "LAS data is cut short")?;
                         plan.decode(raw, s, base);
                     }
@@ -1193,7 +1198,7 @@ mod laz_read {
             Truncated,
             "the LAZ chunk table runs past the end of the file"
         );
-        let chunks = u64::from(u32_at(bytes, usize_of(table) + 4));
+        let chunks = u64::from(u32_at(bytes, usize_of(table).saturating_add(4)));
         // Each chunk takes some bytes of point data, and no chunk is empty.
         ensure!(
             chunks <= (table - start) && chunks <= n as u64 + 1,
@@ -1434,6 +1439,36 @@ pub(crate) mod tests {
             points::corrupt(&mut b, &mut rng, 4);
             let _ = load_las(&b, Keep::ALL);
         }
+    }
+
+    #[test]
+    fn offsets_at_the_far_end_read_nothing_rather_than_overflow() {
+        let b = [0xAB; 16];
+        assert_eq!(
+            (
+                u16_at(&b, usize::MAX),
+                u32_at(&b, usize::MAX - 1),
+                u64_at(&b, usize::MAX - 3)
+            ),
+            (0, 0, 0)
+        );
+        assert_eq!(f64_at(&b, 9).to_bits(), 0);
+        let h = Header::parse(&las(4, 0, 0, &pts(2), &[])).unwrap();
+        let far = Job {
+            first: u64::MAX,
+            count: 1,
+        };
+        assert_eq!(job_start(&h, far), None);
+        // Records and extended records counted and placed past anything a file holds.
+        let mut bytes = las(4, 0, 0, &pts(2), &[]);
+        bytes[100..104].copy_from_slice(&u32::MAX.to_le_bytes());
+        bytes[235..243].copy_from_slice(&(u64::MAX - 8).to_le_bytes());
+        bytes[243..247].copy_from_slice(&u32::MAX.to_le_bytes());
+        load_las(&bytes, Keep::ALL).unwrap();
+        // A point count past the end of the data.
+        bytes[247..255].copy_from_slice(&1000u64.to_le_bytes());
+        let e = load_las(&bytes, Keep::ALL).unwrap_err();
+        assert!(e.to_string().contains("LAS data is cut short"), "{e}");
     }
 
     #[cfg(feature = "laz")]

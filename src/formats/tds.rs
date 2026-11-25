@@ -31,11 +31,12 @@ use serde_json::{Map, Value, json};
 use super::xform::{self, IDENTITY, M4};
 use crate::Result;
 use crate::assets::Assets;
+use crate::bytes::{Le, array_at, f32_at, floats, records, u16_at, u32_at, until_nul};
 use crate::document::{Builder, Document, Keep};
 use crate::images::Images;
 use crate::material::{self, Alpha, Factor, Full, Specular, Tex, UvTransform};
 use crate::mesh::{FastMap, GRAY, Material, Prim, face_normal, srgb_to_linear};
-use crate::num::u32_of;
+use crate::num::{u32_of, usize_of};
 use crate::source::{Axis, Fact, Handedness, SourceInfo};
 
 const MAIN: u16 = 0x4D4D;
@@ -122,40 +123,27 @@ const FRAMES_PER_SECOND: f32 = 30.0;
 /// what is left; the readers below take only whole records from it.
 fn chunks(mut data: &[u8]) -> impl Iterator<Item = (u16, &[u8])> {
     std::iter::from_fn(move || {
-        let id = u16::from_le_bytes(data.get(..2)?.try_into().ok()?);
-        let len = u32::from_le_bytes(data.get(2..6)?.try_into().ok()?) as usize;
+        let id = u16_at(data, 0)?;
+        let len = usize_of(u64::from(u32_at(data, 2)?));
         if len < 6 {
             return None;
         }
-        let len = len.min(data.len());
-        let body = &data[6..len];
-        data = &data[len..];
-        Some((id, body))
+        let (chunk, rest) = data.split_at(len.min(data.len()));
+        data = rest;
+        Some((id, chunk.get(6..)?))
     })
 }
 
-fn u16_at(d: &[u8], i: usize) -> Option<u16> {
-    Some(u16::from_le_bytes(d.get(i..i + 2)?.try_into().ok()?))
-}
-
-fn u32_at(d: &[u8], i: usize) -> Option<u32> {
-    Some(u32::from_le_bytes(d.get(i..i + 4)?.try_into().ok()?))
-}
-
-fn f32_at(d: &[u8], i: usize) -> Option<f32> {
-    Some(f32::from_le_bytes(d.get(i..i + 4)?.try_into().ok()?))
-}
-
 fn vec3_at(d: &[u8], i: usize) -> Option<[f32; 3]> {
-    Some([f32_at(d, i)?, f32_at(d, i + 4)?, f32_at(d, i + 8)?])
+    array_at::<12>(d, i).map(|b| floats(Le, b))
 }
 
 /// A zero-terminated name and what follows it.
 fn cstr(d: &[u8]) -> (String, &[u8]) {
-    let end = d.iter().position(|&c| c == 0).unwrap_or(d.len());
+    let name = until_nul(d);
     (
-        String::from_utf8_lossy(&d[..end]).into_owned(),
-        d.get(end + 1..).unwrap_or_default(),
+        String::from_utf8_lossy(name).into_owned(),
+        d.get(name.len() + 1..).unwrap_or_default(),
     )
 }
 
@@ -427,21 +415,17 @@ fn jpeg_components(b: &[u8]) -> Option<u8> {
         if *b.get(at)? != 0xFF {
             return None;
         }
-        let marker = *b.get(at + 1)?;
+        let marker = *b.get(at.checked_add(1)?)?;
         match marker {
             // Fill bytes.
             0xFF => at += 1,
             // Start of frame, any kind (not DHT, JPG or DAC).
-            0xC0..=0xCF if !matches!(marker, 0xC4 | 0xC8 | 0xCC) => return b.get(at + 9).copied(),
+            0xC0..=0xCF if !matches!(marker, 0xC4 | 0xC8 | 0xCC) => return b.get(at.checked_add(9)?).copied(),
             // Markers without a length, or the scan: no frame header.
             0xD0..=0xDA | 0x01 => return None,
-            _ => at += 2 + usize::from(u16_at_be(b, at + 2)?),
+            _ => at = at.checked_add(2 + usize::from(u16::from_be_bytes(array_at(b, at.checked_add(2)?)?)))?,
         }
     }
-}
-
-fn u16_at_be(b: &[u8], at: usize) -> Option<u16> {
-    Some(u16::from_be_bytes([*b.get(at)?, *b.get(at + 1)?]))
 }
 
 /// Whether a texture's file name marks it as a normal map: `normal`, `norm`, `nrm`, `nmap` or `ddn` in it, or `_n`,
@@ -552,33 +536,29 @@ fn trimesh(d: &[u8]) -> Trimesh {
     for (id, b) in chunks(d) {
         match id {
             VERTICES => {
-                let n = u16_at(b, 0).unwrap_or(0) as usize;
-                t.vertices = (0..n).map_while(|i| vec3_at(b, 2 + i * 12)).collect();
+                let n = usize::from(u16_at(b, 0).unwrap_or(0));
+                t.vertices = records::<12>(b, 2, n).iter().map(|&v| floats(Le, v)).collect();
             }
             UVS => {
-                let n = u16_at(b, 0).unwrap_or(0) as usize;
-                t.uvs = (0..n)
-                    .map_while(|i| Some([f32_at(b, 2 + i * 8)?, f32_at(b, 6 + i * 8)?]))
-                    .collect();
+                let n = usize::from(u16_at(b, 0).unwrap_or(0));
+                t.uvs = records::<8>(b, 2, n).iter().map(|&v| floats(Le, v)).collect();
             }
             MESH_MATRIX => {
                 let m: Option<Vec<f32>> = (0..12).map(|i| f32_at(b, i * 4)).collect();
                 t.matrix = m.and_then(|m| m.try_into().ok());
             }
             FACES => {
-                let n = u16_at(b, 0).unwrap_or(0) as usize;
-                t.faces = (0..n)
-                    .map_while(|i| {
-                        let o = 2 + i * 8;
-                        Some([u16_at(b, o)?, u16_at(b, o + 2)?, u16_at(b, o + 4)?])
-                    })
+                let n = usize::from(u16_at(b, 0).unwrap_or(0));
+                t.faces = records::<8>(b, 2, n)
+                    .iter()
+                    .map(|f| [0, 2, 4].map(|o| u16::from_le_bytes([f[o], f[o + 1]])))
                     .collect();
                 for (id, s) in chunks(b.get(2 + n * 8..).unwrap_or_default()) {
                     match id {
                         FACE_MATERIAL => {
                             let (name, rest) = cstr(s);
-                            let k = u16_at(rest, 0).unwrap_or(0) as usize;
-                            let faces = (0..k).map_while(|i| u16_at(rest, 2 + i * 2)).collect();
+                            let k = usize::from(u16_at(rest, 0).unwrap_or(0));
+                            let faces = records(rest, 2, k).iter().map(|&f| u16::from_le_bytes(f)).collect();
                             t.materials.push((name, faces));
                         }
                         SMOOTHING => {
@@ -739,7 +719,7 @@ fn track<const N: usize>(b: &[u8]) -> Vec<Key<N>> {
     let mut keys = Vec::new();
     let mut o = 14;
     for _ in 0..n {
-        let (Some(frame), Some(flags)) = (u32_at(b, o), u16_at(b, o + 4)) else {
+        let (Some(frame), Some(flags)) = (u32_at(b, o), u16_at(b, o.saturating_add(4))) else {
             break;
         };
         o += 6;
@@ -1020,8 +1000,14 @@ fn light_json(l: &Light, name: &str, extras: bool) -> Value {
     }
     if let Some(s) = &l.spot {
         let half = std::f64::consts::FRAC_PI_2;
-        let outer = (f64::from(s.falloff).to_radians() / 2.0).clamp(1e-4, half);
-        let inner = (f64::from(s.hotspot).to_radians() / 2.0).clamp(0.0, outer * 0.999);
+        // A NaN angle takes the widest cone, so the clamps below always have ordered bounds.
+        let cone = |deg: f32, wide: f64| {
+            Some(f64::from(deg).to_radians() / 2.0)
+                .filter(|a| !a.is_nan())
+                .unwrap_or(wide)
+        };
+        let outer = cone(s.falloff, half).clamp(1e-4, half);
+        let inner = cone(s.hotspot, outer).clamp(0.0, outer * 0.999);
         out["type"] = json!("spot");
         out["spot"] = json!({ "innerConeAngle": inner, "outerConeAngle": outer });
     }
@@ -2399,5 +2385,45 @@ mod tests {
     #[test]
     fn not_3ds_is_refused() {
         assert!(read("x.3ds", b"hello").is_err());
+    }
+
+    #[test]
+    fn a_spotlight_with_nan_cones_is_read_not_a_panic() {
+        let mut spot = f32s(&[0., 0., 10.]);
+        spot.extend(chunk(DL_SPOTLIGHT, &f32s(&[0., 0., 0., f32::NAN, f32::NAN])));
+        let mut editor = object("Tri", &chunk(TRIMESH, &trimesh(&at([0.; 3]), &[[0, 1, 2]], None)));
+        editor.extend(object("Spot", &chunk(LIGHT, &spot)));
+        let doc = read("nan.3ds", &chunk(MAIN, &chunk(EDITOR, &editor))).unwrap();
+        let cone = &doc.json()["extensions"]["KHR_lights_punctual"]["lights"][0]["spot"];
+        let outer = cone["outerConeAngle"].as_f64().unwrap();
+        let inner = cone["innerConeAngle"].as_f64().unwrap();
+        assert!((outer - std::f64::consts::FRAC_PI_2).abs() < 1e-9, "{cone}");
+        assert!(inner < outer, "{cone}");
+    }
+
+    #[test]
+    fn counts_and_lengths_past_the_end_take_only_what_is_there() {
+        // Vertex, UV and face counts of 65535 over a few records, and a chunk claiming 4 GiB.
+        let mut verts = u16s(&[u16::MAX]);
+        verts.extend(f32s(&[0., 0., 0., 1., 0., 0., 0., 1., 0., 9.]));
+        let mut uvs = u16s(&[u16::MAX]);
+        uvs.extend(f32s(&[0., 0., 1.]));
+        let mut tri = chunk(VERTICES, &verts);
+        tri.extend(chunk(UVS, &uvs));
+        tri.extend(chunk(FACES, &u16s(&[u16::MAX, 0, 1, 2, 0, 7])));
+        let t = super::trimesh(&tri);
+        assert_eq!((t.vertices.len(), t.uvs.len(), t.faces.len()), (3, 1, 1));
+        // A face material list counting 65535 faces over one.
+        let mut faces = u16s(&[1, 0, 1, 2, 0]);
+        let mut fm = b"M\0".to_vec();
+        fm.extend(u16s(&[u16::MAX, 0]));
+        faces.extend(chunk(FACE_MATERIAL, &fm));
+        let t = super::trimesh(&chunk(FACES, &faces));
+        assert_eq!(t.materials, [("M".to_owned(), vec![0])]);
+        let mut file = chunk(MAIN, &[]);
+        file.extend([0x00, 0x40, 0xFF, 0xFF, 0xFF, 0xFF, 1, 2, 3]);
+        let all: Vec<_> = chunks(&file).collect();
+        assert_eq!(all, [(MAIN, &[][..]), (0x4000, &[1, 2, 3][..])]);
+        assert_eq!(jpeg_components(&[0xFF, 0xD8, 0xFF, 0xE0, 0xFF, 0xFF]), None);
     }
 }
