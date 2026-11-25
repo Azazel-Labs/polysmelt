@@ -70,6 +70,15 @@ struct Keys {
 }
 
 impl Keys {
+    fn with_capacity(n: usize) -> Self {
+        Self {
+            times: Vec::with_capacity(n),
+            values: Vec::with_capacity(n),
+            flags: Vec::with_capacity(n),
+            slopes: Vec::with_capacity(n),
+        }
+    }
+
     fn push(&mut self, t: f64, v: f64, flags: i32, slopes: [f64; 2]) {
         self.times.push(t);
         self.values.push(v);
@@ -102,7 +111,7 @@ fn curves(c: &Channel, width: usize, map: impl Fn([f64; 3]) -> [f64; 3]) -> Vec<
         let v: [f64; 3] = std::array::from_fn(|j| if j < width { f64::from(c.values[base + j]) } else { 0.0 });
         if width == 3 { map(v) } else { v }
     };
-    let mut out: Vec<Keys> = (0..width).map(|_| Keys::default()).collect();
+    let mut out: Vec<Keys> = (0..width).map(|_| Keys::with_capacity(n)).collect();
     for (k, &t) in c.times.iter().enumerate() {
         let t = f64::from(t);
         let (value, out_slope, next_in) = if cubic {
@@ -133,7 +142,7 @@ fn weight_curves(c: &Channel, targets: usize) -> Vec<Keys> {
     let at = |k: usize, part: usize, j: usize| f64::from(c.values[k * stride + part * targets + j]) * 100.0;
     (0..targets)
         .map(|j| {
-            let mut keys = Keys::default();
+            let mut keys = Keys::with_capacity(n);
             for (k, &t) in c.times.iter().enumerate() {
                 let t = f64::from(t);
                 if cubic {
@@ -202,9 +211,9 @@ fn rotation_curves(c: &Channel, map: impl Fn([f64; 4]) -> [f64; 4]) -> Vec<Keys>
     // Rotations within the tolerance of each other: the cosine of half the angle between them is above this.
     let within = (TOLERANCE_DEGREES.to_radians() / 2.0).cos();
     let dot = |a: [f64; 4], b: [f64; 4]| a.iter().zip(&b).map(|(x, y)| x * y).sum::<f64>().abs();
+    let mut pending = Vec::new();
     for w in c.times.windows(2) {
-        let end = f64::from(w[1]);
-        let mut pending = vec![end];
+        pending.push(f64::from(w[1]));
         while let Some(&b) = pending.last() {
             let &(a, ea) = keys.last().expect("the first key is in");
             if b <= a {
@@ -229,7 +238,7 @@ fn rotation_curves(c: &Channel, map: impl Fn([f64; 4]) -> [f64; 4]) -> Vec<Keys>
             }
         }
     }
-    let mut out: Vec<Keys> = (0..3).map(|_| Keys::default()).collect();
+    let mut out: Vec<Keys> = (0..3).map(|_| Keys::with_capacity(keys.len())).collect();
     for (t, e) in keys {
         for (k, curve) in out.iter_mut().enumerate() {
             curve.push(t, e[k], flags, [0.0; 2]);
