@@ -24,6 +24,7 @@ use serde_json::{Map, json};
 
 use super::Input;
 use super::scene::{self, Animation, Channel, Interp, Node, Path, Scene};
+use super::stream::f64_from;
 use crate::Result;
 use crate::document::{Document, Keep};
 use crate::num::f32_of;
@@ -48,7 +49,7 @@ fn cells(line: &str, tabs: bool) -> Vec<&str> {
 
 /// A cell as a finite number.
 fn number(cell: Option<&&str>) -> Option<f64> {
-    cell?.parse::<f64>().ok().filter(|v| v.is_finite())
+    f64_from(cell?.as_bytes()).filter(|v| v.is_finite())
 }
 
 /// Reads a TRC file.

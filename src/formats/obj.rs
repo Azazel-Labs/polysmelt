@@ -36,7 +36,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use serde_json::{Map, Value, json};
 
 use super::Input;
-use super::stream;
+use super::stream::{self, f32_from};
 
 use crate::Result;
 use crate::assets::Assets;
@@ -141,10 +141,6 @@ fn text(b: &[u8]) -> String {
     }
 }
 
-fn trim(b: &[u8]) -> &[u8] {
-    b.trim_ascii()
-}
-
 /// The first `\n` or `\r` in `rest`. Most bytes are past `\r`, so take one compare.
 #[inline]
 fn eol(rest: &[u8]) -> Option<usize> {
@@ -198,11 +194,7 @@ fn for_each_line(data: &[u8], mut f: impl FnMut(&[u8])) {
 fn split_key(line: &[u8]) -> (&[u8], &[u8]) {
     let line = line.trim_ascii_start();
     let end = line.iter().position(u8::is_ascii_whitespace).unwrap_or(line.len());
-    (&line[..end], trim(&line[end..]))
-}
-
-fn num(w: &[u8]) -> Option<f32> {
-    stream::f32_from(w)
+    (&line[..end], line[end..].trim_ascii())
 }
 
 /// Up to `N` leading numbers of `rest`, stopping at a comment; and how many there were.
@@ -227,7 +219,7 @@ fn nums<const N: usize>(rest: &[u8]) -> ([f32; N], usize) {
         if w[0] == b'#' {
             break;
         }
-        match num(w) {
+        match f32_from(w) {
             Some(x) => out[n] = x,
             None => break,
         }
@@ -431,7 +423,7 @@ fn map_ref(rest: &[u8]) -> Option<MapRef> {
         bump: 1.0,
         channel: Pick::Luma,
     };
-    let mut rest = trim(rest);
+    let mut rest = rest.trim_ascii();
     while rest.first() == Some(&b'-') {
         let (opt, after) = split_key(rest);
         let opt = opt.to_ascii_lowercase();
@@ -449,13 +441,13 @@ fn map_ref(rest: &[u8]) -> Option<MapRef> {
         for k in 0..args {
             let (w, after) = split_key(rest);
             // Optional arguments end at the first word that isn't a number.
-            if k > 0 && args == 3 && num(w).is_none() {
+            if k > 0 && args == 3 && f32_from(w).is_none() {
                 break;
             }
             values.push(w);
             rest = after;
         }
-        let n = |i: usize| values.get(i).and_then(|w| num(w)).filter(|x| x.is_finite());
+        let n = |i: usize| values.get(i).and_then(|w| f32_from(w)).filter(|x| x.is_finite());
         match opt.as_slice() {
             b"-o" => m.offset = [n(0).unwrap_or(0.0), n(1).unwrap_or(0.0)],
             b"-s" => m.scale = [n(0).unwrap_or(1.0), n(1).unwrap_or(1.0)],
@@ -657,32 +649,10 @@ fn statements(d: &[u8]) -> Option<usize> {
     }
 }
 
-/// An index as written: an optional sign and up to 18 digits.
-#[inline]
-fn int(w: &[u8]) -> Option<i64> {
-    let (neg, d) = match w.first()? {
-        b'-' => (true, &w[1..]),
-        b'+' => (false, &w[1..]),
-        _ => (false, w),
-    };
-    if d.is_empty() || d.len() > 18 {
-        return None;
-    }
-    let mut n: i64 = 0;
-    for &c in d {
-        let k = c.wrapping_sub(b'0');
-        if k > 9 {
-            return None;
-        }
-        n = n * 10 + i64::from(k);
-    }
-    Some(if neg { -n } else { n })
-}
-
 /// An OBJ index (1-based, or negative counting back from the last) into `len` items.
 #[inline]
 fn resolve(w: &[u8], len: usize) -> Option<u32> {
-    let n = int(w)?;
+    let n = stream::int::<i64>(w)?;
     let len = i64::try_from(len).ok()?;
     let i = if n < 0 { len + n } else { n - 1 };
     if (0..len).contains(&i) {
@@ -1712,17 +1682,20 @@ impl Reader {
             }
             b"f" | b"fo" => self.face(rest, at, size),
             b"s" => self.smoothing(rest),
-            b"mtllib" => self.libs.push(text(trim(rest))),
+            b"mtllib" => self.libs.push(text(rest.trim_ascii())),
             b"usemtl" => {
                 let next = self.materials.len();
-                self.material = *self.material_of.entry(text(trim(rest))).or_insert_with_key(|name| {
-                    self.materials.push(name.clone());
-                    next
-                });
+                self.material = *self
+                    .material_of
+                    .entry(text(rest.trim_ascii()))
+                    .or_insert_with_key(|name| {
+                        self.materials.push(name.clone());
+                        next
+                    });
                 self.current = None;
             }
             b"o" | b"g" => {
-                let name = text(trim(rest));
+                let name = text(rest.trim_ascii());
                 let name = (!name.is_empty()).then_some(name);
                 if key == b"o" {
                     self.object = name;
@@ -1750,7 +1723,7 @@ impl Reader {
         if key[0] == b'#' {
             let starting = self.v.is_empty() && self.libs.is_empty() && self.parts.is_empty();
             if starting && self.object.is_none() && self.group.is_none() && self.comments.len() < 64 {
-                self.comments.push(text(trim(&line[1..])));
+                self.comments.push(text(line[1..].trim_ascii()));
             }
             return;
         }
@@ -1774,12 +1747,16 @@ impl Reader {
     /// `s`: the smoothing group of the faces that follow, `off` or `0` for flat faces.
     #[cold]
     fn smoothing(&mut self, rest: &[u8]) {
-        let w = trim(rest).split(|&b| stream::space(b)).next().unwrap_or_default();
+        let w = rest
+            .trim_ascii()
+            .split(|&b| stream::space(b))
+            .next()
+            .unwrap_or_default();
         let group = if w.eq_ignore_ascii_case(b"off") {
             0
         } else {
             // Other words (`on`) are a group of their own.
-            int(w).map_or(1, |n| u32::try_from(n & 0x7FFF_FFFF).unwrap_or(1))
+            stream::int::<i64>(w).map_or(1, |n| u32::try_from(n & 0x7FFF_FFFF).unwrap_or(1))
         };
         self.smooth = MADE | group;
     }
@@ -1797,7 +1774,7 @@ impl Reader {
             let s = std::str::from_utf8(w).ok()?;
             u8::from_str_radix(s, 16).ok().map(|b| f32::from(b) / 255.0)
         };
-        for w in trim(rest).chunks_exact(8) {
+        for w in rest.trim_ascii().chunks_exact(8) {
             let (Some(r), Some(g), Some(b)) = (hex(&w[2..4]), hex(&w[4..6]), hex(&w[6..8])) else {
                 break;
             };

@@ -1,6 +1,8 @@
 //! Just enough of OGC well-known text (WKT 1 and 2) for a point cloud's coordinate system: what
 //! kind it is, its EPSG code, and the size of its linear units in meters, across and up.
 
+use super::stream::f64_from;
+
 /// A coordinate system as far as a point cloud needs it.
 #[derive(Debug, PartialEq)]
 pub(crate) struct Crs {
@@ -151,8 +153,7 @@ impl Parser<'_> {
                     {
                         self.at += 1;
                     }
-                    let t = std::str::from_utf8(&self.s[start..self.at]).ok()?;
-                    args.push(Arg::Num(t.parse().ok()?));
+                    args.push(Arg::Num(f64_from(&self.s[start..self.at])?));
                 }
                 _ => {
                     let before = self.at;

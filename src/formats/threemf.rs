@@ -27,6 +27,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{BufReader, Read};
 
+use super::stream::{self, f32_from};
 use crate::document::{Builder, Document, Keep};
 use crate::images::{Images, Location};
 use crate::source::{Axis, Fact, Handedness, SourceInfo};
@@ -1196,15 +1197,33 @@ fn attr(e: &BytesStart<'_>, name: &[u8]) -> Option<String> {
     out
 }
 
-fn num<T: std::str::FromStr>(v: &[u8]) -> Option<T> {
-    std::str::from_utf8(v).ok()?.trim().parse().ok()
+/// An attribute's number, with spaces around it, as `str::trim` and `str::parse` read it.
+fn num<T: Num>(v: &[u8]) -> Option<T> {
+    T::of(v)
+}
+
+/// The numbers attributes hold: coordinates and other reals, and indices.
+trait Num: Sized {
+    fn of(v: &[u8]) -> Option<Self>;
+}
+
+impl Num for f32 {
+    fn of(v: &[u8]) -> Option<Self> {
+        stream::num(v)
+    }
+}
+
+impl Num for u32 {
+    fn of(v: &[u8]) -> Option<Self> {
+        stream::whole(v)
+    }
 }
 
 fn transform(v: &[u8]) -> Mat {
     let n: Vec<f32> = std::str::from_utf8(v)
         .unwrap_or("")
         .split_whitespace()
-        .filter_map(|s| s.parse().ok())
+        .filter_map(|s| f32_from(s.as_bytes()))
         .collect();
     n.try_into().unwrap_or(IDENTITY)
 }
@@ -1522,7 +1541,7 @@ fn parse_part(r: impl Read, triangles: &mut usize, limit: usize) -> Result<Part>
                 let ids = |k: &[u8]| {
                     list(k)
                         .split_whitespace()
-                        .map(|w| w.parse().unwrap_or(u32::MAX))
+                        .map(|w| stream::int(w.as_bytes()).unwrap_or(u32::MAX))
                         .collect()
                 };
                 if let Some(g) = group {
@@ -1557,14 +1576,14 @@ fn parse_part(r: impl Read, triangles: &mut usize, limit: usize) -> Result<Part>
                 if let Some(Group::Composite { values, starts, .. }) = group.and_then(|g| part.groups.get_mut(&g)) {
                     starts.push(values.len());
                     let v = attr(&e, b"values").unwrap_or_default();
-                    values.extend(v.split_whitespace().map(|w| w.parse::<f32>().unwrap_or(0.0)));
+                    values.extend(v.split_whitespace().map(|w| f32_from(w.as_bytes()).unwrap_or(0.0)));
                 }
             }
             b"multi" => {
                 if let Some(Group::Multi { indices, starts, .. }) = group.and_then(|g| part.groups.get_mut(&g)) {
                     starts.push(indices.len());
                     let v = attr(&e, b"pindices").unwrap_or_default();
-                    indices.extend(v.split_whitespace().map(|w| w.parse::<u32>().unwrap_or(0)));
+                    indices.extend(v.split_whitespace().map(|w| stream::int(w.as_bytes()).unwrap_or(0)));
                 }
             }
             name @ (b"base" | b"color") => {
@@ -1602,10 +1621,10 @@ fn parse_part(r: impl Read, triangles: &mut usize, limit: usize) -> Result<Part>
             }
             kind @ (b"pbmetallic" | b"pbspecular" | b"translucent") => {
                 if let Some(list) = display.and_then(|d| part.displays.get_mut(&d)) {
-                    let f = |k: &[u8], d: f32| attr(&e, k).and_then(|v| v.trim().parse::<f32>().ok()).unwrap_or(d);
+                    let f = |k: &[u8], d: f32| attr(&e, k).and_then(|v| stream::num(v.as_bytes())).unwrap_or(d);
                     let rgb = |k: &[u8], d: f32| {
                         let v = attr(&e, k).unwrap_or_default();
-                        let mut n = v.split_whitespace().filter_map(|w| w.parse::<f32>().ok());
+                        let mut n = v.split_whitespace().filter_map(|w| f32_from(w.as_bytes()));
                         let first = n.next().unwrap_or(d);
                         [first, n.next().unwrap_or(first), n.next().unwrap_or(first)].map(f32::to_bits)
                     };
@@ -2341,6 +2360,57 @@ mod tests {
                 mesh.triangles(),
                 doc.buffer(0).map_or(0, |b| b.len())
             );
+        }
+    }
+
+    /// Spellings of numbers that `str::parse` took, trimmed or not, as files write them.
+    const SPELLINGS: &[&str] = &[
+        "0",
+        "1",
+        "-1",
+        "+1",
+        "1.5",
+        "-0",
+        "+.5",
+        ".5",
+        "5.",
+        "1e3",
+        "1E+05",
+        "2.5e-3",
+        "007",
+        "0.1",
+        "16777217",
+        "4294967295",
+        "4294967296",
+        "123456789012345678901234",
+        "inf",
+        "-infinity",
+        "NaN",
+        " 1.5 ",
+        "\t2\r\n",
+        "\u{a0}3",
+        "4\u{3000}",
+        "",
+        " ",
+        "1 2",
+        "1,5",
+        "x",
+        "0x10",
+        "1.0.0",
+    ];
+
+    #[test]
+    fn numbers_read_as_the_standard_parser_reads_them() {
+        let bits = |v: Option<f32>| v.map(f32::to_bits);
+        for s in SPELLINGS {
+            let b = s.as_bytes();
+            assert_eq!(bits(num::<f32>(b)), bits(s.trim().parse().ok()), "{s:?}");
+            // Words of a list, already split at spaces.
+            assert_eq!(bits(f32_from(b)), bits(s.parse().ok()), "{s:?}");
+            // `-0` reads as index 0 now, where it was no index before.
+            let zero = (*s == "-0").then_some(0);
+            assert_eq!(num::<u32>(b), s.trim().parse().ok().or(zero), "{s:?}");
+            assert_eq!(stream::int::<u32>(b), s.parse().ok().or(zero), "{s:?}");
         }
     }
 }

@@ -50,6 +50,7 @@ use serde_json::{Map, Value, json};
 
 use super::Input;
 use super::scene::{self, Animation, Channel, Interp, Node, Path, Scene};
+use super::stream::f64_from;
 use crate::Result;
 use crate::assets::Assets;
 use crate::document::{Document, Keep};
@@ -179,7 +180,7 @@ fn show(s: &str) -> String {
 
 /// A number the line needs.
 fn number(tok: Option<&str>, what: &str, no: usize) -> Result<f64> {
-    match tok.and_then(|t| t.parse::<f64>().ok()).filter(|v| v.is_finite()) {
+    match tok.and_then(|t| f64_from(t.as_bytes())).filter(|v| v.is_finite()) {
         Some(v) => Ok(v),
         None => bail!(
             Corrupt,
@@ -657,8 +658,8 @@ fn parse_amc(text: &str, sk: &Skeleton, rig: &Rig, scene: &Scene) -> (Option<Ani
         let bone = if b == root { &sk.root } else { &sk.bones[b] };
         values.clear();
         for t in tokens.by_ref().take(bone.dofs.len()) {
-            match t.parse::<f64>() {
-                Ok(v) if v.is_finite() => values.push(v),
+            match f64_from(t.as_bytes()) {
+                Some(v) if v.is_finite() => values.push(v),
                 _ => break,
             }
         }

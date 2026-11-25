@@ -16,6 +16,7 @@ use serde_json::json;
 use super::scene::{
     self, Animation, Channel, Interp, M4, Node, Path as Key, Primitive, Scene, SceneMesh, Skin, Target,
 };
+use super::stream::{self, f32_from, f64_from};
 use crate::Result;
 use crate::assets::Assets;
 use crate::document::{Document, Keep};
@@ -496,16 +497,6 @@ fn lines(text: &str) -> Vec<(usize, &str)> {
     out
 }
 
-/// A number as `str::parse` reads it, but faster for the plain decimals files hold.
-fn float(w: &str) -> Option<f32> {
-    super::stream::f32_from(w.as_bytes())
-}
-
-/// A number as `str::parse` reads it, like [`float`].
-fn double(w: &str) -> Option<f64> {
-    super::stream::f64_from(w.as_bytes())
-}
-
 /// A line's words, split where `str::split_whitespace` splits them: an ASCII line (nearly every one) by its bytes.
 enum Words<'a> {
     Ascii(&'a str),
@@ -566,13 +557,15 @@ fn is_end(line: &str) -> bool {
 
 /// The finite numbers of `words`, as many as parse in a row.
 fn numbers<'a>(words: impl Iterator<Item = &'a str>) -> Vec<f32> {
-    words.map_while(|w| float(w).filter(|x| x.is_finite())).collect()
+    words
+        .map_while(|w| f32_from(w.as_bytes()).filter(|x| x.is_finite()))
+        .collect()
 }
 
 /// An integer, written plainly or as a whole float (`3.000000`).
 fn integer(w: &str) -> Option<i64> {
-    w.parse::<i64>().ok().or_else(|| {
-        let f = double(w)?;
+    stream::int(w.as_bytes()).or_else(|| {
+        let f = f64_from(w.as_bytes())?;
         #[allow(clippy::cast_possible_truncation, reason = "checked to be a whole number in range")]
         (f.fract() == 0.0 && f.abs() < 9.0e15).then_some(f as i64)
     })
@@ -662,7 +655,11 @@ fn skeleton(lines: &[(usize, &str)], mut i: usize, s: &mut Smd) -> Result<usize>
         let mut words = words_of(code(line));
         let first = words.next().unwrap_or("");
         if first.eq_ignore_ascii_case("time") {
-            let Some(time) = words.next().and_then(double).filter(|t| t.is_finite()) else {
+            let Some(time) = words
+                .next()
+                .and_then(|w| f64_from(w.as_bytes()))
+                .filter(|t| t.is_finite())
+            else {
                 bail!(Corrupt, "SMD line {n}: the time isn't a number");
             };
             s.frames.push(Frame {
@@ -755,7 +752,11 @@ fn vertex(t: &str) -> Option<Vertex> {
     let mut f = [0.0f32; 8];
     let mut got = 0;
     for slot in &mut f {
-        match words.next().and_then(float).filter(|x| x.is_finite()) {
+        match words
+            .next()
+            .and_then(|w| f32_from(w.as_bytes()))
+            .filter(|x| x.is_finite())
+        {
             Some(x) => {
                 *slot = x;
                 got += 1;
@@ -771,7 +772,10 @@ fn vertex(t: &str) -> Option<Vertex> {
         && let Some(count) = words.next().and_then(integer)
     {
         for _ in 0..count.max(0) {
-            let (Some(b), Some(w)) = (words.next().and_then(integer), words.next().and_then(float)) else {
+            let (Some(b), Some(w)) = (
+                words.next().and_then(integer),
+                words.next().and_then(|w| f32_from(w.as_bytes())),
+            ) else {
                 break;
             };
             links.push((b, w));
@@ -797,7 +801,11 @@ fn vertex_frames(lines: &[(usize, &str)], mut i: usize, s: &mut Smd) -> Result<u
         let mut words = words_of(code(line));
         let first = words.next().unwrap_or("");
         if first.eq_ignore_ascii_case("time") {
-            let Some(time) = words.next().and_then(double).filter(|t| t.is_finite()) else {
+            let Some(time) = words
+                .next()
+                .and_then(|w| f64_from(w.as_bytes()))
+                .filter(|t| t.is_finite())
+            else {
                 bail!(Corrupt, "SMD line {n}: the time isn't a number");
             };
             let name = line
@@ -1053,5 +1061,71 @@ end
         let doc = read(text, "t.smd").unwrap();
         assert_eq!(doc.facts["triangles"], json!(1));
         assert_eq!(doc.json()["materials"][0]["name"], Value::from("mat"));
+    }
+
+    #[test]
+    fn numbers_read_as_the_standard_parser_reads_them() {
+        let bits = |v: Option<f32>| v.map(f32::to_bits);
+        for s in [
+            "0",
+            "1",
+            "-1",
+            "+1",
+            "1.5",
+            "-0",
+            "+.5",
+            ".5",
+            "5.",
+            "1e3",
+            "1E-1",
+            "-2.5E+2",
+            "007",
+            "0.000001",
+            "3.000000",
+            "-2.0",
+            "1e2",
+            "9223372036854775807",
+            "-9223372036854775808",
+            "9223372036854775808",
+            "123456789012345678901234",
+            "inf",
+            "nan",
+            "1.#INF",
+            "",
+            "x",
+            "1,5",
+            "0x10",
+        ] {
+            assert_eq!(bits(f32_from(s.as_bytes())), bits(s.parse().ok()), "{s:?}");
+            assert_eq!(
+                f64_from(s.as_bytes()).map(f64::to_bits),
+                s.parse::<f64>().ok().map(f64::to_bits),
+                "{s:?}"
+            );
+            let old = s.parse::<i64>().ok().or_else(|| {
+                let f = s.parse::<f64>().ok()?;
+                #[allow(clippy::cast_possible_truncation, reason = "checked to be a whole number in range")]
+                (f.fract() == 0.0 && f.abs() < 9.0e15).then_some(f as i64)
+            });
+            assert_eq!(integer(s), old, "{s:?}");
+        }
+        // And in a file: a triangle whose numbers are spelled every which way.
+        let text = "version 1
+nodes
++0 \"root\" -1
+end
+skeleton
+time 0.
+0 +0 .0 0E0 0 0 0
+end
+triangles
+mat
+0 0 0 0 0 0 1 0 0
++0 1. +0 -0 0 0 1E+0 1.0 0 1 +0 1.000000
+000 0 1e0 0 0 0 1 0 1
+end
+";
+        let doc = read(text, "t.smd").unwrap();
+        assert_eq!(doc.facts["triangles"], json!(1));
     }
 }

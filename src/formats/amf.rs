@@ -23,6 +23,7 @@ use std::io::{BufRead, BufReader, Read};
 use quick_xml::events::{BytesStart, Event};
 use serde_json::{Map, Value, json};
 
+use super::stream;
 use crate::document::{Builder, Document};
 use crate::images::Source;
 use crate::material::{Alpha, CLAMP, Full, REPEAT, Tex};
@@ -397,12 +398,7 @@ fn attr(e: &BytesStart<'_>, name: &[u8]) -> Option<String> {
 
 /// A finite number.
 fn number(text: &[u8]) -> Option<f32> {
-    std::str::from_utf8(text)
-        .ok()?
-        .trim()
-        .parse::<f32>()
-        .ok()
-        .filter(|v| v.is_finite())
+    stream::num(text).filter(|v| v.is_finite())
 }
 
 fn text(t: &[u8]) -> String {
@@ -524,10 +520,7 @@ fn close(a: &mut Amf, s: &mut State, t: Tag, parent: Option<Tag>, limit: usize) 
                     s.channels[k] = v;
                 }
                 (Leaf::Corner, Some(Tag::Triangle)) => {
-                    s.corners[k] = std::str::from_utf8(&s.text)
-                        .ok()
-                        .and_then(|t| t.trim().parse().ok())
-                        .unwrap_or(u32::MAX);
+                    s.corners[k] = stream::whole(&s.text).unwrap_or(u32::MAX);
                 }
                 (Leaf::U, Some(Tag::Texmap)) => {
                     if let Some(m) = &mut s.map {

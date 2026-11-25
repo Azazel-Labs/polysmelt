@@ -168,10 +168,47 @@ mod stl;
     feature = "ogex",
     feature = "smd",
     feature = "irr",
-    feature = "xgl"
+    feature = "xgl",
+    feature = "dae",
+    feature = "3mf",
+    feature = "amf",
+    feature = "fbx",
+    feature = "directx",
+    feature = "md5",
+    feature = "asf",
+    feature = "htr",
+    feature = "trc",
+    feature = "las",
+    feature = "e57"
 ))]
 #[cfg_attr(
-    not(all(feature = "obj", feature = "ply", feature = "stl", feature = "bvh")),
+    not(all(
+        feature = "stl",
+        feature = "ply",
+        feature = "obj",
+        feature = "bvh",
+        feature = "off",
+        feature = "x3d",
+        feature = "dxf",
+        feature = "pcd",
+        feature = "xyz",
+        feature = "ac3d",
+        feature = "ogex",
+        feature = "smd",
+        feature = "irr",
+        feature = "xgl",
+        feature = "dae",
+        feature = "3mf",
+        feature = "amf",
+        feature = "fbx",
+        feature = "directx",
+        feature = "md5",
+        feature = "asf",
+        feature = "htr",
+        feature = "trc",
+        feature = "las",
+        feature = "e57"
+    )),
     allow(dead_code, reason = "each text reader uses its own part")
 )]
 mod stream;

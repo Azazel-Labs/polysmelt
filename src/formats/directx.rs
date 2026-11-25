@@ -52,6 +52,7 @@ use serde_json::json;
 use super::inflate::inflate;
 use super::scene::{self, Animation, Channel, IDENTITY, Interp, M4, Node, Path, Primitive};
 use super::scene::{Scene, SceneMesh, Skin};
+use super::stream::f64_from;
 use crate::assets::Assets;
 use crate::bytes::Bin;
 use crate::document::{Document, Keep};
@@ -503,9 +504,7 @@ fn numeric(w: &[u8]) -> bool {
 /// (`-1.#IND00`, `1.#QNAN0`), or else a string.
 fn word_value(o: &mut Obj, w: &[u8]) {
     if numeric(w) {
-        if let Ok(s) = std::str::from_utf8(w)
-            && let Ok(x) = s.parse::<f64>()
-        {
+        if let Some(x) = f64_from(w) {
             o.nums.push(x);
             return;
         }
