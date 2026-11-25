@@ -2,6 +2,14 @@
 
 Breaking changes are allowed in minor releases until 1.0.
 
+## 0.17.4
+
+- Writing a GLB is faster: accessors, buffer views and animations stay typed until the document
+  is written, instead of being built as JSON and read back. Small animated models (IQM, B3D,
+  `.x`, SMD, MD5, BVH) convert 6–29% faster, and the GLB step alone is up to 2.4× faster.
+  Output is unchanged.
+- `Document::json()` builds the full JSON on first use and keeps it.
+
 ## 0.17.3
 
 - DirectX `.x` skins merge a joint listed twice for a vertex before keeping the strongest
