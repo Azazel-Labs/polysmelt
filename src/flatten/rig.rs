@@ -81,7 +81,7 @@ impl Document {
             let samplers = items(a, "samplers");
             let mut channels = Vec::new();
             for ch in items(a, "channels") {
-                let Some((node, path)) = ch.get("target").and_then(super::node_target) else {
+                let Some((node, path)) = ch.get("target").and_then(super::animation::node_target) else {
                     // A channel for another extension's target, or none.
                     continue;
                 };

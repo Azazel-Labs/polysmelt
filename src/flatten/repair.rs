@@ -9,7 +9,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde_json::{Map, Value, json};
 
-use super::{Acc, Reader, Tabs, index, items, list, retain_groups, segments, triangles};
+use super::accessor::{Acc, Tabs};
+use super::mesh::{retain_groups, segments, triangles};
+use super::{Reader, index, items, list};
 use crate::document::{Accessor, Blob, Document, Limits, Tables, View};
 use crate::num::{f32_of, usize_of};
 use crate::quat;
@@ -830,7 +832,7 @@ impl Fix<'_, '_> {
             if fine.contains(&(ia, vcount)) {
                 continue;
             }
-            let mode = super::mode(prim);
+            let mode = super::mesh::mode(prim);
             let key = (ia, usize_of(vcount), mode);
             let result = if let Some(&r) = made.get(&key) {
                 r
@@ -1057,7 +1059,7 @@ impl Fix<'_, '_> {
         let mut out: Vec<[f64; 3]> = Vec::new();
         for (_, _, prim) in prims(&self.doc.base) {
             let attrs = prim.get("attributes");
-            let mode = super::mode(prim);
+            let mode = super::mesh::mode(prim);
             if attrs.and_then(|x| index(x, "NORMAL")) != Some(a) || !(4..=6).contains(&mode) {
                 continue;
             }
