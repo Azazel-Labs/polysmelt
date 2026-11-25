@@ -63,12 +63,7 @@ fn tint(rgb: [u8; 3], average: Option<[u8; 3]>) -> [f64; 3] {
 }
 
 fn srgb_to_linear(c: u8) -> f64 {
-    let c = f64::from(c) / 255.0;
-    if c <= 0.04045 {
-        c / 12.92
-    } else {
-        ((c + 0.055) / 1.055).powf(2.4)
-    }
+    crate::mesh::srgb_to_linear_f64(f64::from(c) / 255.0)
 }
 
 /// `SketchUp`'s inches, Z up, to glTF's meters, Y up. A rotation, so it keeps winding.

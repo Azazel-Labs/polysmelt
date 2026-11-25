@@ -45,7 +45,7 @@ use crate::assets::Assets;
 use crate::document::{Builder, Document, Keep, Part};
 use crate::images::{Images, Location};
 use crate::material::{Alpha, Full, Tex};
-use crate::mesh::{FastMap, Image, Prim, srgb_to_linear};
+use crate::mesh::{FastMap, Image, Prim, linear_u8, srgb_to_linear};
 use crate::num::{f32_of, u32_of};
 use crate::source::{Axis, Converted, Fact, Handedness, SourceInfo};
 use crate::vec3::{self, cross, dot, sub, unit};
@@ -180,7 +180,7 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
     let mut lut = [0.0f32; 256];
     for (k, v) in lut.iter_mut().enumerate() {
-        *v = srgb_to_linear(f32::from(u8::try_from(k).unwrap_or(0)) / 255.0);
+        *v = linear_u8(u8::try_from(k).unwrap_or(0));
     }
     let mut c = Ctx {
         assets,

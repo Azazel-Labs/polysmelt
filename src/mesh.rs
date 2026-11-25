@@ -478,6 +478,44 @@ pub fn srgb_to_linear(c: f32) -> f32 {
     }
 }
 
+/// [`srgb_to_linear`] in double precision.
+#[cfg_attr(not(feature = "skp"), allow(dead_code, reason = "not every reader uses it"))]
+pub(crate) fn srgb_to_linear_f64(c: f64) -> f64 {
+    if c <= 0.040_45 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// An 8-bit sRGB color channel in linear light.
+#[cfg_attr(
+    not(any(feature = "flt", feature = "dxf", feature = "3mf")),
+    allow(dead_code, reason = "not every reader uses it")
+)]
+pub(crate) fn linear_u8(c: u8) -> f32 {
+    srgb_to_linear(f32::from(c) / 255.0)
+}
+
+/// An sRGB color with its RGB made linear; alpha is linear already.
+#[cfg_attr(
+    not(any(feature = "amf", feature = "dae", feature = "3mf")),
+    allow(dead_code, reason = "not every reader uses it")
+)]
+pub(crate) fn linear_rgba(c: [f32; 4]) -> [f32; 4] {
+    [srgb_to_linear(c[0]), srgb_to_linear(c[1]), srgb_to_linear(c[2]), c[3]]
+}
+
+/// A linear color channel, from 0 to 1, sRGB-encoded.
+#[cfg_attr(not(feature = "3mf"), allow(dead_code, reason = "not every reader uses it"))]
+pub(crate) fn linear_to_srgb(c: f32) -> f32 {
+    if c <= 0.003_130_8 {
+        c * 12.92
+    } else {
+        1.055 * c.powf(1.0 / 2.4) - 0.055
+    }
+}
+
 /// Smooth normals from the triangles, for models that don't carry any.
 #[must_use]
 pub fn smooth_normals(positions: &[[f32; 3]], indices: &[u32]) -> Vec<[f32; 3]> {

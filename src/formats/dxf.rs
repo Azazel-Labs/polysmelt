@@ -47,7 +47,7 @@ use super::nurbs;
 use super::stream::f64_from;
 use crate::Result;
 use crate::document::{Builder, Document};
-use crate::mesh::{FastMap, Material, Prim, srgb_to_linear, triangulate};
+use crate::mesh::{FastMap, Material, Prim, linear_u8, triangulate};
 use crate::num::{f32_of, u32_of};
 use crate::source::{Axis, Fact, Handedness, SourceInfo};
 use crate::vec3::{self, cross};
@@ -1360,8 +1360,7 @@ impl Build {
         if let Some(&k) = self.material_of.get(&(layer, rgb)) {
             return k;
         }
-        let channel =
-            |shift: u32| srgb_to_linear(f32::from(u8::try_from((rgb >> shift) & 0xFF).unwrap_or(255)) / 255.0);
+        let channel = |shift: u32| linear_u8(u8::try_from((rgb >> shift) & 0xFF).unwrap_or(255));
         let mut mat = Material::plain(
             &self.m.layers[layer as usize].name,
             [channel(16), channel(8), channel(0), 1.0],

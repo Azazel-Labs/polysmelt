@@ -4,7 +4,7 @@ use super::*;
 use crate::assets::Memory;
 use crate::document::Pose;
 use crate::keep::Keep;
-use crate::mesh::Mesh;
+use crate::mesh::{Mesh, srgb_to_linear};
 
 fn read_bytes(bytes: &[u8], max: usize) -> Result<Document> {
     let keep = Keep::ALL.with_max_triangles(max);
