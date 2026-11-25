@@ -1541,12 +1541,27 @@ impl Layered {
     }
 }
 
-/// Sorted, de-duplicated times, shifted so none is negative.
+/// Times closer than this are one key: exporters write the same frame to different curves a few
+/// ticks apart (two float paths to one time), and a step that small blows up per-frame velocities.
+const SAME_TIME: f64 = 1e-6;
+
+/// Sorted times with keys a hair apart merged, each to the last of its run: a step curve keyed at
+/// any of them already holds its new value there, where at the first it wouldn't yet.
 fn timeline(mut times: Vec<f64>) -> Vec<f64> {
     times.retain(|t| t.is_finite());
     times.sort_by(f64::total_cmp);
-    times.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
-    times
+    let mut out: Vec<f64> = Vec::with_capacity(times.len());
+    let mut start = f64::NEG_INFINITY;
+    for t in times {
+        match out.last_mut() {
+            Some(last) if t - start < SAME_TIME => *last = t,
+            _ => {
+                start = t;
+                out.push(t);
+            }
+        }
+    }
+    out
 }
 
 /// A blend shape target: its name, and by control point, its offsets to position and normal.
@@ -3075,6 +3090,110 @@ fn read_pbr(mat: &mut Full, p: &Props<'_>, to_linear: &dyn Fn([f64; 3]) -> [f32;
     Some(weight)
 }
 
+/// A material's glTF parameters, kept under `glTF|` properties as glTF holds them (linear colors), which take the
+/// place of what the classic and PBR properties gave. Gives whether the material has them.
+fn read_gltf(mat: &mut Full, p: &Props<'_>) -> bool {
+    if !p.own.keys().any(|k| k.starts_with("glTF|")) {
+        return false;
+    }
+    let f = |k: &str| p.own_scalar(&format!("glTF|{k}")).map(f32_of);
+    let c = |k: &str| {
+        p.own.get(&format!("glTF|{k}")).and_then(|v| {
+            let c: Vec<f32> = v.iter().filter_map(num).filter(|x| x.is_finite()).map(f32_of).collect();
+            (c.len() >= 3).then(|| [c[0], c[1], c[2]])
+        })
+    };
+    if let Some(b) = c("baseColor") {
+        mat.base_color[..3].copy_from_slice(&b);
+    }
+    if let Some(a) = f("opacity") {
+        mat.base_color[3] = a;
+    }
+    mat.metallic = f("metalness").unwrap_or(mat.metallic);
+    mat.roughness = f("roughness").unwrap_or(mat.roughness);
+    if let Some(e) = c("emissive") {
+        let k = f("emissiveIntensity").unwrap_or(1.0);
+        mat.emissive = e.map(|e| e * k);
+    }
+    mat.alpha = match f("alphaMode") {
+        Some(m) if (m - 1.0).abs() < 0.5 => Alpha::Mask(f("alphaCutoff").unwrap_or(0.5)),
+        Some(m) if (m - 2.0).abs() < 0.5 => Alpha::Blend,
+        _ => Alpha::Opaque,
+    };
+    mat.double_sided = f("doubleSided").is_some_and(|d| d != 0.0);
+    mat.unlit = f("unlit").is_some_and(|u| u != 0.0);
+    mat.ior = f("ior");
+    mat.transmission = f("transmission").map(Factor::of);
+    mat.clearcoat = f("coat").map(|c| Clearcoat {
+        factor: Factor::of(c),
+        roughness: Factor::of(f("coatRoughness").unwrap_or(0.0)),
+        normal: None,
+    });
+    mat.sheen = c("sheenColor").map(|color| Sheen {
+        color,
+        color_tex: None,
+        roughness: Factor::of(f("sheenRoughness").unwrap_or(0.0)),
+    });
+    mat.specular = f("specular").map(|s| material::Specular {
+        factor: Factor::of(s),
+        color: c("specularColor").unwrap_or([1.0; 3]),
+        color_tex: None,
+    });
+    mat.volume = f("thickness").map(|t| material::Volume {
+        thickness: Factor::of(t),
+        attenuation_distance: f("attenuationDistance"),
+        attenuation_color: c("attenuationColor").unwrap_or([1.0; 3]),
+    });
+    mat.anisotropy = f("anisotropy").map(|a| material::Anisotropy {
+        strength: Factor::of(a),
+        rotation: f("anisotropyRotation").unwrap_or(0.0),
+    });
+    mat.iridescence = f("iridescence").map(|i| material::Iridescence {
+        factor: Factor::of(i),
+        ior: f("iridescenceIor").unwrap_or(1.3),
+        thickness: [
+            f("iridescenceThicknessMin").unwrap_or(100.0),
+            f("iridescenceThicknessMax").unwrap_or(400.0),
+        ],
+        thickness_tex: None,
+    });
+    mat.dispersion = f("dispersion");
+    true
+}
+
+/// The texture field a `glTF|` property names that no classic slot covers.
+fn gltf_field(prop: &str) -> Option<TexField> {
+    Some(match prop {
+        "glTF|specularMap" => |m| m.specular.as_mut()?.factor.tex.as_mut(),
+        "glTF|specularColorMap" => |m| m.specular.as_mut()?.color_tex.as_mut(),
+        "glTF|thicknessMap" => |m| m.volume.as_mut()?.thickness.tex.as_mut(),
+        "glTF|anisotropyMap" => |m| m.anisotropy.as_mut()?.strength.tex.as_mut(),
+        "glTF|iridescenceMap" => |m| m.iridescence.as_mut()?.factor.tex.as_mut(),
+        "glTF|iridescenceThicknessMap" => |m| m.iridescence.as_mut()?.thickness_tex.as_mut(),
+        _ => return None,
+    })
+}
+
+/// Puts texture `t` where `glTF|` property `prop` says, when the material has what holds it and it's empty.
+fn put_gltf_texture(mat: &mut Full, prop: &str, t: Tex) -> bool {
+    let place = match prop {
+        "glTF|specularMap" => mat.specular.as_mut().map(|s| &mut s.factor.tex),
+        "glTF|specularColorMap" => mat.specular.as_mut().map(|s| &mut s.color_tex),
+        "glTF|thicknessMap" => mat.volume.as_mut().map(|v| &mut v.thickness.tex),
+        "glTF|anisotropyMap" => mat.anisotropy.as_mut().map(|a| &mut a.strength.tex),
+        "glTF|iridescenceMap" => mat.iridescence.as_mut().map(|i| &mut i.factor.tex),
+        "glTF|iridescenceThicknessMap" => mat.iridescence.as_mut().map(|i| &mut i.thickness_tex),
+        _ => None,
+    };
+    match place {
+        Some(slot) if slot.is_none() => {
+            *slot = Some(t);
+            true
+        }
+        _ => false,
+    }
+}
+
 /// The texture a material's slot takes from object `id`: the object itself, or for a layered texture, its first
 /// layer.
 fn texture_of(id: i64, objs: &Objects<'_>) -> i64 {
@@ -3149,11 +3268,27 @@ fn read_material(
         mat.metallic = f32_of(m.clamp(0.0, 1.0));
     }
     let pbr = read_pbr(&mut mat, &p, &to_linear);
+    let gltf = read_gltf(&mut mat, &p);
     let mut uv_sets: Vec<(TexField, String)> = Vec::new();
     let mut color_set = None;
     let (mut metallic, mut roughness, mut opacity) = (None, None, None);
     for (link, prop) in objs.children.get(&id).cloned().unwrap_or_default() {
         let Some(slot) = slot(&prop) else {
+            if gltf
+                && let Some(field) = gltf_field(&prop)
+                && let Some(assets) = assets
+            {
+                let tex = texture_of(link, objs);
+                let img = *image_index
+                    .entry(tex)
+                    .or_insert_with(|| texture_image(tex, objs, dir, assets, images));
+                if let Some(t) = img.map(|i| texture_tex(tex, objs, i))
+                    && put_gltf_texture(&mut mat, &prop, t)
+                    && let Some(set) = texture_uv_set(tex, objs)
+                {
+                    uv_sets.push((field, set));
+                }
+            }
             continue;
         };
         let Some(assets) = assets else {
@@ -3169,8 +3304,11 @@ fn read_material(
         let field: Option<TexField> = match slot {
             Slot::Color if mat.base_color_tex.is_none() => {
                 // A texture takes the place of the color it's connected to (a classic material's diffuse factor is
-                // usually a leftover): it's shown as painted, scaled only by a PBR shader's base weight.
-                mat.base_color[..3].fill(pbr.unwrap_or(1.0));
+                // usually a leftover): it's shown as painted, scaled only by a PBR shader's base weight. glTF's factor
+                // does scale it.
+                if !gltf {
+                    mat.base_color[..3].fill(pbr.unwrap_or(1.0));
+                }
                 mat.base_color_tex = Some(t);
                 Some(|m| m.base_color_tex.as_mut())
             }
@@ -3180,7 +3318,7 @@ fn read_material(
             }
             Slot::Emissive if mat.emissive_tex.is_none() => {
                 // An emissive map with no emissive color would show nothing: it's shown as painted.
-                if mat.emissive.iter().all(|c| *c == 0.0) {
+                if !gltf && mat.emissive.iter().all(|c| *c == 0.0) {
                     mat.emissive = [1.0; 3];
                 }
                 mat.emissive_tex = Some(t);
@@ -3195,8 +3333,10 @@ fn read_material(
                     mat.occlusion_tex = Some(t.clone());
                 }
                 mat.metallic_roughness_tex = Some(t);
-                mat.metallic = 1.0;
-                mat.roughness = 1.0;
+                if !gltf {
+                    mat.metallic = 1.0;
+                    mat.roughness = 1.0;
+                }
                 Some(|m| m.metallic_roughness_tex.as_mut())
             }
             Slot::Metallic => {
@@ -3272,8 +3412,17 @@ fn read_material(
     if let (Some(o), Some(c)) = (&opacity, &mat.base_color_tex)
         && o.image == c.image
         && mat.alpha == Alpha::Opaque
+        && !gltf
     {
         mat.alpha = Alpha::Blend;
+    }
+    if gltf {
+        if let (Some(t), Some(s)) = (&mut mat.normal_tex, p.own_scalar("glTF|normalScale")) {
+            t.scale = f32_of(s);
+        }
+        if let (Some(t), Some(s)) = (&mut mat.occlusion_tex, p.own_scalar("glTF|occlusionStrength")) {
+            t.scale = f32_of(s);
+        }
     }
     (mat, color_set, uv_sets)
 }
@@ -3288,6 +3437,26 @@ fn texture_tex(id: i64, objs: &Objects<'_>, image: usize) -> Tex {
         _ => material::REPEAT,
     };
     t.wrap = [wrap("WrapModeU"), wrap("WrapModeV")];
+    // glTF's own sampler, where the texture keeps it.
+    let gl = |k: &str| {
+        let v = scalar(&p, k).filter(|v| *v >= 0.0 && v.fract() == 0.0 && *v <= f64::from(u32::MAX))?;
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a whole number in range"
+        )]
+        Some(v as u32)
+    };
+    for (w, k) in t.wrap.iter_mut().zip(["glTF|wrapS", "glTF|wrapT"]) {
+        if let Some(v) = gl(k) {
+            *w = v;
+        }
+    }
+    for (f, k) in t.filter.iter_mut().zip(["glTF|magFilter", "glTF|minFilter"]) {
+        if let Some(v) = gl(k) {
+            *f = Some(v);
+        }
+    }
     let [tu, tv, _] = vec3(&p, "Translation", [0.0; 3]).map(f32_of);
     let [_, _, angle] = vec3(&p, "Rotation", [0.0; 3]).map(f32_of);
     let [su, sv, _] = vec3(&p, "Scaling", [1.0; 3]).map(f32_of);
@@ -4539,6 +4708,23 @@ Connections:  {{
         let mut c = curve(&spin.iter().map(|v| v[1]).collect::<Vec<_>>());
         c.unwrap_degrees();
         assert_eq!(c.values, spin.iter().map(|v| v[1]).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn keys_a_hair_apart_become_one_time() {
+        // The same frame written to two curves through two float paths, 6e-8 s apart.
+        let t = timeline(vec![
+            0.0,
+            0.666_666_746,
+            0.666_666_687,
+            1.0,
+            f64::NAN,
+            1.0 + 4e-7,
+            1.0 + 8e-7,
+        ]);
+        assert_eq!(t, [0.0, 0.666_666_746, 1.0 + 8e-7]);
+        // Keys a frame apart stay apart, even at 1000 frames a second.
+        assert_eq!(timeline(vec![0.002, 0.001, 0.0]), [0.0, 0.001, 0.002]);
     }
 
     #[test]
