@@ -38,7 +38,7 @@ use serde_json::{Map, Value, json};
 use super::Input;
 use super::stream::{self, f32_from, f64_from};
 use crate::Result;
-use crate::document::{Builder, Document, Keep};
+use crate::document::{self, Animation, Builder, Document, Keep, Sampler};
 use crate::num::{f32_of, usize_of};
 use crate::source::{Axis, Fact, SourceInfo};
 
@@ -618,7 +618,6 @@ pub(super) fn load(input: Input<'_>, keep: Keep) -> Result<Document> {
         })
         .collect();
 
-    let mut animations = Vec::new();
     if keep.animations
         && let Some(m) = &motion
         && let Some(frame_time) = m.frame_time
@@ -679,11 +678,24 @@ pub(super) fn load(input: Input<'_>, keep: Keep) -> Result<Document> {
                 Kind::Scale => ("scale", "VEC3"),
             };
             let output = b.floats(track.out, kind, false);
-            channels.push(json!({ "sampler": samplers.len(), "target": { "node": track.node, "path": path } }));
-            samplers.push(json!({ "input": input, "output": output, "interpolation": "LINEAR" }));
+            channels.push(document::Channel {
+                sampler: samplers.len(),
+                node: track.node,
+                path,
+            });
+            samplers.push(Sampler {
+                input,
+                output,
+                interpolation: "LINEAR",
+            });
         }
         if !channels.is_empty() {
-            animations.push(json!({ "name": "motion", "channels": channels, "samplers": samplers }));
+            b.animations.push(Animation {
+                channels,
+                samplers,
+                name: Some("motion".into()),
+                extras: None,
+            });
         }
     }
 
@@ -719,9 +731,6 @@ pub(super) fn load(input: Input<'_>, keep: Keep) -> Result<Document> {
     json.insert("scene".into(), json!(0));
     json.insert("scenes".into(), json!([{ "nodes": h.roots }]));
     json.insert("nodes".into(), Value::Array(nodes));
-    if !animations.is_empty() {
-        json.insert("animations".into(), Value::Array(animations));
-    }
     Ok(b.finish(json, facts))
 }
 
@@ -785,12 +794,12 @@ Frame Time: 0.5
     #[test]
     fn two_joints() {
         let doc = read(TWO).unwrap();
-        let nodes = doc.json["nodes"].as_array().unwrap();
+        let nodes = doc.json()["nodes"].as_array().unwrap();
         let names: Vec<_> = nodes.iter().map(|n| n["name"].as_str().unwrap()).collect();
         assert_eq!(names, ["Hips", "Spine", "Spine_end"]);
         assert_eq!(nodes[0]["translation"], json!([0.0, 90.0, 0.0]));
         assert_eq!(nodes[0]["children"], json!([1]));
-        assert_eq!(doc.json["scenes"][0]["nodes"], json!([0]));
+        assert_eq!(doc.json()["scenes"][0]["nodes"], json!([0]));
         assert_eq!(doc.facts["joints"], json!(2));
         assert_eq!(doc.facts["channels"], json!(9));
         assert_eq!(doc.facts["frames"], json!(2));
@@ -864,10 +873,10 @@ Frame Time: 0.5
         let crlf = format!("\u{feff}{}", TWO.replace('\n', "\r\n").replace("  ", "\t"));
         let a = read(&crlf).unwrap();
         let b = read(TWO).unwrap();
-        assert_eq!(a.json["nodes"], b.json["nodes"]);
+        assert_eq!(a.json()["nodes"], b.json()["nodes"]);
         assert_eq!(a.facts, b.facts);
         let cr = read(&TWO.replace('\n', "\r")).unwrap();
-        assert_eq!(cr.json["nodes"], b.json["nodes"]);
+        assert_eq!(cr.json()["nodes"], b.json()["nodes"]);
         assert_eq!(cr.facts, b.facts);
     }
 
@@ -875,12 +884,12 @@ Frame Time: 0.5
     fn spellings() {
         let text = "hierarchy\nroot My Hips (1){\noffset 1e1 -0 2.5E-1\nchannels 1 xROTATION\nend site{ offset 0 1 0 }}\nmotion\nframes:1\nframe time:\t0.0333\n-1.5e+1\n";
         let doc = read(text).unwrap();
-        let nodes = doc.json["nodes"].as_array().unwrap();
+        let nodes = doc.json()["nodes"].as_array().unwrap();
         assert_eq!(nodes[0]["name"], "My Hips (1)");
         assert_eq!(nodes[1]["name"], "My Hips (1)_end");
         assert_eq!(nodes[0]["translation"], json!([10.0, -0.0, 0.25]));
         assert_eq!(doc.facts["frames"], json!(1));
-        assert_eq!(doc.json["animations"][0]["channels"].as_array().unwrap().len(), 1);
+        assert_eq!(doc.json()["animations"][0]["channels"].as_array().unwrap().len(), 1);
     }
 
     #[test]
@@ -908,12 +917,12 @@ Frame Time: 0.5
     fn no_motion_and_no_frames() {
         let hierarchy = TWO.split("MOTION").next().unwrap();
         let doc = read(hierarchy).unwrap();
-        assert!(doc.json.get("animations").is_none());
+        assert!(doc.json().get("animations").is_none());
         assert!(doc.facts.get("frames").is_none());
         assert_eq!(doc.facts["channels"], json!(9));
         let zero = format!("{hierarchy}MOTION\nFrames: 0\nFrame Time: 0.1\n");
         let doc = read(&zero).unwrap();
-        assert!(doc.json.get("animations").is_none());
+        assert!(doc.json().get("animations").is_none());
         assert_eq!(doc.facts["frames"], json!(0));
         // Fewer rows than declared keeps what's there.
         let doc = read(&format!("{hierarchy}MOTION\nFrames: 9\nFrame Time: 0.1\n")).unwrap();
@@ -997,7 +1006,7 @@ Frame Time: 0.5
         ))
         .unwrap();
         assert_eq!(doc.facts["frames"], json!(3));
-        assert!(doc.json["asset"]["extras"]["source"].get("frames").is_none());
+        assert!(doc.json()["asset"]["extras"]["source"].get("frames").is_none());
         assert_eq!(doc.rig().unwrap().animations[0].channels[0].times, [0.0, 0.5, 1.0]);
         // No Frame Time line: a thirtieth of a second, noted.
         let doc = read(&format!("{hierarchy}MOTION\nFrames: 2\n{rows}")).unwrap();
@@ -1009,7 +1018,7 @@ Frame Time: 0.5
         // A MOTION section with nothing in it has no frames.
         let doc = read(&format!("{hierarchy}MOTION\n")).unwrap();
         assert_eq!(doc.facts["frames"], json!(0));
-        assert!(doc.json.get("animations").is_none());
+        assert!(doc.json().get("animations").is_none());
     }
 
     #[test]
@@ -1049,7 +1058,7 @@ Frame Time: 0.5
         let text = "HIERARCHY\nROOT a\n{\nCHANNELS 2 Xrotation Wiggle\n}\nMOTION\nFrames: 1\nFrame Time: 1\n90 7\n";
         let doc = read(text).unwrap();
         assert_eq!(doc.facts["channels"], json!(2));
-        assert_eq!(doc.json["animations"][0]["channels"].as_array().unwrap().len(), 1);
+        assert_eq!(doc.json()["animations"][0]["channels"].as_array().unwrap().len(), 1);
     }
 
     #[test]
@@ -1064,7 +1073,7 @@ Frame Time: 0.5
         text.push_str("MOTION\nFrames: 1\nFrame Time: 1\n45\n");
         let assets = Memory::new();
         let doc = crate::formats::load_bytes(text.as_bytes(), "t.bvh", "bvh", &assets, Keep::ALL).unwrap();
-        assert_eq!(doc.json["nodes"].as_array().unwrap().len(), MAX_NODES);
+        assert_eq!(doc.json()["nodes"].as_array().unwrap().len(), MAX_NODES);
         assert_eq!(doc.facts["joints"], json!(depth));
         // One more joint is too many.
         let text = text.replacen("JOINT j\n", "JOINT k\n{\n}\nJOINT j\n", 1);
@@ -1076,7 +1085,7 @@ Frame Time: 0.5
         let text = TWO.replace("Frames: 2", &format!("Frames: {}", u64::MAX));
         let doc = read(&text).unwrap();
         assert_eq!(doc.facts["frames"], json!(2));
-        assert_eq!(doc.json["asset"]["extras"]["source"]["frames"], json!(u64::MAX));
+        assert_eq!(doc.json()["asset"]["extras"]["source"]["frames"], json!(u64::MAX));
     }
 
     #[test]
@@ -1084,9 +1093,9 @@ Frame Time: 0.5
         let all = read(TWO).unwrap();
         let keep = Keep::ALL.with_animations(false);
         let none = load(Input::memory(TWO.as_bytes(), "t.bvh"), keep).unwrap();
-        assert!(none.json.get("animations").is_none());
+        assert!(none.json().get("animations").is_none());
         assert_eq!(all.facts, none.facts);
-        assert_eq!(all.json["nodes"], none.json["nodes"]);
+        assert_eq!(all.json()["nodes"], none.json()["nodes"]);
     }
 
     #[test]

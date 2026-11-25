@@ -20,8 +20,8 @@ impl Document {
     /// When a skin or animation names an accessor, buffer or node that doesn't exist, or
     /// whose data runs past its buffer.
     pub fn rig(&self) -> Result<Rig> {
-        let mut r = Reader::bare(self);
-        let json = &self.json;
+        let mut r = Reader::whole(self);
+        let json = self.json();
         let name = |v: &Value| v.get("name").and_then(Value::as_str).map(str::to_owned);
 
         let raw = list(json, "nodes");

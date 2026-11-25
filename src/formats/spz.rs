@@ -446,14 +446,14 @@ mod tests {
             for degree in 0..=4 {
                 let doc = decode(&spz(version, 50, degree, 1, &[]), 1000, 1).unwrap();
                 assert_eq!(splats(&doc), 50, "version {version}, degree {degree}");
-                let a = &doc.json["meshes"][0]["primitives"][0]["attributes"];
+                let a = &doc.json()["meshes"][0]["primitives"][0]["attributes"];
                 let has = |d: usize| a.get(format!("KHR_gaussian_splatting:SH_DEGREE_{d}_COEF_0")).is_some();
                 let top = usize::from(degree.min(3));
                 assert!(
                     (1..=3).all(|d| has(d) == (d <= top)),
                     "version {version}, degree {degree}"
                 );
-                assert_eq!(doc.json["asset"]["extras"]["source"]["antialiased"], true);
+                assert_eq!(doc.json()["asset"]["extras"]["source"]["antialiased"], true);
                 let info = doc.source_info();
                 assert_eq!(info.version, Some(version.to_string()));
                 assert_eq!(info.up_axis, Fact::Assumed(Axis::PosY));
@@ -551,7 +551,7 @@ mod tests {
         assert_eq!(coordinates(&records), 12);
         assert_eq!(coordinates(&records[..records.len() - 1]), 0);
         let doc = decode(&spz(3, 4, 0, 2, &records), 100, 1).unwrap();
-        let node = &doc.json["nodes"][0];
+        let node = &doc.json()["nodes"][0];
         assert!(node["rotation"].is_array(), "{node}");
     }
 

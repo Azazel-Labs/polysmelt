@@ -64,19 +64,25 @@ impl Document {
     /// document is unchanged then.
     pub fn decode(&mut self) -> Result<()> {
         let plan = read(self)?;
-        let draco = has_draco(&self.json);
+        let draco = has_draco(&self.base);
         if !plan.views.is_empty() || !plan.accessors.is_empty() || draco {
+            // What a reader built has neither: only a file's JSON is changed here.
+            self.json_mut();
             apply(self, &plan);
             drop_unused_buffers(self);
         }
         for key in ["extensionsUsed", "extensionsRequired"] {
-            if let Some(a) = self.json.get_mut(key).and_then(Value::as_array_mut) {
+            if !self.base.contains_key(key) {
+                continue;
+            }
+            let json = self.base_mut();
+            if let Some(a) = json.get_mut(key).and_then(Value::as_array_mut) {
                 a.retain(|e| {
                     e.as_str()
                         .is_none_or(|e| !(e == DRACO || e == QUANTIZATION || MESHOPT_EXTENSIONS.contains(&e)))
                 });
                 if a.is_empty() {
-                    self.json.remove(key);
+                    json.remove(key);
                 }
             }
         }
@@ -94,11 +100,11 @@ fn has_draco(json: &Map<String, Value>) -> bool {
 
 /// Decodes everything [`Document::decode`] replaces, changing nothing yet.
 fn read(doc: &Document) -> Result<Plan> {
-    let json = &doc.json;
+    let json = &doc.base;
     // Only accessors are read: a required extension decoding leaves alone stays required.
     let mut r = Reader::bare(doc);
     let mut plan = Plan::default();
-    for i in 0..list(json, "bufferViews").len() {
+    for i in 0..r.tabs.views() {
         r.meshopt(i)?;
     }
 
@@ -164,7 +170,7 @@ fn read(doc: &Document) -> Result<Plan> {
                     continue;
                 }
                 let values = r.read_acc(&acc, [0.0f32; 4])?;
-                let declared = r.get("accessors", a)?;
+                let declared = r.tabs.declares_bounds(a);
                 let floats: Vec<f32> = values.iter().flat_map(|v| v[..acc.n].iter().copied()).collect();
                 plan.accessors
                     .insert(a, floats_data(declared, floats, acc.n, name == "POSITION"));
@@ -218,11 +224,10 @@ fn read(doc: &Document) -> Result<Plan> {
     Ok(plan)
 }
 
-/// Float elements as an accessor's new data.
-fn floats_data(declared: &Value, floats: Vec<f32>, n: usize, position: bool) -> Data {
+/// Float elements as an accessor's new data, for one that declares bounds when `declared`.
+fn floats_data(declared: bool, floats: Vec<f32>, n: usize, position: bool) -> Data {
     let count = floats.len() / n.max(1);
-    let bounds =
-        (position || declared.get("min").is_some() || declared.get("max").is_some()).then(|| bounds(&floats, n));
+    let bounds = (position || declared).then(|| bounds(&floats, n));
     let mut bytes = Vec::with_capacity(floats.len() * 4);
     for f in floats {
         bytes.extend_from_slice(&f.to_le_bytes());
@@ -297,6 +302,7 @@ fn from_draco(declared: &Value, bytes: &[u8], n: usize, is_indices: bool, attrs:
         .collect();
     let position = attrs.get("POSITION").and_then(Value::as_u64) == Some(acc as u64);
     if ctype == 5126 || normalized {
+        let declared = declared.get("min").is_some() || declared.get("max").is_some();
         return floats_data(declared, floats, n, position);
     }
     let mut out = Vec::new();
@@ -331,7 +337,7 @@ fn apply(doc: &mut Document, plan: &Plan) {
         at
     };
 
-    let views = doc.json.get_mut("bufferViews").and_then(Value::as_array_mut);
+    let views = doc.base.get_mut("bufferViews").and_then(Value::as_array_mut);
     for (i, v) in views.into_iter().flatten().enumerate() {
         let Some(v) = v.as_object_mut() else { continue };
         if let Some(bytes) = plan.views.get(&i) {
@@ -353,7 +359,7 @@ fn apply(doc: &mut Document, plan: &Plan) {
         let v = doc.push_view(view);
         let d = &plan.accessors[&a];
         let Some(acc) = doc
-            .json
+            .base
             .get_mut("accessors")
             .and_then(Value::as_array_mut)
             .and_then(|l| l.get_mut(a))
@@ -373,7 +379,7 @@ fn apply(doc: &mut Document, plan: &Plan) {
         }
     }
 
-    let meshes = doc.json.get_mut("meshes").and_then(Value::as_array_mut);
+    let meshes = doc.base.get_mut("meshes").and_then(Value::as_array_mut);
     let prims = meshes
         .into_iter()
         .flatten()
@@ -404,7 +410,7 @@ fn strip(obj: &mut Map<String, Value>, names: &[&str]) {
 
 /// Drops buffers no view points into, renumbering the views'.
 fn drop_unused_buffers(doc: &mut Document) {
-    let views = list(&doc.json, "bufferViews");
+    let views = list(&doc.base, "bufferViews");
     let mut used = vec![false; doc.buffers.len()];
     for b in views.iter().filter_map(|v| index(v, "buffer")) {
         if let Some(u) = used.get_mut(b) {
@@ -422,20 +428,20 @@ fn drop_unused_buffers(doc: &mut Document) {
     }
     let mut keep = used.iter().copied();
     doc.buffers.retain(|_| keep.next().unwrap_or(true));
-    if let Some(list) = doc.json.get_mut("buffers").and_then(Value::as_array_mut) {
+    if let Some(list) = doc.base.get_mut("buffers").and_then(Value::as_array_mut) {
         let mut keep = used.iter().copied();
         list.retain(|_| keep.next().unwrap_or(true));
         for b in list.iter_mut().filter_map(Value::as_object_mut) {
             strip(b, &MESHOPT_EXTENSIONS);
         }
     }
-    let views = doc.json.get_mut("bufferViews").and_then(Value::as_array_mut);
+    let views = doc.base.get_mut("bufferViews").and_then(Value::as_array_mut);
     for v in views.into_iter().flatten() {
         if let Some(b) = index(v, "buffer") {
             v["buffer"] = json!(renumber.get(b).copied().unwrap_or(b));
         }
     }
     if doc.buffers.is_empty() {
-        doc.json.remove("buffers");
+        doc.base.remove("buffers");
     }
 }

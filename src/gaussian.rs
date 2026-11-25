@@ -200,9 +200,9 @@ impl Splats {
             .collect();
         let mut attributes = json!({ "POSITION": b.positions(self.positions) });
         let color = b.accessor(Part::u16(colors), 5123, n, "VEC4", Some(34962));
-        b.accessors[color]["normalized"] = json!(true);
+        b.accessors[color].normalized = true;
         attributes["COLOR_0"] = json!(color);
-        let mut float = |v: Vec<f32>, kind: &str| b.accessor(Part::f32(v), 5126, n, kind, Some(34962));
+        let mut float = |v: Vec<f32>, kind: &'static str| b.accessor(Part::f32(v), 5126, n, kind, Some(34962));
         attributes[ROTATION] = json!(float(self.rotations.into_flattened(), "VEC4"));
         attributes[SCALE] = json!(float(self.scales.into_flattened(), "VEC3"));
         attributes[OPACITY] = json!(float(self.opacities, "SCALAR"));
@@ -242,12 +242,12 @@ impl Splats {
             facts.insert("points".into(), json!(0));
             facts.insert("splats".into(), json!(0));
             let mut doc = Document::empty(facts);
-            doc.json["asset"]["extras"] = json!({ "source": source });
+            doc.base_mut()["asset"]["extras"] = json!({ "source": source });
             return doc;
         };
         let n = prim["attributes"]["POSITION"]
             .as_u64()
-            .and_then(|a| b.accessors[usize::try_from(a).ok()?]["count"].as_u64())
+            .and_then(|a| Some(b.accessors[usize::try_from(a).ok()?].count as u64))
             .unwrap_or(0);
         facts.insert("points".into(), json!(n));
         facts.insert("splats".into(), json!(n));
@@ -483,7 +483,7 @@ mod tests {
         let mut b = Builder::default();
         let p = splats.primitive(&mut b).unwrap();
         let a = &p["attributes"];
-        assert_eq!(b.accessors[a["POSITION"].as_u64().unwrap() as usize]["count"], 2);
+        assert_eq!(b.accessors[a["POSITION"].as_u64().unwrap() as usize].count, 2);
         // Four columns hold degree 1 and part of degree 2: degree 1 stays.
         assert!(a.get("KHR_gaussian_splatting:SH_DEGREE_1_COEF_2").is_some());
         assert!(a.get("KHR_gaussian_splatting:SH_DEGREE_2_COEF_0").is_none());

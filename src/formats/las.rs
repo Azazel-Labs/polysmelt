@@ -1304,7 +1304,7 @@ pub(crate) mod tests {
                 let bytes = las(minor, format, 0, &pts(5), &[]);
                 let doc = load_las(&bytes, Keep::ALL).unwrap_or_else(|e| panic!("format {format}: {e}"));
                 assert_eq!(doc.facts["points"], 5, "format {format}");
-                let attrs = &doc.json["meshes"][0]["primitives"][0]["attributes"];
+                let attrs = &doc.json()["meshes"][0]["primitives"][0]["attributes"];
                 assert!(attrs.get("_INTENSITY").is_some(), "format {format}: {attrs}");
                 assert_eq!(
                     attrs.get("COLOR_0").is_some(),
@@ -1333,7 +1333,7 @@ pub(crate) mod tests {
         assert_eq!(info.meters_per_unit, Fact::Unknown);
         assert!(!info.converted.units && info.converted.up_axis);
         assert_eq!((info.tool, info.created), (None, None));
-        let t = doc.json["nodes"][0]["translation"].as_array().unwrap();
+        let t = doc.json()["nodes"][0]["translation"].as_array().unwrap();
         assert_eq!(t[0], 500_001.0);
         assert_eq!(t[2], -4_000_000.0);
         assert_eq!(doc.source_info().georeference.unwrap()["scale"][0], 0.01);
@@ -1365,7 +1365,7 @@ pub(crate) mod tests {
         assert_eq!(g["epsg"], 2263);
         assert_eq!(g["kind"], "projected");
         assert!((g["toMeters"][0].as_f64().unwrap() - US_FOOT).abs() < 1e-12);
-        let t = doc.json["nodes"][0]["translation"][0].as_f64().unwrap();
+        let t = doc.json()["nodes"][0]["translation"][0].as_f64().unwrap();
         assert!((t - 500_000.0 * US_FOOT).abs() < 1.0, "{t}");
         let m = doc.flatten(Pose::Rest).unwrap().unwrap();
         let p = &m.prims[0].positions;
@@ -1393,7 +1393,7 @@ pub(crate) mod tests {
         d[112..120].copy_from_slice(&0.5f64.to_le_bytes());
         let bytes = las(4, 6, 2, &pts(4), &[("LASF_Spec", 4, d)]);
         let doc = load_las(&bytes, Keep::ALL).unwrap();
-        let attrs = &doc.json["meshes"][0]["primitives"][0]["attributes"];
+        let attrs = &doc.json()["meshes"][0]["primitives"][0]["attributes"];
         assert!(attrs.get("_WIDTH").is_some(), "{attrs}");
     }
 
@@ -1482,11 +1482,11 @@ pub(crate) mod tests {
             assert!(packed.len() < plain.len());
             let a = load_las(&plain, Keep::ALL).unwrap();
             let b = super::load(Input::memory(&packed, "t.laz"), Keep::ALL.with_threads(3)).unwrap();
-            assert_eq!(b.json["asset"]["extras"]["source"]["format"], "LAZ");
+            assert_eq!(b.json()["asset"]["extras"]["source"]["format"], "LAZ");
             let fa = a.flatten(Pose::Rest).unwrap().unwrap();
             let fb = b.flatten(Pose::Rest).unwrap().unwrap();
             assert_eq!(fa.prims[0].positions, fb.prims[0].positions, "format {format}");
-            assert_eq!(a.json["meshes"], b.json["meshes"], "format {format}");
+            assert_eq!(a.json()["meshes"], b.json()["meshes"], "format {format}");
         }
     }
 

@@ -115,11 +115,12 @@ fn document(meshes: Vec<(Option<String>, Vec<Prim>)>, mesh: &Mesh, source: Map<S
     let mut doc = Document::from_named(meshes, &mesh.materials, Vec::new(), source, facts, &[]);
     // Z-up to Y-up: a quarter turn about X.
     let h = std::f32::consts::FRAC_1_SQRT_2;
-    let roots = doc.json["scenes"][0]["nodes"].take();
-    if let Some(nodes) = doc.json["nodes"].as_array_mut() {
+    let json = doc.base_mut();
+    let roots = json["scenes"][0]["nodes"].take();
+    if let Some(nodes) = json["nodes"].as_array_mut() {
         nodes.push(json!({ "name": "RootNode", "children": roots, "rotation": [-h, 0.0, 0.0, h] }));
         let root = nodes.len() - 1;
-        doc.json["scenes"][0]["nodes"] = json!([root]);
+        json["scenes"][0]["nodes"] = json!([root]);
     }
     doc
 }
@@ -490,14 +491,14 @@ mod tests {
             facet(1.0)
         );
         let doc = read(text.as_bytes());
-        let nodes = doc.json["nodes"].as_array().unwrap();
+        let nodes = doc.json()["nodes"].as_array().unwrap();
         assert_eq!(nodes.len(), 3);
         assert_eq!(nodes[0]["name"], "left part");
-        assert_eq!(doc.json["meshes"][0]["name"], "left part");
+        assert_eq!(doc.json()["meshes"][0]["name"], "left part");
         assert!(nodes[1].get("name").is_none());
         assert_eq!(nodes[2]["children"], json!([0, 1]));
-        assert_eq!(doc.json["scenes"][0]["nodes"], json!([2]));
-        assert_eq!(doc.json["asset"]["extras"]["source"]["encoding"], "ASCII");
+        assert_eq!(doc.json()["scenes"][0]["nodes"], json!([2]));
+        assert_eq!(doc.json()["asset"]["extras"]["source"]["encoding"], "ASCII");
         assert_eq!(doc.facts["triangles"], 2);
     }
 
@@ -522,7 +523,7 @@ facet normal 0 0 1 outer loop vertex 0 0 0 vertex 1 0 0 vertex 0 0 2 endloop end
     #[test]
     fn a_name_ends_at_the_first_facet_on_one_line() {
         let text = format!("solid one line {}endsolid one line", facet(0.0)).replace('\n', " ");
-        assert_eq!(read(text.as_bytes()).json["nodes"][0]["name"], "one line");
+        assert_eq!(read(text.as_bytes()).json()["nodes"][0]["name"], "one line");
     }
 
     #[test]
@@ -535,18 +536,18 @@ facet normal 0 0 1 outer loop vertex 0 0 0 vertex 1 0 0 vertex 0 0 2 endloop end
         }
         bytes.extend([0, 0]);
         let doc = read(&bytes);
-        let source = &doc.json["asset"]["extras"]["source"];
+        let source = &doc.json()["asset"]["extras"]["source"];
         assert_eq!(source["encoding"], "binary");
         assert_eq!(source["header"], "made by a tool");
         assert_eq!(doc.source_info().title.as_deref(), Some("made by a tool"));
         bytes[..80].copy_from_slice(&[b' '; 80]);
         bytes[..22].copy_from_slice(b"COLOR=abcd MATERIAL=ab");
         let doc = read(&bytes);
-        assert!(doc.json["asset"]["extras"]["source"]["header"].is_string());
+        assert!(doc.json()["asset"]["extras"]["source"]["header"].is_string());
         assert!(doc.source_info().title.is_none(), "settings aren't a title");
         bytes[..80].fill(0);
         let doc = read(&bytes);
-        assert!(doc.json["asset"]["extras"]["source"].get("header").is_none());
+        assert!(doc.json()["asset"]["extras"]["source"].get("header").is_none());
         assert!(doc.source_info().title.is_none());
         assert_eq!(doc.source_info().format.as_deref(), Some("STL"));
     }

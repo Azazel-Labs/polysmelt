@@ -921,7 +921,7 @@ frame 1 {
     #[test]
     fn mesh_vertices_come_from_weights() {
         let doc = read(MESH.as_bytes(), "t.md5mesh").unwrap();
-        assert_eq!(doc.json["skins"][0]["joints"], json!([0, 1]));
+        assert_eq!(doc.json()["skins"][0]["joints"], json!([0, 1]));
         let mesh = doc.flatten(Pose::Rest).unwrap().unwrap();
         // Z up turned to Y up: (x, y, z) becomes (x, z, -y).
         let mut got: Vec<[f32; 3]> = mesh.prims[0].positions.clone();
@@ -931,13 +931,13 @@ frame 1 {
             assert!(g.iter().zip(w).all(|(a, b)| (a - b).abs() < 1e-5), "{got:?}");
         }
         assert_eq!(doc.facts["joints"], 2);
-        assert_eq!(doc.json["asset"]["extras"]["source"]["commandline"], "test");
+        assert_eq!(doc.json()["asset"]["extras"]["source"]["commandline"], "test");
     }
 
     #[test]
     fn anim_keys_follow_flags() {
         let doc = read(ANIM.as_bytes(), "walk.md5anim").unwrap();
-        let a = &doc.json["animations"][0];
+        let a = &doc.json()["animations"][0];
         assert_eq!(a["name"], "walk");
         assert_eq!(a["channels"].as_array().unwrap().len(), 2);
         assert_eq!(doc.facts["frames"], 2);

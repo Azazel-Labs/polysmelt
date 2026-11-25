@@ -75,8 +75,8 @@ fn polylist_with_normals_and_texcoords() {
     // V flipped to glTF's top-left origin.
     let k = p.positions.iter().position(|q| q[0] < 0.5 && q[1] > 0.5).unwrap();
     assert!(p.uvs[k][1].abs() < 1e-6);
-    assert_eq!(d.json["meshes"][0]["name"], "Quad");
-    assert_eq!(d.json["asset"]["extras"]["source"]["format"], "COLLADA");
+    assert_eq!(d.json()["meshes"][0]["name"], "Quad");
+    assert_eq!(d.json()["asset"]["extras"]["source"]["format"], "COLLADA");
 }
 
 #[test]
@@ -123,7 +123,10 @@ fn z_up_centimeters_become_y_up_meters() {
     assert_eq!(info.unit.as_deref(), Some("centimeter"));
     assert!(info.converted.units && info.converted.up_axis && !info.converted.handedness);
     assert_eq!(info.output_meters_per_unit(), Fact::Declared(1.0));
-    assert_eq!(d.json["nodes"].as_array().unwrap().last().unwrap()["name"], "RootNode");
+    assert_eq!(
+        d.json()["nodes"].as_array().unwrap().last().unwrap()["name"],
+        "RootNode"
+    );
 }
 
 #[test]
@@ -146,8 +149,8 @@ fn the_asset_says_who_made_it_and_when() {
     assert_eq!(info.keywords, ["crate", "wood", "prop"]);
     assert_eq!(info.created.as_deref(), Some("2024-01-02T03:04:05Z"));
     assert_eq!(info.modified.as_deref(), Some("2024-02-03T04:05:06Z"));
-    assert_eq!(d.json["asset"]["copyright"], "(c) 2024 Ann");
-    let source = &d.json["asset"]["extras"]["source"];
+    assert_eq!(d.json()["asset"]["copyright"], "(c) 2024 Ann");
+    let source = &d.json()["asset"]["extras"]["source"];
     assert_eq!(source["revision"], "7");
     assert_eq!(source["contributors"][1]["authoring_tool"], "Fixer 1");
     // No unit and no up axis: COLLADA's meter and Y up, assumed, and nothing to convert.
@@ -164,7 +167,7 @@ fn instance_node_copies_and_cycles_stop() {
         <node id="b"><translate>5 0 0</translate><instance_node url="#a"/></node>"##;
     let d = read(&doc("", QUAD, scene));
     assert_eq!(d.triangles(), 4);
-    assert_eq!(d.json["meshes"].as_array().unwrap().len(), 1);
+    assert_eq!(d.json()["meshes"].as_array().unwrap().len(), 1);
 }
 
 #[test]
@@ -203,8 +206,8 @@ fn skins_keep_up_to_sixteen_influences() {
         r##"{BONES}<node><instance_controller url="#c"><skeleton>#root</skeleton></instance_controller></node>"##
     );
     let d = read(&doc("", &format!("{QUAD}{SKIN}"), &scene));
-    assert_eq!(d.json["skins"][0]["joints"].as_array().unwrap().len(), 5);
-    let attrs = &d.json["meshes"][0]["primitives"][0]["attributes"];
+    assert_eq!(d.json()["skins"][0]["joints"].as_array().unwrap().len(), 5);
+    let attrs = &d.json()["meshes"][0]["primitives"][0]["attributes"];
     let weights = |k: usize| {
         d.read_floats(usize::try_from(attrs[format!("WEIGHTS_{k}")].as_u64().unwrap()).unwrap())
             .unwrap()
@@ -238,7 +241,7 @@ fn rotation_animation_is_cut_into_short_turns() {
     </animation></library_animations>"##;
     let scene = r##"<node id="spin"><rotate sid="rz">0 0 1 0</rotate><instance_geometry url="#quad"/></node>"##;
     let d = read(&doc("", &format!("{QUAD}{lib}"), scene));
-    let anim = &d.json["animations"][0];
+    let anim = &d.json()["animations"][0];
     assert_eq!(anim["channels"].as_array().unwrap().len(), 1);
     assert_eq!(anim["channels"][0]["target"]["path"], "rotation");
     let input = usize::try_from(anim["samplers"][0]["input"].as_u64().unwrap()).unwrap();
@@ -274,8 +277,8 @@ fn morph_targets_are_deltas() {
         <targets><input semantic="MORPH_TARGET" source="#mt"/><input semantic="MORPH_WEIGHT" source="#mw"/></targets>
       </morph></controller></library_controllers>"##;
     let d = read(&doc("", lib, r##"<node><instance_controller url="#m"/></node>"##));
-    assert_eq!(d.json["meshes"][0]["weights"], json!([0.5]));
-    assert_eq!(d.json["meshes"][0]["extras"]["targetNames"], json!(["Up"]));
+    assert_eq!(d.json()["meshes"][0]["weights"], json!([0.5]));
+    assert_eq!(d.json()["meshes"][0]["extras"]["targetNames"], json!(["Up"]));
     let m = flat(&d);
     assert!(m.prims[0].positions.iter().all(|p| (p[2] - 0.5).abs() < 1e-6));
 }
@@ -305,14 +308,14 @@ fn materials_from_common_profile() {
     let assets = Memory::new().with("tex ture.png", png);
     let text = doc("", &format!("{QUAD}{lib}"), scene);
     let d = read_with(text.as_bytes(), "t.dae", &assets, Keep::ALL).unwrap();
-    let m = &d.json["materials"][0];
+    let m = &d.json()["materials"][0];
     assert_eq!(m["name"], "Red");
     assert_eq!(m["alphaMode"], "BLEND");
     assert_eq!(m["doubleSided"], true);
     assert!(m["pbrMetallicRoughness"]["baseColorTexture"].is_object(), "{m}");
     assert!(m["normalTexture"].is_object(), "{m}");
     assert!((m["pbrMetallicRoughness"]["roughnessFactor"].as_f64().unwrap() - 0.316_227_77).abs() < 1e-4);
-    assert_eq!(d.json["samplers"][0]["wrapS"], json!(crate::material::CLAMP));
+    assert_eq!(d.json()["samplers"][0]["wrapS"], json!(crate::material::CLAMP));
     assert!(m["emissiveFactor"][0].as_f64().unwrap() > 0.2);
 }
 
@@ -328,14 +331,14 @@ fn cameras_and_lights() {
     let scene = r##"<node><instance_camera url="#cam"/><instance_camera url="#ortho"/><instance_light url="#sun"/>
         <instance_light url="#spot"/><instance_light url="#amb"/></node>"##;
     let d = read(&doc("", lib, scene));
-    let cam = &d.json["cameras"][0]["perspective"];
+    let cam = &d.json()["cameras"][0]["perspective"];
     assert!((cam["yfov"].as_f64().unwrap() - 2.0 * 0.5f64.atan()).abs() < 1e-9);
-    assert_eq!(d.json["cameras"][1]["type"], "orthographic");
-    let lights = &d.json["extensions"]["KHR_lights_punctual"]["lights"];
+    assert_eq!(d.json()["cameras"][1]["type"], "orthographic");
+    let lights = &d.json()["extensions"]["KHR_lights_punctual"]["lights"];
     assert_eq!(lights[0]["intensity"], 2.0);
     assert!((lights[1]["spot"]["outerConeAngle"].as_f64().unwrap() - 30f64.to_radians()).abs() < 1e-9);
     assert_eq!(
-        d.json["nodes"][0]["extras"]["ambientLight"][0]
+        d.json()["nodes"][0]["extras"]["ambientLight"][0]
             .as_f64()
             .map(|v| (v * 10.0).round()),
         Some(1.0)
@@ -363,8 +366,8 @@ fn archives_hold_the_document_and_its_textures() {
     let bytes = zip.finish().unwrap().into_inner();
     let d = read_with(&bytes, "t.zae", &Memory::new(), Keep::ALL).unwrap();
     assert_eq!(d.triangles(), 2);
-    assert!(d.json["materials"][0]["pbrMetallicRoughness"]["baseColorTexture"].is_object());
-    assert_eq!(d.json["images"].as_array().map(Vec::len), Some(1));
+    assert!(d.json()["materials"][0]["pbrMetallicRoughness"]["baseColorTexture"].is_object());
+    assert_eq!(d.json()["images"].as_array().map(Vec::len), Some(1));
 }
 
 #[test]
@@ -427,10 +430,10 @@ fn everything() -> String {
 #[test]
 fn everything_reads() {
     let d = read(&everything());
-    assert!(d.json["skins"].is_array());
-    assert!(d.json["animations"].is_array());
-    assert!(d.json["cameras"].is_array());
-    assert_eq!(d.json["materials"][0]["alphaMode"], "BLEND");
+    assert!(d.json()["skins"].is_array());
+    assert!(d.json()["animations"].is_array());
+    assert!(d.json()["cameras"].is_array());
+    assert_eq!(d.json()["materials"][0]["alphaMode"], "BLEND");
     flat(&d);
 }
 
@@ -483,7 +486,7 @@ fn keep_flags_drop_what_they_say() {
         .with_materials(false);
     let d = read_with(text.as_bytes(), "t.dae", &Memory::new(), keep).unwrap();
     for key in ["animations", "skins", "cameras", "materials", "extensions"] {
-        assert!(d.json.get(key).is_none(), "{key}");
+        assert!(d.json().get(key).is_none(), "{key}");
     }
     assert_eq!(d.triangles(), read(&text).triangles());
 }
@@ -501,12 +504,12 @@ fn lines_and_linestrips_are_segments() {
     let d = read(&text);
     let m = flat(&d);
     assert_eq!((m.triangles(), m.lines(), m.points()), (2, 3, 0));
-    assert_eq!(d.json["meshes"][0]["primitives"].as_array().map(Vec::len), Some(3));
+    assert_eq!(d.json()["meshes"][0]["primitives"].as_array().map(Vec::len), Some(3));
     let keep = Keep::ALL.with_lines_and_points(false);
     // The document keeps them; flattening leaves them out.
     let assets = Memory::new();
     let d = super::super::load_bytes(text.as_bytes(), "t.dae", "dae", &assets, keep).unwrap();
-    assert_eq!(d.json["meshes"][0]["primitives"].as_array().map(Vec::len), Some(3));
+    assert_eq!(d.json()["meshes"][0]["primitives"].as_array().map(Vec::len), Some(3));
     let m = flat(&d);
     assert_eq!((m.triangles(), m.lines()), (2, 0));
 }
@@ -546,10 +549,10 @@ fn extras_go_when_not_kept() {
         QUAD,
         r##"<node id="a"><instance_geometry url="#quad"/><extra><technique profile="X"><tag>1</tag></technique></extra></node>"##,
     );
-    assert_eq!(read(&text).json["nodes"][0]["extras"]["extra"]["X"]["tag"], "1");
+    assert_eq!(read(&text).json()["nodes"][0]["extras"]["extra"]["X"]["tag"], "1");
     let keep = Keep::ALL.with_extras(false);
     let d = read_with(text.as_bytes(), "t.dae", &Memory::new(), keep).unwrap();
-    assert!(d.json["nodes"][0].get("extras").is_none());
+    assert!(d.json()["nodes"][0].get("extras").is_none());
 }
 
 #[test]
@@ -565,7 +568,7 @@ fn bindings_of_one_geometry_share_its_accessors() {
     };
     let scene = format!("{}{}", bound("red"), bound("green"));
     let d = read(&doc("", &format!("{QUAD}{lib}"), &scene));
-    let meshes = d.json["meshes"].as_array().unwrap();
+    let meshes = d.json()["meshes"].as_array().unwrap();
     assert_eq!(meshes.len(), 2);
     let (a, b) = (&meshes[0]["primitives"][0], &meshes[1]["primitives"][0]);
     assert_eq!(a["attributes"], b["attributes"]);

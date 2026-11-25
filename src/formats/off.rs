@@ -799,11 +799,11 @@ mod tests {
         let text = "OFF\n4 4 0\n0 0 0\n1 0 0\n0 1 0\nnan 0 0\n3 0 1 2\n3 0 1 9\n3 0 1 3\n2 0 1\n";
         let doc = read_with(text.as_bytes(), usize::MAX).unwrap();
         assert_eq!(doc.facts["triangles"], 1);
-        assert_eq!(doc.json["asset"]["extras"]["source"]["droppedFaces"], 3);
+        assert_eq!(doc.json()["asset"]["extras"]["source"]["droppedFaces"], 3);
         let short = &CUBE[..CUBE.len() - 11];
         let doc = read_with(short.as_bytes(), usize::MAX).unwrap();
         assert_eq!(doc.facts["triangles"], 10);
-        assert_eq!(doc.json["asset"]["extras"]["source"]["truncated"], true);
+        assert_eq!(doc.json()["asset"]["extras"]["source"]["truncated"], true);
         assert!(read_with(b"OFF\n0 0 0\n", usize::MAX).is_err());
         assert!(read_with(b"PLY\n", usize::MAX).is_err());
     }
@@ -840,7 +840,7 @@ mod tests {
     fn binary_off() {
         let doc = read_with(&binary_cube(false), usize::MAX).unwrap();
         assert_eq!(doc.facts["triangles"], 2);
-        assert_eq!(doc.json["asset"]["extras"]["source"]["encoding"], "binary");
+        assert_eq!(doc.json()["asset"]["extras"]["source"]["encoding"], "binary");
         let m = mesh(&binary_cube(true));
         assert_eq!(m.prims[0].colors[0], [0.0, 0.0, 1.0, 1.0]);
     }
@@ -898,6 +898,6 @@ mod tests {
         assert_eq!(info.meters_per_unit, crate::source::Fact::Unknown);
         assert_eq!(info.up_axis, crate::source::Fact::Unknown);
         assert_eq!(info.converted, crate::source::Converted::default());
-        assert_eq!(doc.json["asset"]["extras"]["source"]["encoding"], "ASCII");
+        assert_eq!(doc.json()["asset"]["extras"]["source"]["encoding"], "ASCII");
     }
 }

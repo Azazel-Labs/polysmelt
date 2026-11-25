@@ -197,7 +197,7 @@ impl Cloud {
         facts.insert("points".into(), json!(n));
         if n == 0 {
             let mut doc = Document::empty(facts);
-            doc.json["asset"]["extras"] = json!({ "source": source });
+            doc.base_mut()["asset"]["extras"] = json!({ "source": source });
             return doc;
         }
         let mut b = Builder::default();
@@ -233,7 +233,7 @@ impl Cloud {
                     "VEC4",
                     Some(34962),
                 );
-                b.accessors[a]["normalized"] = json!(true);
+                b.accessors[a].normalized = true;
                 attributes["COLOR_0"] = json!(a);
             }
         }
@@ -373,13 +373,13 @@ mod tests {
         let doc = cloud.document(&info, Map::new(), Map::new());
         assert_eq!(doc.source_info().format.as_deref(), Some("test"));
         assert_eq!(doc.facts["points"], 2);
-        let mesh = &doc.json["meshes"][0];
+        let mesh = &doc.json()["meshes"][0];
         let attrs = &mesh["primitives"][0]["attributes"];
         assert!(attrs.get("_INTENSITY").is_some());
         assert!(attrs.get("_CLASS").is_none());
         assert!(attrs.get("COLOR_0").is_none());
         assert_eq!(mesh["extras"]["constant"]["_CLASS"], 2.0);
-        assert_eq!(doc.json["nodes"][0]["translation"], json!([10.0, 0.0, 0.0]));
+        assert_eq!(doc.json()["nodes"][0]["translation"], json!([10.0, 0.0, 0.0]));
         let m = doc.flatten(crate::document::Pose::Rest).unwrap().unwrap();
         assert_eq!(m.prims.iter().map(|p| p.points.len()).sum::<usize>(), 2);
     }

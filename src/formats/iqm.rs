@@ -842,8 +842,8 @@ mod tests {
         assert_eq!(info.comments, ["made by hand", "exported"]);
         // "wave" at 10 frames a second, "hold" with none (24): the first that has one, and each its own.
         assert_eq!(info.frame_rate, Fact::Declared(10.0));
-        assert_eq!(doc.json["animations"][0]["extras"]["frameRate"], 10.0);
-        assert_eq!(doc.json["animations"][1]["extras"]["frameRate"], 24.0);
+        assert_eq!(doc.json()["animations"][0]["extras"]["frameRate"], 10.0);
+        assert_eq!(doc.json()["animations"][1]["extras"]["frameRate"], 24.0);
         assert_eq!(info.up_axis, Fact::Assumed(Axis::PosZ));
         assert_eq!(info.meters_per_unit, Fact::Unknown);
         assert!(info.converted.up_axis);

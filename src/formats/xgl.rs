@@ -178,7 +178,7 @@ fn read(text: &str, limit: usize, keep: Keep) -> Result<Document> {
     let drawn = doc.counts().triangles;
     doc.facts.insert("triangles".into(), json!(drawn));
     if keep.lights && !lights.is_empty() {
-        let json = &mut doc.json;
+        let json = doc.base_mut();
         let mut list = Vec::new();
         for (node, light) in lights {
             if let Some(n) = json.get_mut("nodes").and_then(|n| n.get_mut(node)) {
@@ -657,7 +657,7 @@ mod tests {
     #[test]
     fn reads_meshes_objects_and_lights() {
         let doc = load(CUBE.as_bytes(), "cube.xgl").unwrap();
-        let j = &doc.json;
+        let j = &doc.json();
         assert_eq!(doc.counts().triangles, 2);
         assert_eq!(doc.facts["dropped_primitives"], 1);
         let prims = j["meshes"][0]["primitives"].as_array().unwrap();

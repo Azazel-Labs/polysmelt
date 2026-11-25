@@ -258,7 +258,7 @@ Frame#\tTime\tL.Knee\t\t\tR Knee\t\t\t
         assert!(near(&rig.animations[0].channels[1].times, &[0.1]));
         let pose = rig.pose(Some(0), 0.15);
         assert!(near(&pose[1].translation, &[0.115, 0.205, 0.295]));
-        assert_eq!(doc.json["asset"]["extras"]["source"]["startTime"], json!(0.5));
+        assert_eq!(doc.json()["asset"]["extras"]["source"]["startTime"], json!(0.5));
         let info = doc.source_info();
         assert_eq!(info.format.as_deref(), Some("TRC"));
         assert_eq!(info.meters_per_unit, Fact::Declared(0.001));
@@ -311,7 +311,7 @@ Frame#\tTime\tL.Knee\t\t\tR Knee\t\t\t
         let doc = read(&TRC[..TRC.find("\n1\t").unwrap()]).unwrap();
         assert_eq!(doc.facts["frames"], json!(0));
         assert_eq!(doc.facts["markers_never_seen"], json!(2));
-        assert!(doc.json.get("animations").is_none());
+        assert!(doc.json().get("animations").is_none());
     }
 
     #[test]

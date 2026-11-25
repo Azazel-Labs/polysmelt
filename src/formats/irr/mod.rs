@@ -175,7 +175,7 @@ impl<'a> Ctx<'a> {
         scene.info.handedness = Fact::Declared(Handedness::Left);
         scene.mirror_z();
         let mut doc = scene.finish(self.keep)?;
-        material::patch(&mut doc.json, &self.patches, self.keep.extras);
+        material::patch(doc.base_mut(), &self.patches, self.keep.extras);
         Ok(doc)
     }
 }

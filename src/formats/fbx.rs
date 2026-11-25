@@ -27,7 +27,7 @@ use crate::{Context as _, ErrorKind, Result};
 use serde_json::{Map, Value, json};
 
 use crate::assets::Assets;
-use crate::document::{Builder, Document, Keep, Part};
+use crate::document::{self, Builder, Document, Keep, Part, Sampler};
 use crate::images::{Images, Location};
 use crate::material::{self, Alpha, Clearcoat, Factor, Full, Sheen, Tex, UvTransform};
 use crate::mesh::{FastMap, GRAY, Material, Prim, smooth_normals, srgb_to_linear, triangulate};
@@ -743,9 +743,6 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
     if !r.skins.is_empty() {
         json.insert("skins".into(), Value::Array(std::mem::take(&mut r.skins)));
     }
-    if !animations.is_empty() {
-        json.insert("animations".into(), Value::Array(animations));
-    }
     if !r.cameras.is_empty() {
         json.insert("cameras".into(), Value::Array(std::mem::take(&mut r.cameras)));
     }
@@ -765,6 +762,7 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
     }
     let (materials, images) = (std::mem::take(&mut r.materials), std::mem::take(&mut r.images));
     let mut b = r.b;
+    b.animations = animations;
     b.materials(&materials, images.list, &mut json);
     Ok(b.finish(json, Map::new()))
 }
@@ -2292,7 +2290,7 @@ impl Reader<'_, '_, '_> {
     }
 
     /// Every animation stack as a glTF animation, its curves sampled at their keys and blended through its layers.
-    fn animations(&mut self) -> Vec<Value> {
+    fn animations(&mut self) -> Vec<document::Animation> {
         let stacks: Vec<i64> = self
             .objs
             .order
@@ -2387,16 +2385,18 @@ impl Reader<'_, '_, '_> {
             if channels.is_empty() {
                 continue;
             }
-            let mut anim = json!({ "channels": channels, "samplers": samplers });
-            if let Some(name) = self.objs.node(stack).and_then(name_of) {
-                anim["name"] = json!(name);
-            }
+            let mut anim = document::Animation {
+                channels,
+                samplers,
+                name: self.objs.node(stack).and_then(name_of).map(Into::into),
+                extras: None,
+            };
             // The stack's own span, which may be wider or narrower than its keys.
             let p = self.objs.props(stack);
             if let (Some(start), Some(stop)) = (scalar(&p, "LocalStart"), scalar(&p, "LocalStop"))
                 && stop > start
             {
-                anim["extras"] = json!({ "start": start / KTIME, "stop": stop / KTIME });
+                anim.extras = Some(json!({ "start": start / KTIME, "stop": stop / KTIME }));
             }
             out.push(anim);
         }
@@ -2500,8 +2500,8 @@ impl Reader<'_, '_, '_> {
         local: &Local,
         tracks: &[Option<Layered>; 3],
         (parent, parent_rest): (Option<&Layered>, [f64; 3]),
-        channels: &mut Vec<Value>,
-        samplers: &mut Vec<Value>,
+        channels: &mut Vec<document::Channel>,
+        samplers: &mut Vec<Sampler>,
     ) {
         let mut times = Vec::new();
         for t in tracks.iter().flatten().chain(parent) {
@@ -2573,8 +2573,16 @@ impl Reader<'_, '_, '_> {
                 if width == 4 { "VEC4" } else { "VEC3" },
                 false,
             );
-            samplers.push(json!({ "input": input, "output": output, "interpolation": "LINEAR" }));
-            channels.push(json!({ "sampler": samplers.len() - 1, "target": { "node": node, "path": path } }));
+            samplers.push(Sampler {
+                input,
+                output,
+                interpolation: "LINEAR",
+            });
+            channels.push(document::Channel {
+                sampler: samplers.len() - 1,
+                node,
+                path,
+            });
         }
         // An animated node holds TRS, never a matrix.
         if self.nodes[node]
@@ -2598,8 +2606,8 @@ impl Reader<'_, '_, '_> {
         &mut self,
         node: usize,
         tracks: &[(usize, Vec<f64>, Layered)],
-        channels: &mut Vec<Value>,
-        samplers: &mut Vec<Value>,
+        channels: &mut Vec<document::Channel>,
+        samplers: &mut Vec<Sampler>,
     ) {
         let Some(mesh) = self.nodes[node]["mesh"].as_u64().and_then(|m| usize::try_from(m).ok()) else {
             return;
@@ -2632,8 +2640,16 @@ impl Reader<'_, '_, '_> {
             .b
             .floats(times.iter().map(|&t| f32_of(t - shift)).collect(), "SCALAR", true);
         let output = self.b.floats(values, "SCALAR", false);
-        samplers.push(json!({ "input": input, "output": output, "interpolation": "LINEAR" }));
-        channels.push(json!({ "sampler": samplers.len() - 1, "target": { "node": node, "path": "weights" } }));
+        samplers.push(Sampler {
+            input,
+            output,
+            interpolation: "LINEAR",
+        });
+        channels.push(document::Channel {
+            sampler: samplers.len() - 1,
+            node,
+            path: "weights",
+        });
     }
 }
 
@@ -4754,8 +4770,8 @@ Connections:  {{
 
     /// A float accessor's numbers.
     fn accessor(doc: &Document, i: &Value) -> Vec<f32> {
-        let a = &doc.json["accessors"][index(i)];
-        let view = &doc.json["bufferViews"][index(&a["bufferView"])];
+        let a = &doc.json()["accessors"][index(i)];
+        let view = &doc.json()["bufferViews"][index(&a["bufferView"])];
         let bytes = doc.buffer(index(&view["buffer"])).unwrap();
         let offset = |v: &Value| usize::try_from(v.as_u64().unwrap_or(0)).unwrap();
         let at = offset(&view["byteOffset"]) + offset(&a["byteOffset"]);
@@ -4774,7 +4790,7 @@ Connections:  {{
 
     /// The node named `name`.
     fn node<'d>(doc: &'d Document, name: &str) -> &'d Value {
-        doc.json["nodes"]
+        doc.json()["nodes"]
             .as_array()
             .unwrap()
             .iter()
@@ -4832,7 +4848,7 @@ Connections:  {{
         assert!(visible(node(&doc, "Fine")), "the finest level shows");
         assert!(!visible(node(&doc, "Coarse")));
         assert!(
-            doc.json["extensionsUsed"]
+            doc.json()["extensionsUsed"]
                 .as_array()
                 .unwrap()
                 .contains(&json!("KHR_node_visibility"))
@@ -4908,7 +4924,7 @@ Connections:  {{
         ]
         .concat();
         let doc = read(&ascii(&objects, &links(&[(20, 0), (21, 0)], &[])));
-        let text = serde_json::to_string(&doc.json).unwrap();
+        let text = serde_json::to_string(&doc.json()).unwrap();
         assert!(!text.contains("null"), "{text}");
     }
 
@@ -4926,7 +4942,7 @@ Connections:  {{
         let start = std::time::Instant::now();
         let doc = read(&text);
         let took = start.elapsed();
-        assert_eq!(doc.json["nodes"].as_array().unwrap().len(), 20_000);
+        assert_eq!(doc.json()["nodes"].as_array().unwrap().len(), 20_000);
         assert!(took < std::time::Duration::from_secs(10), "took {took:?}");
     }
 
@@ -5042,7 +5058,7 @@ Connections:  {{
                 &[(40, 30, "DiffuseColor"), (41, 30, "NormalMap")],
             ),
         ));
-        let mat = &doc.json["materials"][0];
+        let mat = &doc.json()["materials"][0];
         assert_eq!(
             mat["pbrMetallicRoughness"]["baseColorTexture"]["texCoord"]
                 .as_u64()
@@ -5050,7 +5066,7 @@ Connections:  {{
             0
         );
         assert_eq!(mat["normalTexture"]["texCoord"], 1, "{mat}");
-        let attributes = &doc.json["meshes"][0]["primitives"][0]["attributes"];
+        let attributes = &doc.json()["meshes"][0]["primitives"][0]["attributes"];
         let max_u = |set: &str| {
             accessor(&doc, &attributes[set])
                 .chunks_exact(2)
@@ -5081,7 +5097,7 @@ Connections:  {{
         }
         let op: Vec<(i64, i64, &str)> = textures.iter().map(|&(id, p)| (id, 30, p)).collect();
         let doc = read(&ascii(&objects, &links(&oo, &op)));
-        doc.json["materials"][0].clone()
+        doc.json()["materials"][0].clone()
     }
 
     fn number(v: &Value, default: f64) -> f64 {
@@ -5155,7 +5171,7 @@ Connections:  {{
                 &[(45, 30, "DiffuseColor")],
             ),
         ));
-        assert!(doc.json["materials"][0]["pbrMetallicRoughness"]["baseColorTexture"]["index"].is_number());
+        assert!(doc.json()["materials"][0]["pbrMetallicRoughness"]["baseColorTexture"]["index"].is_number());
     }
 
     #[test]
@@ -5179,7 +5195,7 @@ Connections:  {{
             &objects,
             &links(&[(10, 20), (20, 0), (70, 10), (71, 70), (80, 71), (81, 71)], &[]),
         ));
-        let mesh = &doc.json["meshes"][0];
+        let mesh = &doc.json()["meshes"][0];
         let targets = mesh["primitives"][0]["targets"].as_array().unwrap();
         assert_eq!(targets.len(), 2, "{mesh}");
         let reach = |t: &Value, key: &str, k: usize| {
@@ -5280,7 +5296,7 @@ Connections:  {{
                 &[(102, 20, "Lcl Translation"), (103, 102, "d|X")],
             ),
         ));
-        let animation = &doc.json["animations"][0];
+        let animation = &doc.json()["animations"][0];
         let sampler = animation["channels"]
             .as_array()
             .unwrap()
@@ -5335,7 +5351,7 @@ Connections:  {{
         ]
         .concat();
         let doc = read(&ascii(&objects, &links(&[(20, 0), (21, 0), (60, 20), (61, 21)], &[])));
-        let lights = doc.json["extensions"]["KHR_lights_punctual"]["lights"]
+        let lights = doc.json()["extensions"]["KHR_lights_punctual"]["lights"]
             .as_array()
             .unwrap();
         assert_eq!(lights.len(), 2);
@@ -5371,12 +5387,12 @@ Connections:  {{
         ]
         .concat();
         let doc = read(&ascii(&objects, &links(&[(10, 20), (20, 0)], &[])));
-        let mesh = &doc.json["meshes"][0];
+        let mesh = &doc.json()["meshes"][0];
         assert_eq!(mesh["name"], "Wire");
         assert_eq!(mesh["primitives"].as_array().unwrap().len(), 1);
         assert_eq!(mesh["primitives"][0]["mode"], 1);
         assert_eq!(node(&doc, "Wire")["mesh"], 0);
-        let material = &doc.json["materials"][index(&mesh["primitives"][0]["material"])];
+        let material = &doc.json()["materials"][index(&mesh["primitives"][0]["material"])];
         assert!(material["extensions"]["KHR_materials_unlit"].is_object());
         let color = vector(&material["pbrMetallicRoughness"]["baseColorFactor"], &[]);
         assert!(
@@ -5413,7 +5429,7 @@ Connections:  {{
             let doc = read(&ascii(&objects, &links(&[(10, 20), (20, 0)], &[])));
             let drawn = doc.flatten(Pose::Rest).unwrap().map_or(0, |m| m.lines());
             assert_eq!(drawn, lines, "{index}");
-            assert_eq!(doc.json.get("meshes").is_some(), lines > 0, "{index}");
+            assert_eq!(doc.json().get("meshes").is_some(), lines > 0, "{index}");
         }
         // Indexes written as floats: whole numbers are indexes, other numbers no point's.
         assert_eq!((whole(3.0), whole(-1.0)), (3, -1));
@@ -5433,8 +5449,8 @@ Connections:  {{
         ]
         .concat();
         let doc = read(&ascii(&objects, &links(&[(10, 20), (20, 0), (30, 20), (31, 20)], &[])));
-        let materials = doc.json["materials"].as_array().unwrap();
-        let used = &materials[index(&doc.json["meshes"][0]["primitives"][0]["material"])];
+        let materials = doc.json()["materials"].as_array().unwrap();
+        let used = &materials[index(&doc.json()["meshes"][0]["primitives"][0]["material"])];
         assert_eq!(used["name"], "First");
         assert!(materials.iter().all(|m| m.get("extensions").is_none()));
     }
@@ -5459,12 +5475,12 @@ Connections:  {{
                 format!("Definitions:  {{\n\tObjectType: \"Geometry\" {{\n{templates}\t}}\n}}\nObjects:  {{");
             let objects = [line(SQUARE, "0,1,2,-4", ""), curves.to_owned()].concat();
             let doc = read(&ascii(&objects, "").replacen("Objects:  {", &definitions, 1));
-            assert_eq!(doc.json["nodes"][0]["mesh"], 0);
-            let material = &doc.json["materials"][index(&doc.json["meshes"][0]["primitives"][0]["material"])];
+            assert_eq!(doc.json()["nodes"][0]["mesh"], 0);
+            let material = &doc.json()["materials"][index(&doc.json()["meshes"][0]["primitives"][0]["material"])];
             let color = vector(&material["pbrMetallicRoughness"]["baseColorFactor"], &[]);
             assert!(close(&color, &want), "{color:?}");
             assert_eq!(
-                doc.json["asset"]["extras"]["source"]["skipped"],
+                doc.json()["asset"]["extras"]["source"]["skipped"],
                 json!({ "NurbsCurve": 2, "NurbsSurface": 1 })
             );
             assert_eq!(doc.flatten(Pose::Rest).unwrap().unwrap().lines(), 3);
@@ -5551,7 +5567,7 @@ GlobalSettings:  {
             assert_eq!(info.comments, ["first pass"]);
             assert_eq!(info.created.as_deref(), Some("2024-03-09T14:05:07"));
             assert_eq!(info.modified.as_deref(), Some("2024-03-10T08:00:00.250Z"));
-            let source = &doc.json["asset"]["extras"]["source"];
+            let source = &doc.json()["asset"]["extras"]["source"];
             assert_eq!(source["creator"], "FBX SDK/FBX Plugins version 2020.3");
             assert_eq!(source["originalApplication"], "Maya 2020");
             assert_eq!(source["revision"], "rev. 2");

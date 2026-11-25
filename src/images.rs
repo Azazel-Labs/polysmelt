@@ -455,7 +455,7 @@ impl Document {
     /// unread: each is a glTF image with a `uri` (relative to the model's folder, for a file
     /// under it), and its handle says where it is and reads it.
     pub fn images(&self) -> impl Iterator<Item = ImageHandle<'_>> {
-        let list = self.json.get("images").and_then(Value::as_array);
+        let list = self.base.get("images").and_then(Value::as_array);
         list.into_iter()
             .flatten()
             .enumerate()
@@ -483,7 +483,7 @@ impl Document {
             let len = bytes.len();
             let buffer = self.push_buffer(bytes);
             let view = self.push_view(serde_json::json!({ "buffer": buffer, "byteLength": len }));
-            if let Some(img) = self.json["images"][i].as_object_mut() {
+            if let Some(img) = self.base_mut()["images"][i].as_object_mut() {
                 img.remove("uri");
                 img.insert("bufferView".into(), view.into());
                 img.insert("mimeType".into(), mime.into());

@@ -35,7 +35,7 @@ fn close(a: [f32; 3], b: [f32; 3]) -> bool {
 }
 
 fn source(doc: &Document) -> &Value {
-    &doc.json["asset"]["extras"]["source"]
+    &doc.json()["asset"]["extras"]["source"]
 }
 
 /// A geometry object of one triangle, its vertices `positions`, with whatever `more` adds
@@ -116,7 +116,7 @@ fn a_cube_in_centimeters_and_z_up() {
     assert_eq!(p.colors[0], [1.0, 0.0, 0.0, 1.0]);
     assert_eq!(m.materials[p.material].name, "Red");
     assert_eq!(
-        doc.json["nodes"]
+        doc.json()["nodes"]
             .as_array()
             .unwrap()
             .iter()
@@ -217,7 +217,7 @@ fn materials_and_textures() {
         .with("paint.png", PNG.to_vec())
         .with("bumps.png", PNG.to_vec());
     let doc = read_with(&text, &assets).unwrap();
-    let j = &doc.json;
+    let j = &doc.json();
     let mat = &j["materials"][0];
     assert_eq!(mat["name"], "Painted");
     let pbr = &mat["pbrMetallicRoughness"];
@@ -253,7 +253,7 @@ fn shared_objects_are_instances() {
         triangle("g", TRI, "")
     );
     let doc = read(&text).unwrap();
-    assert_eq!(doc.json["meshes"].as_array().unwrap().len(), 1);
+    assert_eq!(doc.json()["meshes"].as_array().unwrap().len(), 1);
     let m = flat(&doc);
     assert_eq!(m.triangles(), 2);
     let xs: Vec<f32> = m.prims.iter().flat_map(|p| p.positions.iter().map(|q| q[0])).collect();
@@ -285,7 +285,7 @@ fn morph_targets_and_weights() {
         }
     "#;
     let doc = read(text).unwrap();
-    let j = &doc.json;
+    let j = &doc.json();
     assert_eq!(j["meshes"][0]["extras"]["targetNames"], json!(["lift"]));
     assert_eq!(j["meshes"][0]["primitives"][0]["targets"].as_array().unwrap().len(), 1);
     let m = flat(&doc);
@@ -322,7 +322,7 @@ fn skins_bind_through_the_skeleton() {
         } }
     "#;
     let doc = read(text).unwrap();
-    let j = &doc.json;
+    let j = &doc.json();
     assert_eq!(j["skins"].as_array().unwrap().len(), 1);
     let m = flat(&doc);
     // v' = bone * inverse(bind) * skin * v: moved 2 up by the skin and 1 along x by the bone;
@@ -352,7 +352,7 @@ fn animated(transforms: &str, animation: &str) -> String {
 }
 
 fn sampler<'d>(doc: &'d Document, path: &str) -> &'d Value {
-    let a = &doc.json["animations"][0];
+    let a = &doc.json()["animations"][0];
     let c = a["channels"]
         .as_array()
         .unwrap()
@@ -516,7 +516,7 @@ fn clips_are_separate_animations() {
         triangle("g", TRI, "")
     );
     let doc = read(&text).unwrap();
-    let a = doc.json["animations"].as_array().unwrap();
+    let a = doc.json()["animations"].as_array().unwrap();
     assert_eq!(a.len(), 2);
     assert_eq!(a[1]["name"], "walk");
     assert_eq!(a[1]["extras"]["rate"], json!(60.0));
@@ -551,7 +551,7 @@ fn lights_and_cameras() {
         triangle("g", TRI, "")
     );
     let doc = read(&text).unwrap();
-    let j = &doc.json;
+    let j = &doc.json();
     let lights = j["extensions"]["KHR_lights_punctual"]["lights"].as_array().unwrap();
     assert_eq!(lights.len(), 2);
     assert_eq!(lights[0]["type"], "directional");
@@ -564,8 +564,8 @@ fn lights_and_cameras() {
     // A file of objects and no nodes places each under the root; one with nothing in it, or only an empty
     // geometry object, has no geometry.
     let lone = read("CameraObject $c { }").unwrap();
-    assert_eq!(lone.json["cameras"].as_array().map(Vec::len), Some(1));
-    assert_eq!(lone.json["nodes"][1]["camera"], json!(0));
+    assert_eq!(lone.json()["cameras"].as_array().map(Vec::len), Some(1));
+    assert_eq!(lone.json()["nodes"][1]["camera"], json!(0));
     assert!(lone.to_glb().is_ok());
     assert!(read("").is_err());
     assert!(read("GeometryObject { Mesh { } }").is_err());

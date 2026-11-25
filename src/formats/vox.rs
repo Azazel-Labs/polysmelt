@@ -21,7 +21,7 @@ use std::collections::HashMap;
 
 use serde_json::{Map, Value, json};
 
-use crate::document::{Builder, Document, Keep};
+use crate::document::{Animation, Builder, Channel, Document, Keep, Sampler};
 use crate::material::{Factor, Full};
 use crate::mesh::{Material, Prim, srgb_to_linear};
 use crate::source::{Axis, Fact, Handedness, SourceInfo};
@@ -366,7 +366,8 @@ pub(crate) fn vox(data: &[u8], keep: Keep) -> Result<Document> {
         json.insert("extensionsUsed".into(), json!(["KHR_node_visibility"]));
     }
     if keep.animations && !animated.is_empty() {
-        json.insert("animations".into(), json!([animation(&mut b, &animated)]));
+        let a = animation(&mut b, &animated);
+        b.animations.push(a);
     }
 
     let palette = v.palette.unwrap_or_else(default_palette);
@@ -873,7 +874,7 @@ fn quaternion(r: &[[i32; 3]; 3]) -> [f32; 4] {
 
 /// One animation stepping each animated node through its frames.
 #[allow(clippy::float_cmp, reason = "exact: a scale is -1 or 1")]
-fn animation(b: &mut Builder, animated: &[(usize, &[Frame])]) -> Value {
+fn animation(b: &mut Builder, animated: &[(usize, &[Frame])]) -> Animation {
     let (mut channels, mut samplers) = (Vec::new(), Vec::new());
     for &(node, frames) in animated {
         let mut frames: Vec<&Frame> = frames.iter().collect();
@@ -897,11 +898,24 @@ fn animation(b: &mut Builder, animated: &[(usize, &[Frame])]) -> Value {
         }
         for (path, values, kind) in paths {
             let output = b.floats(values, kind, false);
-            channels.push(json!({ "sampler": samplers.len(), "target": { "node": node, "path": path } }));
-            samplers.push(json!({ "input": input, "output": output, "interpolation": "STEP" }));
+            channels.push(Channel {
+                sampler: samplers.len(),
+                node,
+                path,
+            });
+            samplers.push(Sampler {
+                input,
+                output,
+                interpolation: "STEP",
+            });
         }
     }
-    json!({ "name": "frames", "channels": channels, "samplers": samplers })
+    Animation {
+        channels,
+        samplers,
+        name: Some("frames".into()),
+        extras: None,
+    }
 }
 
 /// Each face direction as the axis it faces along, whether it faces the positive way, and the
@@ -1657,7 +1671,7 @@ mod tests {
         assert_eq!(info.handedness, Fact::Assumed(Handedness::Right));
         assert_eq!(info.meters_per_unit, Fact::Unknown);
         assert!(info.converted.up_axis && !info.converted.units);
-        let materials = doc.json["materials"].as_array().unwrap();
+        let materials = doc.json()["materials"].as_array().unwrap();
         let alpha = |m: &Value| m["pbrMetallicRoughness"]["baseColorFactor"][3].as_f64().unwrap();
         assert!((alpha(&materials[0]) - 0.25).abs() < 1e-6, "{}", materials[0]);
         assert_eq!(materials[0]["alphaMode"], "BLEND");
@@ -1671,7 +1685,7 @@ mod tests {
                 < 1e-6
         );
 
-        let nodes = doc.json["nodes"].as_array().unwrap();
+        let nodes = doc.json()["nodes"].as_array().unwrap();
         let shape = nodes.iter().find(|n| n.get("children").is_some()).unwrap();
         let alternate = &nodes[shape["children"][0].as_u64().unwrap() as usize];
         assert_eq!(alternate["name"], "frame_3");

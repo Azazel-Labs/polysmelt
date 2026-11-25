@@ -886,7 +886,7 @@ end
     #[test]
     fn a_reference_file_is_a_skinned_mesh() {
         let doc = read(REFERENCE, "t.smd").unwrap();
-        let j = &doc.json;
+        let j = &doc.json();
         assert_eq!(j["skins"].as_array().unwrap().len(), 1);
         assert_eq!(j["skins"][0]["joints"].as_array().unwrap().len(), 2);
         assert_eq!(j["nodes"][0]["name"], "root bone");
@@ -995,7 +995,7 @@ time 2
 end
 ";
         let doc = read(text, "face.vta").unwrap();
-        let j = &doc.json;
+        let j = &doc.json();
         let m = &j["meshes"][0];
         assert_eq!(m["primitives"][0]["mode"], json!(0));
         assert_eq!(m["primitives"][0]["targets"].as_array().unwrap().len(), 2);
@@ -1049,7 +1049,11 @@ end
 ";
         let doc = read(text, "t.smd").unwrap();
         assert_eq!(doc.facts["bones"], json!(3));
-        assert!(doc.json["skins"][0]["joints"].as_array().is_some_and(|j| j.len() == 3));
+        assert!(
+            doc.json()["skins"][0]["joints"]
+                .as_array()
+                .is_some_and(|j| j.len() == 3)
+        );
     }
 
     #[test]
@@ -1057,6 +1061,6 @@ end
         let text = "// exported\r\nversion 1\r\nnodes\r\n0\t\"root\"\t-1\r\nend\r\nflexcontrol\r\nx y z\r\nend\r\nskeleton\r\ntime 0 // rest\r\n0 0 0 0 0 0 0\r\nend\r\ntriangles\r\nmat\r\n0 0 0 0 0 0 1 0 0\r\n0 1 0 0 0 0 1 1 0\r\n0 0 1 0 0 0 1 0 1\r\nend\r\n";
         let doc = read(text, "t.smd").unwrap();
         assert_eq!(doc.facts["triangles"], json!(1));
-        assert_eq!(doc.json["materials"][0]["name"], Value::from("mat"));
+        assert_eq!(doc.json()["materials"][0]["name"], Value::from("mat"));
     }
 }

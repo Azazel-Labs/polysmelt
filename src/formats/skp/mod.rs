@@ -49,7 +49,9 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document> {
     };
     let mut source = Map::new();
     source_info(&bytes, major).write(&mut source);
-    doc.json.entry("asset").or_insert_with(|| json!({ "version": "2.0" }))["extras"] = json!({ "source": source });
+    doc.base_mut()
+        .entry("asset")
+        .or_insert_with(|| json!({ "version": "2.0" }))["extras"] = json!({ "source": source });
     Ok(doc)
 }
 

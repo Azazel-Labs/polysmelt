@@ -98,7 +98,7 @@ mod tests {
         bytes.extend([1, 2, 3]);
         let doc = decode(&bytes, 10).unwrap();
         assert_eq!(doc.facts["splats"], 1);
-        assert_eq!(doc.json["asset"]["extras"]["source"]["trailingBytes"], 3);
+        assert_eq!(doc.json()["asset"]["extras"]["source"]["trailingBytes"], 3);
         let info = doc.source_info();
         assert_eq!(info.format.as_deref(), Some("splat"));
         assert_eq!(info.up_axis, Fact::Assumed(Axis::NegY));

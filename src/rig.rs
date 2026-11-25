@@ -677,9 +677,9 @@ mod tests {
             None,
             "glTF has no frame rate"
         );
-        doc.json["asset"]["extras"] = serde_json::json!({ "source": { "frameRate": 30.0 } });
+        doc.json_mut()["asset"]["extras"] = serde_json::json!({ "source": { "frameRate": 30.0 } });
         assert_eq!(doc.rig().unwrap().animations[0].frame_rate, Some(30.0));
-        doc.json["animations"][0]["extras"] = serde_json::json!({ "frameRate": 24.0 });
+        doc.json_mut()["animations"][0]["extras"] = serde_json::json!({ "frameRate": 24.0 });
         assert_eq!(doc.rig().unwrap().animations[0].frame_rate, Some(24.0));
     }
 }

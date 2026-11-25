@@ -950,7 +950,7 @@ fn others(
             .map(|c| (c.clamp(0.0, 1.0) * 65535.0).round() as u16)
             .collect();
         let a = b.accessor(Part::u16(colors), 5123, n, "VEC4", Some(34962));
-        b.accessors[a]["normalized"] = json!(true);
+        b.accessors[a].normalized = true;
         attributes[color] = json!(a);
     }
     let columns = gather(&mut v.extra, None, n);
@@ -1696,7 +1696,7 @@ end_header
         assert_eq!(info.meters_per_unit, crate::source::Fact::Unknown);
         assert_eq!(info.up_axis, crate::source::Fact::Unknown);
         assert_eq!(info.converted, crate::source::Converted::default());
-        assert_eq!(doc.json["asset"]["extras"]["source"]["objInfo"], json!(["a note"]));
+        assert_eq!(doc.json()["asset"]["extras"]["source"]["objInfo"], json!(["a note"]));
         assert_eq!(writer("VCGLIB generated").as_deref(), Some("VCGLIB"));
         assert_eq!(writer("made by hand"), None);
     }
@@ -1724,13 +1724,13 @@ end_header
         }
         let doc = load(&bytes).unwrap();
         let index = |v: &Value| usize::try_from(v.as_u64().unwrap()).unwrap();
-        let a = &doc.json["accessors"][index(&doc.json["meshes"][0]["primitives"][0]["attributes"]["COLOR_0"])];
+        let a = &doc.json()["accessors"][index(&doc.json()["meshes"][0]["primitives"][0]["attributes"]["COLOR_0"])];
         assert_eq!(
             (a["componentType"].as_u64(), a["type"].as_str()),
             (Some(5123), Some("VEC4"))
         );
         assert_eq!(a["normalized"], true);
-        assert_eq!(doc.json["bufferViews"][index(&a["bufferView"])]["byteLength"], 3 * 8);
+        assert_eq!(doc.json()["bufferViews"][index(&a["bufferView"])]["byteLength"], 3 * 8);
         // Each byte value reads back as the byte it was, made linear.
         let m = doc.flatten(crate::document::Pose::Rest).unwrap().unwrap();
         for (got, want) in m.prims[0].colors.iter().zip(rgb) {
@@ -1745,16 +1745,16 @@ end_header
     }
 
     fn attributes(doc: &Document) -> Vec<String> {
-        let prim = &doc.json["meshes"][0]["primitives"][0]["attributes"];
+        let prim = &doc.json()["meshes"][0]["primitives"][0]["attributes"];
         prim.as_object().unwrap().keys().cloned().collect()
     }
 
     /// How many vertices the first primitive has.
     fn vertex_count(doc: &Document) -> u64 {
-        let pos = doc.json["meshes"][0]["primitives"][0]["attributes"]["POSITION"]
+        let pos = doc.json()["meshes"][0]["primitives"][0]["attributes"]["POSITION"]
             .as_u64()
             .unwrap();
-        doc.json["accessors"][usize::try_from(pos).unwrap()]["count"]
+        doc.json()["accessors"][usize::try_from(pos).unwrap()]["count"]
             .as_u64()
             .unwrap()
     }
@@ -1774,7 +1774,7 @@ end_header
         bytes.extend(std::iter::repeat_n(0u8, 20_000_000));
         let doc = load(&bytes).unwrap();
         assert_eq!(vertex_count(&doc), 20_000_000 / 1012);
-        assert_eq!(doc.json["asset"]["extras"]["source"]["truncated"], true);
+        assert_eq!(doc.json()["asset"]["extras"]["source"]["truncated"], true);
         // As ASCII: each property needs a character and a separator; two whole vertices.
         let text = "ply\nformat ascii 1.0\nelement vertex 3\nproperty float x\nproperty float y\n\
                     property float z\nend_header\n0 0 0 1 0 0 0 1";
@@ -1793,7 +1793,7 @@ end_header
                     property float z\nelement face 4\nproperty list uchar int vertex_indices\n\
                     end_header\n0 0 0\n1 0 0\n0 1 0\n1 1 0\n3 0 1 2\n3 1 3 2\n3 0 1";
         let doc = read(text);
-        assert_eq!(doc.json["asset"]["extras"]["source"]["truncated"], true);
+        assert_eq!(doc.json()["asset"]["extras"]["source"]["truncated"], true);
         assert_eq!(mesh(text).triangles(), 2);
     }
 
@@ -1805,7 +1805,7 @@ end_header
                     7.5 -2.25 0\r\n-1 2 3\r\n4 5 6\r\n";
         let doc = read(text);
         assert_eq!(vertex_count(&doc), 3);
-        assert!(doc.json["asset"]["extras"]["source"].get("truncated").is_none());
+        assert!(doc.json()["asset"]["extras"]["source"].get("truncated").is_none());
         // Items written a value a line still read, and a list on its item's line does.
         let faces = "ply\nformat ascii 1.0\nelement vertex 3\nproperty float x\nproperty float y\n\
                      property float z\nelement face 1\nproperty uchar flags\n\
@@ -1871,12 +1871,12 @@ end_header
              property int texnumber\nend_header\n0 0 0\n1 0 0\n1 1 0\n0 1 0\n\
              3 0 1 2 6 0 0 1 0 1 1 1\n3 0 2 3 6 0 0 1 1 0 1 0\n",
         );
-        let prims = doc.json["meshes"][0]["primitives"].as_array().unwrap();
+        let prims = doc.json()["meshes"][0]["primitives"].as_array().unwrap();
         assert_eq!(prims.len(), 2);
         assert_eq!(prims[0]["material"], 0);
         assert_eq!(prims[1]["material"], 1);
-        assert_eq!(doc.json["materials"][0]["name"], "a.png");
-        assert_eq!(doc.json["materials"][1]["name"], "b.png");
+        assert_eq!(doc.json()["materials"][0]["name"], "a.png");
+        assert_eq!(doc.json()["materials"][1]["name"], "b.png");
         let m = doc.flatten(crate::document::Pose::Rest).unwrap().unwrap();
         assert_eq!(m.triangles(), 2);
     }
@@ -1957,7 +1957,7 @@ end_header
     }
 
     fn floats(doc: &Document, name: &str) -> Vec<f32> {
-        let a = &doc.json["meshes"][0]["primitives"][0]["attributes"][name];
+        let a = &doc.json()["meshes"][0]["primitives"][0]["attributes"][name];
         doc.read_floats(usize::try_from(a.as_u64().unwrap()).unwrap())
             .unwrap()
             .1
@@ -1967,7 +1967,7 @@ end_header
     fn gaussian_splats_read_as_khr_gaussian_splatting() {
         let doc = load(&splat_file(3, 45)).unwrap();
         assert_eq!(doc.facts["splats"], 3);
-        assert_eq!(doc.json["extensionsUsed"][0], gaussian::EXTENSION);
+        assert_eq!(doc.json()["extensionsUsed"][0], gaussian::EXTENSION);
         let names = attributes(&doc);
         assert!(!names.iter().any(|n| n == "NORMAL" || n.starts_with('_')), "{names:?}");
         assert!(names.iter().any(|n| n.ends_with("SH_DEGREE_3_COEF_6")), "{names:?}");
@@ -2098,8 +2098,8 @@ end_header
              0 0 0 1\n1 0 0 2\n1 1 0 3\n0 1 0 4\n\
              3 0 1 2 6 0 0 1 0 1 1\n3 0 2 3 6 0.5 0.5 1 1 0 1\n",
         );
-        let prim = &doc.json["meshes"][0]["primitives"][0];
-        let count = |a: &Value| doc.json["accessors"][usize::try_from(a.as_u64().unwrap()).unwrap()]["count"].clone();
+        let prim = &doc.json()["meshes"][0]["primitives"][0];
+        let count = |a: &Value| doc.json()["accessors"][usize::try_from(a.as_u64().unwrap()).unwrap()]["count"].clone();
         let positions = count(&prim["attributes"]["POSITION"]);
         assert_eq!(positions, 5, "vertices 0 and 2 split by their two texture coordinates");
         assert_eq!(count(&prim["attributes"]["_QUALITY"]), positions);

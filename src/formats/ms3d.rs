@@ -662,7 +662,7 @@ mod tests {
     #[test]
     fn a_skinned_triangle_with_a_material_and_keys() {
         let doc = read(&sample(false)).unwrap();
-        let j = &doc.json;
+        let j = &doc.json();
         assert_eq!(doc.facts["joints"], json!(2));
         assert_eq!(doc.facts["triangles"], json!(1));
         assert_eq!(j["materials"][0]["name"], "skin");
@@ -687,7 +687,7 @@ mod tests {
         let p = &mesh.prims[0];
         let w = p.skin_weights[0];
         assert!((w[0] - 0.5).abs() < 1e-3 && (w[1] - 0.5).abs() < 1e-3, "{w:?}");
-        assert_eq!(doc.json["asset"]["extras"]["source"]["weightsVersion"], json!(1));
+        assert_eq!(doc.json()["asset"]["extras"]["source"]["weightsVersion"], json!(1));
     }
 
     #[test]

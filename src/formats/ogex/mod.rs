@@ -52,7 +52,7 @@ use serde_json::{Map, Value, json};
 
 use crate::Result;
 use crate::assets::Assets;
-use crate::document::{Builder, Document, Keep, Part};
+use crate::document::{Builder, Document, Keep, Limits, Part};
 use crate::images::Images;
 use crate::material::Full;
 use crate::mesh::FastMap;
@@ -882,7 +882,7 @@ fn camera(c: &mut Ctx<'_>, o: u32) -> Option<usize> {
 
 /// A float accessor of `kind` (`SCALAR`, `VEC3`, `VEC4` or `MAT4`) with no target, for skins
 /// and animations; `bounds` adds the `min` and `max` an animation's times need.
-fn floats(b: &mut Builder, v: Vec<f32>, kind: &str, bounds: bool) -> usize {
+fn floats(b: &mut Builder, v: Vec<f32>, kind: &'static str, bounds: bool) -> usize {
     let width = match kind {
         "VEC3" => 3,
         "VEC4" => 4,
@@ -903,8 +903,8 @@ fn floats(b: &mut Builder, v: Vec<f32>, kind: &str, bounds: bool) -> usize {
     });
     let a = b.accessor(Part::f32(v), 5126, count, kind, None);
     if let Some((min, max)) = range {
-        b.accessors[a]["min"] = json!(min);
-        b.accessors[a]["max"] = json!(max);
+        b.accessors[a].min = Some(Limits::floats(&min));
+        b.accessors[a].max = Some(Limits::floats(&max));
     }
     a
 }

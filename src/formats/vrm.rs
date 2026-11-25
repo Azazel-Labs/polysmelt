@@ -29,7 +29,7 @@ fn vrm_extension(name: &str) -> bool {
 
 pub(crate) fn load<'a>(input: Input<'a>, assets: &'a dyn Assets, keep: Keep) -> Result<Document> {
     let mut doc = super::gltf::load(input, assets, keep)?;
-    let json = &mut doc.json;
+    let json = doc.json_mut();
     if let Some(Value::Array(required)) = json.get_mut("extensionsRequired") {
         required.retain(|e| !e.as_str().is_some_and(vrm_extension));
         if required.is_empty() {
@@ -209,8 +209,8 @@ mod tests {
             "extensions": { "VRMC_vrm": { "specVersion": "1.0", "meta": { "name": "Avatar" } } }
         });
         let doc = read(&glb(1.0, &extra), "vrm");
-        assert!(doc.json.get("extensionsRequired").is_none());
-        let source = &doc.json["asset"]["extras"]["source"];
+        assert!(doc.json().get("extensionsRequired").is_none());
+        let source = &doc.json()["asset"]["extras"]["source"];
         assert_eq!(source["format"], "VRM");
         assert_eq!(source["version"], "1.0");
         assert_eq!(source["title"], "Avatar");
@@ -227,7 +227,7 @@ mod tests {
             "extensions": { "VRM": { "specVersion": "0.0", "meta": { "title": "Old" } } }
         });
         let doc = read(&glb(-1.0, &extra), "vrm");
-        let source = &doc.json["asset"]["extras"]["source"];
+        let source = &doc.json()["asset"]["extras"]["source"];
         assert_eq!(source["version"], "0.0");
         assert_eq!(source["title"], "Old");
         let m = doc.flatten(Pose::Rest).unwrap().unwrap();
@@ -258,7 +258,7 @@ mod tests {
         assert_eq!(info.meters_per_unit, Fact::Declared(1.0));
         assert_eq!(info.up_axis, Fact::Declared(Axis::PosY));
         assert_eq!(info.converted, crate::source::Converted::default());
-        let source = &doc.json["asset"]["extras"]["source"];
+        let source = &doc.json()["asset"]["extras"]["source"];
         assert_eq!(source["modelVersion"], "3");
         assert_eq!(source["references"], json!(["https://example.com/a"]));
 
@@ -275,11 +275,11 @@ mod tests {
         assert_eq!(info.author.as_deref(), Some("Cy"));
         assert_eq!(info.license.as_deref(), Some("https://example.com/license"));
         assert_eq!(info.forward_axis, Fact::Declared(Axis::NegZ));
-        let source = &doc.json["asset"]["extras"]["source"];
+        let source = &doc.json()["asset"]["extras"]["source"];
         assert_eq!(source["contactInformation"], "cy@example.com");
         assert_eq!(source["modelVersion"], "1.2");
         // The glTF itself is as it was, but for the turn.
-        assert!(doc.json["asset"].get("copyright").is_none());
+        assert!(doc.json()["asset"].get("copyright").is_none());
     }
 
     #[test]
@@ -289,7 +289,7 @@ mod tests {
             "extensions": { "VRMC_vrm_animation": { "specVersion": "1.0" } }
         });
         let doc = read(&glb(1.0, &extra), "vrma");
-        assert_eq!(doc.json["asset"]["extras"]["source"]["format"], "VRMA");
+        assert_eq!(doc.json()["asset"]["extras"]["source"]["format"], "VRMA");
     }
 
     #[test]

@@ -601,6 +601,9 @@ mod tests {
         assert_eq!(info.up_axis, Fact::Assumed(Axis::PosZ));
         assert_eq!(info.frame_rate, Fact::Assumed(10.0));
         assert!(info.converted.up_axis && !info.converted.units);
-        assert_eq!(doc.json["asset"]["extras"]["source"]["name"], "models/thing/thing.md3");
+        assert_eq!(
+            doc.json()["asset"]["extras"]["source"]["name"],
+            "models/thing/thing.md3"
+        );
     }
 }

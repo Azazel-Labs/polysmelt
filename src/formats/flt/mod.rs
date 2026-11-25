@@ -42,7 +42,7 @@ use serde_json::{Map, Value, json};
 
 use crate::Result;
 use crate::assets::Assets;
-use crate::document::{Builder, Document, Keep, Part};
+use crate::document::{Animation, Builder, Channel, Document, Keep, Limits, Part, Sampler};
 use crate::images::{Images, Location};
 use crate::material::{Alpha, Full, Tex};
 use crate::mesh::{FastMap, Image, Prim, srgb_to_linear};
@@ -1404,7 +1404,7 @@ fn key_layer(layers: u32, mask: u8, l: usize) -> bool {
 }
 
 /// A float accessor of `kind` with no target, for animations; `bounds` adds `min` and `max`.
-fn floats(b: &mut Builder, v: Vec<f32>, kind: &str, bounds: bool) -> usize {
+fn floats(b: &mut Builder, v: Vec<f32>, kind: &'static str, bounds: bool) -> usize {
     let width = if kind == "VEC3" { 3 } else { 1 };
     let count = v.len() / width;
     let range = bounds.then(|| {
@@ -1420,15 +1420,15 @@ fn floats(b: &mut Builder, v: Vec<f32>, kind: &str, bounds: bool) -> usize {
     });
     let a = b.accessor(Part::f32(v), 5126, count, kind, None);
     if let Some((min, max)) = range {
-        b.accessors[a]["min"] = json!(min);
-        b.accessors[a]["max"] = json!(max);
+        b.accessors[a].min = Some(Limits::floats(&min));
+        b.accessors[a].max = Some(Limits::floats(&max));
     }
     a
 }
 
 /// Animated groups as an animation: each frame node scaled to full size in its turn and to
 /// nothing otherwise, stepping.
-fn animation(b: &mut Builder, sequences: &[(parse::Sequence, Vec<usize>)]) -> Option<Value> {
+fn animation(b: &mut Builder, sequences: &[(parse::Sequence, Vec<usize>)]) -> Option<Animation> {
     let mut channels = Vec::new();
     let mut samplers = Vec::new();
     for (seq, frames) in sequences {
@@ -1464,11 +1464,24 @@ fn animation(b: &mut Builder, sequences: &[(parse::Sequence, Vec<usize>)]) -> Op
                 v.extend_from_slice(&[s, s, s]);
             }
             let output = floats(b, v, "VEC3", false);
-            samplers.push(json!({ "input": input, "output": output, "interpolation": "STEP" }));
-            channels.push(json!({ "sampler": samplers.len() - 1, "target": { "node": node, "path": "scale" } }));
+            samplers.push(Sampler {
+                input,
+                output,
+                interpolation: "STEP",
+            });
+            channels.push(Channel {
+                sampler: samplers.len() - 1,
+                node,
+                path: "scale",
+            });
         }
     }
-    (!channels.is_empty()).then(|| json!({ "name": "sequences", "channels": channels, "samplers": samplers }))
+    (!channels.is_empty()).then(|| Animation {
+        channels,
+        samplers,
+        name: Some("sequences".into()),
+        extras: None,
+    })
 }
 
 /// A date as the header writes it, C's `ctime` form (`"Tue Mar 05 14:30:00 2024"`), in ISO 8601.
@@ -1644,7 +1657,7 @@ fn finish(mut c: Ctx<'_>, mut s: Scene) -> Document {
     if c.keep.animations
         && let Some(a) = animation(&mut c.b, &s.sequences)
     {
-        json.insert("animations".into(), json!([a]));
+        c.b.animations.push(a);
     }
     json.insert("nodes".into(), Value::Array(s.nodes));
     if !c.meshes.is_empty() {

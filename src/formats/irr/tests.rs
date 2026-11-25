@@ -51,7 +51,7 @@ fn reads_a_mesh() {
     let assets = Memory::new();
     let doc = load(MESH.as_bytes(), "quad.irrmesh", &assets);
     assert_eq!(doc.counts().triangles, 3);
-    let j = &doc.json;
+    let j = &doc.json();
     assert_eq!(j["meshes"][0]["primitives"].as_array().unwrap().len(), 2);
     let m = &j["materials"];
     assert_eq!(m[0]["doubleSided"], Value::Bool(true));
@@ -157,7 +157,7 @@ fn reads_a_scene() {
         .with("quad.irrmesh", MESH.as_bytes())
         .with("models/tri.obj", OBJ.as_bytes());
     let doc = load(SCENE.as_bytes(), "scene.irr", &assets);
-    let j = &doc.json;
+    let j = &doc.json();
     let facts = &doc.facts;
     // A cube 12, a sphere 8×6 less the poles' 16 = 80, a sky box 12, a billboard 2, the mesh 3, two OBJs 1 each.
     assert_eq!(doc.counts().triangles, 12 + 80 + 12 + 2 + 3 + 2, "{facts:?}");

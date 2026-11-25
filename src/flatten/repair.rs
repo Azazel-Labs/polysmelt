@@ -9,8 +9,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde_json::{Map, Value, json};
 
-use super::{Acc, Reader, index, items, list, retain_groups, segments, triangles};
-use crate::document::{Blob, Document};
+use super::{Acc, Reader, Tabs, index, items, list, retain_groups, segments, triangles};
+use crate::document::{Accessor, Blob, Document, Limits, Tables, View};
 use crate::num::{f32_of, usize_of};
 
 /// The largest a unit vector's length may be off by before it's rewritten: well inside the
@@ -43,22 +43,29 @@ impl Document {
     /// [`Document::to_glb`] do this to what they write, so calling it first is needed only to
     /// look at the result.
     pub fn repair(&mut self) {
-        let mut json = self.json.clone();
-        if let Some(bytes) = repaired(self, &mut json) {
+        let mut json = self.json_mut().clone();
+        if let Some(bytes) = repaired(self, &mut json, &mut None) {
             self.buffers.push(Blob::Bytes(bytes.into()));
         }
-        self.json = json;
+        self.base = json;
     }
 }
 
-/// Repairs `json`, a copy of `doc`'s, as [`Document::repair`] describes. Returns the bytes
-/// of the new buffer that rewritten data went into, which `json` already lists after `doc`'s
+/// Repairs `json` and `tables`, a copy of `doc`'s, as [`Document::repair`] describes.
+/// `tables` is `doc`'s tables, borrowed until one of them changes. Returns the bytes of the
+/// new buffer that rewritten data went into, which `json` already lists after `doc`'s
 /// buffers; `None` when nothing needed new data. A step that can't read what it needs is
 /// skipped, so this never fails.
-pub(crate) fn repaired(doc: &Document, json: &mut Map<String, Value>) -> Option<Vec<u8>> {
+pub(crate) fn repaired<'d>(
+    doc: &'d Document,
+    json: &mut Map<String, Value>,
+    tables: &mut Option<Cow<'d, Tables>>,
+) -> Option<Vec<u8>> {
     let mut fix = Fix {
         doc,
         json,
+        tables,
+        tabs: Tabs::of(doc),
         buffer: doc.buffers.len(),
         out: Vec::new(),
         done: BTreeSet::new(),
@@ -84,8 +91,13 @@ pub(crate) fn repaired(doc: &Document, json: &mut Map<String, Value>) -> Option<
 
 struct Fix<'d, 'j> {
     doc: &'d Document,
-    /// The copy being repaired. Data is read from `doc`, whose accessors keep their indices.
+    /// The copy being repaired, but for the lists `tables` holds. Data is read from `doc`,
+    /// whose accessors keep their indices.
     json: &'j mut Map<String, Value>,
+    /// The copy's accessors, buffer views and animations, when `doc` holds them as tables.
+    tables: &'j mut Option<Cow<'d, Tables>>,
+    /// `doc`'s own accessors and buffer views.
+    tabs: Tabs<'d>,
     /// The new buffer's index.
     buffer: usize,
     out: Vec<u8>,
@@ -147,6 +159,123 @@ fn push(json: &mut Map<String, Value>, key: &str, v: Value) -> usize {
 
 fn accessor_mut(json: &mut Map<String, Value>, a: usize) -> Option<&mut Map<String, Value>> {
     json.get_mut("accessors")?.as_array_mut()?.get_mut(a)?.as_object_mut()
+}
+
+/// An accessor of the copy being repaired, in its JSON or its tables.
+enum AccRef<'a> {
+    Json(&'a Map<String, Value>),
+    Typed(&'a Accessor),
+}
+
+impl AccRef<'_> {
+    /// Whether it declares a `min` or `max`.
+    fn declared(&self) -> bool {
+        match self {
+            Self::Json(a) => a.contains_key("min") || a.contains_key("max"),
+            Self::Typed(a) => a.min.is_some() || a.max.is_some(),
+        }
+    }
+
+    fn sparse(&self) -> bool {
+        match self {
+            Self::Json(a) => a.contains_key("sparse"),
+            Self::Typed(a) => a.sparse.is_some(),
+        }
+    }
+
+    /// Whether its declared bounds are these.
+    fn same_bounds(&self, min: &[f64], max: &[f64], ctype: u64) -> bool {
+        match self {
+            Self::Json(a) => same_bounds(a.get("min"), min, ctype) && same_bounds(a.get("max"), max, ctype),
+            Self::Typed(a) => same_limits(a.min.as_ref(), min, ctype) && same_limits(a.max.as_ref(), max, ctype),
+        }
+    }
+}
+
+/// An accessor of the copy being repaired, to change.
+enum AccMut<'a> {
+    Json(&'a mut Map<String, Value>),
+    Typed(&'a mut Accessor),
+}
+
+impl AccMut<'_> {
+    /// Points it at tightly packed elements at the start of buffer view `view`.
+    fn point(&mut self, view: usize, ctype: u64, count: usize) {
+        match self {
+            Self::Json(acc) => {
+                acc.insert("bufferView".into(), json!(view));
+                acc.insert("componentType".into(), json!(ctype));
+                acc.insert("count".into(), json!(count));
+                acc.remove("byteOffset");
+                acc.remove("sparse");
+            }
+            Self::Typed(acc) => {
+                acc.buffer_view = Some(view);
+                acc.component_type = u32::try_from(ctype).unwrap_or_default();
+                acc.count = count;
+                acc.byte_offset = None;
+                acc.sparse = None;
+            }
+        }
+    }
+
+    /// Points it at the start of buffer view `view`, its elements as they were.
+    fn moved(&mut self, view: usize) {
+        match self {
+            Self::Json(acc) => {
+                acc.insert("bufferView".into(), json!(view));
+                acc.remove("byteOffset");
+            }
+            Self::Typed(acc) => {
+                acc.buffer_view = Some(view);
+                acc.byte_offset = None;
+            }
+        }
+    }
+
+    fn set_bounds(&mut self, min: &[f64], max: &[f64], ctype: u64) {
+        match self {
+            Self::Json(acc) => {
+                acc.insert("min".into(), bound_values(min, ctype));
+                acc.insert("max".into(), bound_values(max, ctype));
+            }
+            Self::Typed(acc) => {
+                acc.min = Some(bound_limits(min, ctype));
+                acc.max = Some(bound_limits(max, ctype));
+            }
+        }
+    }
+}
+
+/// Each animation sampler of `doc` as (input, output, whether it's a cubic spline, whether a
+/// rotation channel uses it): those naming no input or output left out.
+fn samplers(doc: &Document) -> Vec<(usize, usize, bool, bool)> {
+    let mut out = Vec::new();
+    if let Some(t) = doc.tables.as_deref().filter(|t| !t.animations.is_empty()) {
+        for anim in &t.animations {
+            for (si, s) in anim.samplers.iter().enumerate() {
+                let rotation = anim.channels.iter().find(|c| c.sampler == si).map(|c| c.path) == Some("rotation");
+                out.push((s.input, s.output, s.interpolation == "CUBICSPLINE", rotation));
+            }
+        }
+        return out;
+    }
+    for anim in list(&doc.base, "animations") {
+        let channels = items(anim, "channels");
+        for (si, s) in items(anim, "samplers").iter().enumerate() {
+            let (Some(ia), Some(oa)) = (index(s, "input"), index(s, "output")) else {
+                continue;
+            };
+            let cubic = s.get("interpolation").and_then(Value::as_str) == Some("CUBICSPLINE");
+            let rotation = channels
+                .iter()
+                .find(|c| index(c, "sampler") == Some(si))
+                .and_then(|c| c.get("target")?.get("path")?.as_str())
+                == Some("rotation");
+            out.push((ia, oa, cubic, rotation));
+        }
+    }
+    out
 }
 
 fn primitive_mut(json: &mut Map<String, Value>, m: usize, p: usize) -> Option<&mut Map<String, Value>> {
@@ -401,6 +530,16 @@ fn min_max<const CS: usize, T: Copy + PartialOrd + Into<f64>>(
     }
 }
 
+/// [`bound_values`] for an accessor in tables.
+fn bound_limits(v: &[f64], ctype: u64) -> Limits {
+    if ctype == 5126 {
+        Limits::Float(v.iter().map(|&x| f64::from(f32_of(x))).collect())
+    } else {
+        #[allow(clippy::cast_possible_truncation, reason = "integer components' bounds are whole")]
+        Limits::Int(v.iter().map(|&x| x as i64).collect())
+    }
+}
+
 fn bound_values(v: &[f64], ctype: u64) -> Value {
     #[allow(clippy::cast_possible_truncation, reason = "integer components' bounds are whole")]
     let ints = || v.iter().map(|&x| json!(x as i64)).collect();
@@ -424,10 +563,22 @@ fn same_bounds(declared: Option<&Value>, want: &[f64], ctype: u64) -> bool {
         })
 }
 
+/// [`same_bounds`] for an accessor in tables.
+#[allow(clippy::float_cmp, reason = "bounds must match the data exactly")]
+fn same_limits(declared: Option<&Limits>, want: &[f64], ctype: u64) -> bool {
+    let Some(d) = declared else {
+        return false;
+    };
+    d.len() == want.len()
+        && want.iter().enumerate().all(|(i, &w)| {
+            d.get(i)
+                .is_some_and(|d| if ctype == 5126 { f32_of(d) == f32_of(w) } else { d == w })
+        })
+}
+
 /// Whether a buffer view in `doc` gives a stride, which animation and skin data mustn't have.
-fn strided(json: &Map<String, Value>, view: Option<usize>) -> bool {
-    view.and_then(|v| list(json, "bufferViews").get(v))
-        .is_some_and(|v| v.get("byteStride").is_some())
+fn strided(tabs: Tabs<'_>, view: Option<usize>) -> bool {
+    view.is_some_and(|v| tabs.view_strided(v))
 }
 
 /// Elements' lengths are checked against this when vertices are unit vectors.
@@ -443,16 +594,88 @@ fn off_unit_sq(sq: f64) -> bool {
 }
 
 impl Fix<'_, '_> {
+    /// Adds a buffer view to the copy; returns its index.
+    fn push_view(&mut self, v: View) -> usize {
+        match self.tables {
+            Some(t) => {
+                let views = &mut t.to_mut().views;
+                views.push(v);
+                views.len() - 1
+            }
+            None => push(self.json, "bufferViews", v.to_value()),
+        }
+    }
+
+    /// Adds a copy of `doc`'s accessor `a`; returns its index.
+    fn push_copy(&mut self, a: usize) -> Option<usize> {
+        match (self.tabs, &mut *self.tables) {
+            (Tabs::Typed(own), Some(t)) => {
+                let copy = own.accessors.get(a)?.clone();
+                let accessors = &mut t.to_mut().accessors;
+                accessors.push(copy);
+                Some(accessors.len() - 1)
+            }
+            (Tabs::Json { accessors, .. }, None) => {
+                let copy = accessors.get(a)?.clone();
+                Some(push(self.json, "accessors", copy))
+            }
+            _ => None,
+        }
+    }
+
+    /// Adds an accessor of `count` VEC2 zeros, in buffer view `view` or none; returns its
+    /// index.
+    fn push_zeros(&mut self, count: u64, view: Option<usize>) -> usize {
+        if let Some(t) = self.tables {
+            let accessors = &mut t.to_mut().accessors;
+            accessors.push(Accessor {
+                buffer_view: view,
+                component_type: 5126,
+                count: usize_of(count),
+                kind: "VEC2",
+                ..Accessor::default()
+            });
+            return accessors.len() - 1;
+        }
+        let mut a = json!({ "componentType": 5126, "count": count, "type": "VEC2" });
+        if let Some(v) = view {
+            a["bufferView"] = json!(v);
+        }
+        push(self.json, "accessors", a)
+    }
+
+    /// The copy's accessor `a`.
+    fn accessor(&self, a: usize) -> Option<AccRef<'_>> {
+        match &*self.tables {
+            Some(t) => t.accessors.get(a).map(AccRef::Typed),
+            None => list(self.json, "accessors").get(a)?.as_object().map(AccRef::Json),
+        }
+    }
+
+    /// The copy's accessor `a`, to change: the tables are copied the first time.
+    fn accessor_mut(&mut self, a: usize) -> Option<AccMut<'_>> {
+        match self.tables {
+            Some(t) => {
+                if a >= t.accessors.len() {
+                    return None;
+                }
+                t.to_mut().accessors.get_mut(a).map(AccMut::Typed)
+            }
+            None => accessor_mut(self.json, a).map(AccMut::Json),
+        }
+    }
+
     /// Puts `bytes` in the new buffer behind a new buffer view; returns the view.
-    fn place(&mut self, bytes: &[u8], target: Option<u64>) -> usize {
+    fn place(&mut self, bytes: &[u8], target: Option<u32>) -> usize {
         self.out.resize(self.out.len().next_multiple_of(4), 0);
         let at = self.out.len();
         self.out.extend_from_slice(bytes);
-        let mut v = json!({ "buffer": self.buffer, "byteOffset": at, "byteLength": bytes.len() });
-        if let Some(t) = target {
-            v["target"] = json!(t);
-        }
-        push(self.json, "bufferViews", v)
+        self.push_view(View {
+            buffer: self.buffer,
+            byte_offset: Some(at as u64),
+            byte_length: bytes.len() as u64,
+            target,
+        })
     }
 
     /// Points accessor `a` at new elements, tightly packed. Its bounds are recomputed when it
@@ -465,7 +688,7 @@ impl Fix<'_, '_> {
         ctype: u64,
         n: usize,
         count: usize,
-        target: Option<u64>,
+        target: Option<u32>,
         need_bounds: bool,
     ) {
         if count == 0 {
@@ -473,29 +696,29 @@ impl Fix<'_, '_> {
         }
         let view = self.place(bytes, target);
         self.done.insert(a);
-        let Some(acc) = accessor_mut(self.json, a) else { return };
-        let declared = acc.contains_key("min") || acc.contains_key("max");
-        acc.insert("bufferView".into(), json!(view));
-        acc.insert("componentType".into(), json!(ctype));
-        acc.insert("count".into(), json!(count));
-        acc.remove("byteOffset");
-        acc.remove("sparse");
-        if (declared || need_bounds)
-            && let Some((min, max)) = bounds(bytes, ctype, n)
-        {
-            acc.insert("min".into(), bound_values(&min, ctype));
-            acc.insert("max".into(), bound_values(&max, ctype));
+        let Some(declared) = self.accessor(a).map(|acc| acc.declared()) else {
+            return;
+        };
+        let bounds = if declared || need_bounds {
+            bounds(bytes, ctype, n)
+        } else {
+            None
+        };
+        let Some(mut acc) = self.accessor_mut(a) else { return };
+        acc.point(view, ctype, count);
+        if let Some((min, max)) = bounds {
+            acc.set_bounds(&min, &max, ctype);
         }
     }
 
     /// Corrects accessor `a`'s bounds for elements `bytes` it holds unchanged: when they're
     /// declared but wrong, or `required` and missing.
     fn check_bounds(&mut self, a: usize, bytes: &[u8], ctype: u64, n: usize, required: bool) {
-        let Some(acc) = accessor_mut(self.json, a) else { return };
-        if acc.contains_key("sparse") {
+        let Some(acc) = self.accessor(a) else { return };
+        if acc.sparse() {
             return;
         }
-        let declared = acc.contains_key("min") || acc.contains_key("max");
+        let declared = acc.declared();
         if !declared && !required {
             return;
         }
@@ -506,21 +729,21 @@ impl Fix<'_, '_> {
 
     /// Accessor `a`'s `min` and `max` made these, where they differ.
     fn set_bounds(&mut self, a: usize, min: &[f64], max: &[f64], ctype: u64) {
-        let Some(acc) = accessor_mut(self.json, a) else { return };
-        if same_bounds(acc.get("min"), min, ctype) && same_bounds(acc.get("max"), max, ctype) {
+        if self.accessor(a).is_none_or(|acc| acc.same_bounds(min, max, ctype)) {
             return;
         }
-        acc.insert("min".into(), bound_values(min, ctype));
-        acc.insert("max".into(), bound_values(max, ctype));
+        if let Some(mut acc) = self.accessor_mut(a) {
+            acc.set_bounds(min, max, ctype);
+        }
     }
 
     /// Vertex attributes sharing a buffer view that gives no stride, which glTF forbids: each
     /// gets a view of its own on the same bytes.
     fn strides(&mut self, r: &mut Reader<'_>) {
-        let json = &self.doc.json;
-        let accessors = list(json, "accessors");
-        let views = list(json, "bufferViews");
-        let mut vertex = vec![false; accessors.len()];
+        let doc = self.doc;
+        let json = &doc.base;
+        let tabs = self.tabs;
+        let mut vertex = vec![false; tabs.accessors()];
         for (_, _, prim) in prims(json) {
             for (_, set) in attribute_sets(prim) {
                 for a in set.values().filter_map(Value::as_u64).map(usize_of) {
@@ -530,19 +753,14 @@ impl Fix<'_, '_> {
                 }
             }
         }
-        let mut users: Vec<Vec<usize>> = vec![Vec::new(); views.len()];
-        for (i, a) in accessors.iter().enumerate() {
-            if let Some(u) = index(a, "bufferView").and_then(|v| users.get_mut(v)) {
+        let mut users: Vec<Vec<usize>> = vec![Vec::new(); tabs.views()];
+        for i in 0..tabs.accessors() {
+            if let Some(u) = tabs.accessor_view(i).and_then(|v| users.get_mut(v)) {
                 u.push(i);
             }
         }
         for (v, users) in users.iter().enumerate() {
-            let view = &views[v];
-            if users.len() < 2
-                || view.get("byteStride").is_some()
-                || view.get("extensions").is_some()
-                || !users.iter().any(|&a| vertex[a])
-            {
+            if users.len() < 2 || tabs.view_strided(v) || tabs.view_extended(v) || !users.iter().any(|&a| vertex[a]) {
                 continue;
             }
             let Ok((buffer, offset, len, _, _)) = r.view(v) else {
@@ -554,16 +772,14 @@ impl Fix<'_, '_> {
                 if acc.count == 0 || acc.sparse.is_some() || acc.offset + span > len {
                     continue;
                 }
-                let nv = json!({
-                    "buffer": buffer,
-                    "byteOffset": offset + acc.offset,
-                    "byteLength": span,
-                    "target": 34962,
+                let i = self.push_view(View {
+                    buffer,
+                    byte_offset: Some(offset + acc.offset),
+                    byte_length: span,
+                    target: Some(34962),
                 });
-                let i = push(self.json, "bufferViews", nv);
-                if let Some(acc) = accessor_mut(self.json, a) {
-                    acc.insert("bufferView".into(), json!(i));
-                    acc.remove("byteOffset");
+                if let Some(mut acc) = self.accessor_mut(a) {
+                    acc.moved(i);
                 }
             }
         }
@@ -573,7 +789,7 @@ impl Fix<'_, '_> {
     /// nothing to draw.
     fn indices(&mut self, r: &mut Reader<'_>) -> BTreeSet<(usize, usize)> {
         let doc = self.doc;
-        let accessors = list(&doc.json, "accessors");
+        let tabs = self.tabs;
         let mut drop = BTreeSet::new();
         // (indices, vertices, mode) → the new indices and mode, `None` for none left.
         let mut made: HashMap<(usize, usize, u64), Option<(usize, u64)>> = HashMap::new();
@@ -582,12 +798,11 @@ impl Fix<'_, '_> {
             attrs
                 .into_iter()
                 .flat_map(|a| a.values())
-                .filter_map(|a| accessors.get(usize_of(a.as_u64()?)))
-                .filter_map(|a| a.get("count").and_then(Value::as_u64))
+                .filter_map(|a| tabs.accessor_count(usize_of(a.as_u64()?)))
                 .min()
         };
         // Each indexed primitive's (mesh, primitive, indices, vertices).
-        let indexed: Vec<_> = prims(&doc.json)
+        let indexed: Vec<_> = prims(&doc.base)
             .into_iter()
             .filter_map(|(m, p, prim)| Some((m, p, index(prim, "indices")?, vertex_count(prim)?, prim)))
             .collect();
@@ -701,8 +916,7 @@ impl Fix<'_, '_> {
                 _ => out.extend_from_slice(&i.to_le_bytes()),
             }
         }
-        let template = list(&self.doc.json, "accessors").get(ia)?.clone();
-        let a = push(self.json, "accessors", template);
+        let a = self.push_copy(ia)?;
         let count = out.len() / csize(ctype);
         self.rewrite(a, &out, ctype, 1, count, Some(34963), false);
         Some(Some((a, mode)))
@@ -713,7 +927,7 @@ impl Fix<'_, '_> {
     fn vertices(&mut self, r: &mut Reader<'_>) {
         let doc = self.doc;
         let mut roles: BTreeMap<usize, Role> = BTreeMap::new();
-        for (_, _, prim) in prims(&doc.json) {
+        for (_, _, prim) in prims(&doc.base) {
             for (base, set) in attribute_sets(prim) {
                 for (name, a) in set {
                     let Some(a) = a.as_u64().map(usize_of) else { continue };
@@ -730,18 +944,15 @@ impl Fix<'_, '_> {
                 roles.entry(a).or_insert(Role::Indices);
             }
         }
-        for node in list(&doc.json, "nodes") {
+        for node in list(&doc.base, "nodes") {
             let instancing = node.get("extensions").and_then(|e| e.get("EXT_mesh_gpu_instancing"));
             let attrs = instancing.and_then(|e| e.get("attributes")).and_then(Value::as_object);
             for a in attrs.into_iter().flat_map(Map::values).filter_map(Value::as_u64) {
                 roles.entry(usize_of(a)).or_insert(Role::Instance);
             }
         }
-        let accessors = list(&doc.json, "accessors");
-        let declared = |a: usize| {
-            let x = accessors.get(a);
-            x.is_some_and(|x| x.get("min").is_some() || x.get("max").is_some())
-        };
+        let tabs = self.tabs;
+        let declared = |a: usize| tabs.declares_bounds(a);
         let mut jobs = Vec::new();
         for (a, role) in roles {
             if self.done.contains(&a) {
@@ -767,7 +978,7 @@ impl Fix<'_, '_> {
                 if acc.ctype == 5126 && (!all_finite(&bytes) || unit.is_some_and(|n| !all_unit(&bytes, n))) {
                     return Scan::Fix;
                 }
-                let sparse = accessors.get(a).is_some_and(|x| x.get("sparse").is_some());
+                let sparse = tabs.is_sparse(a);
                 let checked = (role == Role::Position || declared(a)) && !sparse;
                 Scan::Fine(if checked {
                     bounds(&bytes, acc.ctype, acc.n)
@@ -843,7 +1054,7 @@ impl Fix<'_, '_> {
     /// normals `a`.
     fn face_normals(&self, r: &mut Reader<'_>, a: usize) -> Vec<[f64; 3]> {
         let mut out: Vec<[f64; 3]> = Vec::new();
-        for (_, _, prim) in prims(&self.doc.json) {
+        for (_, _, prim) in prims(&self.doc.base) {
             let attrs = prim.get("attributes");
             let mode = super::mode(prim);
             if attrs.and_then(|x| index(x, "NORMAL")) != Some(a) || !(4..=6).contains(&mode) {
@@ -889,7 +1100,7 @@ impl Fix<'_, '_> {
     fn weights(&mut self, r: &mut Reader<'_>) {
         let doc = self.doc;
         let mut seen: BTreeSet<Vec<usize>> = BTreeSet::new();
-        for (_, _, prim) in prims(&doc.json) {
+        for (_, _, prim) in prims(&doc.base) {
             let Some(attrs) = prim.get("attributes") else { continue };
             let sets: Vec<usize> = (0..).map_while(|k| index(attrs, &format!("WEIGHTS_{k}"))).collect();
             if sets.is_empty() || sets.iter().any(|a| self.done.contains(a)) || !seen.insert(sets.clone()) {
@@ -924,38 +1135,25 @@ impl Fix<'_, '_> {
     /// Animation samplers: keys out of order or at the same time, interleaved data, and
     /// rotations that aren't unit quaternions.
     fn animations(&mut self, r: &mut Reader<'_>) {
-        let doc = self.doc;
         // Each input's key order, once read: `None` for already in order.
         let mut inputs: HashMap<usize, Option<Option<Vec<usize>>>> = HashMap::new();
         let mut outputs: BTreeSet<usize> = BTreeSet::new();
-        for anim in list(&doc.json, "animations") {
-            let channels = items(anim, "channels");
-            for (si, s) in items(anim, "samplers").iter().enumerate() {
-                let (Some(ia), Some(oa)) = (index(s, "input"), index(s, "output")) else {
-                    continue;
-                };
-                let cubic = s.get("interpolation").and_then(Value::as_str) == Some("CUBICSPLINE");
-                let rotation = channels
-                    .iter()
-                    .find(|c| index(c, "sampler") == Some(si))
-                    .and_then(|c| c.get("target")?.get("path")?.as_str())
-                    == Some("rotation");
-                let order = if let Some(o) = inputs.get(&ia) {
-                    o.clone()
-                } else {
-                    let o = self.input(r, ia);
-                    inputs.insert(ia, o.clone());
-                    o
-                };
-                let Some(order) = order else { continue };
-                if !outputs.insert(oa) || self.done.contains(&oa) {
-                    continue;
-                }
-                let Ok(in_count) = r.acc(ia).map(|a| a.count) else {
-                    continue;
-                };
-                self.output(r, oa, in_count, order.as_deref(), cubic, rotation);
+        for (ia, oa, cubic, rotation) in samplers(self.doc) {
+            let order = if let Some(o) = inputs.get(&ia) {
+                o.clone()
+            } else {
+                let o = self.input(r, ia);
+                inputs.insert(ia, o.clone());
+                o
+            };
+            let Some(order) = order else { continue };
+            if !outputs.insert(oa) || self.done.contains(&oa) {
+                continue;
             }
+            let Ok(in_count) = r.acc(ia).map(|a| a.count) else {
+                continue;
+            };
+            self.output(r, oa, in_count, order.as_deref(), cubic, rotation);
         }
     }
 
@@ -971,7 +1169,7 @@ impl Fix<'_, '_> {
         let mut t = f32s(&bytes);
         let changed = finite(&mut t);
         let order = key_order(&t);
-        if order.is_some() || changed || strided(&self.doc.json, acc.view) {
+        if order.is_some() || changed || strided(self.tabs, acc.view) {
             let t: Vec<f32> = match &order {
                 Some(o) => o.iter().map(|&k| t[k]).collect(),
                 None => t,
@@ -1026,7 +1224,7 @@ impl Fix<'_, '_> {
                 bytes = Cow::Owned(bytes_of(&f));
             }
         }
-        if changed || strided(&self.doc.json, acc.view) {
+        if changed || strided(self.tabs, acc.view) {
             let count = bytes.len() / es;
             self.rewrite(oa, &bytes, acc.ctype, acc.n, count, None, false);
         } else {
@@ -1037,7 +1235,7 @@ impl Fix<'_, '_> {
     /// Inverse bind matrices: interleaved, or not finite.
     fn skins(&mut self, r: &mut Reader<'_>) {
         let doc = self.doc;
-        for skin in list(&doc.json, "skins") {
+        for skin in list(&doc.base, "skins") {
             let Some(a) = index(skin, "inverseBindMatrices") else {
                 continue;
             };
@@ -1050,7 +1248,7 @@ impl Fix<'_, '_> {
             }
             let Some(bytes) = raw(r, &acc) else { continue };
             let mut f = f32s(&bytes);
-            if finite(&mut f) || strided(&doc.json, acc.view) {
+            if finite(&mut f) || strided(self.tabs, acc.view) {
                 self.rewrite(a, &bytes_of(&f), 5126, acc.n, acc.count, None, false);
             } else {
                 self.check_bounds(a, &bytes, 5126, acc.n, false);
@@ -1062,9 +1260,9 @@ impl Fix<'_, '_> {
     /// filled by its first set, or zeros.
     fn texcoords(&mut self) {
         let doc = self.doc;
-        let materials = list(&doc.json, "materials");
+        let materials = list(&doc.base, "materials");
         let mut zeros: HashMap<u64, usize> = HashMap::new();
-        for (m, p, prim) in prims(&doc.json) {
+        for (m, p, prim) in prims(&doc.base) {
             let Some(attrs) = prim.get("attributes").and_then(Value::as_object) else {
                 continue;
             };
@@ -1084,10 +1282,8 @@ impl Fix<'_, '_> {
             let source = if let Some(&v) = sets.values().next() {
                 v.clone()
             } else {
-                let accessors = list(&doc.json, "accessors");
                 let Some(count) = index(prim.get("attributes").unwrap_or(&Value::Null), "POSITION")
-                    .and_then(|a| accessors.get(a))
-                    .and_then(|a| a.get("count")?.as_u64())
+                    .and_then(|a| self.tabs.accessor_count(a))
                 else {
                     continue;
                 };
@@ -1097,13 +1293,13 @@ impl Fix<'_, '_> {
                     // An accessor without a view is zeros by the specification, but some readers (the `gltf` crate
                     // among them) refuse one that isn't sparse: the zeros are written out, unless there are more
                     // than the file's own data could hold positions for (a count that's only claimed).
-                    let mut a = json!({ "componentType": 5126, "count": count, "type": "VEC2" });
                     let data: u64 = doc.buffers.iter().map(crate::document::Blob::len).sum();
                     let fits = |n: &u64| *n <= 1 << 26 && n * 8 <= data.max(1 << 20);
-                    if let Some(len) = Some(count).filter(fits).and_then(|n| usize::try_from(n * 8).ok()) {
-                        a["bufferView"] = json!(self.place(&vec![0; len], Some(34962)));
-                    }
-                    let a = push(self.json, "accessors", a);
+                    let view = Some(count)
+                        .filter(fits)
+                        .and_then(|n| usize::try_from(n * 8).ok())
+                        .map(|len| self.place(&vec![0; len], Some(34962)));
+                    let a = self.push_zeros(count, view);
                     zeros.insert(count, a);
                     a
                 };
@@ -1507,10 +1703,10 @@ mod tests {
         fn doc(self, rest: Value) -> Document {
             let mut d = Document::empty(Map::new());
             d.push_buffer(self.bytes);
-            d.json.insert("bufferViews".into(), json!(self.views));
-            d.json.insert("accessors".into(), json!(self.accessors));
+            d.json_mut().insert("bufferViews".into(), json!(self.views));
+            d.json_mut().insert("accessors".into(), json!(self.accessors));
             if let Value::Object(o) = rest {
-                d.json.extend(o);
+                d.json_mut().extend(o);
             }
             d
         }
@@ -1544,9 +1740,9 @@ mod tests {
             "nodes": [{ "mesh": 0 }],
             "scenes": [{ "nodes": [0] }],
         }));
-        let mut json = d.json.clone();
-        assert!(repaired(&d, &mut json).is_none());
-        assert_eq!(json, d.json);
+        let mut json = d.json().clone();
+        assert!(repaired(&d, &mut json, &mut None).is_none());
+        assert_eq!(json, *d.json());
     }
 
     #[test]
@@ -1562,8 +1758,8 @@ mod tests {
             "meshes": [{ "primitives": [{ "attributes": { "POSITION": p } }] }],
             "nodes": [{ "mesh": 0, "extensions": { "EXT_mesh_gpu_instancing": { "attributes": { "TRANSLATION": t } } } }],
         })));
-        assert_eq!(d.json["accessors"][t]["min"], json!([-0.5, 0.0, 0.0]));
-        assert_eq!(d.json["accessors"][t]["max"], json!([1.0, 2.0, 0.0]));
+        assert_eq!(d.json()["accessors"][t]["min"], json!([-0.5, 0.0, 0.0]));
+        assert_eq!(d.json()["accessors"][t]["max"], json!([1.0, 2.0, 0.0]));
     }
 
     #[test]
@@ -1581,7 +1777,7 @@ mod tests {
         })));
         assert_eq!(values(&d, input), [0.0, 1.0, 2.0]);
         assert_eq!(values(&d, output), [0.0, 0.0, 0.0, 5.0, 0.0, 0.0, 2.0, 0.0, 0.0]);
-        assert_eq!(d.json["accessors"][input]["max"], json!([2.0]));
+        assert_eq!(d.json()["accessors"][input]["max"], json!([2.0]));
     }
 
     #[test]
@@ -1597,8 +1793,8 @@ mod tests {
             "nodes": [{}],
             "skins": [{ "joints": [0], "inverseBindMatrices": ibm }],
         })));
-        let view = usize_of(d.json["accessors"][ibm]["bufferView"].as_u64().unwrap());
-        assert!(d.json["bufferViews"][view].get("byteStride").is_none());
+        let view = usize_of(d.json()["accessors"][ibm]["bufferView"].as_u64().unwrap());
+        assert!(d.json()["bufferViews"][view].get("byteStride").is_none());
         assert_eq!(values(&d, ibm), identity);
     }
 
@@ -1630,10 +1826,10 @@ mod tests {
                 { "attributes": { "POSITION": p }, "indices": none },
             ] }],
         })));
-        let prims = d.json["meshes"][0]["primitives"].as_array().unwrap();
+        let prims = d.json()["meshes"][0]["primitives"].as_array().unwrap();
         assert_eq!(prims.len(), 1);
         let i = usize_of(prims[0]["indices"].as_u64().unwrap());
-        assert_eq!(d.json["accessors"][i]["count"], 3);
+        assert_eq!(d.json()["accessors"][i]["count"], 3);
     }
 
     #[test]
@@ -1643,9 +1839,9 @@ mod tests {
             "scenes": [{ "nodes": [0, 1] }],
         }));
         d.repair();
-        assert_eq!(d.json["nodes"][0]["children"], json!([1]));
-        assert!(d.json["nodes"][1].get("children").is_none_or(|c| c == &json!([])));
-        assert_eq!(d.json["scenes"][0]["nodes"], json!([0]));
+        assert_eq!(d.json()["nodes"][0]["children"], json!([1]));
+        assert!(d.json()["nodes"][1].get("children").is_none_or(|c| c == &json!([])));
+        assert_eq!(d.json()["scenes"][0]["nodes"], json!([0]));
     }
 
     #[test]
@@ -1659,7 +1855,7 @@ mod tests {
             "textures": [{}],
         })));
         assert_eq!(
-            d.json["meshes"][0]["primitives"][0]["attributes"]["TEXCOORD_1"],
+            d.json()["meshes"][0]["primitives"][0]["attributes"]["TEXCOORD_1"],
             json!(uv)
         );
     }
@@ -1673,12 +1869,12 @@ mod tests {
             "materials": [{ "pbrMetallicRoughness": { "baseColorTexture": { "index": 0 } } }],
             "textures": [{}],
         })));
-        let uv = index(&d.json["meshes"][0]["primitives"][0]["attributes"], "TEXCOORD_0").unwrap();
-        let acc = &d.json["accessors"][uv];
+        let uv = index(&d.json()["meshes"][0]["primitives"][0]["attributes"], "TEXCOORD_0").unwrap();
+        let acc = &d.json()["accessors"][uv];
         assert_eq!(acc["count"], 3);
         // Backed by a view, which readers that refuse a view-less accessor need.
         let view = index(acc, "bufferView").expect("a view");
-        assert_eq!(d.json["bufferViews"][view]["byteLength"], 24);
+        assert_eq!(d.json()["bufferViews"][view]["byteLength"], 24);
     }
 
     #[test]
@@ -1690,7 +1886,7 @@ mod tests {
             "textures": [{}],
         }));
         d.repair();
-        let uv = index(&d.json["meshes"][0]["primitives"][0]["attributes"], "TEXCOORD_0").unwrap();
-        assert!(d.json["accessors"][uv].get("bufferView").is_none());
+        let uv = index(&d.json()["meshes"][0]["primitives"][0]["attributes"], "TEXCOORD_0").unwrap();
+        assert!(d.json()["accessors"][uv].get("bufferView").is_none());
     }
 }

@@ -951,7 +951,7 @@ mod tests {
     #[test]
     fn skeleton() {
         let doc = asf(ASF).unwrap();
-        let nodes = doc.json["nodes"].as_array().unwrap();
+        let nodes = doc.json()["nodes"].as_array().unwrap();
         let names: Vec<_> = nodes.iter().map(|n| n["name"].as_str().unwrap()).collect();
         assert_eq!(names, ["root", "upper", "lower", "lower_end"]);
         // `length 0.0254` makes a unit a meter.
@@ -966,8 +966,8 @@ mod tests {
             json!([[-180.0, 180.0], [null, null], [-90.0, 90.0]])
         );
         assert_eq!(nodes[2]["extras"]["dof"], json!(["rz", "l"]));
-        assert_eq!(doc.json["asset"]["extras"]["source"]["format"], "ASF");
-        assert!(doc.json.get("animations").is_none());
+        assert_eq!(doc.json()["asset"]["extras"]["source"]["format"], "ASF");
+        assert!(doc.json().get("animations").is_none());
         let info = doc.source_info();
         // `length 0.0254` makes the unit a meter, as the file declares.
         assert_eq!(info.meters_per_unit, Fact::Declared(1.0));
@@ -985,7 +985,7 @@ mod tests {
         assert_eq!(doc.facts["frames"], json!(2));
         assert!(doc.facts.get("frame_time_guessed").is_none());
         assert_eq!(doc.source_info().frame_rate, Fact::Assumed(120.0));
-        assert_eq!(doc.json["asset"]["extras"]["source"]["skeleton"], "t.asf");
+        assert_eq!(doc.json()["asset"]["extras"]["source"]["skeleton"], "t.asf");
         let rig = doc.rig().unwrap();
         let a = &rig.animations[0];
         assert_eq!(a.channels.len(), 4);
@@ -1008,7 +1008,7 @@ mod tests {
         let motion = ":DEGREES\n1\nroot 0 0 0 0 0 0\n";
         let assets = Memory::new().with("02.asf", ASF.as_bytes());
         let doc = load(Input::memory(motion.as_bytes(), "02_01.amc"), "amc", &assets, Keep::ALL).unwrap();
-        assert_eq!(doc.json["asset"]["extras"]["source"]["skeleton"], "02.asf");
+        assert_eq!(doc.json()["asset"]["extras"]["source"]["skeleton"], "02.asf");
         let e = error(load(
             Input::memory(motion.as_bytes(), "x.amc"),
             "amc",
@@ -1099,7 +1099,7 @@ mod tests {
         let keep = Keep::ALL.with_animations(false);
         let none = load(Input::memory(text.as_bytes(), "t.amc"), "amc", &assets, keep).unwrap();
         let all = amc(ASF, text).unwrap();
-        assert!(none.json.get("animations").is_none());
+        assert!(none.json().get("animations").is_none());
         assert_eq!(none.facts, all.facts);
     }
 }

@@ -1263,7 +1263,7 @@ fn weights_channel(
 /// Sets what the shared material writer doesn't: blending by a texture's alpha, texture coordinate sets past the
 /// first, and the scripts' other properties as extras.
 fn finish_materials(doc: &mut Document, posts: &[MaterialPost], keep: Keep) {
-    let Some(Value::Array(mats)) = doc.json.get_mut("materials") else {
+    let Some(Value::Array(mats)) = doc.base_mut().get_mut("materials") else {
         return;
     };
     for (m, post) in mats.iter_mut().zip(posts) {

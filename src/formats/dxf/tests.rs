@@ -24,7 +24,7 @@ fn triangles(doc: &Document) -> u64 {
 }
 
 fn source(doc: &Document) -> &Value {
-    &doc.json["asset"]["extras"]["source"]
+    &doc.json()["asset"]["extras"]["source"]
 }
 
 fn bounds(m: &Mesh) -> ([f32; 3], [f32; 3]) {
@@ -143,7 +143,7 @@ fn faces_turn_y_up_in_meters() {
     assert_eq!(info.up_axis, Fact::Assumed(Axis::PosZ));
     assert_eq!(info.handedness, Fact::Declared(Handedness::Right));
     assert!(info.converted.units && info.converted.up_axis);
-    assert_eq!(doc.json["nodes"][0]["name"], "RootNode");
+    assert_eq!(doc.json()["nodes"][0]["name"], "RootNode");
     let m = mesh(&doc);
     assert_eq!(m.triangles(), 12);
     let (lo, hi) = bounds(&m);
@@ -170,7 +170,7 @@ fn a_three_corner_face_and_degenerate_ones() {
     assert_eq!(info.meters_per_unit, Fact::Unknown);
     assert_eq!(info.unit, None);
     assert!(!info.converted.units && info.converted.up_axis);
-    assert!(doc.json["nodes"][0].get("scale").is_none());
+    assert!(doc.json()["nodes"][0].get("scale").is_none());
 }
 
 #[test]
@@ -291,10 +291,10 @@ fn an_insert_by_base_scale_and_rotation() {
     let insert = "0 INSERT 8 0 2 tri 10 10 20 0 30 0 41 2 42 2 43 2 50 90 ";
     let doc = read(&text(&drawing(0, "", TRI_BLOCK, insert), "\n"));
     assert_eq!(triangles(&doc), 1);
-    let node = &doc.json["nodes"][0];
+    let node = &doc.json()["nodes"][0];
     assert_eq!(node["name"], "Tri");
     assert_eq!(node["mesh"], 0);
-    assert_eq!(doc.json["meshes"][0]["name"], "Tri");
+    assert_eq!(doc.json()["meshes"][0]["name"], "Tri");
     // The block's (2,0,0) and (1,1,0) are 1 and (0,1) from its base, doubled and turned a
     // quarter: (10,2,0) and (8,0,0); its base point lands on (10,0,0). Y-up, that's z = -y.
     let (lo, hi) = bounds(&mesh(&doc));
@@ -309,8 +309,8 @@ fn an_insert_array_shares_one_mesh() {
     let insert = "0 INSERT 8 0 2 Tri 10 0 20 0 30 0 70 2 71 3 44 5 45 7 ";
     let doc = read(&text(&drawing(0, "", TRI_BLOCK, insert), "\n"));
     assert_eq!(triangles(&doc), 6);
-    assert_eq!(doc.json["meshes"].as_array().unwrap().len(), 1);
-    assert_eq!(doc.json["nodes"].as_array().unwrap().len(), 7);
+    assert_eq!(doc.json()["meshes"].as_array().unwrap().len(), 1);
+    assert_eq!(doc.json()["nodes"].as_array().unwrap().len(), 7);
     let m = mesh(&doc);
     assert_eq!(m.triangles(), 6);
     let (lo, hi) = bounds(&m);
@@ -349,7 +349,7 @@ fn nested_blocks_cycles_and_depth() {
     let entities = "0 INSERT 2 Outer 10 0 20 0 30 0 0 INSERT 2 Loop 0 INSERT 2 Missing";
     let doc = read(&text(&drawing(0, "", &blocks, entities), "\n"));
     assert_eq!(triangles(&doc), 3);
-    assert_eq!(doc.json["meshes"].as_array().unwrap().len(), 1);
+    assert_eq!(doc.json()["meshes"].as_array().unwrap().len(), 1);
     let notes = source(&doc)["notes"].to_string();
     assert!(
         notes.contains("contains itself") && notes.contains("isn't there"),
@@ -492,7 +492,7 @@ fn skipped_and_left_out() {
         json!({ "3DSOLID": 1, "DIMENSION": 1, "HATCH": 1, "MTEXT": 1, "TEXT": 1 })
     );
     assert!(src["notes"].to_string().contains("paper space"));
-    assert!(doc.json["scenes"][0].get("nodes").is_none());
+    assert!(doc.json()["scenes"][0].get("nodes").is_none());
 }
 
 #[test]

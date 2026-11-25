@@ -1417,7 +1417,7 @@ mod tests {
 </amf>"#;
 
     fn source(doc: &Document) -> &Value {
-        &doc.json["asset"]["extras"]["source"]
+        &doc.json()["asset"]["extras"]["source"]
     }
 
     #[test]
@@ -1438,12 +1438,12 @@ mod tests {
         assert_eq!(src["droppedTriangles"], 1);
         assert_eq!(src["droppedFormulas"], 1);
         assert_eq!(doc.facts["triangles"], 5);
-        let mesh = &doc.json["meshes"][0];
+        let mesh = &doc.json()["meshes"][0];
         assert_eq!(mesh["name"], "Pyramid");
         let prims = mesh["primitives"].as_array().unwrap();
         assert_eq!(prims.len(), 3);
         assert_eq!(prims[0]["extras"]["name"], "Hard side");
-        let mats = doc.json["materials"].as_array().unwrap();
+        let mats = doc.json()["materials"].as_array().unwrap();
         let mat = |p: &Value| &mats[usize::try_from(p["material"].as_u64().unwrap()).unwrap()];
         // The first volume has a red vertex: its colors go on the vertices.
         assert!(prims[0]["attributes"].get("COLOR_0").is_some());
@@ -1506,9 +1506,9 @@ mod tests {
     #[test]
     fn constellations_place_instances() {
         let doc = load_str(CONSTELLATIONS).unwrap();
-        let nodes = doc.json["nodes"].as_array().unwrap();
+        let nodes = doc.json()["nodes"].as_array().unwrap();
         // Four placed triangles; one mesh, shared.
-        assert_eq!(doc.json["meshes"].as_array().unwrap().len(), 1);
+        assert_eq!(doc.json()["meshes"].as_array().unwrap().len(), 1);
         assert_eq!(nodes.iter().filter(|n| n.get("mesh").is_some()).count(), 4);
         assert!(nodes.iter().any(|n| n["name"] == "Pair of pairs"));
         // The missing object and the loop between 8 and 9 are dropped.
@@ -1570,16 +1570,16 @@ mod tests {
             b64(&[0, 0, 0, 0])
         );
         let doc = load_str(&xml).unwrap();
-        assert_eq!(doc.json["images"].as_array().unwrap().len(), 1);
-        let prims = doc.json["meshes"][0]["primitives"].as_array().unwrap();
+        assert_eq!(doc.json()["images"].as_array().unwrap().len(), 1);
+        let prims = doc.json()["meshes"][0]["primitives"].as_array().unwrap();
         assert_eq!(prims.len(), 2);
         let textured = prims
             .iter()
             .find(|p| p["attributes"].get("TEXCOORD_0").is_some())
             .unwrap();
-        let mat = &doc.json["materials"][usize::try_from(textured["material"].as_u64().unwrap()).unwrap()];
+        let mat = &doc.json()["materials"][usize::try_from(textured["material"].as_u64().unwrap()).unwrap()];
         assert_eq!(mat["pbrMetallicRoughness"]["baseColorTexture"]["index"], 0);
-        assert_eq!(doc.json["samplers"][0]["wrapS"], REPEAT);
+        assert_eq!(doc.json()["samplers"][0]["wrapS"], REPEAT);
         let m = flat(&doc);
         let rgb = [255, 0, 0, 0, 0, 0, 0, 0, 0, 255, 0, 0];
         assert_eq!(m.images[0].bytes, crate::png::encode(2, 2, 3, &rgb).unwrap());

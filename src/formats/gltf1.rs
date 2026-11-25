@@ -839,7 +839,7 @@ pub(crate) fn finish(doc: &mut Document, fix: &Fixups) -> Result<()> {
             .collect();
         let bytes: Vec<u8> = joints.iter().flat_map(|j| j.to_le_bytes()).collect();
         let view = push(doc, bytes);
-        let acc = doc.json["accessors"][a].as_object_mut().expect("an accessor");
+        let acc = doc.json_mut()["accessors"][a].as_object_mut().expect("an accessor");
         acc.insert("bufferView".into(), json!(view));
         acc.insert("byteOffset".into(), json!(0));
         acc.insert("componentType".into(), json!(5123));
@@ -858,12 +858,13 @@ pub(crate) fn finish(doc: &mut Document, fix: &Fixups) -> Result<()> {
             }
         }
         if min[0].is_finite() {
-            doc.json["accessors"][a]["min"] = json!(min);
-            doc.json["accessors"][a]["max"] = json!(max);
+            let acc = &mut doc.json_mut()["accessors"][a];
+            acc["min"] = json!(min);
+            acc["max"] = json!(max);
         }
     }
     for &(s, bsm) in &fix.bind_shapes {
-        let skin = &doc.json["skins"][s];
+        let skin = &doc.base["skins"][s];
         let joints = skin["joints"].as_array().map_or(0, Vec::len);
         let ibms: Vec<f32> = match skin.get("inverseBindMatrices").and_then(Value::as_u64) {
             Some(a) => floats(doc, usize_of(a))?.0,
@@ -881,14 +882,14 @@ pub(crate) fn finish(doc: &mut Document, fix: &Fixups) -> Result<()> {
         let count = baked.len() / 64;
         let view = push(doc, baked);
         let accessors = doc
-            .json
+            .json_mut()
             .entry("accessors")
             .or_insert_with(|| json!([]))
             .as_array_mut()
             .expect("glTF accessors is a list");
         accessors.push(json!({ "bufferView": view, "componentType": 5126, "count": count, "type": "MAT4" }));
         let a = accessors.len() - 1;
-        doc.json["skins"][s]["inverseBindMatrices"] = json!(a);
+        doc.base_mut()["skins"][s]["inverseBindMatrices"] = json!(a);
     }
     Ok(())
 }
@@ -902,7 +903,7 @@ fn push(doc: &mut Document, bytes: Vec<u8>) -> usize {
 
 /// Float accessor `a`'s components, and its count.
 fn floats(doc: &Document, a: usize) -> Result<(Vec<f32>, usize)> {
-    let acc = &doc.json["accessors"][a];
+    let acc = &doc.json()["accessors"][a];
     let get = |v: &Value, k: &str| v.get(k).and_then(Value::as_u64).unwrap_or(0);
     ensure!(
         get(acc, "componentType") == 5126,
@@ -914,7 +915,7 @@ fn floats(doc: &Document, a: usize) -> Result<(Vec<f32>, usize)> {
     let Some(v) = acc.get("bufferView").and_then(Value::as_u64) else {
         return Ok((vec![0.0; count * n], count));
     };
-    let view = &doc.json["bufferViews"][usize_of(v)];
+    let view = &doc.json()["bufferViews"][usize_of(v)];
     let stride = match usize_of(get(view, "byteStride")) {
         0 => n * 4,
         s => s,

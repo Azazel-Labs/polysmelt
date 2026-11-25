@@ -133,9 +133,9 @@ fn skeleton_parent_cycles_are_broken() {
                </bones><bonehierarchy><boneparent bone=\"a\" parent=\"b\"/><boneparent bone=\"b\" parent=\"c\"/>\
                <boneparent bone=\"c\" parent=\"a\"/></bonehierarchy></skeleton>";
     let doc = load_as(xml.as_bytes(), "loop.skeleton.xml", &Memory::new()).unwrap();
-    let nodes = doc.json["nodes"].as_array().unwrap();
+    let nodes = doc.json()["nodes"].as_array().unwrap();
     assert_eq!(nodes.len(), 3);
-    let roots = doc.json["scenes"][0]["nodes"].as_array().unwrap();
+    let roots = doc.json()["scenes"][0]["nodes"].as_array().unwrap();
     assert!(!roots.is_empty(), "a cycle leaves a root");
 }
 
@@ -229,8 +229,8 @@ fn every_byte_order_and_form_agree() {
         &Memory::new(),
     )
     .unwrap();
-    assert_eq!(le.json["meshes"], be.json["meshes"]);
-    assert_eq!(le.json["accessors"], be.json["accessors"]);
+    assert_eq!(le.json()["meshes"], be.json()["meshes"]);
+    assert_eq!(le.json()["accessors"], be.json()["accessors"]);
     let bin = load_as(
         include_bytes!("../../../tests/corpus/ogre/twin_binary/twin.mesh"),
         "twin.mesh",
@@ -243,8 +243,8 @@ fn every_byte_order_and_form_agree() {
         &Memory::new(),
     )
     .unwrap();
-    assert_eq!(bin.json["meshes"], xml.json["meshes"]);
-    assert_eq!(bin.json["accessors"], xml.json["accessors"]);
+    assert_eq!(bin.json()["meshes"], xml.json()["meshes"]);
+    assert_eq!(bin.json()["accessors"], xml.json()["accessors"]);
 }
 
 #[test]

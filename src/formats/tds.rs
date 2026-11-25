@@ -1918,7 +1918,7 @@ mod tests {
     #[test]
     fn meshes_materials_and_smoothing() {
         let doc = read("floor.3ds", &square()).unwrap();
-        let names: Vec<&str> = doc.json["nodes"]
+        let names: Vec<&str> = doc.json()["nodes"]
             .as_array()
             .unwrap()
             .iter()
@@ -1932,7 +1932,7 @@ mod tests {
         assert_eq!(info.meters_per_unit, Fact::Unknown);
         assert_eq!(info.frame_rate, Fact::Unknown, "no keyframer");
         assert!(info.converted.up_axis && !info.converted.units);
-        let red = &doc.json["materials"][0]["extras"]["3ds"];
+        let red = &doc.json()["materials"][0]["extras"]["3ds"];
         assert_eq!(red["diffuse"], json!([255, 0, 0]));
         assert_eq!(red["transparency"], json!(25.0));
         assert_eq!(red["maps"]["bump"], json!({ "file": "red.png", "uScale": 2.0 }));
@@ -2020,9 +2020,9 @@ mod tests {
         let mut main = chunk(EDITOR, &editor);
         main.extend(chunk(KEYFRAMER, &kf));
         let doc = read("arm.3ds", &chunk(MAIN, &main)).unwrap();
-        assert_eq!(doc.json["nodes"][1]["name"], "Arm");
-        assert_eq!(doc.json["nodes"][0]["children"], json!([1]));
-        assert_eq!(doc.json["animations"][0]["channels"].as_array().unwrap().len(), 2);
+        assert_eq!(doc.json()["nodes"][1]["name"], "Arm");
+        assert_eq!(doc.json()["nodes"][0]["children"], json!([1]));
+        assert_eq!(doc.json()["animations"][0]["channels"].as_array().unwrap().len(), 2);
         assert_eq!(doc.source_info().frame_rate, Fact::Assumed(30.0));
 
         // At rest, everything is where the editor has it (turned Y up).
@@ -2051,15 +2051,15 @@ mod tests {
         editor.extend(object("Cam", &chunk(CAMERA, &cam)));
         editor.extend(object("Spot", &chunk(LIGHT, &spot)));
         let doc = read("lit.3ds", &chunk(MAIN, &chunk(EDITOR, &editor))).unwrap();
-        let p = &doc.json["cameras"][0]["perspective"];
+        let p = &doc.json()["cameras"][0]["perspective"];
         assert_eq!(p["znear"], json!(1.0));
         assert_eq!(p["zfar"], json!(100.0));
-        let light = &doc.json["extensions"]["KHR_lights_punctual"]["lights"][0];
+        let light = &doc.json()["extensions"]["KHR_lights_punctual"]["lights"][0];
         assert_eq!(light["type"], "spot");
         let outer = light["spot"]["outerConeAngle"].as_f64().unwrap();
         assert!((outer - 30f64.to_radians()).abs() < 1e-9);
         // The camera looks along +Y: its -Z turned onto +Y is a quarter turn about +X.
-        let q: Vec<f64> = doc.json["nodes"][1]["rotation"]
+        let q: Vec<f64> = doc.json()["nodes"][1]["rotation"]
             .as_array()
             .unwrap()
             .iter()
@@ -2068,7 +2068,7 @@ mod tests {
         let h = std::f64::consts::FRAC_1_SQRT_2;
         assert!((q[0] - h).abs() < 1e-6 && (q[3] - h).abs() < 1e-6, "{q:?}");
         // The spot looks straight down: -Z already.
-        let q = doc.json["nodes"][2]["rotation"].as_array().unwrap();
+        let q = doc.json()["nodes"][2]["rotation"].as_array().unwrap();
         assert!((q[3].as_f64().unwrap().abs() - 1.0).abs() < 1e-6, "{q:?}");
     }
 
@@ -2215,7 +2215,7 @@ mod tests {
         let assets = crate::assets::Memory::new().with("leaf.png", png);
         let file = chunk(MAIN, &chunk(EDITOR, &editor));
         let doc = crate::formats::load_bytes(&file, "l.3ds", "3ds", &assets, Keep::ALL).unwrap();
-        let leaf = &doc.json["materials"][0];
+        let leaf = &doc.json()["materials"][0];
         assert!(leaf["pbrMetallicRoughness"]["baseColorTexture"].is_object(), "{leaf}");
         assert_eq!(leaf["alphaMode"], "BLEND", "{leaf}");
     }
@@ -2315,7 +2315,7 @@ mod tests {
         ]);
         let doc = crate::formats::load_bytes(&file, "b.3ds", "3ds", &assets, Keep::ALL).unwrap();
         let normal = |name: &str| {
-            let m = doc.json["materials"]
+            let m = doc.json()["materials"]
                 .as_array()
                 .unwrap()
                 .iter()

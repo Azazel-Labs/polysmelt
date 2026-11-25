@@ -380,7 +380,7 @@ impl Document {
             return;
         }
         let mut before = BTreeSet::new();
-        let mut root = Value::Object(std::mem::take(&mut self.json));
+        let mut root = Value::Object(std::mem::take(self.json_mut()));
         extensions_present(&root, &mut before);
         let Value::Object(json) = &mut root else { unreachable!() };
         // Animation pointers (`KHR_animation_pointer`) into what goes, go with it.
@@ -513,7 +513,7 @@ impl Document {
             }
         }
         let Value::Object(json) = root else { unreachable!() };
-        self.json = json;
+        *self.json_mut() = json;
     }
 }
 
@@ -535,7 +535,7 @@ mod tests {
     fn doc(v: Value) -> Document {
         let Value::Object(json) = v else { unreachable!() };
         let mut d = Document::empty(Map::new());
-        d.json = json;
+        *d.json_mut() = json;
         d
     }
 
@@ -544,7 +544,7 @@ mod tests {
         let v = json!({ "asset": { "version": "2.0" }, "animations": [{ "channels": [{}] }], "extras": { "a": 1 } });
         let mut d = doc(v.clone());
         d.prune(Keep::default());
-        assert_eq!(Value::Object(d.json), v);
+        assert_eq!(Value::Object(d.json().clone()), v);
     }
 
     #[test]
@@ -557,13 +557,13 @@ mod tests {
             image_bytes: false,
             ..Keep::ALL
         });
-        assert_eq!(Value::Object(d.json), v);
+        assert_eq!(Value::Object(d.json().clone()), v);
         let mut d = doc(v);
         d.prune(Keep {
             extras: false,
             ..Keep::ALL
         });
-        assert!(!d.json.contains_key("animations"));
+        assert!(!d.json().contains_key("animations"));
     }
 
     #[test]
@@ -575,7 +575,7 @@ mod tests {
             max_points: usize::MAX,
             ..Keep::ALL
         });
-        assert_eq!(Value::Object(d.json.clone()), v);
+        assert_eq!(Value::Object(d.json().clone()), v);
         assert!(!d.lines_and_points());
         assert_eq!(d.max_points(), TRIANGLE_CEILING);
         d.prune(Keep::LIGHT);
@@ -609,7 +609,7 @@ mod tests {
         }));
         d.prune(Keep::MESHES);
         assert_eq!(
-            Value::Object(d.json),
+            Value::Object(d.json().clone()),
             json!({
                 "asset": { "version": "2.0" },
                 "nodes": [{ "mesh": 0, "skin": 0 }, {}],
@@ -650,7 +650,7 @@ mod tests {
             ..Keep::ALL
         });
         assert_eq!(
-            Value::Object(d.json),
+            Value::Object(d.json().clone()),
             json!({
                 "asset": { "version": "2.0" },
                 "nodes": [{ "mesh": 0 }],
@@ -681,7 +681,7 @@ mod tests {
             ..Keep::ALL
         });
         assert_eq!(
-            Value::Object(d.json),
+            Value::Object(d.json().clone()),
             json!({
                 "asset": { "version": "2.0" },
                 "animations": [{ "channels": [

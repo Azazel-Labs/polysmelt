@@ -54,7 +54,7 @@ use serde_json::{Map, Value, json};
 use super::Input;
 use super::xform::{IDENTITY, M4, Trs, decompose, inverse, mul, scale, set_transform, translate};
 use crate::assets::{Assets, memory_key};
-use crate::document::{Builder, Document, Keep, Part};
+use crate::document::{self, Animation, Builder, Document, Keep, Part, Sampler};
 use crate::images::{Images, Location, gray};
 use crate::material::{self, Alpha, Clearcoat, Factor, Full, Specular, Tex, UvTransform};
 use crate::mesh::{GRAY, Material, Prim, triangulate};
@@ -246,9 +246,6 @@ fn load_capped(input: Input<'_>, assets: &dyn Assets, keep: Keep, max_nodes: usi
     if !r.skins.is_empty() {
         json.insert("skins".into(), Value::Array(std::mem::take(&mut r.skins)));
     }
-    if !animations.is_empty() {
-        json.insert("animations".into(), Value::Array(animations));
-    }
     if !r.cameras.is_empty() {
         json.insert("cameras".into(), Value::Array(std::mem::take(&mut r.cameras)));
     }
@@ -261,6 +258,7 @@ fn load_capped(input: Input<'_>, assets: &dyn Assets, keep: Keep, max_nodes: usi
     }
     let (materials, images) = (std::mem::take(&mut r.materials), std::mem::take(&mut r.images));
     let mut b = r.b;
+    b.animations = animations;
     b.materials(&materials, images.list, &mut json);
     Ok(b.finish(json, Map::new()))
 }
@@ -1187,7 +1185,7 @@ impl Reader<'_> {
     }
 
     /// One animation: animated transforms, skeletal animations and blend shape weights.
-    fn animations(&mut self, tcps: f64) -> Vec<Value> {
+    fn animations(&mut self, tcps: f64) -> Vec<Animation> {
         let mut channels = Vec::new();
         for (node, prim) in std::mem::take(&mut self.animated) {
             self.transform_channels(node, &prim, &mut channels);
@@ -1274,10 +1272,23 @@ impl Reader<'_> {
                 _ => "SCALAR",
             };
             let output = self.b.floats(c.values.into_iter().map(f32_of).collect(), kind, false);
-            samplers.push(json!({ "input": input, "output": output, "interpolation": "LINEAR" }));
-            out.push(json!({ "sampler": samplers.len() - 1, "target": { "node": c.node, "path": c.path } }));
+            samplers.push(Sampler {
+                input,
+                output,
+                interpolation: "LINEAR",
+            });
+            out.push(document::Channel {
+                sampler: samplers.len() - 1,
+                node: c.node,
+                path: c.path,
+            });
         }
-        vec![json!({ "channels": out, "samplers": samplers })]
+        vec![Animation {
+            channels: out,
+            samplers,
+            name: None,
+            extras: None,
+        }]
     }
 
     /// Translation, rotation and scale channels for a node whose prim's transform is animated: its local transform
@@ -3835,10 +3846,10 @@ def Material \"Planks\"
         assert_eq!(info.description.as_deref(), Some("A crate"));
         assert_eq!(info.comments, ["first pass"]);
         assert_eq!(
-            d.json["asset"]["extras"]["source"]["customLayerData"]["creator"],
+            d.json()["asset"]["extras"]["source"]["customLayerData"]["creator"],
             "someone"
         );
-        assert_eq!(d.json["asset"]["extras"]["source"]["timeCodesPerSecond"], 60.0);
+        assert_eq!(d.json()["asset"]["extras"]["source"]["timeCodesPerSecond"], 60.0);
 
         // A stage that says nothing: USD's centimeters, Y up and 24 time codes a second, assumed.
         let d = doc(
@@ -4020,7 +4031,7 @@ def Material \"Planks\"
 "#,
         );
         let d = doc(&usda, &[("glow.png", false), ("ao.png", true)]);
-        let m = &d.json["materials"][0];
+        let m = &d.json()["materials"][0];
         assert!(m.get("emissiveTexture").is_some(), "the emissive texture: {m}");
         assert_eq!(m["emissiveFactor"], json!([1.0, 1.0, 1.0]));
         assert!(
@@ -4087,8 +4098,8 @@ def Xform "Root"
         }
         usda.push_str("}\n");
         let d = doc(&usda, &[]);
-        assert_eq!(d.json["meshes"].as_array().unwrap().len(), 1);
-        let held = d.json["nodes"]
+        assert_eq!(d.json()["meshes"].as_array().unwrap().len(), 1);
+        let held = d.json()["nodes"]
             .as_array()
             .unwrap()
             .iter()
@@ -4112,10 +4123,10 @@ def Xform "Root"
         )
         .unwrap();
         assert!(
-            d.json["nodes"].as_array().unwrap().len() <= 5,
+            d.json()["nodes"].as_array().unwrap().len() <= 5,
             "4 and a root for the units"
         );
-        assert!(d.json["asset"]["extras"]["source"]["truncated"].is_string());
+        assert!(d.json()["asset"]["extras"]["source"]["truncated"].is_string());
         let mesh = d.flatten(Pose::Rest).unwrap().unwrap();
         assert_eq!(mesh.triangles(), 4 * 12, "what was made is kept");
     }
@@ -4140,7 +4151,7 @@ def Xform "Root"
             "#usda 1.0\ndef DomeLight \"Sky\"\n{\n    asset inputs:texture:file = @sky.hdr@\n    float inputs:intensity = 2\n}\n",
             &[],
         );
-        let sky = d.json["nodes"]
+        let sky = d.json()["nodes"]
             .as_array()
             .unwrap()
             .iter()
@@ -4196,7 +4207,7 @@ def Xform "Root"
         )
         .replace("MaterialBindingAPI", "SkelBindingAPI");
         let d = doc(&usda, &[]);
-        let target = &d.json["meshes"][0]["primitives"][0]["targets"][0];
+        let target = &d.json()["meshes"][0]["primitives"][0]["targets"][0];
         assert!(
             target.get("POSITION").is_some() && target.get("NORMAL").is_some(),
             "{target}"
@@ -4423,7 +4434,7 @@ def HermiteCurves "Wave"
 "#,
         );
         let d = doc(&usda, &[]);
-        assert_eq!(d.json["meshes"].as_array().unwrap().len(), 2);
+        assert_eq!(d.json()["meshes"].as_array().unwrap().len(), 2);
         let m = d.flatten(Pose::Rest).unwrap().unwrap();
         assert_eq!((m.triangles(), m.lines()), (0, 16));
         // The arc lies on the unit circle; the Hermite segment rises and falls between its points.

@@ -100,17 +100,17 @@ fn check_cube(doc: &Document) {
 fn classic_cube() {
     let doc = read(CUBE_WRL, "cube.wrl");
     check_cube(&doc);
-    let source = &doc.json["asset"]["extras"]["source"];
+    let source = &doc.json()["asset"]["extras"]["source"];
     assert_eq!(source["format"], "VRML97");
     assert_eq!(source["version"], "2.0");
-    assert_eq!(doc.json["nodes"][1]["name"], "Cube");
+    assert_eq!(doc.json()["nodes"][1]["name"], "Cube");
 }
 
 #[test]
 fn xml_cube() {
     let doc = read(CUBE_X3D, "cube.x3d");
     check_cube(&doc);
-    let source = &doc.json["asset"]["extras"]["source"];
+    let source = &doc.json()["asset"]["extras"]["source"];
     assert_eq!(source["encoding"], "XML");
     assert_eq!(source["version"], "3.3");
 }
@@ -122,7 +122,7 @@ fn gzipped() {
     let bytes = z.finish().unwrap();
     let doc = read_in(&bytes, "cube.wrz", &Memory::new(), usize::MAX).unwrap();
     check_cube(&doc);
-    assert_eq!(doc.json["asset"]["extras"]["source"]["gzip"], true);
+    assert_eq!(doc.json()["asset"]["extras"]["source"]["gzip"], true);
     let mut z = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
     z.write_all(CUBE_X3D.as_bytes()).unwrap();
     let doc = read_in(&z.finish().unwrap(), "cube.x3dz", &Memory::new(), usize::MAX).unwrap();
@@ -157,18 +157,18 @@ Transform { translation 5 0 0 children USE S }
 ROUTE A.b TO C.d
 ";
     let doc = read(text, "a.x3dv");
-    assert_eq!(doc.json["meshes"].as_array().unwrap().len(), 1);
+    assert_eq!(doc.json()["meshes"].as_array().unwrap().len(), 1);
     assert_eq!(triangles(&doc), 24);
     let (lo, hi) = bounds(&mesh(&doc));
     assert_eq!((lo[0], hi[0]), (-1.0, 6.0));
-    assert_eq!(doc.json["asset"]["extras"]["source"]["skipped"]["ROUTE"], 1);
+    assert_eq!(doc.json()["asset"]["extras"]["source"]["skipped"]["ROUTE"], 1);
 }
 
 #[test]
 fn a_node_inside_itself_stops() {
     let text = "#VRML V2.0 utf8\nDEF A Group { children [ Shape { geometry Sphere {} } USE A ] }\n";
     let doc = read(text, "a.wrl");
-    assert_eq!(doc.json["meshes"].as_array().unwrap().len(), 1);
+    assert_eq!(doc.json()["meshes"].as_array().unwrap().len(), 1);
     let xml = r#"<X3D><Scene><Group DEF="A"><Shape><Box/></Shape><Group USE="A"/></Group></Scene></X3D>"#;
     let doc = read(xml, "a.x3d");
     assert_eq!(triangles(&doc), 12);
@@ -231,10 +231,10 @@ Shape {
     assert_eq!(p.colors[p.indices[3] as usize], [1.0, 0.0, 0.0, 1.0]);
     // Texture coordinates flipped to glTF's.
     assert!(p.uvs.contains(&[1.0, 0.0]) && p.uvs.contains(&[0.0, 1.0]));
-    let mat = &doc.json["materials"][0];
+    let mat = &doc.json()["materials"][0];
     assert_eq!(mat["doubleSided"], true);
-    assert_eq!(doc.json["samplers"][0]["wrapS"], CLAMP);
-    assert_eq!(doc.json["images"].as_array().unwrap().len(), 1);
+    assert_eq!(doc.json()["samplers"][0]["wrapS"], CLAMP);
+    assert_eq!(doc.json()["images"].as_array().unwrap().len(), 1);
 }
 
 #[test]
@@ -308,7 +308,7 @@ Shape {
 }
 "#;
     let doc = read(text, "a.wrl");
-    let j = &doc.json;
+    let j = &doc.json();
     assert_eq!(j["asset"]["extras"]["source"]["title"], "Room");
     assert_eq!(j["cameras"][0]["perspective"]["yfov"], 0.5);
     let lights = j["extensions"]["KHR_lights_punctual"]["lights"].as_array().unwrap();
@@ -357,7 +357,7 @@ Transform { rotation 0 0 1 1.5707963 center 1 0 0 children Shape { geometry Inde
         "{first:?}"
     );
     // A PointSet with no points draws nothing, and isn't skipped either.
-    assert!(doc.json["asset"]["extras"]["source"].get("skipped").is_none());
+    assert!(doc.json()["asset"]["extras"]["source"].get("skipped").is_none());
 }
 
 #[test]
@@ -371,7 +371,7 @@ Inline { url "a.wrl" }
 "#;
     let doc = read_in(text.as_bytes(), "dir/a.wrl", &assets, usize::MAX).unwrap();
     assert_eq!(triangles(&doc), 24);
-    assert_eq!(doc.json["meshes"].as_array().unwrap().len(), 1);
+    assert_eq!(doc.json()["meshes"].as_array().unwrap().len(), 1);
 }
 
 #[test]
@@ -387,7 +387,7 @@ Shape { geometry Sphere {} }
 ROUTE T.fraction_changed TO I.set_fraction
 "#;
     let doc = read(text, "a.wrl");
-    let skipped = &doc.json["asset"]["extras"]["source"]["skipped"];
+    let skipped = &doc.json()["asset"]["extras"]["source"]["skipped"];
     for k in ["TimeSensor", "PositionInterpolator", "Script", "ROUTE"] {
         assert_eq!(skipped[k], 1, "{k}: {skipped}");
     }
@@ -395,7 +395,7 @@ ROUTE T.fraction_changed TO I.set_fraction
     for k in ["PROTO", "EXTERNPROTO", "Thing"] {
         assert!(skipped.get(k).is_none(), "{k}: {skipped}");
     }
-    assert_eq!(doc.json["meshes"].as_array().unwrap().len(), 2);
+    assert_eq!(doc.json()["meshes"].as_array().unwrap().len(), 2);
     assert!(notes(&doc).contains("external prototype"));
 }
 
@@ -513,7 +513,7 @@ fn line_and_point_sets() {
     let (lo, hi) = bounds(&m);
     assert_eq!((lo, hi), ([0.0; 3], [1.0, 1.0, 5.0]));
     // Lines and points are unlit.
-    assert!(doc.json["materials"][0]["extensions"]["KHR_materials_unlit"].is_object());
+    assert!(doc.json()["materials"][0]["extensions"]["KHR_materials_unlit"].is_object());
 }
 
 /// Whether every triangle faces away from `center`.
@@ -533,11 +533,11 @@ fn near(a: [f32; 3], b: [f32; 3]) -> bool {
 }
 
 fn notes(doc: &Document) -> String {
-    doc.json["asset"]["extras"]["source"]["notes"].to_string()
+    doc.json()["asset"]["extras"]["source"]["notes"].to_string()
 }
 
 fn base_colors(doc: &Document) -> Vec<String> {
-    doc.json["materials"]
+    doc.json()["materials"]
         .as_array()
         .unwrap()
         .iter()
@@ -577,9 +577,9 @@ USE A
     assert!(colors.contains(&"[0.0,0.0,1.0,1.0]".to_owned()), "{colors:?}");
     assert!(colors.contains(&"[1.0,0.0,0.0,1.0]".to_owned()), "{colors:?}");
     // The instance keeps its DEF name.
-    let nodes = doc.json["nodes"].as_array().unwrap();
+    let nodes = doc.json()["nodes"].as_array().unwrap();
     assert!(nodes.iter().any(|n| n["name"] == "A"));
-    assert!(doc.json["asset"]["extras"]["source"].get("skipped").is_none());
+    assert!(doc.json()["asset"]["extras"]["source"].get("skipped").is_none());
 }
 
 #[test]
@@ -618,10 +618,10 @@ fn prototypes_in_xml() {
     let colors = base_colors(&doc);
     assert!(colors.contains(&"[0.0,1.0,0.0,1.0]".to_owned()), "{colors:?}");
     assert!(colors.contains(&"[1.0,1.0,0.0,1.0]".to_owned()), "{colors:?}");
-    let nodes = doc.json["nodes"].as_array().unwrap();
+    let nodes = doc.json()["nodes"].as_array().unwrap();
     assert!(nodes.iter().any(|n| n["name"] == "Floor"));
     // The body's own names stay inside it.
-    assert!(doc.json["asset"]["extras"]["source"].get("skipped").is_none());
+    assert!(doc.json()["asset"]["extras"]["source"].get("skipped").is_none());
 }
 
 #[test]
@@ -649,7 +649,7 @@ Transform { translation 0 0 -5 children Same { } }
         near(lo, [-1.0, -2.0, -6.0]) && near(hi, [5.1, 2.0, 0.5]),
         "{lo:?} {hi:?}"
     );
-    assert_eq!(doc.json["asset"]["extras"]["source"]["skipped"]["Gone"], 1);
+    assert_eq!(doc.json()["asset"]["extras"]["source"]["skipped"]["Gone"], 1);
     assert!(notes(&doc).contains("external prototype"), "{}", notes(&doc));
 }
 
@@ -659,7 +659,7 @@ fn prototypes_that_instance_themselves_stop() {
     let text = "#VRML V2.0 utf8\nPROTO A [ ] { Transform { translation 1 0 0 children [ Shape { geometry Box { } } A { } ] } }\nA { }\n";
     let doc = read(text, "a.wrl");
     assert!(notes(&doc).contains("nested too deep"), "{}", notes(&doc));
-    assert_eq!(doc.json["meshes"].as_array().unwrap().len(), 32);
+    assert_eq!(doc.json()["meshes"].as_array().unwrap().len(), 32);
     // Doubling at each level: stopped by the node budget, or here the triangle limit.
     let text =
         "#VRML V2.0 utf8\nPROTO B [ ] { Group { children [ Shape { geometry Box { } } B { } B { } ] } }\nB { }\n";
@@ -829,7 +829,7 @@ Shape { geometry Polypoint2D { point [ 0 0, 1 1, 2 0 ] } }
     let (lo, hi) = bounds(&m);
     assert_eq!((lo, hi), ([-4.0, -4.0, 0.0], [6.0, 6.0, 0.0]));
     // Filled ones are seen from both sides unless solid; lines and points are unlit.
-    let materials = doc.json["materials"].as_array().unwrap();
+    let materials = doc.json()["materials"].as_array().unwrap();
     assert!(materials.iter().any(|m| m["doubleSided"] == true));
     assert!(
         materials
@@ -842,7 +842,7 @@ Shape { geometry Polypoint2D { point [ 0 0, 1 1, 2 0 ] } }
             .filter(|p| !p.indices.is_empty())
             .all(|p| p.normals.iter().all(|&n| near(n, [0.0, 0.0, 1.0])))
     );
-    assert!(doc.json["asset"]["extras"]["source"].get("skipped").is_none());
+    assert!(doc.json()["asset"]["extras"]["source"].get("skipped").is_none());
 }
 
 #[test]
@@ -874,7 +874,7 @@ Shape { geometry Box {} }
     assert_eq!(info.keywords, ["room", "chair"]);
     assert_eq!(info.comments, ["first", "second"]);
     assert_eq!(
-        doc.json["asset"]["extras"]["source"]["meta"]["reference"],
+        doc.json()["asset"]["extras"]["source"]["meta"]["reference"],
         "https://example.com"
     );
 

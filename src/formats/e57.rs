@@ -786,7 +786,7 @@ mod tests {
     }
 
     fn data(doc: &Document, key: &str) -> Vec<u8> {
-        let j = &doc.json;
+        let j = &doc.json();
         let a = j["meshes"][0]["primitives"][0]["attributes"][key].as_u64().unwrap() as usize;
         let acc = &j["accessors"][a];
         let view = &j["bufferViews"][acc["bufferView"].as_u64().unwrap() as usize];
@@ -824,7 +824,7 @@ mod tests {
         // Red 255 at point 255, green full everywhere, blue none, opaque.
         assert_eq!(&c[255 * 4..256 * 4], &[65535, 65535, 0, 65535]);
         assert_eq!(c[0], 0);
-        let s = &doc.json["asset"]["extras"]["source"];
+        let s = &doc.json()["asset"]["extras"]["source"];
         assert_eq!(s["format"], "E57");
         assert_eq!(s["scans"][0]["name"], "scan g0");
         assert_eq!(s["scans"][0]["sensor"]["vendor"], "test");
@@ -838,7 +838,7 @@ mod tests {
         assert_eq!(info.created.as_deref(), Some("2021-03-17T07:06:40Z"));
         assert!(info.georeference.is_none());
         assert!(
-            doc.json["meshes"][0]["primitives"][0]["attributes"]
+            doc.json()["meshes"][0]["primitives"][0]["attributes"]
                 .get("_SCAN")
                 .is_none()
         );
@@ -872,7 +872,7 @@ mod tests {
             }
             let scan = floats(&doc, "_SCAN");
             assert_eq!((scan[4], scan[5]), (0.0, 1.0));
-            assert!(doc.json["asset"]["extras"]["source"]["scans"][1]["pose"].is_object());
+            assert!(doc.json()["asset"]["extras"]["source"]["scans"][1]["pose"].is_object());
         }
     }
 
@@ -880,7 +880,7 @@ mod tests {
     fn far_scans_keep_their_detail_and_their_coordinate_system() {
         let wkt = r#"PROJCS["WGS 84 / UTM zone 17N",GEOGCS["WGS 84"],UNIT["metre",1],AUTHORITY["EPSG","32617"]]"#;
         let doc = read(&file(&[(50, None)], 500_000.0, Some(wkt)), Keep::ALL).unwrap();
-        let t = doc.json["nodes"][0]["translation"].as_array().unwrap();
+        let t = doc.json()["nodes"][0]["translation"].as_array().unwrap();
         assert_eq!(t[0], 500_000.0);
         let p = floats(&doc, "POSITION");
         // A millimeter apart, half a million meters out.

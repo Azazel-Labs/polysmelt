@@ -173,7 +173,7 @@ fn a_pmx_model_in_every_encoding_and_index_size() {
     for utf8 in [false, true] {
         for size in [1, 2, 4] {
             let doc = read(&pmx_sample(utf8, size), "m.pmx").unwrap();
-            let j = &doc.json;
+            let j = &doc.json();
             assert_eq!(doc.facts["triangles"], json!(2), "{utf8} {size}");
             assert_eq!(doc.facts["bones"], json!(2));
             assert_eq!(doc.facts["sdef_vertices"], json!(1));
@@ -210,7 +210,7 @@ fn pmx_is_mirrored_and_scaled() {
 #[test]
 fn pmx_materials_and_extras() {
     let doc = read(&pmx_sample(false, 4), "m.pmx").unwrap();
-    let j = &doc.json;
+    let j = &doc.json();
     let face = &j["materials"][0];
     assert_eq!(face["name"], "face");
     assert_eq!(face["doubleSided"], true);
@@ -258,8 +258,8 @@ fn reading_less_drops_morphs_and_skins() {
         keep,
     )
     .unwrap();
-    assert!(doc.json["meshes"][0]["primitives"][0].get("targets").is_none());
-    assert!(doc.json.get("skins").is_none());
+    assert!(doc.json()["meshes"][0]["primitives"][0].get("targets").is_none());
+    assert!(doc.json().get("skins").is_none());
 }
 
 /// A PMD model: a triangle, a material with a texture and a sphere map, two bones, IK, a base and an eye morph,
@@ -313,7 +313,7 @@ fn pmd_sample() -> Vec<u8> {
 #[test]
 fn a_pmd_model() {
     let doc = read(&pmd_sample(), "m.pmd").unwrap();
-    let j = &doc.json;
+    let j = &doc.json();
     let src = &j["asset"]["extras"]["source"];
     assert_eq!(doc.source_info().title.as_deref(), Some("モデル"));
     assert_eq!(doc.source_info().version.as_deref(), Some("1.0"));
@@ -354,7 +354,7 @@ fn vmd_sample() -> Vec<u8> {
 #[test]
 fn a_vmd_motion() {
     let doc = read(&vmd_sample(), "m.vmd").unwrap();
-    let j = &doc.json;
+    let j = &doc.json();
     assert_eq!(doc.facts["bone_keys"], json!(3));
     assert_eq!(doc.facts["camera_keys"], json!(1));
     let src = &j["asset"]["extras"]["source"];

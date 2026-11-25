@@ -825,7 +825,7 @@ mod tests {
     }
 
     fn attrs(doc: &Document) -> Vec<String> {
-        let mut v: Vec<String> = doc.json["meshes"][0]["primitives"][0]["attributes"]
+        let mut v: Vec<String> = doc.json()["meshes"][0]["primitives"][0]["attributes"]
             .as_object()
             .unwrap()
             .keys()
@@ -837,11 +837,11 @@ mod tests {
 
     /// The values of attribute `name`, as floats (normalized ones scaled to 0..=1).
     fn values(doc: &Document, name: &str) -> Vec<f32> {
-        let a = doc.json["meshes"][0]["primitives"][0]["attributes"][name]
+        let a = doc.json()["meshes"][0]["primitives"][0]["attributes"][name]
             .as_u64()
             .unwrap() as usize;
-        let acc = &doc.json["accessors"][a];
-        let view = &doc.json["bufferViews"][acc["bufferView"].as_u64().unwrap() as usize];
+        let acc = &doc.json()["accessors"][a];
+        let view = &doc.json()["bufferViews"][acc["bufferView"].as_u64().unwrap() as usize];
         let buf = doc.buffer(view["buffer"].as_u64().unwrap_or(0) as usize).unwrap();
         let off = view["byteOffset"].as_u64().unwrap_or(0) as usize;
         let len = view["byteLength"].as_u64().unwrap() as usize;
@@ -892,7 +892,7 @@ nan nan nan 0 0
         let want = points::linear8([bits[2], bits[1], bits[0]]);
         assert!((c[4] - f32::from(want[0]) / 65535.0).abs() < 1e-6);
         assert_eq!(values(&doc, "_INTENSITY"), [7.0, 9.0]);
-        let vp = &doc.json["asset"]["extras"]["source"]["viewpoint"];
+        let vp = &doc.json()["asset"]["extras"]["source"]["viewpoint"];
         assert_eq!(vp["translation"], json!([1.0, 2.0, 3.0]));
         assert_eq!(vp["rotation"], json!([0.0, 0.0, 0.0, 1.0]));
     }
@@ -980,7 +980,7 @@ nan nan nan 0 0
             let nz: Vec<f32> = values(&doc, "NORMAL").chunks(3).map(|c| c[2]).collect();
             assert_eq!(&nz[..2], &[1.0, -1.0]);
             assert_eq!(values(&doc, "_LABEL")[7], 21.0);
-            let constant = &doc.json["meshes"][0]["extras"]["constant"];
+            let constant = &doc.json()["meshes"][0]["extras"]["constant"];
             assert_eq!(constant["_HIST_0"], 3.0, "{data}");
             assert_eq!(constant["_HIST_1"], 4.0);
             let got = (p, values(&doc, "_LABEL"));
@@ -1009,7 +1009,7 @@ nan nan nan 0 0
             out.extend(v.to_le_bytes());
         }
         let doc = load(&out).unwrap();
-        let t = &doc.json["nodes"][0]["translation"];
+        let t = &doc.json()["nodes"][0]["translation"];
         assert_eq!(t, &json!([637_012.0, 849_028.0, 0.0]));
         let p = values(&doc, "POSITION");
         assert!((p[3] - p[0] - 0.01).abs() < 1e-5, "{p:?}");
@@ -1023,7 +1023,7 @@ nan nan nan 0 0
         assert_eq!(doc.facts["points"], 3);
         let c = values(&doc, "COLOR_0");
         assert_eq!(&c[..8], &[1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0]);
-        assert_eq!(doc.json["asset"]["extras"]["source"]["height"], 2);
+        assert_eq!(doc.json()["asset"]["extras"]["source"]["height"], 2);
         let m = doc.flatten(Pose::Rest).unwrap().unwrap();
         assert_eq!(m.prims.iter().map(|p| p.points.len()).sum::<usize>(), 3);
     }

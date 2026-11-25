@@ -1023,10 +1023,10 @@ mod tests {
             square("hand", "0x00", "loc 3 0 0\n")
         );
         let doc = read(&text, &Memory::new()).unwrap();
-        let nodes = doc.json["nodes"].as_array().unwrap();
+        let nodes = doc.json()["nodes"].as_array().unwrap();
         // The plain world gives way: the group is the root.
         assert_eq!(nodes.len(), 2);
-        assert_eq!(doc.json["scenes"][0]["nodes"], json!([0]));
+        assert_eq!(doc.json()["scenes"][0]["nodes"], json!([0]));
         assert_eq!(nodes[0]["name"], "arm");
         assert_eq!(nodes[0]["children"], json!([1]));
         assert_eq!(nodes[1]["translation"], json!([3.0, 0.0, 0.0]));
@@ -1048,8 +1048,8 @@ mod tests {
             square("s", "0x00", "")
         );
         let doc = read(&placed, &Memory::new()).unwrap();
-        assert_eq!(doc.json["nodes"][0]["extras"]["ac3d"]["type"], "world");
-        assert_eq!(doc.json["nodes"][0]["children"], json!([1]));
+        assert_eq!(doc.json()["nodes"][0]["extras"]["ac3d"]["type"], "world");
+        assert_eq!(doc.json()["nodes"][0]["children"], json!([1]));
     }
 
     #[test]
@@ -1079,8 +1079,8 @@ mod tests {
         assert_eq!(glass.emissive[0], 1.0);
         assert_eq!(glass.roughness, 1.0);
         assert_eq!(glass.color_image, None);
-        assert_eq!(doc.json["materials"][1]["extras"]["ac3d"]["glow"], 3.0);
-        assert_eq!(doc.json["materials"][1]["extras"]["ac3d"]["transparency"], 0.25);
+        assert_eq!(doc.json()["materials"][1]["extras"]["ac3d"]["glow"], 3.0);
+        assert_eq!(doc.json()["materials"][1]["extras"]["ac3d"]["transparency"], 0.25);
         // Texture coordinates are repeated, offset and flipped for glTF.
         let textured = m.prims.iter().find(|p| p.material == 0).unwrap();
         let mut uvs = textured.uvs.clone();
@@ -1093,7 +1093,7 @@ mod tests {
         );
         // A missing texture is counted, and the material keeps its color.
         let doc = read(&text, &Memory::new()).unwrap();
-        assert_eq!(doc.json["asset"]["extras"]["source"]["droppedTextures"], 1);
+        assert_eq!(doc.json()["asset"]["extras"]["source"]["droppedTextures"], 1);
         let info = doc.source_info();
         assert_eq!(info.format.as_deref(), Some("AC3D"));
         assert_eq!(info.up_axis, Fact::Assumed(Axis::PosY));
@@ -1134,7 +1134,7 @@ mod tests {
             );
             assert!(u[0] * v[1] - u[1] * v[0] > 0.0, "{c:?}");
         }
-        assert_eq!(doc.json["meshes"][1]["name"], "dots");
+        assert_eq!(doc.json()["meshes"][1]["name"], "dots");
     }
 
     #[test]
@@ -1189,7 +1189,7 @@ mod tests {
         assert_eq!(m.materials[0].name, "blue");
         assert!(m.materials[0].double_sided);
         assert!((m.materials[0].color[3] - 0.5).abs() < 1e-6);
-        assert_eq!(doc.json["nodes"][0]["extras"]["ac3d"]["data"], "OBJECT poly\r\nki");
+        assert_eq!(doc.json()["nodes"][0]["extras"]["ac3d"]["data"], "OBJECT poly\r\nki");
         // No materials: AC3D's default white.
         let bare = format!("AC3Db\n{}", square("s", "0x00", "").replace("mat 0\n", ""));
         let m = flat(&read(&bare, &Memory::new()).unwrap());
@@ -1218,12 +1218,12 @@ mod tests {
         let wild = "AC3Db\nOBJECT poly\nnumvert 4000000000\n0 0 0\n1 0 0\n0 1 0\nnumsurf 99999999\nSURF 0x10\nmat 77\n\
                     refs 4000000000\n0 0 0\n1 0 0\n2 0 0\nkids 99999999\n";
         let doc = read(wild, &assets).unwrap();
-        assert_eq!(doc.json["asset"]["extras"]["source"]["truncated"], true);
+        assert_eq!(doc.json()["asset"]["extras"]["source"]["truncated"], true);
         // Vertex indices past the vertices drop their surface.
         let bad = "AC3Db\nOBJECT poly\nnumvert 3\n0 0 0\n1 0 0\n0 1 0\nnumsurf 2\nSURF 0\nrefs 3\n0 0 0\n1 0 0\n9 0 0\n\
                    SURF 0\nrefs 3\n0 0 0\n1 0 0\n2 0 0\nkids 0\n";
         let doc = read(bad, &assets).unwrap();
-        assert_eq!(doc.json["asset"]["extras"]["source"]["droppedSurfaces"], 1);
+        assert_eq!(doc.json()["asset"]["extras"]["source"]["droppedSurfaces"], 1);
         assert_eq!(flat(&doc).triangles(), 1);
         // Deep nesting doesn't recurse.
         let deep = format!(

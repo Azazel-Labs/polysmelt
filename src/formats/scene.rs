@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use serde_json::{Map, Value, json};
 
 use crate::Result;
-use crate::document::{Builder, Document, Keep, Part};
+use crate::document::{self, Accessor, Builder, Document, Keep, Limits, Part, Sampler, Sparse};
 use crate::images::Source;
 use crate::mesh::Material;
 use crate::num::{f32_of, u32_of};
@@ -632,7 +632,6 @@ impl Scene {
         b.materials(materials, images, &mut json);
 
         // Animations.
-        let mut animations_json = Vec::new();
         if keep.animations {
             // Each distinct set of times is written once, by a hash of their bits: channels usually share theirs.
             let mut inputs: HashMap<u64, Vec<(Vec<f32>, usize)>> = HashMap::new();
@@ -640,10 +639,14 @@ impl Scene {
             // where a view per accessor would cost far more than the keys of a short channel.
             let mut data: Vec<f32> = Vec::new();
             let mut placed: Vec<usize> = Vec::new();
-            let mut place = |b: &mut Builder, v: &[f32], count: usize, kind: &str| {
-                b.accessors.push(json!({
-                    "byteOffset": data.len() * 4, "componentType": 5126, "count": count, "type": kind
-                }));
+            let mut place = |b: &mut Builder, v: &[f32], count: usize, kind: &'static str| {
+                b.accessors.push(Accessor {
+                    byte_offset: Some(data.len() as u64 * 4),
+                    component_type: 5126,
+                    count,
+                    kind,
+                    ..Accessor::default()
+                });
                 data.extend_from_slice(v);
                 placed.push(b.accessors.len() - 1);
                 b.accessors.len() - 1
@@ -685,8 +688,8 @@ impl Scene {
                     } else {
                         let i = place(&mut b, &times, count, "SCALAR");
                         // Strictly increasing, so the first and last are the bounds.
-                        b.accessors[i]["min"] = json!([times[0]]);
-                        b.accessors[i]["max"] = json!([times[count - 1]]);
+                        b.accessors[i].min = Some(Limits::floats(&times[..1]));
+                        b.accessors[i].max = Some(Limits::floats(&times[count - 1..]));
                         list.push((times, i));
                         i
                     };
@@ -704,27 +707,31 @@ impl Scene {
                     let interp = match cinterp {
                         Interp::Linear => "LINEAR",
                     };
-                    channels.push(json!({ "sampler": samplers.len(), "target": { "node": node, "path": path } }));
-                    samplers.push(json!({ "input": input, "output": output, "interpolation": interp }));
+                    channels.push(document::Channel {
+                        sampler: samplers.len(),
+                        node,
+                        path,
+                    });
+                    samplers.push(Sampler {
+                        input,
+                        output,
+                        interpolation: interp,
+                    });
                 }
                 if channels.is_empty() {
                     continue;
                 }
-                let mut aj = json!({ "channels": channels, "samplers": samplers });
-                if !a.name.is_empty() {
-                    aj["name"] = json!(a.name);
-                }
-                if keep.extras
-                    && let Some(e) = a.extras
-                {
-                    aj["extras"] = e;
-                }
-                animations_json.push(aj);
+                b.animations.push(document::Animation {
+                    channels,
+                    samplers,
+                    name: (!a.name.is_empty()).then_some(a.name),
+                    extras: a.extras.filter(|_| keep.extras),
+                });
             }
             if !data.is_empty() {
                 let view = b.view(Part::f32(data), None);
                 for a in placed {
-                    b.accessors[a]["bufferView"] = json!(view);
+                    b.accessors[a].buffer_view = Some(view);
                 }
             }
         }
@@ -745,9 +752,6 @@ impl Scene {
         }
         if !skins_json.is_empty() {
             json.insert("skins".into(), Value::Array(skins_json));
-        }
-        if !animations_json.is_empty() {
-            json.insert("animations".into(), Value::Array(animations_json));
         }
         let mut facts = self.facts;
         facts.entry("triangles").or_insert(json!(tris));
@@ -1052,24 +1056,25 @@ fn sparse_vec3(b: &mut Builder, mut v: Vec<[f32; 3]>, n: usize, bounds: bool) ->
         let count = nonzero.len();
         let iv = b.view(Part::u32(nonzero), None);
         let vv = b.view(Part::vec3(values), None);
-        let a = json!({
-            "componentType": 5126,
-            "count": n,
-            "type": "VEC3",
-            "sparse": {
-                "count": count,
-                "indices": { "bufferView": iv, "componentType": 5125 },
-                "values": { "bufferView": vv },
-            },
+        b.accessors.push(Accessor {
+            component_type: 5126,
+            count: n,
+            kind: "VEC3",
+            sparse: Some(Sparse {
+                count,
+                indices: iv,
+                index_type: 5125,
+                values: vv,
+            }),
+            ..Accessor::default()
         });
-        b.accessors.push(a);
         b.accessors.len() - 1
     } else {
         b.accessor(Part::vec3(v), 5126, n, "VEC3", Some(34962))
     };
     if bounds {
-        b.accessors[a]["min"] = json!(min);
-        b.accessors[a]["max"] = json!(max);
+        b.accessors[a].min = Some(Limits::floats(&min));
+        b.accessors[a].max = Some(Limits::floats(&max));
     }
     a
 }
@@ -1787,15 +1792,15 @@ mod tests {
         s.rotate_roots(Z_UP_TO_Y_UP);
         s.scale(0.5);
         let doc = s.finish(Keep::ALL).unwrap();
-        let skins = doc.json["skins"].as_array().unwrap();
+        let skins = doc.json()["skins"].as_array().unwrap();
         assert_eq!(skins.len(), 1);
         // The two skeleton roots are gathered under one.
-        assert_eq!(doc.json["nodes"].as_array().unwrap().len(), 4);
-        let prim = &doc.json["meshes"][0]["primitives"][0];
+        assert_eq!(doc.json()["nodes"].as_array().unwrap().len(), 4);
+        let prim = &doc.json()["meshes"][0]["primitives"][0];
         assert!(prim["attributes"].get("TEXCOORD_1").is_none());
         assert_eq!(prim["material"], 0);
         assert!(
-            doc.json["accessors"][usize::try_from(prim["targets"][0]["POSITION"].as_u64().unwrap()).unwrap()]
+            doc.json()["accessors"][usize::try_from(prim["targets"][0]["POSITION"].as_u64().unwrap()).unwrap()]
                 .get("sparse")
                 .is_some()
         );

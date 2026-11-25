@@ -44,7 +44,7 @@ use serde_json::{Map, Value};
 
 #[cfg(doc)]
 use crate::document::Keep;
-use crate::document::{Bounds, Counts, Document, Pose};
+use crate::document::{Bounds, Counts, Document, Pose, Tables};
 use crate::gltf as container;
 use crate::mesh::{
     Anisotropy, Clearcoat, Extensions, Factor, Image, Iridescence, Material, Mesh, Prim, Sampling, Sheen, Specular,
@@ -139,7 +139,7 @@ impl Document {
     /// counted), from the JSON alone: nothing is read or decoded.
     #[must_use]
     pub fn counts(&self) -> Counts {
-        counts(&self.json)
+        counts(&self.base, Tabs::of(self))
     }
 
     /// The box around every vertex the default scene draws in `pose`, transforms, instances,
@@ -181,7 +181,7 @@ impl Document {
     /// When the document has no animation `index`, and as [`Document::bounds`].
     #[allow(clippy::cast_precision_loss, reason = "sample numbers are small")]
     pub fn animation_bounds(&self, index: usize, samples: usize) -> Result<Option<Bounds>> {
-        let (first, last) = Reader::bare(self).span(index)?;
+        let (first, last) = Reader::whole(self).span(index)?;
         let n = samples.max(1);
         let mut out: Option<Bounds> = None;
         for k in 0..n {
@@ -203,14 +203,13 @@ impl Document {
 }
 
 /// See [`Document::counts`]. A document whose default scene doesn't exist counts nothing.
-fn counts(json: &Map<String, Value>) -> Counts {
+fn counts(json: &Map<String, Value>, tabs: Tabs<'_>) -> Counts {
     let mut c = Counts::default();
     let Ok(order) = scene_order(json) else {
         return c;
     };
     let meshes = list(json, "meshes");
-    let accessors = list(json, "accessors");
-    let count = |a: usize| accessors.get(a).and_then(|a| index(a, "count")).unwrap_or(0);
+    let count = |a: usize| tabs.accessor_count(a).map_or(0, usize_of);
     let mut add = |mesh: &Value, k: usize| {
         for p in list(mesh.as_object().unwrap_or(&Map::new()), "primitives") {
             let Some(pos) = p.get("attributes").and_then(|a| index(a, "POSITION")) else {
@@ -400,9 +399,137 @@ struct Acc {
     /// Components per column: a matrix's height, `n` for a scalar or vector.
     rows: usize,
     normalized: bool,
-    sparse: Option<Value>,
+    sparse: Option<SparseAt>,
     /// Elements decoded from Draco, tightly packed, in place of a buffer view.
     decoded: Option<Arc<[u8]>>,
+}
+
+/// A sparse accessor's substitutions, as far as they're given: what's missing is an error
+/// only once they're read.
+#[derive(Clone, Copy)]
+struct SparseAt {
+    count: Option<usize>,
+    indices: SparsePart,
+    /// The indices' component type, 0 when not given.
+    ictype: u64,
+    values: SparsePart,
+}
+
+/// Where a sparse accessor's indices or values are.
+#[derive(Clone, Copy)]
+enum SparsePart {
+    Missing,
+    NoView,
+    /// A buffer view and the offset into it.
+    At(usize, u64),
+}
+
+impl SparseAt {
+    fn of(s: &Value) -> Self {
+        let part = |key: &str| match s.get(key) {
+            None => SparsePart::Missing,
+            Some(p) => match index(p, "bufferView") {
+                None => SparsePart::NoView,
+                Some(v) => SparsePart::At(v, p.get("byteOffset").and_then(Value::as_u64).unwrap_or(0)),
+            },
+        };
+        Self {
+            count: index(s, "count"),
+            indices: part("indices"),
+            ictype: at(s, &["indices", "componentType"])
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+            values: part("values"),
+        }
+    }
+}
+
+/// A document's accessors and buffer views: the lists in its JSON, or the tables a reader
+/// built them in.
+#[derive(Clone, Copy)]
+enum Tabs<'d> {
+    Json { accessors: &'d [Value], views: &'d [Value] },
+    Typed(&'d Tables),
+}
+
+impl<'d> Tabs<'d> {
+    fn of(doc: &'d Document) -> Self {
+        match doc.tables.as_deref() {
+            Some(t) => Self::Typed(t),
+            None => Self::json(&doc.base),
+        }
+    }
+
+    fn json(json: &'d Map<String, Value>) -> Self {
+        Self::Json {
+            accessors: list(json, "accessors"),
+            views: list(json, "bufferViews"),
+        }
+    }
+
+    fn accessors(self) -> usize {
+        match self {
+            Self::Json { accessors, .. } => accessors.len(),
+            Self::Typed(t) => t.accessors.len(),
+        }
+    }
+
+    fn views(self) -> usize {
+        match self {
+            Self::Json { views, .. } => views.len(),
+            Self::Typed(t) => t.views.len(),
+        }
+    }
+
+    /// Accessor `i`'s buffer view.
+    fn accessor_view(self, i: usize) -> Option<usize> {
+        match self {
+            Self::Json { accessors, .. } => index(accessors.get(i)?, "bufferView"),
+            Self::Typed(t) => t.accessors.get(i)?.buffer_view,
+        }
+    }
+
+    /// Accessor `i`'s `count`.
+    fn accessor_count(self, i: usize) -> Option<u64> {
+        match self {
+            Self::Json { accessors, .. } => accessors.get(i)?.get("count")?.as_u64(),
+            Self::Typed(t) => Some(t.accessors.get(i)?.count as u64),
+        }
+    }
+
+    /// Whether accessor `i` declares a `min` or `max`.
+    fn declares_bounds(self, i: usize) -> bool {
+        match self {
+            Self::Json { accessors, .. } => accessors
+                .get(i)
+                .is_some_and(|x| x.get("min").is_some() || x.get("max").is_some()),
+            Self::Typed(t) => t.accessors.get(i).is_some_and(|x| x.min.is_some() || x.max.is_some()),
+        }
+    }
+
+    /// Whether accessor `i` is sparse.
+    fn is_sparse(self, i: usize) -> bool {
+        match self {
+            Self::Json { accessors, .. } => accessors.get(i).is_some_and(|x| x.get("sparse").is_some()),
+            Self::Typed(t) => t.accessors.get(i).is_some_and(|x| x.sparse.is_some()),
+        }
+    }
+
+    /// Whether buffer view `v` gives a `byteStride`.
+    fn view_strided(self, v: usize) -> bool {
+        match self {
+            Self::Json { views, .. } => views.get(v).is_some_and(|v| v.get("byteStride").is_some()),
+            Self::Typed(_) => false,
+        }
+    }
+
+    /// Whether buffer view `v` has extensions.
+    fn view_extended(self, v: usize) -> bool {
+        match self {
+            Self::Json { views, .. } => views.get(v).is_some_and(|v| v.get("extensions").is_some()),
+            Self::Typed(_) => false,
+        }
+    }
 }
 
 impl Acc {
@@ -473,8 +600,7 @@ struct Reader<'d> {
     doc: &'d Document,
     json: &'d Map<String, Value>,
     /// The accessors and buffer views, looked up once: every attribute read names one of each.
-    accessors: &'d [Value],
-    views: &'d [Value],
+    tabs: Tabs<'d>,
     /// The other top-level lists read for each mesh, node or material, looked up once too.
     meshes: &'d [Value],
     nodes: &'d [Value],
@@ -523,6 +649,25 @@ struct Posed {
     /// Set by the caller rather than an animation, so it holds for a node written as a matrix
     /// too.
     given: bool,
+}
+
+/// The error text for a missing list entry.
+fn missing(key: &str, i: usize) -> String {
+    format!("glTF {key}[{i}] doesn't exist")
+}
+
+/// An accessor type's components, and components per column.
+fn shape(kind: Option<&str>) -> Option<(usize, usize)> {
+    Some(match kind? {
+        "SCALAR" => (1, 1),
+        "VEC2" => (2, 2),
+        "VEC3" => (3, 3),
+        "VEC4" => (4, 4),
+        "MAT2" => (4, 2),
+        "MAT3" => (9, 3),
+        "MAT4" => (16, 4),
+        _ => return None,
+    })
 }
 
 fn list<'v>(obj: &'v Map<String, Value>, key: &str) -> &'v [Value] {
@@ -594,7 +739,7 @@ fn f32s<const N: usize>(v: Option<&Value>, default: [f32; N]) -> [f32; N] {
 impl<'d> Reader<'d> {
     #[allow(clippy::unnecessary_wraps, reason = "it fails without the draco feature")]
     fn new(doc: &'d Document) -> Result<Self> {
-        let json = &doc.json;
+        let json = doc.json();
         #[cfg(not(feature = "draco"))]
         ensure!(
             !list(json, "extensionsRequired")
@@ -613,18 +758,27 @@ impl<'d> Reader<'d> {
                 "glTF requires the `{e}` extension, which polysmelt can't draw"
             );
         }
-        Ok(Self::bare(doc))
+        Ok(Self::whole(doc))
     }
 
-    /// A reader that only reads accessors: none of the checks drawing needs.
+    /// A reader that only reads accessors: none of the checks drawing needs. It reads the
+    /// animations only when they're in the JSON, as [`Reader::whole`] has them.
     fn bare(doc: &'d Document) -> Self {
-        let json = &doc.json;
+        Self::over(doc, &doc.base, Tabs::of(doc))
+    }
+
+    /// A reader of the whole JSON, animations too, but none of the checks drawing needs.
+    fn whole(doc: &'d Document) -> Self {
+        let json = doc.json();
+        Self::over(doc, json, Tabs::json(json))
+    }
+
+    fn over(doc: &'d Document, json: &'d Map<String, Value>, tabs: Tabs<'d>) -> Self {
         let n = |key| list(json, key).len();
         Self {
             doc,
             json,
-            accessors: list(json, "accessors"),
-            views: list(json, "bufferViews"),
+            tabs,
             meshes: list(json, "meshes"),
             nodes: list(json, "nodes"),
             materials_json: list(json, "materials"),
@@ -652,19 +806,25 @@ impl<'d> Reader<'d> {
     }
 
     fn get(&self, key: &str, i: usize) -> Result<&'d Value> {
-        let all = match key {
-            "accessors" => self.accessors,
-            "bufferViews" => self.views,
-            "meshes" => self.meshes,
+        let all = match (key, self.tabs) {
+            ("accessors", Tabs::Json { accessors, .. }) => accessors,
+            ("bufferViews", Tabs::Json { views, .. }) => views,
+            ("meshes", _) => self.meshes,
             _ => list(self.json, key),
         };
-        all.get(i)
-            .with_context(ErrorKind::Corrupt, || format!("glTF {key}[{i}] doesn't exist"))
+        all.get(i).with_context(ErrorKind::Corrupt, || missing(key, i))
     }
 
     /// A buffer view as (buffer, offset, length, stride), and whether it has extensions (as a
     /// meshopt-compressed one does).
     fn view(&self, i: usize) -> Result<(usize, u64, u64, Option<usize>, bool)> {
+        if let Tabs::Typed(t) = self.tabs {
+            let v = t
+                .views
+                .get(i)
+                .with_context(ErrorKind::Corrupt, || missing("bufferViews", i))?;
+            return Ok((v.buffer, v.byte_offset.unwrap_or(0), v.byte_length, None, false));
+        }
         let v = self.get("bufferViews", i)?;
         // One pass over its members rather than a lookup for each: these are read for every
         // accessor.
@@ -694,6 +854,13 @@ impl<'d> Reader<'d> {
     fn meshopt(&mut self, i: usize) -> Result<bool> {
         if self.meshopt.contains_key(&i) {
             return Ok(true);
+        }
+        if let Tabs::Typed(t) = self.tabs {
+            // Only a file's views are compressed.
+            t.views
+                .get(i)
+                .with_context(ErrorKind::Corrupt, || missing("bufferViews", i))?;
+            return Ok(false);
         }
         let v = self.get("bufferViews", i)?;
         let Some((name, ext)) = container::meshopt_of(v) else {
@@ -779,6 +946,37 @@ impl<'d> Reader<'d> {
                 decoded: Some(bytes.clone()),
             });
         }
+        if let Tabs::Typed(t) = self.tabs {
+            let a = t
+                .accessors
+                .get(i)
+                .with_context(ErrorKind::Corrupt, || missing("accessors", i))?;
+            let ctype = u64::from(a.component_type);
+            ensure!(
+                matches!(ctype, 5120..=5123 | 5125 | 5126),
+                Corrupt,
+                "glTF accessor {i} has component type {ctype}"
+            );
+            let (n, rows) = shape(Some(a.kind)).with_context(ErrorKind::Corrupt, || {
+                format!("glTF accessor {i} has type {:?}, not one read here", Some(a.kind))
+            })?;
+            return Ok(Acc {
+                view: a.buffer_view,
+                offset: a.byte_offset.unwrap_or(0),
+                count: a.count,
+                ctype,
+                n,
+                rows,
+                normalized: a.normalized,
+                sparse: a.sparse.map(|s| SparseAt {
+                    count: Some(s.count),
+                    indices: SparsePart::At(s.indices, 0),
+                    ictype: u64::from(s.index_type),
+                    values: SparsePart::At(s.values, 0),
+                }),
+                decoded: None,
+            });
+        }
         let a = self.get("accessors", i)?;
         // One pass over its members, as for a view.
         let (mut ctype, mut kind, mut view, mut offset, mut count, mut normalized, mut sparse) =
@@ -801,16 +999,10 @@ impl<'d> Reader<'d> {
             Corrupt,
             "glTF accessor {i} has component type {ctype}"
         );
-        let (n, rows) = match kind.and_then(Value::as_str) {
-            Some("SCALAR") => (1, 1),
-            Some("VEC2") => (2, 2),
-            Some("VEC3") => (3, 3),
-            Some("VEC4") => (4, 4),
-            Some("MAT2") => (4, 2),
-            Some("MAT3") => (9, 3),
-            Some("MAT4") => (16, 4),
-            t => bail!(Corrupt, "glTF accessor {i} has type {t:?}, not one read here"),
-        };
+        let kind = kind.and_then(Value::as_str);
+        let (n, rows) = shape(kind).with_context(ErrorKind::Corrupt, || {
+            format!("glTF accessor {i} has type {kind:?}, not one read here")
+        })?;
         let u = |x: Option<&Value>| x.and_then(Value::as_u64).map(usize_of);
         Ok(Acc {
             view: u(view),
@@ -820,7 +1012,7 @@ impl<'d> Reader<'d> {
             n,
             rows,
             normalized: normalized.and_then(Value::as_bool).unwrap_or(false),
-            sparse: sparse.cloned(),
+            sparse: sparse.map(SparseAt::of),
             decoded: None,
         })
     }
@@ -996,7 +1188,7 @@ impl<'d> Reader<'d> {
             }
         })?;
         out.resize(count, zero);
-        if let Some(s) = a.sparse.clone() {
+        if let Some(s) = a.sparse {
             let (at, values) = self.sparse(a, &s)?;
             let values = self.read_acc(&values, fill)?;
             for (k, v) in at.into_iter().zip(values) {
@@ -1012,7 +1204,19 @@ impl<'d> Reader<'d> {
     /// Decodes the Draco stream holding accessor `i`, when it has no buffer view of its own and
     /// a primitive's `KHR_draco_mesh_compression` names it.
     fn draco_holding(&mut self, i: usize) -> Result<()> {
-        if self.draco.iter().any(|d| d.0 == i) || self.get("accessors", i)?.get("bufferView").is_some() {
+        if self.draco.iter().any(|d| d.0 == i) {
+            return Ok(());
+        }
+        let viewed = if let Tabs::Typed(t) = self.tabs {
+            let a = t
+                .accessors
+                .get(i)
+                .with_context(ErrorKind::Corrupt, || missing("accessors", i))?;
+            a.buffer_view.is_some()
+        } else {
+            self.get("accessors", i)?.get("bufferView").is_some()
+        };
+        if viewed {
             return Ok(());
         }
         let meshes = self.meshes;
@@ -1105,7 +1309,7 @@ impl<'d> Reader<'d> {
             }
         })?;
         out.resize(count, 0);
-        if let Some(s) = a.sparse.clone() {
+        if let Some(s) = a.sparse {
             let (at, values) = self.sparse(a, &s)?;
             let values = self.read_u32s(&values)?;
             for (k, v) in at.into_iter().zip(values) {
@@ -1118,25 +1322,28 @@ impl<'d> Reader<'d> {
     }
 
     /// A sparse accessor's indices, and an accessor for its values.
-    fn sparse(&mut self, a: &Acc, s: &Value) -> Result<(Vec<u32>, Acc)> {
-        let count = index(s, "count").context(ErrorKind::Corrupt, "glTF sparse accessor has no count")?;
+    fn sparse(&mut self, a: &Acc, s: &SparseAt) -> Result<(Vec<u32>, Acc)> {
+        let count = s
+            .count
+            .context(ErrorKind::Corrupt, "glTF sparse accessor has no count")?;
         ensure!(
             count <= a.count,
             Corrupt,
             "glTF sparse accessor replaces more elements than it has"
         );
-        let part = |key: &str| -> Result<(usize, u64)> {
-            let p = s
-                .get(key)
-                .with_context(ErrorKind::Corrupt, || format!("glTF sparse accessor has no {key}"))?;
-            Ok((
-                index(p, "bufferView")
-                    .with_context(ErrorKind::Corrupt, || format!("glTF sparse {key} has no bufferView"))?,
-                p.get("byteOffset").and_then(Value::as_u64).unwrap_or(0),
-            ))
+        let part = |key: &str, p: SparsePart| -> Result<(usize, u64)> {
+            match p {
+                SparsePart::At(v, off) => Ok((v, off)),
+                SparsePart::Missing => {
+                    None.with_context(ErrorKind::Corrupt, || format!("glTF sparse accessor has no {key}"))
+                }
+                SparsePart::NoView => {
+                    None.with_context(ErrorKind::Corrupt, || format!("glTF sparse {key} has no bufferView"))
+                }
+            }
         };
-        let (iv, ioff) = part("indices")?;
-        let ictype = s["indices"].get("componentType").and_then(Value::as_u64).unwrap_or(0);
+        let (iv, ioff) = part("indices", s.indices)?;
+        let ictype = s.ictype;
         ensure!(
             matches!(ictype, 5121 | 5123 | 5125),
             Corrupt,
@@ -1154,7 +1361,7 @@ impl<'d> Reader<'d> {
             decoded: None,
         };
         let at = self.read_u32s(&idx)?;
-        let (vv, voff) = part("values")?;
+        let (vv, voff) = part("values", s.values)?;
         let values = Acc {
             view: Some(vv),
             offset: voff,
@@ -3650,13 +3857,13 @@ mod tests {
         let path = dir.path().join("packed.glb");
         std::fs::write(&path, &packed).unwrap();
         let mut doc = crate::formats::load(&path, "glb", &Folder::new(dir.path()), Keep::ALL).unwrap();
-        assert_eq!(doc.json["buffers"].as_array().unwrap().len(), 2, "data and fallback");
+        assert_eq!(doc.json()["buffers"].as_array().unwrap().len(), 2, "data and fallback");
         let before = doc.flatten(Pose::Rest).unwrap().unwrap();
         doc.decode().unwrap();
-        let text = serde_json::to_string(&doc.json).unwrap();
+        let text = serde_json::to_string(&doc.json()).unwrap();
         assert!(!text.contains("meshopt"), "{text}");
         // The compressed data and the fallback are gone: only the decoded buffer is left.
-        assert_eq!(doc.json["buffers"].as_array().unwrap().len(), 1);
+        assert_eq!(doc.json()["buffers"].as_array().unwrap().len(), 1);
         let after = doc.flatten(Pose::Rest).unwrap().unwrap();
         assert_eq!(before.to_glb().unwrap(), after.to_glb().unwrap());
         same(&mesh, &load(dir.path(), "decoded.glb", &doc.to_glb().unwrap()));
@@ -3702,7 +3909,7 @@ mod tests {
             ],
         });
         let mut doc = crate::document::Document::empty(serde_json::Map::new());
-        doc.json = json.as_object().unwrap().clone();
+        *doc.json_mut() = json.as_object().unwrap().clone();
         doc.push_buffer(bin);
         assert_eq!(doc.read_floats(0).unwrap(), (4, vec![1.0, 2.0, 3.0, 4.0]));
         let (width, m3) = doc.read_floats(1).unwrap();
@@ -3723,7 +3930,7 @@ mod tests {
         std::fs::write(&path, &packed).unwrap();
         let mut doc = crate::formats::load(&path, "glb", &Folder::new(dir.path()), Keep::ALL).unwrap();
         for key in ["extensionsUsed", "extensionsRequired"] {
-            let list = doc.json.entry(key).or_insert_with(|| serde_json::json!([]));
+            let list = doc.json_mut().entry(key).or_insert_with(|| serde_json::json!([]));
             list.as_array_mut().unwrap().push("EXT_made_up".into());
         }
         assert!(
@@ -3731,8 +3938,8 @@ mod tests {
             "drawing needs every required extension"
         );
         doc.decode().unwrap();
-        assert_eq!(doc.json["extensionsRequired"], serde_json::json!(["EXT_made_up"]));
-        assert!(!serde_json::to_string(&doc.json).unwrap().contains("meshopt"));
+        assert_eq!(doc.json()["extensionsRequired"], serde_json::json!(["EXT_made_up"]));
+        assert!(!serde_json::to_string(&doc.json()).unwrap().contains("meshopt"));
     }
 
     #[test]
@@ -3769,7 +3976,7 @@ mod tests {
         let mut doc = crate::formats::load(&path, "gltf", &Folder::new(dir.path()), Keep::ALL).unwrap();
         let before = doc.flatten(Pose::Rest).unwrap().unwrap();
         doc.decode().unwrap();
-        assert_eq!(doc.json["accessors"][1]["componentType"], 5123);
+        assert_eq!(doc.json()["accessors"][1]["componentType"], 5123);
         let after = doc.flatten(Pose::Rest).unwrap().unwrap();
         assert_eq!(before.to_glb().unwrap(), after.to_glb().unwrap());
     }
@@ -3796,14 +4003,14 @@ mod tests {
         let mut mesh = grid(2);
         mesh.materials[0].emissive = [4.0, 2.0, 0.0];
         let doc = crate::document::Document::from_mesh(mesh, serde_json::Map::new());
-        let m = &doc.json["materials"][0];
+        let m = &doc.json()["materials"][0];
         assert_eq!(m["emissiveFactor"], serde_json::json!([1.0, 0.5, 0.0]));
         assert_eq!(
             m["extensions"]["KHR_materials_emissive_strength"]["emissiveStrength"],
             4.0
         );
         assert_eq!(
-            doc.json["extensionsUsed"],
+            doc.json()["extensionsUsed"],
             serde_json::json!(["KHR_materials_emissive_strength"])
         );
         let back = doc.flatten(Pose::Rest).unwrap().unwrap();
@@ -3813,7 +4020,7 @@ mod tests {
     #[test]
     fn a_required_extension_it_cant_draw_is_an_error() {
         let mut doc = crate::document::Document::from_mesh(grid(2), serde_json::Map::new());
-        doc.json.insert(
+        doc.json_mut().insert(
             "extensionsRequired".into(),
             serde_json::json!(["KHR_materials_unlit", "KHR_techniques_webgl"]),
         );
@@ -3821,7 +4028,7 @@ mod tests {
             doc.flatten(Pose::Rest).unwrap().is_some(),
             "a look is drawn as best it can be"
         );
-        doc.json.insert(
+        doc.json_mut().insert(
             "extensionsRequired".into(),
             serde_json::json!(["EXT_some_future_geometry"]),
         );
@@ -3865,7 +4072,7 @@ mod tests {
         let serde_json::Value::Object(json) = json else {
             unreachable!()
         };
-        doc.json = json;
+        *doc.json_mut() = json;
         doc.push_buffer(bin);
         doc
     }
@@ -3957,7 +4164,7 @@ mod tests {
             .flat_map(|f| f.to_le_bytes())
             .collect();
         let b = doc.push_buffer(bin);
-        let json = &mut doc.json;
+        let json = doc.json_mut();
         json["buffers"]
             .as_array_mut()
             .unwrap()
@@ -4078,7 +4285,7 @@ mod tests {
             }
             let doc = crate::open(&path).unwrap();
             let mut poses = vec![Pose::Rest, Pose::Bind];
-            let animations = super::list(&doc.json, "animations").len();
+            let animations = super::list(doc.json(), "animations").len();
             poses.extend((0..animations).map(|index| Pose::Animation { index, time: 0.4 }));
             for pose in poses {
                 let Ok(mesh) = doc.flatten(pose) else { continue };
@@ -4137,11 +4344,11 @@ mod tests {
         let doc = crate::formats::load(&path, "glb", &Folder::new(dir), Keep::ALL).unwrap();
         let mut decoded = crate::formats::load(&path, "glb", &Folder::new(dir), Keep::ALL).unwrap();
         decoded.decode().unwrap();
-        let prim = &doc.json["meshes"][0]["primitives"][0];
+        let prim = &doc.json()["meshes"][0]["primitives"][0];
         let position = usize::try_from(prim["attributes"]["POSITION"].as_u64().unwrap()).unwrap();
         let indices = usize::try_from(prim["indices"].as_u64().unwrap()).unwrap();
         assert!(
-            doc.json["accessors"][position].get("bufferView").is_none(),
+            doc.json()["accessors"][position].get("bufferView").is_none(),
             "the data is in the stream"
         );
         let (n, floats) = doc.read_floats(position).unwrap();

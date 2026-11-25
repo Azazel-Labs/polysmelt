@@ -127,7 +127,7 @@ pub(super) fn load(text: &str, dir: &Path, limit: usize, assets: &dyn Assets, ke
         scene.source.insert("files".into(), json!(named));
     }
     let mut doc = ctx.finish()?;
-    let json = &mut doc.json;
+    let json = doc.base_mut();
 
     if keep.cameras && !cameras.is_empty() {
         let mut list = Vec::new();

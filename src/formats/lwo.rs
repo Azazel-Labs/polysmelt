@@ -2387,7 +2387,7 @@ mod tests {
         assert!((area - 6.0).abs() < 1e-5 && (vol - 1.0).abs() < 1e-5, "{area} {vol}");
         assert_eq!(doc.facts["triangles"], 12);
         // The layer's node sits at its pivot, and its points are relative to it.
-        let node = &doc.json["nodes"][0];
+        let node = &doc.json()["nodes"][0];
         assert_eq!(node["name"], "Box");
         assert_eq!(node["translation"], json!([1.0, 2.0, 3.0]));
         let p = &m.prims[0];
@@ -2411,13 +2411,13 @@ mod tests {
         assert_eq!(mat.name, "Skin");
         assert_eq!(mat.color, [0.8, 0.8, 0.8, 1.0]);
         assert_eq!(m.images.len(), 1);
-        assert_eq!(doc.json["samplers"][0]["wrapS"], REPEAT);
-        assert_eq!(doc.json["samplers"][0]["wrapT"], MIRROR);
+        assert_eq!(doc.json()["samplers"][0]["wrapS"], REPEAT);
+        assert_eq!(doc.json()["samplers"][0]["wrapT"], MIRROR);
         // The morph is named and starts at rest.
-        let mesh = &doc.json["meshes"][0];
+        let mesh = &doc.json()["meshes"][0];
         assert_eq!(mesh["extras"]["targetNames"], json!(["smile"]));
         assert_eq!(mesh["weights"], json!([0.0]));
-        let source = &doc.json["asset"]["extras"]["source"];
+        let source = &doc.json()["asset"]["extras"]["source"];
         assert_eq!(source["format"], "LWO2");
         assert_eq!(source["description"], "a box");
         let info = doc.source_info();
@@ -2428,13 +2428,13 @@ mod tests {
         assert!(info.converted.handedness && !info.converted.units && !info.converted.up_axis);
         assert_eq!(info.description.as_deref(), Some("a box"));
         assert_eq!(
-            doc.json["nodes"][0]["extras"]["vertexMaps"].as_array().unwrap().len(),
+            doc.json()["nodes"][0]["extras"]["vertexMaps"].as_array().unwrap().len(),
             3
         );
 
         // Without the image the texture is dropped and counted, and the surface keeps its color.
         let doc = read(&cube(0.5), &Memory::new()).unwrap();
-        assert_eq!(doc.json["asset"]["extras"]["source"]["droppedTextures"], 1);
+        assert_eq!(doc.json()["asset"]["extras"]["source"]["droppedTextures"], 1);
         let m = flat(&doc);
         let red = srgb_to_linear(1.0) * 0.8;
         assert_eq!(m.materials[0].color, [red, 0.0, 0.0, 1.0]);
@@ -2475,14 +2475,14 @@ mod tests {
             ],
         );
         let doc = read(&bytes, &Memory::new()).unwrap();
-        let nodes = doc.json["nodes"].as_array().unwrap();
-        assert_eq!(doc.json["scenes"][0]["nodes"], json!([0]));
+        let nodes = doc.json()["nodes"].as_array().unwrap();
+        assert_eq!(doc.json()["scenes"][0]["nodes"], json!([0]));
         assert_eq!(nodes[0]["children"], json!([1]));
         assert_eq!(nodes[1]["children"], json!([2]));
         assert_eq!(nodes[1]["translation"], json!([1.0, 2.0, 3.0]));
         assert_eq!(nodes[2]["translation"], json!([0.0, 1.0, 0.0]));
         assert_eq!(nodes[2]["name"], "Layer 3");
-        assert_eq!(doc.json["asset"]["extras"]["source"]["droppedCurves"], 1);
+        assert_eq!(doc.json()["asset"]["extras"]["source"]["droppedCurves"], 1);
         let m = flat(&doc);
         assert_eq!(m.triangles(), 3);
         assert_eq!(m.lines(), 1);
@@ -2507,8 +2507,8 @@ mod tests {
         );
         let doc = read(&looped, &Memory::new()).unwrap();
         assert_eq!(flat(&doc).triangles(), 2);
-        assert_eq!(doc.json["scenes"][0]["nodes"].as_array().unwrap().len(), 2);
-        assert_eq!(doc.json["nodes"][2]["extras"]["missingParent"], 9);
+        assert_eq!(doc.json()["scenes"][0]["nodes"].as_array().unwrap().len(), 2);
+        assert_eq!(doc.json()["nodes"][2]["extras"]["missingParent"], 9);
     }
 
     #[test]
@@ -2578,7 +2578,7 @@ mod tests {
         assert!((area - 6.0).abs() < 1e-5 && (vol - 1.0).abs() < 1e-5, "{area} {vol}");
         assert_eq!(m.materials[0].name, "Red");
         assert_eq!(m.materials[0].color, [0.75, 0.0, 0.0, 1.0]);
-        assert_eq!(doc.json["asset"]["extras"]["source"]["format"], "LWOB");
+        assert_eq!(doc.json()["asset"]["extras"]["source"]["format"], "LWOB");
     }
 
     #[test]
@@ -2604,7 +2604,7 @@ mod tests {
         assert_eq!(gold.color, [1.0, 1.0, 0.0, 1.0]);
         // Untagged polygons get LightWave's default surface.
         assert!(m.materials.iter().any(|x| x.name == "Default"));
-        assert_eq!(doc.json["asset"]["extras"]["source"]["format"], "LWO3");
+        assert_eq!(doc.json()["asset"]["extras"]["source"]["format"], "LWO3");
     }
 
     #[test]
@@ -2621,7 +2621,7 @@ mod tests {
         let mut cut_short = cube(0.5);
         cut_short.truncate(cut_short.len() - 40);
         let doc = read(&cut_short, &assets).unwrap();
-        assert_eq!(doc.json["asset"]["extras"]["source"]["truncated"], true);
+        assert_eq!(doc.json()["asset"]["extras"]["source"]["truncated"], true);
         // Huge counts and indices.
         let wild = file(
             *b"LWO2",

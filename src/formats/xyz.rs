@@ -865,7 +865,7 @@ mod tests {
     }
 
     fn attrs(doc: &Document) -> Vec<String> {
-        let mut v: Vec<String> = doc.json["meshes"][0]["primitives"][0]["attributes"]
+        let mut v: Vec<String> = doc.json()["meshes"][0]["primitives"][0]["attributes"]
             .as_object()
             .unwrap()
             .keys()
@@ -876,11 +876,11 @@ mod tests {
     }
 
     fn values(doc: &Document, name: &str) -> Vec<f32> {
-        let a = doc.json["meshes"][0]["primitives"][0]["attributes"][name]
+        let a = doc.json()["meshes"][0]["primitives"][0]["attributes"][name]
             .as_u64()
             .unwrap() as usize;
-        let acc = &doc.json["accessors"][a];
-        let view = &doc.json["bufferViews"][acc["bufferView"].as_u64().unwrap() as usize];
+        let acc = &doc.json()["accessors"][a];
+        let view = &doc.json()["bufferViews"][acc["bufferView"].as_u64().unwrap() as usize];
         let buf = doc.buffer(view["buffer"].as_u64().unwrap_or(0) as usize).unwrap();
         let off = view["byteOffset"].as_u64().unwrap_or(0) as usize;
         let len = view["byteLength"].as_u64().unwrap() as usize;
@@ -922,7 +922,7 @@ mod tests {
         assert_eq!(attrs(&doc), ["COLOR_0", "NORMAL", "POSITION"]);
         let n = values(&doc, "NORMAL");
         assert_eq!(&n[..6], &[0.0, 1.0, 0.0, 0.6, 0.0, -0.8]);
-        let cols = &doc.json["asset"]["extras"]["source"]["columns"];
+        let cols = &doc.json()["asset"]["extras"]["source"]["columns"];
         assert_eq!(cols[3], "normal x");
         let info = doc.source_info();
         assert_eq!(info.format.as_deref(), Some("XYZ"));
@@ -950,7 +950,10 @@ mod tests {
     fn far_points_keep_their_detail() {
         let text = "637012.24 849028.31 431.66\n637012.25 849028.33 431.67\n";
         let doc = load_text(text, "xyz", Keep::ALL).unwrap();
-        assert_eq!(doc.json["nodes"][0]["translation"], json!([637_012.0, 0.0, -849_028.0]));
+        assert_eq!(
+            doc.json()["nodes"][0]["translation"],
+            json!([637_012.0, 0.0, -849_028.0])
+        );
         let p = values(&doc, "POSITION");
         assert!((p[3] - p[0] - 0.01).abs() < 1e-5);
         assert!((p[5] - p[2] + 0.02).abs() < 1e-5);
@@ -966,9 +969,12 @@ mod tests {
         // (1, 2, 3) turned to (-2, 1, 3) and moved to (8, 1, 3); Y-up, (8, 3, -1).
         assert_eq!(values(&doc, "POSITION"), [1.0, 3.0, -2.0, 8.0, 3.0, -1.0]);
         assert_eq!(values(&doc, "_SCAN"), [0.0, 1.0]);
-        assert_eq!(doc.json["meshes"][0]["extras"]["constant"]["_INTENSITY"], 0.25);
+        assert_eq!(doc.json()["meshes"][0]["extras"]["constant"]["_INTENSITY"], 0.25);
         assert_eq!(
-            doc.json["asset"]["extras"]["source"]["scans"].as_array().unwrap().len(),
+            doc.json()["asset"]["extras"]["source"]["scans"]
+                .as_array()
+                .unwrap()
+                .len(),
             2
         );
     }

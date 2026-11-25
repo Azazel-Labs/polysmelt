@@ -65,18 +65,10 @@ pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
             "glTF version {version:?} isn't 1.x or 2.x"
         );
     }
-    let mut doc = Document {
-        json,
-        buffers: Vec::new(),
-        facts: Map::new(),
-        refs: crate::images::Refs::new(),
-        max_triangles: crate::mesh::MAX_TRIANGLES,
-        lines_and_points: true,
-        max_points: crate::mesh::MAX_POINTS,
-    };
-    let n = doc.json.get("buffers").and_then(Value::as_array).map_or(0, Vec::len);
+    let mut doc = Document::new(json, Vec::new(), Map::new(), crate::images::Refs::new());
+    let n = doc.base.get("buffers").and_then(Value::as_array).map_or(0, Vec::len);
     for i in 0..n {
-        let b = &mut doc.json["buffers"][i];
+        let b = &mut doc.base_mut()["buffers"][i];
         let declared = b.get("byteLength").and_then(Value::as_u64).unwrap_or(0);
         let fallback = container::is_fallback(b);
         let blob = match b.get("uri").and_then(Value::as_str) {
@@ -123,9 +115,9 @@ pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
 
 /// Moves each image named by URI into a buffer of its own, when it's found and its type known.
 fn embed_images(doc: &mut Document, input: Input<'_>, assets: &dyn Assets) {
-    let n = doc.json.get("images").and_then(Value::as_array).map_or(0, Vec::len);
+    let n = doc.base.get("images").and_then(Value::as_array).map_or(0, Vec::len);
     for i in 0..n {
-        let img = &doc.json["images"][i];
+        let img = &doc.base["images"][i];
         let Some(uri) = img.get("uri").and_then(Value::as_str) else {
             continue;
         };
@@ -146,7 +138,7 @@ fn embed_images(doc: &mut Document, input: Input<'_>, assets: &dyn Assets) {
         let len = blob.len();
         let buffer = doc.push_blob(blob);
         let view = doc.push_view(json!({ "buffer": buffer, "byteLength": len }));
-        let img = doc.json["images"][i]
+        let img = doc.base_mut()["images"][i]
             .as_object_mut()
             .expect("an image with a uri is an object");
         img.remove("uri");
@@ -158,7 +150,7 @@ fn embed_images(doc: &mut Document, input: Input<'_>, assets: &dyn Assets) {
 /// Notes where each image named by URI (other than a `data:` one) is, without reading it. A file
 /// on disk is only looked for when the image's location is first asked.
 fn reference_images(doc: &mut Document, input: Input<'_>, assets: &dyn Assets) {
-    let images = doc.json.get("images").and_then(Value::as_array);
+    let images = doc.base.get("images").and_then(Value::as_array);
     for (i, img) in images.into_iter().flatten().enumerate() {
         let Some(uri) = img
             .get("uri")
@@ -519,8 +511,8 @@ mod tests {
                 .as_array()
                 .is_some_and(|l| l.iter().any(|b| b.get("uri").is_some()));
             // Nor must one the repair pass rewrites, as it does invalid input.
-            let mut fixed = doc.json.clone();
-            let repaired = crate::flatten::repaired(&doc, &mut fixed).is_some() || fixed != doc.json;
+            let mut fixed = doc.json().clone();
+            let repaired = crate::flatten::repaired(&doc, &mut fixed, &mut None).is_some() || fixed != *doc.json();
             if original[4..8] != 1u32.to_le_bytes() && !in_files && !repaired {
                 let (b, bbin) = split(&written);
                 assert_eq!(normalized(a.clone()), normalized(b.clone()), "{name}: the JSON changed");
@@ -555,6 +547,6 @@ mod tests {
         .concat();
         let assets = crate::assets::Memory::new();
         let doc = crate::formats::load_bytes(&glb, "x.glb", "glb", &assets, Keep::ALL).unwrap();
-        assert_eq!(doc.json["scene"], 0);
+        assert_eq!(doc.json()["scene"], 0);
     }
 }

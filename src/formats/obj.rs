@@ -3861,7 +3861,7 @@ f 1 2 3
         let m = doc.flatten(crate::document::Pose::Rest).unwrap().unwrap();
         let p = &m.prims[0].positions;
         assert!(p.contains(&[0.0, 0.0, 1.0]) && !p.contains(&[9.0, 9.0, 9.0]), "{p:?}");
-        assert_eq!(doc.json["materials"][0]["name"], "red");
+        assert_eq!(doc.json()["materials"][0]["name"], "red");
         assert_eq!(m.materials[0].color, [1.0, 0.0, 0.0, 1.0]);
     }
 
@@ -3940,7 +3940,7 @@ f 1 2 3
         let text = "mtllib t.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 0 1\n\
                     usemtl leaf\nf 1/1 2/2 3/3\nusemtl glass\nf 1/1 3/3 2/2\n";
         let doc = read_in(text.as_bytes(), &assets);
-        let leaf = &doc.json["materials"][0];
+        let leaf = &doc.json()["materials"][0];
         assert_eq!(leaf["alphaMode"], "MASK", "{leaf}");
         assert!(leaf["emissiveTexture"].is_object());
         assert_eq!(leaf["emissiveFactor"], json!([1.0, 1.0, 1.0]));
@@ -3948,7 +3948,7 @@ f 1 2 3
         assert!(leaf["occlusionTexture"].is_object());
         let alpha = &leaf["pbrMetallicRoughness"]["baseColorFactor"][3];
         assert!(alpha.is_null() || alpha == 1.0, "d wins over Tr: {leaf}");
-        let glass = &doc.json["materials"][1];
+        let glass = &doc.json()["materials"][1];
         assert_eq!(
             glass["extensions"]["KHR_materials_transmission"]["transmissionFactor"],
             0.75
@@ -4022,8 +4022,8 @@ f 1 2 3
         // embedded and the file used as it is left unread.
         let full = doc(Keep::ALL);
         let lazy = doc(Keep::ALL.with_image_bytes(false));
-        assert_eq!(lazy.json["materials"], full.json["materials"]);
-        let uris: Vec<_> = (0..3).map(|i| lazy.json["images"][i]["uri"].as_str()).collect();
+        assert_eq!(lazy.json()["materials"], full.json()["materials"]);
+        let uris: Vec<_> = (0..3).map(|i| lazy.json()["images"][i]["uri"].as_str()).collect();
         assert_eq!(uris, [None, None, Some("rma.png")]);
     }
 }

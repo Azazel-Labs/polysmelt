@@ -97,7 +97,7 @@ fn cube_file(extra: &str) -> String {
 #[test]
 fn reads_the_header() {
     let doc = read_bytes(TEXT_CUBE, usize::MAX).unwrap();
-    let source = &doc.json["asset"]["extras"]["source"];
+    let source = &doc.json()["asset"]["extras"]["source"];
     assert_eq!(source["format"], "DirectX");
     assert_eq!(source["version"], "3.3");
     assert_eq!(source["encoding"], "text");
@@ -121,7 +121,7 @@ fn three_encodings_read_alike() {
     let text = mesh(&read_bytes(TEXT_CUBE, usize::MAX).unwrap());
     for (bytes, encoding) in [(BINARY_CUBE, "binary"), (COMPRESSED_CUBE, "compressed binary")] {
         let doc = read_bytes(bytes, usize::MAX).unwrap();
-        assert_eq!(doc.json["asset"]["extras"]["source"]["encoding"], encoding);
+        assert_eq!(doc.json()["asset"]["extras"]["source"]["encoding"], encoding);
         let m = mesh(&doc);
         assert_eq!(m.triangles(), text.triangles());
         let (a, b) = (bounds(&m), bounds(&text));
@@ -363,7 +363,7 @@ fn materials_and_their_list() {
     let m = mesh(&doc);
     assert_eq!(m.prims.len(), 2);
     assert_eq!(m.triangles(), 12);
-    let red = doc.json["materials"]
+    let red = doc.json()["materials"]
         .as_array()
         .unwrap()
         .iter()
@@ -386,8 +386,8 @@ fn finds_a_texture() {
          0;0;0;; 0;0;0;; TextureFilename {{ \"tex\\\\red.png\"; }} }} }} }} }}"
     );
     let doc = super::super::load_bytes(text.as_bytes(), "a.x", "x", &files, Keep::ALL).unwrap();
-    assert_eq!(doc.json["images"].as_array().map_or(0, Vec::len), 1);
-    assert!(doc.json["materials"][0]["pbrMetallicRoughness"]["baseColorTexture"].is_object());
+    assert_eq!(doc.json()["images"].as_array().map_or(0, Vec::len), 1);
+    assert!(doc.json()["materials"][0]["pbrMetallicRoughness"]["baseColorTexture"].is_object());
 }
 
 // --- Frames, skins and animation -----------------------------------------------------------------------------------
@@ -446,10 +446,10 @@ fn animation_keys_and_ticks() {
          AnimationKey {{ 2; 2; 0;3;0,0,0;;, 24;3;1,0,2;;; }} \
          AnimationKey {{ 1; 2; 0;3;1,1,1;;, 48;3;2,2,2;;; }} }} }}"
     ));
-    assert_eq!(doc.json["asset"]["extras"]["source"]["frameRate"], 24.0);
-    assert_eq!(doc.json["animations"][0]["name"], "Go");
+    assert_eq!(doc.json()["asset"]["extras"]["source"]["frameRate"], 24.0);
+    assert_eq!(doc.json()["animations"][0]["name"], "Go");
     assert_eq!(
-        doc.json["animations"][0]["extras"]["animationOptions"][0]["closed"],
+        doc.json()["animations"][0]["extras"]["animationOptions"][0]["closed"],
         true
     );
     let rig = doc.rig().unwrap();
@@ -475,8 +475,8 @@ fn skin_weights_become_a_skin() {
          SkinWeights {{ \"Upper\"; 4; 2,3,6,7; 1;1;1;1; 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,-1,0,1;; }} }} }}\n\
          Frame Lower {{ Frame Upper {{ FrameTransformMatrix {{ 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,1,0,1;; }} }} }}"
     ));
-    assert_eq!(doc.json["skins"].as_array().unwrap().len(), 1);
-    assert_eq!(doc.json["skins"][0]["joints"].as_array().unwrap().len(), 2);
+    assert_eq!(doc.json()["skins"].as_array().unwrap().len(), 1);
+    assert_eq!(doc.json()["skins"][0]["joints"].as_array().unwrap().len(), 2);
     assert_eq!(doc.facts["skinned_meshes"], 1);
     // The bind pose puts the cube where it was.
     let (lo, hi) = bounds(&mesh(&doc));

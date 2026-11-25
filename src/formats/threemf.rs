@@ -2065,7 +2065,7 @@ mod tests {
         assert_eq!(facts["colors"], 2);
         let info = doc.source_info();
         assert_eq!(info.tool.as_deref(), Some("Test Exporter"));
-        assert!(doc.json["asset"]["extras"]["source"].get("metadata").is_none());
+        assert!(doc.json()["asset"]["extras"]["source"].get("metadata").is_none());
         assert_eq!(info.meters_per_unit, Fact::Declared(0.001));
         assert_eq!(info.unit.as_deref(), Some("millimeter"));
         assert_eq!(info.up_axis, Fact::Declared(Axis::PosZ));
@@ -2160,7 +2160,7 @@ mod tests {
 
     /// The hidden nodes' names and `extras.volumeType`.
     fn hidden(doc: &Document) -> Vec<(String, String)> {
-        let nodes = doc.json["nodes"].as_array().unwrap();
+        let nodes = doc.json()["nodes"].as_array().unwrap();
         let mut out: Vec<(String, String)> = nodes
             .iter()
             .filter(|n| n["extensions"]["KHR_node_visibility"]["visible"] == false)
@@ -2211,7 +2211,7 @@ mod tests {
         ];
         assert_eq!(hidden(&doc), want.map(|(a, b)| (a.to_owned(), b.to_owned())));
         assert!(
-            doc.json["extensionsUsed"]
+            doc.json()["extensionsUsed"]
                 .as_array()
                 .unwrap()
                 .contains(&json!("KHR_node_visibility"))
@@ -2275,7 +2275,7 @@ mod tests {
         let doc = load_zip(&[("3D/3dmodel.model", &model)]);
         // Object 1 under 2, and under 3 under 2; 2 inside itself and inside 3 left out.
         assert_eq!(doc.facts["triangles"], 2);
-        assert_eq!(doc.json["asset"]["extras"]["source"]["droppedComponents"], 2);
+        assert_eq!(doc.json()["asset"]["extras"]["source"]["droppedComponents"], 2);
     }
 
     /// Corners share a vertex unless their colors differ.

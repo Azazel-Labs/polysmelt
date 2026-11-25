@@ -20,6 +20,7 @@
 use std::borrow::Cow;
 use std::fmt;
 use std::io::Write;
+use std::sync::OnceLock;
 
 use serde_json::{Map, Value, json};
 
@@ -34,6 +35,10 @@ use crate::{Context as _, ErrorKind, Result, Within as _};
 
 pub use crate::keep::Keep;
 
+mod typed;
+
+pub(crate) use typed::{Accessor, Animation, Channel, Limits, Sampler, Sparse, Tables, View};
+
 /// A model as a glTF 2.0 document: its JSON, its buffers' bytes, and facts about the source.
 ///
 /// It owns all it holds, so it outlives whatever it was read from, and a clone shares the
@@ -41,8 +46,13 @@ pub use crate::keep::Keep;
 /// converts into one.
 #[derive(Clone)]
 pub struct Document {
-    /// The glTF JSON (see [`Document::json`]).
-    pub(crate) json: Map<String, Value>,
+    /// The glTF JSON (see [`Document::json`]), but for the lists `tables` holds.
+    pub(crate) base: Map<String, Value>,
+    /// The accessors, buffer views and animations, when a reader built them (see [`typed`]):
+    /// `base` has none of these lists then.
+    pub(crate) tables: Option<Box<Tables>>,
+    /// The whole JSON, `base` with `tables` in it, made when it's first asked for.
+    pub(crate) full: OnceLock<Map<String, Value>>,
     /// Buffer `i`'s bytes, for each of the JSON's buffers.
     pub(crate) buffers: Vec<Blob>,
     /// Facts worth recording about the source: `triangles`, and per format `points`, `lines`,
@@ -64,7 +74,7 @@ pub struct Document {
 impl fmt::Debug for Document {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Document")
-            .field("json", &self.json)
+            .field("json", self.json())
             .field("buffers", &self.buffers.iter().map(Blob::len).collect::<Vec<_>>())
             .field("facts", &self.facts)
             .finish_non_exhaustive()
@@ -296,6 +306,12 @@ impl Parts {
     }
 }
 
+/// A GLB's JSON before it's written: `json` with the lists `tables` holds.
+struct Packed<'d> {
+    json: Map<String, Value>,
+    tables: Option<Cow<'d, Tables>>,
+}
+
 /// A GLB ready to write (see [`Document::write_glb`]): its header and JSON chunk, and its
 /// binary chunk.
 struct Glb {
@@ -459,21 +475,41 @@ impl Document {
     /// [`Document::buffer`]).
     #[must_use]
     pub fn json(&self) -> &Map<String, Value> {
-        &self.json
+        match &self.tables {
+            None => &self.base,
+            Some(t) => self.full.get_or_init(|| {
+                let mut json = self.base.clone();
+                t.insert_into(&mut json, false);
+                json
+            }),
+        }
     }
 
     /// The glTF JSON, to change. Its `buffers` list must stay one entry for each buffer the
     /// document holds: add buffers with [`Document::push_buffer`], and leave out a `uri`, which
     /// is ignored.
     pub fn json_mut(&mut self) -> &mut Map<String, Value> {
-        &mut self.json
+        if let Some(t) = self.tables.take() {
+            match self.full.take() {
+                Some(full) => self.base = full,
+                None => t.insert_into(&mut self.base, false),
+            }
+        }
+        &mut self.base
+    }
+
+    /// The JSON, to change what isn't in `tables` (the accessors, buffer views and
+    /// animations).
+    pub(crate) fn base_mut(&mut self) -> &mut Map<String, Value> {
+        self.full.take();
+        &mut self.base
     }
 
     /// What the file this was read from says about itself: its units, up axis, frame rate, author, tool and
     /// dates, each declared, assumed or unknown, and what the reader converted (see [`crate::source`]). A glTF
     /// file read as it is reports glTF's own: meters, +Y up, right-handed, its `generator` and `copyright`.
     pub fn source_info(&self) -> SourceInfo {
-        let asset = self.json.get("asset");
+        let asset = self.base.get("asset");
         let source = asset
             .and_then(|a| a.pointer("/extras/source"))
             .and_then(Value::as_object);
@@ -501,11 +537,18 @@ impl Document {
         let Value::Object(json) = json!({ "asset": { "version": "2.0", "generator": "polysmelt" } }) else {
             unreachable!()
         };
+        Document::new(json, Vec::new(), facts, Refs::new())
+    }
+
+    /// A document of `json` and `buffers`, whose limits are the defaults.
+    pub(crate) fn new(json: Map<String, Value>, buffers: Vec<Blob>, facts: Map<String, Value>, refs: Refs) -> Document {
         Document {
-            json,
-            buffers: Vec::new(),
+            base: json,
+            tables: None,
+            full: OnceLock::new(),
+            buffers,
             facts,
-            refs: Refs::new(),
+            refs,
             max_triangles: MAX_TRIANGLES,
             lines_and_points: true,
             max_points: MAX_POINTS,
@@ -571,15 +614,21 @@ impl Document {
 
     /// Buffer view `i`'s bytes, shared without a copy when its buffer owns them in one piece.
     pub(crate) fn view_shared(&self, i: usize) -> Result<Bytes> {
-        let v = list(&self.json, "bufferViews")
-            .get(i)
-            .with_context(ErrorKind::Corrupt, || format!("glTF bufferViews[{i}] doesn't exist"))?;
-        let num = |k: &str| v.get(k).and_then(Value::as_u64).unwrap_or(0);
+        let missing = || format!("glTF bufferViews[{i}] doesn't exist");
+        let (buffer, offset, len) = if let Some(t) = &self.tables {
+            let v = t.views.get(i).with_context(ErrorKind::Corrupt, missing)?;
+            (v.buffer, v.byte_offset.unwrap_or(0), v.byte_length)
+        } else {
+            let v = list(&self.base, "bufferViews")
+                .get(i)
+                .with_context(ErrorKind::Corrupt, missing)?;
+            let num = |k: &str| v.get(k).and_then(Value::as_u64).unwrap_or(0);
+            (usize_of(num("buffer")), num("byteOffset"), num("byteLength"))
+        };
         let b = self
             .buffers
-            .get(usize_of(num("buffer")))
+            .get(buffer)
             .context(ErrorKind::Corrupt, "glTF buffer view names a missing buffer")?;
-        let (offset, len) = (num("byteOffset"), num("byteLength"));
         ensure!(
             offset.saturating_add(len) <= b.len(),
             Truncated,
@@ -596,8 +645,9 @@ impl Document {
     }
 
     pub(crate) fn push_blob(&mut self, blob: Blob) -> usize {
+        self.full.take();
         let held = &self.buffers;
-        let buffers = self.json.entry("buffers").or_insert_with(|| json!([]));
+        let buffers = self.base.entry("buffers").or_insert_with(|| json!([]));
         if !buffers.is_array() {
             *buffers = held.iter().map(|b| json!({ "byteLength": b.len() })).collect();
         }
@@ -611,7 +661,7 @@ impl Document {
     /// Adds a buffer view; returns its index. A JSON `bufferViews` that isn't a list becomes
     /// one.
     pub(crate) fn push_view(&mut self, view: Value) -> usize {
-        let views = self.json.entry("bufferViews").or_insert_with(|| json!([]));
+        let views = self.json_mut().entry("bufferViews").or_insert_with(|| json!([]));
         if !views.is_array() {
             *views = json!([]);
         }
@@ -650,9 +700,13 @@ impl Document {
     ///
     /// As [`Document::to_glb`] and [`compress_with`](crate::gltf::compress_with).
     pub fn to_glb_with(&self, options: &container::CompressOptions) -> Result<Vec<u8>> {
-        let (json, bin) = self.packed()?;
+        let (packed, bin) = self.packed()?;
         let mut bytes = Vec::with_capacity(bin.padded.map_or(0, usize_of));
         bin.write(self, &mut bytes)?;
+        let Packed { mut json, tables } = packed;
+        if let Some(t) = tables {
+            t.insert_into(&mut json, true);
+        }
         container::compress_parts(json, bin.padded.map(|_| &bytes[..]), *options)
     }
 
@@ -683,9 +737,9 @@ impl Document {
         reason = "the JSON chunk is smaller than `total`, which is checked to fit"
     )]
     fn glb(&self) -> Result<Glb> {
-        let (json, bin) = self.packed()?;
+        let (packed, bin) = self.packed()?;
         let mut head = vec![0; 20];
-        serde_json::to_writer(&mut head, &Value::Object(json)).context(ErrorKind::Invalid, "writing the glTF JSON")?;
+        typed::write_json(&mut head, &packed.json, packed.tables.as_deref())?;
         head.resize(head.len().next_multiple_of(4), b' ');
         let text = head.len() - 20;
         let total = head.len() as u64 + bin.padded.map_or(0, |n| 8 + n);
@@ -700,12 +754,13 @@ impl Document {
 
     /// The GLB's JSON, its buffers merged into the first (repair's bytes included), and where
     /// each goes in its binary chunk.
-    fn packed(&self) -> Result<(Map<String, Value>, Bin)> {
-        let mut json = self.json.clone();
-        let extra = crate::flatten::repaired(self, &mut json).map(|b| Blob::Bytes(b.into()));
-        let (json, layout, bin_len) = self.glb_json(json, extra.as_ref())?;
+    fn packed(&self) -> Result<(Packed<'_>, Bin)> {
+        let mut json = self.base.clone();
+        let mut tables = self.tables.as_deref().map(Cow::Borrowed);
+        let extra = crate::flatten::repaired(self, &mut json, &mut tables).map(|b| Blob::Bytes(b.into()));
+        let (json, layout, bin_len) = self.glb_json(json, tables.as_mut(), extra.as_ref())?;
         let padded = bin_len.map(|n| n.next_multiple_of(4));
-        Ok((json, Bin { padded, layout, extra }))
+        Ok((Packed { json, tables }, Bin { padded, layout, extra }))
     }
 
     /// The GLB's JSON (from `json`, the document's, with `extra` its last buffer if given),
@@ -715,6 +770,7 @@ impl Document {
     fn glb_json(
         &self,
         mut json: Map<String, Value>,
+        tables: Option<&mut Cow<'_, Tables>>,
         extra: Option<&Blob>,
     ) -> Result<(Map<String, Value>, Vec<(usize, u64, u64)>, Option<u64>)> {
         let buffers = list(&json, "buffers");
@@ -781,7 +837,24 @@ impl Document {
         for name in required {
             container::require_extension(&mut json, &name);
         }
-        let has_views = !list(&json, "bufferViews").is_empty();
+        let mut has_views = !list(&json, "bufferViews").is_empty();
+        if let Some(t) = tables {
+            has_views |= !t.views.is_empty();
+            // Most stay where they are, and the tables are then written as they are.
+            let moves = |v: &View| {
+                let mut moved = *v;
+                moved.rehome(&home).map(|()| moved != *v)
+            };
+            let mut any = false;
+            for (i, v) in t.views.iter().enumerate() {
+                any |= moves(v).with_within(|| format!("glTF buffer view {i}"))?;
+            }
+            if any {
+                for (i, v) in t.to_mut().views.iter_mut().enumerate() {
+                    v.rehome(&home).with_within(|| format!("glTF buffer view {i}"))?;
+                }
+            }
+        }
         if layout.is_empty() && placeholders.is_empty() && !has_views {
             json.remove("buffers");
             return Ok((json, layout, None));
@@ -1083,8 +1156,10 @@ fn skin_attributes(joints: &[[u32; 4]], weights: &[[f32; 4]], offset: u32, count
 #[derive(Default)]
 pub(crate) struct Builder {
     pub parts: Parts,
-    pub views: Vec<Value>,
-    pub accessors: Vec<Value>,
+    pub views: Vec<View>,
+    pub accessors: Vec<Accessor>,
+    /// Kept only when there are views (an animation's keys have one).
+    pub animations: Vec<Animation>,
     /// The images named but not read, by image index.
     pub refs: Refs,
     /// While writing skinned primitives: what's added to a bone's index for its joint, and how
@@ -1249,8 +1324,8 @@ impl Builder {
         }
         let n = v.len();
         let a = self.accessor(Part::f32(v.into_flattened()), 5126, n, "VEC3", Some(34962));
-        self.accessors[a]["min"] = json!(min);
-        self.accessors[a]["max"] = json!(max);
+        self.accessors[a].min = Some(Limits::floats(&min));
+        self.accessors[a].max = Some(Limits::floats(&max));
         a
     }
 
@@ -1264,7 +1339,7 @@ impl Builder {
         feature = "bvh",
         feature = "dae"
     ))]
-    pub(crate) fn floats(&mut self, v: Vec<f32>, kind: &str, bounds: bool) -> usize {
+    pub(crate) fn floats(&mut self, v: Vec<f32>, kind: &'static str, bounds: bool) -> usize {
         let width = match kind {
             "VEC2" => 2,
             "VEC3" => 3,
@@ -1286,8 +1361,8 @@ impl Builder {
         });
         let a = self.accessor(Part::f32(v), 5126, count, kind, None);
         if let Some((min, max)) = range {
-            self.accessors[a]["min"] = json!(min);
-            self.accessors[a]["max"] = json!(max);
+            self.accessors[a].min = Some(Limits::floats(&min));
+            self.accessors[a].max = Some(Limits::floats(&max));
         }
         a
     }
@@ -1367,39 +1442,56 @@ impl Builder {
             asset["generator"] = json!("polysmelt");
         }
         let mut buffers = Vec::new();
+        let mut tables = None;
         if !self.views.is_empty() {
-            json.insert("accessors".into(), Value::Array(self.accessors));
-            json.insert("bufferViews".into(), Value::Array(self.views));
+            // The tables stand for these.
+            json.remove("accessors");
+            json.remove("bufferViews");
+            if !self.animations.is_empty() {
+                json.remove("animations");
+            }
             json.insert("buffers".into(), json!([{ "byteLength": self.parts.len }]));
             buffers.push(Blob::Parts(self.parts));
+            tables = Some(Box::new(Tables {
+                accessors: self.accessors,
+                views: self.views,
+                animations: self.animations,
+            }));
         }
-        Document {
-            json,
-            buffers,
-            facts,
-            refs: self.refs,
-            max_triangles: MAX_TRIANGLES,
-            lines_and_points: true,
-            max_points: MAX_POINTS,
-        }
+        let mut doc = Document::new(json, buffers, facts, self.refs);
+        doc.tables = tables;
+        doc
     }
 
     /// A buffer view of `part`; returns its index.
     pub(crate) fn view(&mut self, part: Part, target: Option<u32>) -> usize {
         let (at, len) = self.parts.push(part);
-        let mut v = json!({ "buffer": 0, "byteOffset": at, "byteLength": len });
-        if let Some(t) = target {
-            v["target"] = json!(t);
-        }
-        self.views.push(v);
+        self.views.push(View {
+            buffer: 0,
+            byte_offset: Some(at),
+            byte_length: len,
+            target,
+        });
         self.views.len() - 1
     }
 
     /// An accessor of `count` elements of `kind` over a view of `part`; returns its index.
-    pub(crate) fn accessor(&mut self, part: Part, ctype: u32, count: usize, kind: &str, target: Option<u32>) -> usize {
+    pub(crate) fn accessor(
+        &mut self,
+        part: Part,
+        ctype: u32,
+        count: usize,
+        kind: &'static str,
+        target: Option<u32>,
+    ) -> usize {
         let v = self.view(part, target);
-        self.accessors
-            .push(json!({ "bufferView": v, "componentType": ctype, "count": count, "type": kind }));
+        self.accessors.push(Accessor {
+            buffer_view: Some(v),
+            component_type: ctype,
+            count,
+            kind,
+            ..Accessor::default()
+        });
         self.accessors.len() - 1
     }
 }

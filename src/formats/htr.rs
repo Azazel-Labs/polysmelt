@@ -486,7 +486,7 @@ knee 0 -400 0 0 0 90 300
     #[test]
     fn two_segments() {
         let doc = read(HTR).unwrap();
-        let nodes = doc.json["nodes"].as_array().unwrap();
+        let nodes = doc.json()["nodes"].as_array().unwrap();
         let names: Vec<_> = nodes.iter().map(|n| n["name"].as_str().unwrap()).collect();
         assert_eq!(names, ["hip", "knee", "knee_end"]);
         assert_eq!(doc.facts["segments"], json!(2));
@@ -570,7 +570,7 @@ knee 0 -400 0 0 0 90 300
         assert_eq!(info.frame_rate, Fact::Assumed(30.0));
         assert_eq!(info.up_axis, Fact::Assumed(Axis::PosY));
         assert_eq!(info.meters_per_unit, Fact::Unknown);
-        assert_eq!(doc.json["scenes"][0]["nodes"], json!([0, 1]));
+        assert_eq!(doc.json()["scenes"][0]["nodes"], json!([0, 1]));
     }
 
     #[test]

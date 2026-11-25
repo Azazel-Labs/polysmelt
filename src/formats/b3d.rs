@@ -732,7 +732,7 @@ mod tests {
     #[test]
     fn a_skinned_triangle_with_a_brush_and_keys() {
         let doc = read(&sample()).unwrap();
-        let j = &doc.json;
+        let j = &doc.json();
         assert_eq!(doc.facts["triangles"], json!(1));
         assert_eq!(j["materials"][0]["name"], "red");
         assert_eq!(j["materials"][0]["doubleSided"], true);
