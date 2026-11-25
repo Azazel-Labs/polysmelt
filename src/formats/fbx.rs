@@ -33,6 +33,7 @@ use crate::material::{self, Alpha, Clearcoat, Factor, Full, Sheen, Tex, UvTransf
 use crate::mesh::{FastMap, GRAY, Material, Prim, smooth_normals, srgb_to_linear, triangulate};
 use crate::num::f32_of;
 use crate::source::{Axis, Fact, Handedness, SourceInfo};
+use crate::vec3;
 
 use super::xform::{IDENTITY, M4, Trs, column_major, decompose, det3, inverse, mul, scale, set_transform, translate};
 
@@ -3591,7 +3592,7 @@ fn geometry(
                 prim.positions.push(p);
                 cps.push(cp);
                 if let Some((_, nv)) = n {
-                    let nv = unit([nv[0], nv[1], nv[2]]);
+                    let nv = vec3::unit_or([nv[0], nv[1], nv[2]], [0.0, 1.0, 0.0]);
                     prim.normals.push(nv.map(f32_of));
                     if let Some((_, tv)) = tg {
                         prim.tangents.push(tangent(nv, [tv[0], tv[1], tv[2]], bn.map(|b| b.1)));
@@ -3863,10 +3864,7 @@ fn smoothing(
         // Newell's method: twice the polygon's area, along its normal.
         let mut sum = [0.0; 3];
         for pv in range.clone() {
-            let (a, b) = (pos(pv), pos(next[pv]));
-            sum[0] += (a[1] - b[1]) * (a[2] + b[2]);
-            sum[1] += (a[2] - b[2]) * (a[0] + b[0]);
-            sum[2] += (a[0] - b[0]) * (a[1] + b[1]);
+            vec3::newell_edge(&mut sum, pos(pv), pos(next[pv]));
         }
         for pv in range {
             let g = &mut normal[group[pv]];
@@ -3925,12 +3923,6 @@ fn tangent(n: [f64; 3], t: [f64; 3], b: Option<&[f64]>) -> [f32; 4] {
         }
     });
     [f32_of(t[0]), f32_of(t[1]), f32_of(t[2]), w]
-}
-
-/// `v` scaled to length one (straight up when it has none).
-fn unit(v: [f64; 3]) -> [f64; 3] {
-    let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
-    if len > 0.0 { v.map(|c| c / len) } else { [0.0, 1.0, 0.0] }
 }
 
 #[cfg(all(test, feature = "fs"))]

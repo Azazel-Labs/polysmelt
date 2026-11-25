@@ -7,7 +7,7 @@ use std::path::Path;
 use super::xml;
 use crate::images::Location;
 use crate::material::{Alpha, CLAMP, Factor, Full, MIRROR, REPEAT, Specular, Tex, UvTransform};
-use crate::mesh::srgb_to_linear;
+use crate::mesh::linear_rgba as linear;
 use crate::num::f32_of;
 
 /// What a shading channel (`diffuse`, `emission`, ...) holds.
@@ -22,11 +22,6 @@ enum Channel {
 /// The share of red, green and blue in luminance.
 fn luminance(c: [f32; 4]) -> f32 {
     0.212_671 * c[0] + 0.715_160 * c[1] + 0.072_169 * c[2]
-}
-
-/// A color with its RGB made linear.
-fn linear(c: [f32; 4]) -> [f32; 4] {
-    [srgb_to_linear(c[0]), srgb_to_linear(c[1]), srgb_to_linear(c[2]), c[3]]
 }
 
 impl super::Reader<'_> {
@@ -367,18 +362,9 @@ impl super::Reader<'_> {
     /// The image at a URI: a `data:` URI, an entry of the archive, or a file beside the model.
     fn uri_image(&mut self, uri: &str) -> Option<usize> {
         let assets = self.assets;
-        if let Some(data) = uri.strip_prefix("data:") {
-            let (head, body) = data.split_once(',')?;
-            let bytes = if head.ends_with(";base64") {
-                xml::from_base64(body.as_bytes())?
-            } else {
-                xml::percent_decode(body).into_bytes()
-            };
-            let ext = head
-                .split(';')
-                .next()
-                .and_then(|m| m.strip_prefix("image/"))
-                .unwrap_or("png");
+        if uri.starts_with("data:") {
+            let (mime, bytes) = crate::gltf::data_uri(uri).ok()?;
+            let ext = mime.as_deref().and_then(|m| m.strip_prefix("image/")).unwrap_or("png");
             let file = format!("image.{ext}");
             return self.images.bytes(Cow::Owned(bytes), &file, Location::Embedded, |b| {
                 assets.image(b, Path::new(&file))

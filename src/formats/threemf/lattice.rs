@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
 
 use crate::mesh::Prim;
+use crate::vec3::{add, cross, scale, sub};
 
 /// How a beam's end is closed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -324,22 +325,6 @@ pub(super) fn build(
     triangles
 }
 
-fn add(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
-}
-fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-fn scale(a: [f32; 3], s: f32) -> [f32; 3] {
-    [a[0] * s, a[1] * s, a[2] * s]
-}
-fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
-}
 fn length(a: [f32; 3]) -> f32 {
     a[0].hypot(a[1]).hypot(a[2])
 }

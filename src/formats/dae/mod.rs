@@ -56,6 +56,7 @@ use crate::images::Images;
 use crate::material::Full;
 use crate::num::{f32_of, u32_of};
 use crate::source::{Axis, Fact, Handedness, SourceInfo};
+use crate::vec3::{self, cross, dot, sub};
 use crate::{Context as _, ErrorKind, Result};
 use xml::Dom;
 
@@ -1757,9 +1758,9 @@ impl Transform {
                 let eye = [at(0, 0.0), at(1, 0.0), at(2, 0.0)];
                 let target = [at(3, 0.0), at(4, 0.0), at(5, -1.0)];
                 let up = [at(6, 0.0), at(7, 1.0), at(8, 0.0)];
-                let z = norm(sub(eye, target)).unwrap_or([0.0, 0.0, 1.0]);
-                let x = norm(cross(up, z))
-                    .or_else(|| norm(cross([0.0, 0.0, 1.0], z)))
+                let z = vec3::unit(sub(eye, target)).unwrap_or([0.0, 0.0, 1.0]);
+                let x = vec3::unit(cross(up, z))
+                    .or_else(|| vec3::unit(cross([0.0, 0.0, 1.0], z)))
                     .unwrap_or([1.0, 0.0, 0.0]);
                 let y = cross(z, x);
                 [
@@ -1773,11 +1774,11 @@ impl Transform {
                 // Shears along the rotation axis's part across the translation axis, by the angle's tangent.
                 let angle = at(0, 0.0).to_radians().clamp(-1.5, 1.5);
                 let a = [at(1, 0.0), at(2, 0.0), at(3, 0.0)];
-                let Some(b) = norm([at(4, 0.0), at(5, 0.0), at(6, 0.0)]) else {
+                let Some(b) = vec3::unit([at(4, 0.0), at(5, 0.0), at(6, 0.0)]) else {
                     return IDENTITY;
                 };
                 let d = dot(a, b);
-                let Some(a) = norm([a[0] - d * b[0], a[1] - d * b[1], a[2] - d * b[2]]) else {
+                let Some(a) = vec3::unit([a[0] - d * b[0], a[1] - d * b[1], a[2] - d * b[2]]) else {
                     return IDENTITY;
                 };
                 let t = angle.tan();
@@ -1795,7 +1796,7 @@ impl Transform {
 
 /// A rotation of `angle` radians about `axis`.
 fn rotation(axis: [f64; 3], angle: f64) -> M4 {
-    let Some([x, y, z]) = norm(axis) else {
+    let Some([x, y, z]) = vec3::unit(axis) else {
         return IDENTITY;
     };
     let (s, c) = angle.sin_cos();
@@ -1806,25 +1807,4 @@ fn rotation(axis: [f64; 3], angle: f64) -> M4 {
         [t * x * z - s * y, t * y * z + s * x, t * z * z + c, 0.0],
         [0.0, 0.0, 0.0, 1.0],
     ]
-}
-
-fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-
-fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-
-fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
-}
-
-fn norm(v: [f64; 3]) -> Option<[f64; 3]> {
-    let len = dot(v, v).sqrt();
-    (len > 1e-12 && len.is_finite()).then(|| [v[0] / len, v[1] / len, v[2] / len])
 }

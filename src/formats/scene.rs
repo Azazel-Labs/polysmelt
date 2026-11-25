@@ -1129,6 +1129,22 @@ fn survey(v: &[[f32; 3]]) -> (usize, [f32; 3], [f32; 3]) {
     (moved, min, max)
 }
 
+/// Merges a vertex's repeated joints (adding their weights in the order they come) and keeps the
+/// [`MAX_INFLUENCES`] strongest, strongest first and the lower joint first between equals. The writer settles every
+/// skinned vertex this way; a reader that must bound its lists first calls it too, so the writer keeps what it kept.
+pub(crate) fn strongest(list: &mut Vec<(u32, f32)>) {
+    list.sort_by_key(|e| e.0);
+    list.dedup_by(|later, kept| {
+        let same = later.0 == kept.0;
+        if same {
+            kept.1 += later.1;
+        }
+        same
+    });
+    list.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+    list.truncate(MAX_INFLUENCES);
+}
+
 /// Each vertex's joints and weights in sets of four, as glTF wants them: joints in range and merged where
 /// repeated, the strongest first, at most [`MAX_INFLUENCES`], summing to 1, and a vertex with none bound wholly to
 /// the primitive's rest joint. Returns the joints and weights set after set, and the number of sets.
@@ -1152,13 +1168,9 @@ fn skin_sets(p: &Primitive, count: usize) -> (Vec<u32>, Vec<f32>, usize) {
             if !(wt > 0.0 && wt.is_finite()) || j as usize >= count {
                 continue;
             }
-            match list.iter_mut().find(|e| e.0 == j) {
-                Some(e) => e.1 += wt,
-                None => list.push((j, wt)),
-            }
+            list.push((j, wt));
         }
-        list.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
-        list.truncate(MAX_INFLUENCES);
+        strongest(&mut list);
         let sum: f32 = list.iter().map(|e| e.1).sum();
         if list.is_empty() || sum <= 0.0 || !sum.is_finite() {
             flat.push((rest, 1.0));

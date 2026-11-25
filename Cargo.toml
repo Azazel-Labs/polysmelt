@@ -1,6 +1,6 @@
 [package]
 name = "polysmelt"
-version = "0.16.2"
+version = "0.17.3"
 edition = "2024"
 # MIT-0, except the SketchUp reader (src/formats/skp), which is MIT: see its LICENSE-openskp.
 license = "MIT-0 AND MIT"
@@ -69,7 +69,7 @@ htr = []
 splat = []
 # Gaussian splats in gzipped `.spz`, versions 1 to 3 (KHR_gaussian_splatting).
 spz = ["dep:flate2"]
-fbx =["dep:base64", "dep:flate2"]
+fbx =["dep:flate2"]
 3mf = ["dep:zip", "dep:quick-xml"]
 # COLLADA `.dae`, and `.zae` and `.kmz` archives holding one.
 dae = ["dep:zip", "dep:quick-xml"]
@@ -102,7 +102,7 @@ xyz = []
 # E57 scans: point clouds with their poses, colors and intensity.
 e57 = ["dep:e57"]
 # AMF (Additive Manufacturing File), plain or zipped.
-amf = ["dep:quick-xml", "dep:zip", "dep:base64", "dep:flate2", "dep:fdeflate"]
+amf = ["dep:quick-xml", "dep:zip", "dep:flate2", "dep:fdeflate"]
 # LightWave objects (`.lwo`: LWOB, LWO2 and LWO3).
 lwo = []
 # AC3D `.ac` models.
@@ -122,7 +122,8 @@ serde_json = "1"
 bytemuck = "1"
 # Shared, sliceable bytes: images in a mesh point at the buffer they were read into rather than copying it.
 bytes = { version = "1.10", default-features = false }
-base64 = { version = "0.22", optional = true }
+# Base64 text: data URIs (glTF, COLLADA), AMF textures and ASCII FBX content.
+base64 = "0.22"
 zip = { version = "9", default-features = false, features = ["deflate"], optional = true }
 quick-xml = { version = "0.41", optional = true }
 openusd = { version = "0.8", optional = true }

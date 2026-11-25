@@ -39,7 +39,7 @@ use zip::ZipArchive;
 type Zip<'a> = ZipArchive<Box<dyn super::ReadSeek + 'a>>;
 
 use crate::material::{self, Factor, Full, Specular, Tex, Volume};
-use crate::mesh::{GRAY, Image, Material, Prim, srgb_to_linear};
+use crate::mesh::{GRAY, Image, Material, Prim, linear_rgba, linear_to_srgb, linear_u8};
 
 mod lattice;
 use lattice::{Attr, BallMode, BeamLook, Cap, Clip, Clipper, Lattice};
@@ -150,7 +150,7 @@ impl Finish {
                 m.metallic = 0.0;
                 m.roughness = 1.0 - f(glossiness);
                 // glTF's specular color scales the 4% a dielectric reflects head on.
-                let color = color.map(|c| srgb_to_linear(f32::from(c) / 255.0) / 0.04);
+                let color = color.map(|c| linear_u8(c) / 0.04);
                 m.specular = Some(Specular {
                     factor: Factor::of(1.0),
                     color,
@@ -1665,8 +1665,7 @@ fn parse_part(r: impl Read, triangles: &mut usize, limit: usize) -> Result<Part>
 
 /// Linear RGBA of an sRGB color.
 fn linear(c: [u8; 4]) -> [f32; 4] {
-    let [r, g, b] = [c[0], c[1], c[2]].map(|v| srgb_to_linear(f32::from(v) / 255.0));
-    [r, g, b, f32::from(c[3]) / 255.0]
+    linear_rgba(c.map(|v| f32::from(v) / 255.0))
 }
 
 /// An sRGB color of linear RGBA.
@@ -1676,14 +1675,7 @@ fn linear(c: [u8; 4]) -> [f32; 4] {
     reason = "clamped to 0..=1 first, so in 0..=255"
 )]
 fn srgb(c: [f32; 4]) -> [u8; 4] {
-    let encode = |v: f32| {
-        let v = if v.is_nan() { 0.0 } else { v.clamp(0.0, 1.0) };
-        if v <= 0.003_130_8 {
-            v * 12.92
-        } else {
-            1.055 * v.powf(1.0 / 2.4) - 0.055
-        }
-    };
+    let encode = |v: f32| linear_to_srgb(if v.is_nan() { 0.0 } else { v.clamp(0.0, 1.0) });
     let alpha = if c[3].is_nan() { 1.0 } else { c[3].clamp(0.0, 1.0) };
     [encode(c[0]), encode(c[1]), encode(c[2]), alpha].map(|v| (v * 255.0).round() as u8)
 }

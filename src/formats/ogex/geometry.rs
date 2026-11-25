@@ -8,6 +8,7 @@ use crate::Result;
 use crate::document::{Builder, Part};
 use crate::mesh::{FastMap, Prim};
 use crate::num::{f32_of, u32_of};
+use crate::vec3::{cross, dot, unit};
 
 /// The most morph targets a mesh keeps.
 const MAX_TARGETS: usize = 256;
@@ -15,8 +16,8 @@ const MAX_TARGETS: usize = 256;
 const MAX_TARGET_FLOATS: usize = 1 << 24;
 /// The highest texture coordinate or color set kept.
 const MAX_SET: usize = 7;
-/// The most bone influences a skin may list.
-const MAX_INFLUENCES: usize = 1 << 26;
+/// The most bone influences a skin may list, its vertices' together.
+const MAX_INFLUENCE_TOTAL: usize = 1 << 26;
 
 /// A geometry object as written into the buffer.
 pub(super) struct Geom {
@@ -310,7 +311,7 @@ fn vec3(p: &[f64], fill: f64) -> [f32; 3] {
 /// A normal at unit length; +Z when it has none.
 fn unit_normal(p: &[f64]) -> [f32; 3] {
     let v = [0, 1, 2].map(|k| p.get(k).copied().unwrap_or(0.0));
-    super::math::unit(v).map_or([0.0, 0.0, 1.0], |u| u.map(f32_of))
+    unit(v).map_or([0.0, 0.0, 1.0], |u| u.map(f32_of))
 }
 
 /// What one index array draws: triangles, line segments or points.
@@ -502,8 +503,8 @@ fn build(c: &mut Ctx<'_>, g: u32, need_uv: usize) -> Result<Option<Geom>> {
                 } else if let Some((bv, bw)) = bitangents {
                     // The handedness: whether the bitangent agrees with normal × tangent.
                     let nrm = p.normals[i].map(f64::from);
-                    let cr = super::math::cross(nrm, d.map(f64::from));
-                    super::math::dot(
+                    let cr = cross(nrm, d.map(f64::from));
+                    dot(
                         cr,
                         [0, 1, 2].map(|k| bv[i * bw..i * bw + bw].get(k).copied().unwrap_or(0.0)),
                     )
@@ -794,9 +795,9 @@ fn read_skin(c: &mut Ctx<'_>, s: u32, n: usize, p: &mut Prim) -> Option<(usize, 
     }
     let mut total = 0usize;
     for &k in counts {
-        total = total.checked_add(vertex(k, MAX_INFLUENCES)? as usize)?;
+        total = total.checked_add(vertex(k, MAX_INFLUENCE_TOTAL)? as usize)?;
     }
-    if total > MAX_INFLUENCES || indices.len() != total || weights.len() != total {
+    if total > MAX_INFLUENCE_TOTAL || indices.len() != total || weights.len() != total {
         return None;
     }
     p.skin_joints = Vec::with_capacity(n);
@@ -805,7 +806,7 @@ fn read_skin(c: &mut Ctx<'_>, s: u32, n: usize, p: &mut Prim) -> Option<(usize, 
     let mut dropped = 0;
     for &k in counts {
         // Checked above to be a whole number in range.
-        let k = vertex(k, MAX_INFLUENCES).map_or(0, |k| k as usize);
+        let k = vertex(k, MAX_INFLUENCE_TOTAL).map_or(0, |k| k as usize);
         // The four strongest influences, strongest first.
         let mut top = [(0u32, 0.0f64); 4];
         for i in at..at + k {

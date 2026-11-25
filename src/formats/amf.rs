@@ -26,7 +26,7 @@ use serde_json::{Map, Value, json};
 use crate::document::{Builder, Document};
 use crate::images::Source;
 use crate::material::{Alpha, CLAMP, Full, REPEAT, Tex};
-use crate::mesh::{GRAY, Image, Material, Prim, srgb_to_linear};
+use crate::mesh::{GRAY, Image, Material, Prim, linear_rgba};
 use crate::source::{Axis, Fact, SourceInfo};
 use crate::{Context as _, ErrorKind, Result, Within as _};
 
@@ -658,7 +658,7 @@ fn close(a: &mut Amf, s: &mut State, t: Tag, parent: Option<Tag>, limit: usize) 
         }
         Tag::Texture => {
             if let Some(mut t) = s.texture.take() {
-                if let Some(pixels) = base64(&s.text) {
+                if let Some(pixels) = crate::gltf::decode_base64(&s.text) {
                     t.pixels = pixels;
                     a.textures.push(t);
                 } else {
@@ -714,17 +714,6 @@ fn close(a: &mut Amf, s: &mut State, t: Tag, parent: Option<Tag>, limit: usize) 
     Ok(())
 }
 
-/// Base64 text (whitespace and padding as they come) as bytes.
-fn base64(text: &[u8]) -> Option<Vec<u8>> {
-    use base64::Engine as _;
-    use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
-    let clean: Vec<u8> = text.iter().copied().filter(|c| !c.is_ascii_whitespace()).collect();
-    let config = GeneralPurposeConfig::new().with_decode_padding_mode(DecodePaddingMode::Indifferent);
-    GeneralPurpose::new(&base64::alphabet::STANDARD, config)
-        .decode(clean)
-        .ok()
-}
-
 /// Moves the model's metadata of the kinds [`SourceInfo`] has from `metadata` into `info`: the standard's
 /// `name`, `description`, `author` and `cad`, and the copyright, license and dates other writers add.
 fn take_metadata(info: &mut SourceInfo, metadata: &mut Map<String, Value>) {
@@ -763,11 +752,6 @@ fn meters(unit: &str) -> Option<f64> {
     })
 }
 
-/// Linear RGBA of an sRGB color.
-fn linear(c: [f32; 4]) -> [f32; 4] {
-    [srgb_to_linear(c[0]), srgb_to_linear(c[1]), srgb_to_linear(c[2]), c[3]]
-}
-
 fn some<const N: usize>(v: Option<&[f32; N]>) -> Option<[f32; N]> {
     v.filter(|v| !v[0].is_nan()).copied()
 }
@@ -777,7 +761,7 @@ fn material_colors(materials: &[Mat], index: &HashMap<&str, usize>) -> Vec<Optio
     fn color(materials: &[Mat], index: &HashMap<&str, usize>, i: usize, depth: usize) -> Option<[f32; 4]> {
         let m = &materials[i];
         if let Some(c) = m.color {
-            return Some(linear(c));
+            return Some(linear_rgba(c));
         }
         if depth >= 8 {
             return None;
@@ -933,7 +917,7 @@ fn build(a: &Amf, zipped: bool) -> Result<Document> {
             let base = vol
                 .color
                 .or(o.color)
-                .map(linear)
+                .map(linear_rgba)
                 .or_else(|| material.and_then(|m| mat_colors[m]))
                 .unwrap_or(GRAY);
             // Each triangle's image (when textured), and the triangles in order of it.
@@ -1014,7 +998,7 @@ fn build(a: &Amf, zipped: bool) -> Result<Document> {
                             if colored {
                                 let c = tri_color
                                     .or_else(|| some(o.colors.get(v as usize)))
-                                    .map_or(base, linear);
+                                    .map_or(base, linear_rgba);
                                 blend |= c[3] < 1.0;
                                 p.colors.push(c);
                             }

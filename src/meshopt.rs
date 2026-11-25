@@ -1291,11 +1291,8 @@ fn octahedral(c: [f32; 3], max: f32) -> [f32; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vec3::unit as normalize;
 
-    fn normalize(v: [f32; 3]) -> Option<[f32; 3]> {
-        let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
-        (len > 0.0).then(|| v.map(|c| c / len))
-    }
     use crate::test_rng::Pcg32;
     use std::f32::consts::FRAC_1_SQRT_2;
 

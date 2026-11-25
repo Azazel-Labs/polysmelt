@@ -3,6 +3,8 @@
 
 use serde_json::{Value, json};
 
+use crate::vec3::{cross, dot, unit};
+
 pub(super) type M4 = [f64; 16];
 
 pub(super) const IDENTITY: M4 = [
@@ -80,23 +82,6 @@ pub(super) fn quat_unit(q: [f64; 4]) -> [f64; 4] {
     } else {
         [0.0, 0.0, 0.0, 1.0]
     }
-}
-
-pub(super) fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-
-pub(super) fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
-}
-
-pub(super) fn unit(v: [f64; 3]) -> Option<[f64; 3]> {
-    let l = dot(v, v).sqrt();
-    (l > 1e-12 && l.is_finite()).then(|| v.map(|c| c / l))
 }
 
 /// The inverse of a matrix; `None` when it's singular.

@@ -47,6 +47,7 @@ use crate::material::{self, Alpha, Clearcoat, Factor, Full, Sheen, Specular, Tex
 use crate::mesh::{Image, Material, Prim, quad, smooth_normals, srgb_to_linear, triangulate};
 use crate::num::u32_of;
 use crate::source::{Axis, Fact, SourceInfo};
+use crate::vec3;
 
 /// Marks a corner without a texture coordinate or normal.
 const NONE: u32 = u32::MAX;
@@ -896,13 +897,6 @@ fn written_corners(s: &[u8], face: &mut Vec<Corner>) -> Option<(usize, bool, [u3
     }
 }
 
-/// A `vn` statement's normal, made unit length.
-#[inline]
-fn unit_normal(f: [f32; 3]) -> [f32; 3] {
-    let len = (f[0] * f[0] + f[1] * f[1] + f[2] * f[2]).sqrt();
-    if len > 0.0 { f.map(|c| c / len) } else { [0.0, 1.0, 0.0] }
-}
-
 /// One statement of a [`Piece`], or a run of them.
 #[derive(Clone, Copy)]
 enum Op {
@@ -1017,7 +1011,7 @@ impl Piece {
             [b'v', b'n', b' ' | b'\t', ..] => {
                 let (f, n, next) = quick_nums::<3>(s, 3)?;
                 if n == 3 {
-                    self.nums.extend_from_slice(&unit_normal(f));
+                    self.nums.extend_from_slice(&vec3::unit_or(f, [0.0, 1.0, 0.0]));
                     self.run(Op::Vn);
                 }
                 next
@@ -2561,7 +2555,7 @@ impl Reader {
     #[inline]
     fn normal(&mut self, f: [f32; 3], n: usize) {
         if n == 3 {
-            self.vn.push(unit_normal(f));
+            self.vn.push(vec3::unit_or(f, [0.0, 1.0, 0.0]));
         }
     }
 
@@ -2805,13 +2799,7 @@ impl Reader {
 
 /// A triangle's normal, as long as twice its area.
 fn area_normal(a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> [f32; 3] {
-    let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
-    let v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
-    [
-        u[1] * v[2] - u[2] * v[1],
-        u[2] * v[0] - u[0] * v[2],
-        u[0] * v[1] - u[1] * v[0],
-    ]
+    vec3::cross(vec3::sub(b, a), vec3::sub(c, a))
 }
 
 fn add(to: &mut [f32; 3], n: [f32; 3]) {

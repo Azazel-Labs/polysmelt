@@ -2,6 +2,7 @@ use super::*;
 use crate::assets::Memory;
 use crate::document::Pose;
 use crate::mesh::Mesh;
+use crate::vec3::{cross, dot, sub};
 
 const TEXT_CUBE: &[u8] = include_bytes!("../../../tests/corpus/x/test_cube_text/test_cube_text.x");
 const BINARY_CUBE: &[u8] = include_bytes!("../../../tests/corpus/x/test_cube_binary/test_cube_binary.x");
@@ -49,22 +50,6 @@ fn bounds(m: &Mesh) -> ([f32; 3], [f32; 3]) {
 
 fn close(a: &[f32], b: &[f32]) -> bool {
     a.len() == b.len() && a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-4)
-}
-
-fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
-}
-
-fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-
-fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
 /// Every triangle faces away from the mesh's center.

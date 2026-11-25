@@ -50,7 +50,7 @@ use std::path::Path as FsPath;
 use serde_json::json;
 
 use super::inflate::inflate;
-use super::scene::{self, Animation, Bin, Channel, IDENTITY, Interp, M4, MAX_INFLUENCES, Node, Path, Primitive};
+use super::scene::{self, Animation, Bin, Channel, IDENTITY, Interp, M4, Node, Path, Primitive};
 use super::scene::{Scene, SceneMesh, Skin};
 use crate::assets::Assets;
 use crate::document::{Document, Keep};
@@ -851,10 +851,8 @@ impl<'a> Build<'a> {
                 }
             }
         }
-        for l in &mut lists {
-            l.sort_by(|a, b| b.1.total_cmp(&a.1));
-            l.truncate(MAX_INFLUENCES);
-        }
+        // Two bones can name one frame: their weights add up before the strongest are kept.
+        lists.iter_mut().for_each(scene::strongest);
         // Vertices no bone moves stay with the mesh's frame: a joint at the frame (or at a node under it, when the
         // frame is a bone already) with no offset.
         let used = |p: &u32| lists.get(*p as usize).is_some_and(Vec::is_empty);

@@ -60,6 +60,7 @@ use crate::material::{self, Alpha, Clearcoat, Factor, Full, Specular, Tex, UvTra
 use crate::mesh::{GRAY, Material, Prim, triangulate};
 use crate::num::f32_of;
 use crate::source::{Axis, Fact, Handedness, SourceInfo};
+use crate::vec3::{self, cross, dot};
 
 /// Prim types that are no node: shading networks, and what the prims using them read (subsets, blend shapes,
 /// skeletal animations).
@@ -1928,18 +1929,6 @@ fn empty_sets<T: Clone>(n: usize) -> Vec<Vec<T>> {
     if n > 1 { vec![Vec::new(); n] } else { Vec::new() }
 }
 
-fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-
-fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
-}
-
 impl Reader<'_> {
     fn primvar<T>(
         &self,
@@ -3315,24 +3304,13 @@ fn smooth_normals(points: &[[f32; 3]], corners: &[i32], faces: &[(usize, usize, 
 
 /// A polygon's normal (Newell's), unit length.
 fn polygon_normal(poly: &[[f32; 3]], flip: bool) -> [f32; 3] {
-    let mut n = [0f64; 3];
-    for (i, a) in poly.iter().enumerate() {
-        let (a, b) = (a.map(f64::from), poly[(i + 1) % poly.len()].map(f64::from));
-        n[0] += (a[1] - b[1]) * (a[2] + b[2]);
-        n[1] += (a[2] - b[2]) * (a[0] + b[0]);
-        n[2] += (a[0] - b[0]) * (a[1] + b[1]);
-    }
-    unit(n, flip)
+    unit(vec3::newell(poly.iter().map(|a| a.map(f64::from))), flip)
 }
 
+/// `n` at unit length, reversed when `flip`; up when it has no length.
 fn unit(n: [f64; 3], flip: bool) -> [f32; 3] {
-    let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
-    let s = if flip { -1.0 } else { 1.0 };
-    if len > 0.0 {
-        n.map(|x| f32_of(s * x / len))
-    } else {
-        [0.0, 1.0, 0.0]
-    }
+    let n = if flip { n.map(|x| -x) } else { n };
+    vec3::unit_or(n, [0.0, 1.0, 0.0]).map(f32_of)
 }
 
 fn vec3s(v: sdf::Value) -> Option<Vec<[f32; 3]>> {

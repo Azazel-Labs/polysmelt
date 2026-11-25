@@ -2,6 +2,28 @@
 
 Breaking changes are allowed in minor releases until 1.0.
 
+## 0.17.3
+
+- DirectX `.x` skins merge a joint listed twice for a vertex before keeping the strongest
+  influences, so its weight isn't lost. Every reader that trims influences now keeps the same
+  ones the glTF writer would.
+- Base64 in AMF textures and ASCII FBX `Content` decodes as leniently as glTF data URIs: either
+  alphabet, whitespace anywhere, and optional padding. COLLADA `data:` images that aren't base64
+  keep their raw bytes.
+- `base64` is a regular dependency rather than part of the `fbx` and `amf` features.
+- Internal: one set of vector, polygon normal and sRGB helpers replaces the readers' own
+  copies. Output is unchanged.
+
+## 0.17.2
+
+- `Loader::open_with` and `Loader::read_with` borrow an `&dyn Assets` for one read, so assets
+  that aren't `Send`, `Sync` or `'static` work, and can be asked afterwards what was read.
+
+## 0.17.1
+
+- `Error::new(kind, message)` and `Error::caused(kind, message, source)` are public, so an
+  `Assets` source or a `pack_glb` fetch of your own can return any `ErrorKind`.
+
 ## 0.17.0
 
 This release reshapes the public API ahead of 1.0. Most code needs only the small changes

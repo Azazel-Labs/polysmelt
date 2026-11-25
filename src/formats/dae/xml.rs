@@ -685,37 +685,6 @@ pub(super) fn from_hex(text: &[u8]) -> Option<Vec<u8>> {
         .collect()
 }
 
-/// Bytes from base64 text (whitespace ignored); `None` when it isn't base64.
-pub(super) fn from_base64(text: &[u8]) -> Option<Vec<u8>> {
-    let value = |c: u8| -> Option<u32> {
-        Some(u32::from(match c {
-            b'A'..=b'Z' => c - b'A',
-            b'a'..=b'z' => c - b'a' + 26,
-            b'0'..=b'9' => c - b'0' + 52,
-            b'+' | b'-' => 62,
-            b'/' | b'_' => 63,
-            _ => return None,
-        }))
-    };
-    let mut out = Vec::with_capacity(text.len() * 3 / 4);
-    let (mut acc, mut bits) = (0u32, 0u32);
-    for &c in text {
-        if c.is_ascii_whitespace() {
-            continue;
-        }
-        if c == b'=' {
-            break;
-        }
-        acc = (acc << 6) | value(c)?;
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            out.push(((acc >> bits) & 0xFF).to_le_bytes()[0]);
-        }
-    }
-    Some(out)
-}
-
 #[allow(
     clippy::cast_possible_truncation,
     reason = "the tree is far smaller than 2^32 elements"

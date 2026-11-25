@@ -51,6 +51,7 @@ use crate::mesh::{
     Texture, UvTransform, Volume,
 };
 use crate::num::{f32_of, u32_of, usize_of};
+use crate::vec3;
 use crate::{Context as _, ErrorKind, Result, Within as _};
 
 /// How much of a buffer is read at once.
@@ -1830,14 +1831,7 @@ fn apply_tangent(m: &M4, t: [f32; 4], flip: bool) -> [f32; 4] {
 }
 
 fn normalize(v: &mut [f32; 3]) {
-    let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
-    if len > 0.0 {
-        for c in v.iter_mut() {
-            *c /= len;
-        }
-    } else {
-        *v = [0.0, 0.0, 1.0];
-    }
+    *v = vec3::unit_or(*v, [0.0, 0.0, 1.0]);
 }
 
 /// One primitive's geometry before it is placed.
