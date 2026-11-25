@@ -4,11 +4,10 @@
 
 use super::glb::image_mime;
 use crate::bytes::{u16_at, u32_at};
+use crate::images::MAX_PIXELS;
 
 /// The widest or tallest image decoded. Real textures are a few thousand pixels across.
 const MAX_SIDE: usize = 16_384;
-/// The most pixels decoded, 64 million, which is 256 MB of RGBA.
-const MAX_PIXELS: usize = 1 << 26;
 
 /// `bytes` as a PNG or JPEG file: unchanged when it already is one, re-encoded as PNG when it is a BMP or TGA this
 /// can decode, `None` otherwise.

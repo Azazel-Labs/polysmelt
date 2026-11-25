@@ -61,8 +61,8 @@ const MAX_NODES: usize = 1 << 20;
 /// The most points arcs in polylines, circles, arcs, ellipses and splines add to a drawing; past
 /// them, a bulge is its chord, a circle, arc or ellipse a segment for each quarter turn and a
 /// spline its control points. Each is a few bytes of the file but up to 32 segments (a spline
-/// up to 32 for each knot span), so this bounds what a file of curves costs.
-const MAX_ARC_POINTS: usize = 1 << 22;
+/// up to 32 for each knot span): the curve budget every reader shares.
+const MAX_ARC_POINTS: usize = super::nurbs::MAX_CURVE_POINTS;
 /// The turn each segment of an arc stands for, at most: a sixteenth of a half turn.
 const ARC_STEP: f64 = std::f64::consts::PI / 16.0;
 const WHITE: u32 = 0xFF_FFFF;

@@ -8,6 +8,12 @@
 
 use serde_json::{Value, json};
 
+/// The longest turn between two animation samples, in degrees, when a source's rotations are resampled as glTF
+/// quaternions: FBX interpolates Euler angles and USD can too, while glTF takes the shorter way between quaternions,
+/// so longer turns are cut into steps short enough that the two agree.
+#[cfg(any(feature = "fbx", feature = "usd"))]
+pub(super) const MAX_STEP_DEGREES: f64 = 10.0;
+
 pub(super) type M4 = [[f64; 4]; 4];
 
 pub(super) const IDENTITY: M4 = [[1., 0., 0., 0.], [0., 1., 0., 0.], [0., 0., 1., 0.], [0., 0., 0., 1.]];

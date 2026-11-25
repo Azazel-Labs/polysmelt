@@ -6,6 +6,10 @@
 
 use crate::{Context, ErrorKind, Result};
 
+/// The most bytes a compressed model inflates to, whichever reader inflates it: 2 GiB, past any real `.x` or XGL
+/// file. Deflate makes at most about 1032 bytes of a byte, so a file near the cap is megabytes, not a few bytes.
+pub(super) const MAX_INFLATED: usize = 1 << 31;
+
 /// Reads a deflate stream's bits, least significant first.
 struct Bits<'a> {
     data: &'a [u8],

@@ -298,13 +298,8 @@ impl Layer {
 /// FBX time units per second.
 const KTIME: f64 = 46_186_158_000.0;
 
-/// The most points NURBS curves add to a file; past them, a curve is drawn through its control points. Each control
-/// point is a few bytes of the file but up to 32 segments, so this bounds what a file of curves costs.
-const MAX_CURVE_POINTS: usize = 1 << 22;
-
-/// The most degrees a rotation curve may turn between two samples: FBX interpolates Euler
-/// angles, glTF quaternions, so long turns are cut into steps short enough to agree.
-const MAX_STEP_DEGREES: f64 = 10.0;
+use super::nurbs::MAX_CURVE_POINTS;
+use super::xform::MAX_STEP_DEGREES;
 
 /// The scene's frame rate, from `TimeMode` (the FBX SDK's `EMode`), or `CustomFrameRate` when that's the mode.
 fn frame_rate(settings: &Props<'_>) -> Fact<f64> {

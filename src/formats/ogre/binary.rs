@@ -81,8 +81,7 @@ const VES_TEXTURE_COORDINATES: u16 = 7;
 const VES_BINORMAL: u16 = 8;
 const VES_TANGENT: u16 = 9;
 
-/// The most texture coordinate sets a geometry keeps.
-const MAX_UV_SETS: usize = 8;
+use crate::formats::scene::MAX_UV_SETS;
 
 /// The mesh serializer versions, oldest first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
