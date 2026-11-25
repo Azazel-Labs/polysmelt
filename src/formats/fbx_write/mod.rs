@@ -591,9 +591,33 @@ impl<'d> Writer<'d> {
         Ok(())
     }
 
-    /// Writes node `i`'s camera and light, on model `model`.
-    #[allow(clippy::unused_self, reason = "written in a later step")]
-    fn attributes(&mut self, _i: usize, _model: i64) {}
+    /// Writes node `i`'s camera and light, on model `model`: on the model itself when it's turned for the one it
+    /// holds, else on a child turned for it.
+    fn attributes(&mut self, i: usize, model: i64) {
+        let node = &list(self.json, "nodes")[i];
+        let m = self.models[i].as_ref().expect("a written node");
+        let (name, turn) = (m.name.clone(), m.turn.map(|t| t.perm));
+        if let Some(cam) = index(node, "camera").and_then(|c| list(self.json, "cameras").get(c)) {
+            let host = if turn == Some(CAMERA_TURN.perm) {
+                model
+            } else {
+                self.helper(model, &format!("{name}_camera"), "Camera", [0.0; 3], CAMERA_TURN.q)
+            };
+            let attr = self.id();
+            self.object("NodeAttribute", camera(attr, &name, cam));
+            self.oo(attr, host);
+        }
+        if let Some(light) = self.light_of(node) {
+            let host = if turn == Some(LIGHT_TURN.perm) {
+                model
+            } else {
+                self.helper(model, &format!("{name}_light"), "Light", [0.0; 3], LIGHT_TURN.q)
+            };
+            let attr = self.id();
+            self.object("NodeAttribute", light_attribute(attr, &name, light));
+            self.oo(attr, host);
+        }
+    }
 
     /// The scene's top-level records, once everything is written.
     fn finish(mut self) -> Vec<Node> {
@@ -767,6 +791,117 @@ impl<'d> Writer<'d> {
         }
         n
     }
+}
+
+/// A glTF camera as a camera attribute. The field of view is given as an angle and, for tools that work from a lens,
+/// as the focal length a 24 mm high film would need for it.
+fn camera(id: i64, name: &str, cam: &Value) -> Node {
+    const FILM_HEIGHT: f64 = 24.0 / 25.4;
+    let ortho = cam.get("type").and_then(Value::as_str) == Some("orthographic");
+    let o = cam.get("orthographic").unwrap_or(&Value::Null);
+    let p = cam.get("perspective").unwrap_or(&Value::Null);
+    let (aspect, near, far) = if ortho {
+        let (x, y) = (number(o, "xmag").unwrap_or(1.0), number(o, "ymag").unwrap_or(1.0));
+        let aspect = if x > 0.0 && y > 0.0 { x / y } else { 1.0 };
+        (
+            aspect,
+            number(o, "znear").unwrap_or(0.01),
+            number(o, "zfar").unwrap_or(1000.0),
+        )
+    } else {
+        let aspect = number(p, "aspectRatio").filter(|a| *a > 0.0).unwrap_or(16.0 / 9.0);
+        // Without a far plane the camera sees forever: as far as can be held in practice.
+        let near = number(p, "znear").filter(|n| *n > 0.0).unwrap_or(0.01);
+        (
+            aspect,
+            near,
+            number(p, "zfar").filter(|f| *f > near).unwrap_or(near * 1e7),
+        )
+    };
+    let yfov = number(p, "yfov")
+        .filter(|f| *f > 0.0 && *f < std::f64::consts::PI)
+        .unwrap_or(0.8);
+    let focal = FILM_HEIGHT * 25.4 / 2.0 / (yfov / 2.0).tan();
+    let mut props = vec![
+        p_int("CameraProjectionType", "enum", i32::from(ortho)),
+        p_int("ApertureMode", "enum", 2),
+        p_f64("FieldOfView", "FieldOfView", "A", yfov.to_degrees()),
+        p_f64("FocalLength", "Number", "A", focal),
+        p_f64("FilmWidth", "Number", "", FILM_HEIGHT * aspect),
+        p_f64("FilmHeight", "Number", "", FILM_HEIGHT),
+        p_f64("FilmAspectRatio", "double", "", aspect),
+        p_int("AspectRatioMode", "enum", 0),
+        p_f64("AspectWidth", "double", "", aspect),
+        p_f64("AspectHeight", "double", "", 1.0),
+        p_f64("NearPlane", "double", "", near),
+        p_f64("FarPlane", "double", "", far),
+    ];
+    if ortho {
+        props.push(p_f64("OrthoZoom", "double", "", number(o, "ymag").unwrap_or(1.0)));
+    }
+    if let Some(extras) = cam.get("extras").and_then(Value::as_object) {
+        user_props(extras, &mut props);
+    }
+    Node::new("NodeAttribute")
+        .i64(id)
+        .str(&fbx_name(name, "NodeAttribute"))
+        .str("Camera")
+        .with(props70(props))
+        .child("TypeFlags", |n| n.str("Camera"))
+        .child("GeometryVersion", |n| n.i32(124))
+        .child("Position", |n| n.f64(0.0).f64(0.0).f64(0.0))
+        .child("Up", |n| n.f64(0.0).f64(1.0).f64(0.0))
+        .child("LookAt", |n| n.f64(1.0).f64(0.0).f64(0.0))
+        .child("ShowInfoOnMoving", |n| n.i32(1))
+        .child("ShowAudio", |n| n.i32(0))
+        .child("AudioColor", |n| n.f64(0.0).f64(1.0).f64(0.0))
+        .child("CameraOrthoZoom", |n| n.f64(1.0))
+}
+
+/// A `KHR_lights_punctual` light as a light attribute: intensity in percent, as FBX keeps it, falling off with the
+/// square of distance. A range has no FBX equivalent and is kept as a user property.
+fn light_attribute(id: i64, name: &str, light: &Value) -> Node {
+    let kind = match light.get("type").and_then(Value::as_str) {
+        Some("directional") => 1,
+        Some("spot") => 2,
+        _ => 0,
+    };
+    let color = numbers(light, "color", [1.0; 3]).map(to_srgb);
+    let mut props = vec![
+        p_int("LightType", "enum", kind),
+        p_int("CastLight", "bool", 1),
+        p_vec("Color", "Color", "", "A", color),
+        p_f64(
+            "Intensity",
+            "Number",
+            "A",
+            number(light, "intensity").unwrap_or(1.0) * 100.0,
+        ),
+        p_int("DecayType", "enum", 2),
+        p_int("CastShadows", "bool", 1),
+    ];
+    if kind == 2 {
+        let spot = light.get("spot").unwrap_or(&Value::Null);
+        let outer = number(spot, "outerConeAngle").unwrap_or(std::f64::consts::FRAC_PI_4);
+        let inner = number(spot, "innerConeAngle").unwrap_or(0.0);
+        props.push(p_f64("InnerAngle", "Number", "A", (inner * 2.0).to_degrees()));
+        props.push(p_f64("OuterAngle", "Number", "A", (outer * 2.0).to_degrees()));
+    }
+    let mut user = Map::new();
+    if let Some(range) = light.get("range") {
+        user.insert("range".to_owned(), range.clone());
+    }
+    if let Some(extras) = light.get("extras").and_then(Value::as_object) {
+        user.extend(extras.iter().map(|(k, v)| (k.clone(), v.clone())));
+    }
+    user_props(&user, &mut props);
+    Node::new("NodeAttribute")
+        .i64(id)
+        .str(&fbx_name(name, "NodeAttribute"))
+        .str("Light")
+        .with(props70(props))
+        .child("TypeFlags", |n| n.str("Light"))
+        .child("GeometryVersion", |n| n.i32(124))
 }
 
 /// Who wrote the file.
