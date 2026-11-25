@@ -689,7 +689,7 @@ impl<'d> Writer<'d> {
                 )
             };
             let attr = self.id();
-            self.object("NodeAttribute", camera(attr, &name, cam));
+            self.object("NodeAttribute", camera(attr, own_name(cam, &name), cam));
             self.oo(attr, host);
         }
         if let Some(light) = self.light_of(node) {
@@ -704,7 +704,7 @@ impl<'d> Writer<'d> {
                 )
             };
             let attr = self.id();
-            self.object("NodeAttribute", light_attribute(attr, &name, light));
+            self.object("NodeAttribute", light_attribute(attr, own_name(light, &name), light));
             self.oo(attr, host);
         }
     }
@@ -946,6 +946,14 @@ fn camera(id: i64, name: &str, cam: &Value) -> Node {
         .child("ShowAudio", |n| n.i32(0))
         .child("AudioColor", |n| n.f64(0.0).f64(1.0).f64(0.0))
         .child("CameraOrthoZoom", |n| n.f64(1.0))
+}
+
+/// The name a camera or light goes by: its own, or else its node's.
+fn own_name<'a>(item: &'a Value, node: &'a str) -> &'a str {
+    item.get("name")
+        .and_then(Value::as_str)
+        .filter(|n| !n.is_empty())
+        .unwrap_or(node)
 }
 
 /// A `KHR_lights_punctual` light as a light attribute: intensity in percent, as FBX keeps it, falling off with the
