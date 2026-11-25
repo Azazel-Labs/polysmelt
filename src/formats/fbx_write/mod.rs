@@ -14,8 +14,9 @@
 //! specular, volume, anisotropy, iridescence and dispersion factors. Textures are embedded in the file, each with its
 //! wrap modes, `KHR_texture_transform` and UV set.
 //!
-//! Skins become skin deformers with a cluster per joint and a bind pose; morph targets become blend shapes, a channel
-//! per target; animations become an animation stack and layer each (with a take), translation and scale curves keyed
+//! Skins become skin deformers with a cluster per joint and a bind pose (a skinned mesh whose last joint stands for
+//! its own model, as this crate's reader gives it, is drawn by that joint's model again); morph targets become blend
+//! shapes, a channel per target; animations become an animation stack and layer each (with a take), translation and scale curves keyed
 //! as glTF keys them, rotation as Euler curves keyed densely enough to follow the quaternion path, and morph weights
 //! as each channel's `DeformPercent`. Cameras and `KHR_lights_punctual` lights become camera and light attributes,
 //! and node extras become user properties.
@@ -100,6 +101,10 @@ struct Model {
     /// The inverse of the parent's turn, applied before the node's own transform.
     back: Option<[f64; 4]>,
     joint: bool,
+    /// The skinned node whose mesh this model draws in place of a model of its own (see `Writer::folds`).
+    carries: Option<usize>,
+    /// The transform between the model and its geometry, when it isn't the identity.
+    geometric: Option<Trs>,
 }
 
 impl Model {
@@ -129,6 +134,8 @@ struct Writer<'d> {
     counts: Vec<(&'static str, usize)>,
     /// By node index, the node's model.
     models: Vec<Option<Model>>,
+    /// By node index, the model a skinned node's mesh is folded onto, for a node without a model of its own.
+    folded: Vec<Option<usize>>,
     /// Material index → material object (`None` for one that failed).
     materials: HashMap<Option<usize>, i64>,
     /// Texture key → texture object.
@@ -233,6 +240,7 @@ impl<'d> Writer<'d> {
             links: Vec::new(),
             counts: Vec::new(),
             models: Vec::new(),
+            folded: Vec::new(),
             materials: HashMap::new(),
             textures: HashMap::new(),
             videos: HashMap::new(),
@@ -242,6 +250,11 @@ impl<'d> Writer<'d> {
             fps: 30.0,
             span: None,
         }
+    }
+
+    /// The node whose model draws node `i`'s mesh: its own, or the joint it's folded onto.
+    fn at(&self, i: usize) -> usize {
+        self.folded.get(i).copied().flatten().unwrap_or(i)
     }
 
     /// A new object id.
@@ -383,7 +396,20 @@ impl<'d> Writer<'d> {
                 turn: self.turn_of(i, joint[i]),
                 back: None,
                 joint: joint[i],
+                carries: None,
+                geometric: None,
             });
+        }
+        self.folded = vec![None; nodes.len()];
+        for (i, fold) in self.folds(&keep, &parents)?.into_iter().enumerate() {
+            if let Some((j, g)) = fold
+                && let Some(m) = self.models[j].as_mut()
+            {
+                m.carries = Some(i);
+                m.geometric = Some(g).filter(|&g| g != ([0.0; 3], quat::IDENTITY, [1.0; 3]));
+                self.models[i] = None;
+                self.folded[i] = Some(j);
+            }
         }
         // World transforms and turns, parents first.
         let order = topological(&self.models);
@@ -456,7 +482,9 @@ impl<'d> Writer<'d> {
     fn model(&mut self, i: usize) {
         let node = &list(self.json, "nodes")[i];
         let m = self.models[i].as_ref().expect("a written node");
-        let kind = if m.joint {
+        let kind = if m.carries.is_some() {
+            "Mesh"
+        } else if m.joint {
             "LimbNode"
         } else if node.get("mesh").is_some() {
             "Mesh"
@@ -478,6 +506,11 @@ impl<'d> Writer<'d> {
             p_vec("Lcl Rotation", "Lcl Rotation", "", "A", euler(r)),
             p_vec("Lcl Scaling", "Lcl Scaling", "", "A", s),
         ];
+        if let Some((gt, gr, gs)) = m.geometric {
+            props.push(p_vec("GeometricTranslation", "Vector3D", "Vector", "", gt));
+            props.push(p_vec("GeometricRotation", "Vector3D", "Vector", "", euler(gr)));
+            props.push(p_vec("GeometricScaling", "Vector3D", "Vector", "", gs));
+        }
         if hidden {
             props.push(p_f64("Visibility", "Visibility", "A", 0.0));
         }
@@ -496,7 +529,7 @@ impl<'d> Writer<'d> {
         self.object("Model", model);
         let parent = parent.and_then(|p| self.models[p].as_ref()).map_or(0, |p| p.id);
         self.oo(id, parent);
-        if self.models[i].as_ref().is_some_and(|m| m.joint) {
+        if self.models[i].as_ref().is_some_and(|m| m.joint && m.carries.is_none()) {
             let attr = self.id();
             let n = Node::new("NodeAttribute")
                 .i64(attr)
@@ -515,9 +548,16 @@ impl<'d> Writer<'d> {
     /// Writes what node `i` holds: its mesh (with skin and morph targets), camera and light.
     fn content(&mut self, i: usize) -> Result<()> {
         let node = &list(self.json, "nodes")[i];
-        let model = self.models[i].as_ref().expect("a written node").id;
+        let m = self.models[i].as_ref().expect("a written node");
+        let (model, carries) = (m.id, m.carries);
         if let Some(mesh) = index(node, "mesh").filter(|&m| m < list(self.json, "meshes").len()) {
             self.mesh(i, mesh, model)?;
+        }
+        let meshes = list(self.json, "meshes").len();
+        if let Some(n) = carries
+            && let Some(mesh) = index(&list(self.json, "nodes")[n], "mesh").filter(|&m| m < meshes)
+        {
+            self.mesh(n, mesh, model)?;
         }
         self.attributes(i, model);
         Ok(())
@@ -579,7 +619,7 @@ impl<'d> Writer<'d> {
         };
         // GPU instances become a model each under the node's, drawing the same geometry; a skin places its mesh
         // itself, so a skinned node's instances aren't kept.
-        let name = self.models[i].as_ref().expect("written").name.clone();
+        let name = self.models[self.at(i)].as_ref().expect("written").name.clone();
         let hosts = match self.instances(node)? {
             Some(instances) if !skinned => instances
                 .into_iter()

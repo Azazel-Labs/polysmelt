@@ -2,6 +2,13 @@
 
 Breaking changes are allowed in minor releases until 1.0.
 
+## 0.18.1
+
+- FBX export: a skinned mesh read from FBX is written back on its own model rather than on a
+  second model beside it, so FBX read and written again keeps its nodes and joints instead of
+  gaining one each time. When the mesh's geometry is offset from its model, the writer keeps the
+  offset as a geometric transform.
+
 ## 0.18.0
 
 - FBX export: `Document::to_fbx` and `Document::write_fbx` (the `fbx` feature) write binary

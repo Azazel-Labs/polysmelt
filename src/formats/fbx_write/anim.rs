@@ -345,9 +345,7 @@ impl Writer<'_> {
 
     /// Writes channel `c` of node `node` as a curve node on `layer`.
     fn channel(&mut self, node: usize, c: &Channel, layer: i64) {
-        let Some(m) = self.models.get(node).and_then(Option::as_ref) else {
-            return;
-        };
+        // Weights go to the node's blend shape channels, which a folded node has without a model of its own.
         if c.property == Property::Weights {
             let targets = self.channels.get(&node).cloned().unwrap_or_default();
             for (j, keys) in weight_curves(c, targets.len()).into_iter().enumerate() {
@@ -368,6 +366,9 @@ impl Writer<'_> {
             }
             return;
         }
+        let Some(m) = self.models.get(node).and_then(Option::as_ref) else {
+            return;
+        };
         let (prop, short) = match c.property {
             Property::Translation => ("Lcl Translation", "T"),
             Property::Rotation => ("Lcl Rotation", "R"),

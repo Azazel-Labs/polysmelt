@@ -5,9 +5,9 @@ use serde_json::Value;
 
 use super::geometry::Geom;
 use super::records::{Node, p_f64, props70};
-use super::{Writer, fbx_name, index, list};
+use super::{Trs, Writer, fbx_name, index, list, trs_matrix};
 use crate::Result;
-use crate::formats::xform::{IDENTITY, M4, from_column_major, inverse, mul, to_column_major};
+use crate::formats::xform::{IDENTITY, M4, decompose, from_column_major, inverse, mul, to_column_major};
 
 /// A primitive's attribute accessor.
 fn attribute(prim: &Value, name: &str) -> Option<usize> {
@@ -15,6 +15,168 @@ fn attribute(prim: &Value, name: &str) -> Option<usize> {
 }
 
 impl Writer<'_> {
+    /// A skin's inverse bind matrices; none when it has none (each joint's is then the identity).
+    fn inverse_binds(&self, skin: &Value) -> Result<Vec<M4>> {
+        let Some(a) = index(skin, "inverseBindMatrices") else {
+            return Ok(Vec::new());
+        };
+        let (w, m) = self.doc.read_floats(a)?;
+        Ok(if w == 16 {
+            m.chunks_exact(16)
+                .map(|c| from_column_major(&std::array::from_fn(|k| f64::from(c[k]))))
+                .collect()
+        } else {
+            Vec::new()
+        })
+    }
+
+    /// By node index, the joint a skinned node's mesh is folded onto, with the geometric transform it takes there.
+    ///
+    /// This crate's reader keeps a skinned mesh's model as the skin's last joint (for vertices no cluster weights)
+    /// and draws the mesh from a root node of the same name, as glTF asks. Writing the two as one model again
+    /// writes the file they came from, where two models would read back as three nodes. It's done only when that
+    /// loses nothing: the node holds just its mesh and skin, with no children, extras or animated transform; the
+    /// joint holds nothing; every vertex on the joint is on it alone; and its inverse bind matrix is a plain
+    /// transform, which becomes the geometric one.
+    pub(super) fn folds(&self, keep: &[bool], parents: &[Option<usize>]) -> Result<Vec<Option<(usize, Trs)>>> {
+        let nodes = list(self.json, "nodes");
+        let mut out = vec![None; nodes.len()];
+        let mut taken = vec![false; nodes.len()];
+        let mut moved = vec![false; nodes.len()];
+        for anim in list(self.json, "animations") {
+            for c in anim.get("channels").and_then(Value::as_array).into_iter().flatten() {
+                let target = c.get("target").unwrap_or(&Value::Null);
+                if target.get("path").and_then(Value::as_str) != Some("weights")
+                    && let Some(f) = index(target, "node").and_then(|n| moved.get_mut(n))
+                {
+                    *f = true;
+                }
+            }
+        }
+        let hidden = |n: &Value| n.pointer("/extensions/KHR_node_visibility/visible") == Some(&Value::Bool(false));
+        let hidden_under = |mut n: usize| {
+            for _ in 0..=nodes.len() {
+                if hidden(&nodes[n]) {
+                    return true;
+                }
+                match parents.get(n).copied().flatten() {
+                    Some(p) => n = p,
+                    None => break,
+                }
+            }
+            false
+        };
+        let name = |n: usize| nodes[n].get("name").and_then(Value::as_str).unwrap_or("");
+        let holds = |n: &Value| {
+            ["mesh", "skin", "camera"].iter().any(|k| n.get(*k).is_some())
+                || n.pointer("/extensions/KHR_lights_punctual").is_some()
+        };
+        for (i, node) in nodes.iter().enumerate() {
+            let Some(obj) = node.as_object() else { continue };
+            let mesh = index(node, "mesh").and_then(|m| list(self.json, "meshes").get(m));
+            let skin = index(node, "skin").and_then(|s| list(self.json, "skins").get(s));
+            let (Some(mesh), Some(skin)) = (mesh, skin) else {
+                continue;
+            };
+            let plain = obj.iter().all(|(k, v)| match k.as_str() {
+                "name" | "mesh" | "skin" | "weights" | "translation" | "rotation" | "scale" | "matrix" => true,
+                "extensions" => v
+                    .as_object()
+                    .is_some_and(|e| e.keys().all(|k| k == "KHR_node_visibility")),
+                _ => false,
+            });
+            let joints = skin
+                .get("joints")
+                .and_then(Value::as_array)
+                .map_or(&[][..], Vec::as_slice);
+            let Some(j) = joints
+                .last()
+                .and_then(Value::as_u64)
+                .and_then(|j| usize::try_from(j).ok())
+            else {
+                continue;
+            };
+            if !plain
+                || !keep[i]
+                || moved[i]
+                || j == i
+                || j >= nodes.len()
+                || !keep[j]
+                || taken[j]
+                || holds(&nodes[j])
+                || !(name(i).is_empty() || name(i) == name(j))
+                || hidden(node) != hidden_under(j)
+            {
+                continue;
+            }
+            let ibm = self
+                .inverse_binds(skin)?
+                .get(joints.len() - 1)
+                .copied()
+                .unwrap_or(IDENTITY);
+            let d = decompose(&ibm);
+            let g = (d.t, d.r, d.s);
+            let back = trs_matrix(g);
+            let tol = 1e-6 * (1.0 + ibm.iter().flatten().fold(0.0_f64, |a, x| a.max(x.abs())));
+            let plain_transform = d.exact
+                && ibm
+                    .iter()
+                    .flatten()
+                    .zip(back.iter().flatten())
+                    .all(|(a, b)| (a - b).abs() <= tol);
+            if !plain_transform || !self.alone_on(mesh, joints.len() - 1)? {
+                continue;
+            }
+            taken[j] = true;
+            out[i] = Some((j, g));
+        }
+        Ok(out)
+    }
+
+    /// Whether every vertex of `mesh` that skin joint `joint` weights is weighted by it alone, and some vertex by
+    /// another joint: without one, no cluster would weight anything and the mesh would read back unskinned.
+    fn alone_on(&self, mesh: &Value, joint: usize) -> Result<bool> {
+        let mut others = false;
+        for prim in mesh.get("primitives").and_then(Value::as_array).into_iter().flatten() {
+            let mut sets = Vec::new();
+            for set in 0.. {
+                let (Some(ja), Some(wa)) = (
+                    attribute(prim, &format!("JOINTS_{set}")),
+                    attribute(prim, &format!("WEIGHTS_{set}")),
+                ) else {
+                    break;
+                };
+                let (jw, js) = self.doc.read_floats(ja)?;
+                let (ww, ws) = self.doc.read_floats(wa)?;
+                if jw != 4 || ww != 4 || js.len() != ws.len() {
+                    return Ok(false);
+                }
+                sets.push((js, ws));
+            }
+            let count = sets.first().map_or(0, |s| s.0.len() / 4);
+            for v in 0..count {
+                let (mut on, mut off) = (0.0_f32, 0.0_f32);
+                for (js, ws) in &sets {
+                    for k in v * 4..v * 4 + 4 {
+                        let w = ws.get(k).copied().unwrap_or(0.0).max(0.0);
+                        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "a joint index")]
+                        let mine = js.get(k).is_some_and(|&j| j as usize == joint);
+                        if mine {
+                            on += w;
+                        } else {
+                            off += w;
+                        }
+                    }
+                }
+                if on > 0.0 && off > 1e-6 {
+                    return Ok(false);
+                }
+                others |= off > 0.0;
+            }
+        }
+        Ok(others)
+    }
+
     /// Writes node `i`'s skin as a deformer of geometry `g`, with a cluster for each joint and a bind pose.
     pub(super) fn skin(&mut self, i: usize, g: &Geom) -> Result<()> {
         let Some(gid) = g.id else { return Ok(()) };
@@ -29,19 +191,7 @@ impl Writer<'_> {
             .flatten()
             .filter_map(|j| j.as_u64().and_then(|j| usize::try_from(j).ok()))
             .collect();
-        let ibms: Vec<M4> = match index(skin, "inverseBindMatrices") {
-            Some(a) => {
-                let (w, m) = self.doc.read_floats(a)?;
-                if w == 16 {
-                    m.chunks_exact(16)
-                        .map(|c| from_column_major(&std::array::from_fn(|k| f64::from(c[k]))))
-                        .collect()
-                } else {
-                    Vec::new()
-                }
-            }
-            None => Vec::new(),
-        };
+        let ibms = self.inverse_binds(skin)?;
         // Each joint's control points and weights, a vertex's weights for one joint summed.
         let mut per_joint: Vec<(Vec<i32>, Vec<f64>)> = vec![(Vec::new(), Vec::new()); joints.len()];
         let mesh = index(node, "mesh").map_or(&Value::Null, |m| &list(self.json, "meshes")[m]);
@@ -100,8 +250,12 @@ impl Writer<'_> {
                 (*ix, *ws) = merged.into_iter().unzip();
             }
         }
-        let m = self.models[i].as_ref().expect("a written node");
+        // A mesh folded onto its skin's last joint has that joint for its model, and the vertices on the joint alone
+        // are the ones no cluster weights, so it gets no cluster; the geometric transform comes off the others'.
+        let at = self.at(i);
+        let m = self.models[at].as_ref().expect("a written node");
         let (mesh_world, mesh_model, name) = (m.world, m.id, m.name.clone());
+        let unbind = inverse(&m.geometric.map_or(IDENTITY, trs_matrix));
         let skin_id = self.id();
         let skin_node = Node::new("Deformer")
             .i64(skin_id)
@@ -114,11 +268,14 @@ impl Writer<'_> {
         self.oo(skin_id, gid);
         let mut pose = vec![(mesh_model, mesh_world)];
         for (k, &j) in joints.iter().enumerate() {
+            if at != i && j == at {
+                continue;
+            }
             let Some(joint) = self.models.get(j).and_then(Option::as_ref) else {
                 continue;
             };
             let (jid, jname) = (joint.id, joint.name.clone());
-            let ibm = ibms.get(k).copied().unwrap_or(IDENTITY);
+            let ibm = mul(&ibms.get(k).copied().unwrap_or(IDENTITY), &unbind);
             // The joint's world transform at bind time, as the mesh's world transform and the inverse bind matrix
             // give it.
             let link = mul(&mesh_world, &inverse(&ibm));
@@ -184,7 +341,7 @@ impl Writer<'_> {
             .map(|w| w.iter().map(|v| v.as_f64().unwrap_or(0.0)).collect())
             .unwrap_or_default();
         let names = mesh_json.pointer("/extras/targetNames").and_then(Value::as_array);
-        let model_name = self.models[i].as_ref().expect("a written node").name.clone();
+        let model_name = self.models[self.at(i)].as_ref().expect("a written node").name.clone();
         let bs = self.id();
         let blend = Node::new("Deformer")
             .i64(bs)

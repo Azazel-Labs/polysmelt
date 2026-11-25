@@ -814,6 +814,56 @@ fn skinned_scene() -> Document {
 }
 
 /// A quad with two morph targets, one moving normals too, and two clips of their weights.
+/// A bone and an empty node, both skin joints, and a strip whose far end is on the empty node alone: what this
+/// crate's reader makes of a skinned mesh whose model is placed (and its geometry offset) away from the origin.
+fn mesh_model_scene() -> Document {
+    let mut g = Glb::default();
+    let pos = g.floats(
+        &[
+            -0.2, 0.0, 0.0, 0.2, 0.0, 0.0, -0.2, 1.0, 0.0, 0.2, 1.0, 0.0, -0.2, 2.0, 0.0, 0.2, 2.0, 0.0,
+        ],
+        "VEC3",
+    );
+    let joints = g.u16s(
+        &[0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0],
+        "VEC4",
+    );
+    let weights = g.floats(
+        &[
+            1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0,
+            0.0, 0.0, 0.0,
+        ],
+        "VEC4",
+    );
+    let idx = g.u16s(&[0, 1, 3, 0, 3, 2, 2, 3, 5, 2, 5, 4], "SCALAR");
+    // The empty node's inverse bind matrix isn't the inverse of where it is: the geometry sits offset in it.
+    let mut ibm: Vec<f32> = translation([0.5, -1.0, 0.0]).to_vec();
+    ibm.extend_from_slice(&[
+        0.0, 0.0, -2.0, 0.0, 0.0, 2.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, -1.0, 0.25, 3.0, 1.0,
+    ]);
+    let ibm = g.floats(&ibm, "MAT4");
+    let t = g.floats(&[0.0, 1.0], "SCALAR");
+    let turn: Vec<f32> = [0.0, 60.0].iter().flat_map(|&d| quat([0.0, 0.0, 1.0], d)).collect();
+    let turn = g.floats(&turn, "VEC4");
+    let slide = g.floats(&[0.0, 1.0, 0.0, 0.5, 1.5, 0.0], "VEC3");
+    g.build(json!({
+        "scene": 0,
+        "scenes": [{"nodes": [0, 1, 2]}],
+        "nodes": [
+            {"name": "Bone", "translation": [-0.5, 1.0, 0.0]},
+            {"name": "Body", "translation": [0.0, 1.0, 0.0], "rotation": quat([0.0, 0.0, 1.0], 45.0)},
+            {"name": "Body", "mesh": 0, "skin": 0}
+        ],
+        "meshes": [{"primitives": [{"attributes": {
+            "POSITION": pos, "JOINTS_0": joints, "WEIGHTS_0": weights}, "indices": idx}]}],
+        "skins": [{"joints": [0, 1], "inverseBindMatrices": ibm}],
+        "animations": [{"name": "Sway", "samplers": [
+            {"input": t, "output": turn}, {"input": t, "output": slide}], "channels": [
+            {"sampler": 0, "target": {"node": 0, "path": "rotation"}},
+            {"sampler": 1, "target": {"node": 1, "path": "translation"}}]}]
+    }))
+}
+
 fn morph_scene() -> Document {
     let mut g = Glb::default();
     let prim = quad(&mut g, 2.0, 0);
@@ -975,6 +1025,46 @@ fn skins_bind_poses_and_clips_come_back() {
             }
         }
     }
+}
+
+/// The names of a document's nodes and its first skin's joints.
+fn layout(doc: &Document) -> (Vec<String>, Vec<String>) {
+    let json = doc.json();
+    let names: Vec<String> = json["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n.get("name").and_then(Value::as_str).unwrap_or("").to_owned())
+        .collect();
+    let joints = json["skins"][0]["joints"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|j| names[j.as_u64().unwrap() as usize].clone())
+        .collect();
+    (names, joints)
+}
+
+#[test]
+fn a_read_skinned_mesh_writes_back_as_one_model() {
+    // The reader keeps the mesh's model as a joint and draws the mesh from a root node of its own: written again,
+    // the two are one model, so reading and writing over and over neither adds nodes nor joints.
+    let (_, once) = round_trip(&skinned_scene(), "skinned");
+    let (_, twice) = round_trip(&once, "skinned_again");
+    assert_eq!(layout(&once), layout(&twice));
+    let d = diff(&once, &twice);
+    assert!(d.is_empty(), "differs in {d:?}");
+    let (_, thrice) = round_trip(&twice, "skinned_thrice");
+    assert_eq!(layout(&twice), layout(&thrice));
+}
+
+#[test]
+fn a_mesh_folded_onto_its_joint_keeps_its_geometric_offset() {
+    let doc = mesh_model_scene();
+    let (_, back) = round_trip(&doc, "mesh_model");
+    assert_eq!(layout(&doc), layout(&back));
+    let d = diff(&doc, &back);
+    assert!(d.is_empty(), "differs in {d:?}");
 }
 
 #[test]
