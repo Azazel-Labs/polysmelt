@@ -1,6 +1,6 @@
 [package]
 name = "polysmelt"
-version = "0.17.6"
+version = "0.17.7"
 edition = "2024"
 # MIT-0, except the SketchUp reader (src/formats/skp), which is MIT: see its LICENSE-openskp.
 license = "MIT-0 AND MIT"
