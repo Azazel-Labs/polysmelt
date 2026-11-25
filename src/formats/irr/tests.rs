@@ -3,6 +3,7 @@ use serde_json::Value;
 use crate::assets::Memory;
 use crate::document::{Document, Keep, Pose};
 use crate::formats::load_bytes;
+use crate::quat;
 
 const MESH: &str = r#"<?xml version="1.0"?>
 <mesh xmlns="http://irrlicht.sourceforge.net/IRRMESH_09_2007" version="1.0">
@@ -203,7 +204,7 @@ fn reads_a_scene() {
     let q = j["nodes"][aim]["rotation"]
         .as_array()
         .map_or([0.0, 0.0, 0.0, 1.0], |q| [0, 1, 2, 3].map(|k| q[k].as_f64().unwrap()));
-    let forward = crate::formats::scene::rotate(q, [0.0, 0.0, -1.0]);
+    let forward = quat::rotate(q, [0.0, 0.0, -1.0]);
     assert!(forward[2] < -0.99, "{forward:?}");
     assert_eq!(j["nodes"][eye]["translation"][2], 10.0);
 }

@@ -191,8 +191,14 @@ mod vrm;
 mod wkt;
 #[cfg(feature = "x3d")]
 mod x3d;
-#[cfg(any(feature = "fbx", feature = "usd", feature = "3ds", feature = "dae"))]
-mod xform;
+#[cfg_attr(
+    not(all(feature = "minimal", feature = "fbx", feature = "usd", feature = "dae")),
+    allow(
+        dead_code,
+        reason = "each reader uses the parts it needs; the flat mesh only the column-major ones"
+    )
+)]
+pub(crate) mod xform;
 #[cfg(feature = "xgl")]
 mod xgl;
 #[cfg_attr(

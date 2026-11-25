@@ -54,6 +54,7 @@ use crate::Result;
 use crate::assets::Assets;
 use crate::document::{Document, Keep};
 use crate::num::f32_of;
+use crate::quat;
 use crate::source::{Axis, Fact};
 
 /// Bones a skeleton may have: far past any capture rig.
@@ -134,7 +135,7 @@ impl Bone {
     fn frame(&self, radians: f64) -> [f64; 4] {
         let mut q = [0.0, 0.0, 0.0, 1.0];
         for &a in &self.order {
-            q = scene::quat_mul(scene::about(a, self.axis[a] * radians), q);
+            q = quat::mul(quat::about(a, self.axis[a] * radians), q);
         }
         q
     }
@@ -587,15 +588,10 @@ fn rotation(dofs: &[Dof], values: &[f64], radians: f64) -> [f64; 4] {
     let mut q = [0.0, 0.0, 0.0, 1.0];
     for (d, v) in dofs.iter().zip(values) {
         if let Dof::Rotate(a) = *d {
-            q = scene::quat_mul(scene::about(a, v * radians), q);
+            q = quat::mul(quat::about(a, v * radians), q);
         }
     }
     q
-}
-
-/// `q` turned around: the inverse of a unit quaternion.
-fn conjugate(q: [f64; 4]) -> [f64; 4] {
-    [-q[0], -q[1], -q[2], q[3]]
 }
 
 /// Reads an AMC motion for `sk`, whose nodes are in `rig`, as an animation.
@@ -679,9 +675,9 @@ fn parse_amc(text: &str, sk: &Skeleton, rig: &Rig, scene: &Scene) -> (Option<Ani
         track.frames.push(f);
         let c = bone.frame(skeleton_angle);
         let m = rotation(&bone.dofs, &values, angle);
-        let q = scene::quat_mul(scene::quat_mul(c, m), conjugate(c));
+        let q = quat::mul(quat::mul(c, m), quat::conjugate(c));
         if bone.dofs.iter().any(|d| matches!(d, Dof::Rotate(_))) {
-            track.rotations.extend(scene::normalize(q));
+            track.rotations.extend(quat::normalize(q));
         }
         if bone.dofs.iter().any(|d| matches!(d, Dof::Translate(_))) {
             let node = if b == root { rig.root } else { rig.nodes[b] };
@@ -697,7 +693,7 @@ fn parse_amc(text: &str, sk: &Skeleton, rig: &Rig, scene: &Scene) -> (Option<Ani
             let at = if b == root {
                 t
             } else {
-                let along = scene::rotate(c, t);
+                let along = quat::rotate(c, t);
                 [rest[0] + along[0], rest[1] + along[1], rest[2] + along[2]]
             };
             track.translations.extend(at.map(f32_of));

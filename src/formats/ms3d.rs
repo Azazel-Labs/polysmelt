@@ -21,6 +21,7 @@ use crate::document::{Document, Keep};
 use crate::images::Images;
 use crate::mesh::{Material, srgb_to_linear};
 use crate::num::u32_of;
+use crate::quat;
 use crate::source::{Axis, Fact, Handedness};
 
 const MAGIC: &[u8; 10] = b"MS3D000000";
@@ -138,7 +139,7 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
     for j in &m.joints {
         let mut n = Node::named(j.name.clone(), by_name.get(j.parent.as_str()).copied());
         n.translation = j.position;
-        n.rotation = scene::normalize(euler(j.rotation));
+        n.rotation = quat::normalize(euler(j.rotation));
         scene.add(n);
     }
     let joints = m.joints.len();
@@ -245,7 +246,7 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         if !j.turns.is_empty() {
             let mut values = Vec::with_capacity(j.turns.len() * 4);
             for (_, r) in &j.turns {
-                values.extend(scene::normalize(scene::quat_mul(rest, euler(*r))));
+                values.extend(quat::normalize(quat::mul(rest, euler(*r))));
             }
             channels.push(Channel {
                 node: i,
@@ -310,11 +311,7 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
 
 /// The rotation Euler angles make: about X, then Y, then Z.
 fn euler(r: [f32; 3]) -> [f64; 4] {
-    let [x, y, z] = r.map(f64::from);
-    scene::quat_mul(
-        scene::about(2, z),
-        scene::quat_mul(scene::about(1, y), scene::about(0, x)),
-    )
+    quat::euler_xyz(r.map(f64::from))
 }
 
 /// A vertex's joints and weights. Without extra weights, its joint takes all; with them, its joint and the first

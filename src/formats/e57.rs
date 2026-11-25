@@ -29,6 +29,7 @@ use super::points::{self, Cloud, Column};
 use super::{Input, ReadSeek};
 use crate::document::{Document, Keep};
 use crate::num::f32_of;
+use crate::quat;
 use crate::source::{Axis, Fact, Handedness, SourceInfo};
 use crate::{Context as _, ErrorKind, Result};
 
@@ -295,18 +296,10 @@ fn pose(t: Option<&Transform>) -> ([f64; 9], [f64; 3]) {
     let q = &t.rotation;
     let len = (q.w * q.w + q.x * q.x + q.y * q.y + q.z * q.z).sqrt();
     let rotation = if len.is_finite() && len > 1e-12 {
-        let (w, x, y, z) = (q.w / len, q.x / len, q.y / len, q.z / len);
-        [
-            1.0 - 2.0 * (y * y + z * z),
-            2.0 * (x * y - w * z),
-            2.0 * (x * z + w * y),
-            2.0 * (x * y + w * z),
-            1.0 - 2.0 * (x * x + z * z),
-            2.0 * (y * z - w * x),
-            2.0 * (x * z - w * y),
-            2.0 * (y * z + w * x),
-            1.0 - 2.0 * (x * x + y * y),
-        ]
+        // E57 lists `w` first, and its length is summed in that order.
+        let r = quat::matrix([q.x / len, q.y / len, q.z / len, q.w / len]);
+        // Row-major, as `rotate` reads it.
+        std::array::from_fn(|k| r[k % 3 * 3 + k / 3])
     } else {
         identity
     };

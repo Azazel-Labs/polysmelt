@@ -11,10 +11,13 @@ use std::collections::BTreeMap;
 
 use serde_json::{Map, Value, json};
 
-use super::math::{mul, quat_axis, quat_mul, quat_unit, set_trs, trs};
+use super::math::trs;
 use super::{Comp, Ctx, Kind, Morphs, Placed, Rot, Xf, matrix, rotation};
+use crate::formats::xform::col::mul;
+use crate::formats::xform::set_trs;
 use crate::mesh::FastMap;
 use crate::num::f32_of;
+use crate::quat;
 
 /// The most keys a track may have.
 const MAX_KEYS: usize = 1 << 20;
@@ -444,7 +447,7 @@ fn continuous(values: &mut [f64]) {
 fn rotation_channel(x: &Xf, cv: &Curve, qa: [f64; 4], qb: [f64; 4], angle: f64) -> Option<(Out, bool)> {
     let Kind::Rotate(r) = x.kind else { return None };
     let w = cv.width;
-    let q = |v: &[f64]| quat_unit(quat_mul(qa, quat_mul(rotation(r, v, angle), qb)));
+    let q = |v: &[f64]| quat::unit(quat::mul(qa, quat::mul(rotation(r, v, angle), qb)));
     let mut times = Vec::new();
     let mut values = Vec::new();
     let mut sampled = false;
@@ -490,7 +493,7 @@ fn rotation_channel(x: &Xf, cv: &Curve, qa: [f64; 4], qb: [f64; 4], angle: f64) 
                         let f = p as f64 / pieces as f64;
                         times.push(cv.times[k] + (cv.times[k + 1] - cv.times[k]) * f);
                         let theta = (v[0] + (next[0] - v[0]) * f) * angle;
-                        values.extend(quat_unit(quat_mul(qa, quat_mul(quat_axis(a, theta), qb))));
+                        values.extend(quat::unit(quat::mul(qa, quat::mul(quat::about_axis(a, theta), qb))));
                     }
                 }
             }
@@ -581,11 +584,11 @@ fn split_trs(group: &[&Xf], angle: f64) -> ([f64; 3], [f64; 4], [f64; 3]) {
             Kind::Translate(Comp::All) => (0..3).for_each(|k| t[k] += x.value[k]),
             Kind::Scale(Comp::One(k)) => s[k] *= x.value[0],
             Kind::Scale(Comp::All) => (0..3).for_each(|k| s[k] *= x.value[k]),
-            Kind::Rotate(r) => q = quat_mul(q, rotation(r, &x.value, angle)),
+            Kind::Rotate(r) => q = quat::mul(q, rotation(r, &x.value, angle)),
             Kind::Matrix(_) => {}
         }
     }
-    (t, quat_unit(q), s)
+    (t, quat::unit(q), s)
 }
 
 /// The channels of one group of transforms (driving glTF node `node`) in one clip, its
@@ -626,8 +629,8 @@ fn group_channels(
                 Kind::Scale(Comp::All) => (0..3).for_each(|k| sc[k].push(term(k))),
                 Kind::Rotate(r) => match curves.get(&x.ddl) {
                     Some(cv) => rot = Some((x, cv)),
-                    None if rot.is_some() => qb = quat_mul(qb, rotation(r, &x.value, angle)),
-                    None => qa = quat_mul(qa, rotation(r, &x.value, angle)),
+                    None if rot.is_some() => qb = quat::mul(qb, rotation(r, &x.value, angle)),
+                    None => qa = quat::mul(qa, rotation(r, &x.value, angle)),
                 },
                 Kind::Matrix(_) => return None,
             }
@@ -680,7 +683,7 @@ fn group_channels(
         node,
         &times,
         |t| {
-            let mut m = super::math::IDENTITY;
+            let mut m = super::IDENTITY;
             for x in group {
                 let v: &[f64] = match curves.get(&x.ddl) {
                     Some(cv) => {

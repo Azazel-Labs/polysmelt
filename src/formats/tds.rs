@@ -37,6 +37,7 @@ use crate::images::Images;
 use crate::material::{self, Alpha, Factor, Full, Specular, Tex, UvTransform};
 use crate::mesh::{FastMap, GRAY, Material, Prim, face_normal, srgb_to_linear};
 use crate::num::{u32_of, usize_of};
+use crate::quat;
 use crate::source::{Axis, Fact, Handedness, SourceInfo};
 
 const MAIN: u16 = 0x4D4D;
@@ -818,15 +819,6 @@ fn kf_node(d: &[u8], index: u16) -> KfNode {
     n
 }
 
-fn qmul(a: [f64; 4], b: [f64; 4]) -> [f64; 4] {
-    [
-        a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1],
-        a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
-        a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3],
-        a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2],
-    ]
-}
-
 /// A rotation key's turn. 3DS turns clockwise about the axis, as lib3ds reads it.
 fn axis_angle(k: &Key<4>) -> [f64; 4] {
     let [angle, x, y, z] = k.value.map(f64::from);
@@ -844,37 +836,18 @@ fn rotations(keys: &[Key<4>]) -> Vec<[f64; 4]> {
     let mut q = [0.0, 0.0, 0.0, 1.0];
     keys.iter()
         .map(|k| {
-            q = qmul(axis_angle(k), q);
-            let n = q.iter().map(|c| c * c).sum::<f64>().sqrt();
-            q = q.map(|c| c / n);
+            q = quat::unit_unchecked(quat::mul(axis_angle(k), q));
             q
         })
         .collect()
 }
 
 fn trs(t: [f64; 3], q: [f64; 4], s: [f64; 3]) -> M4 {
-    let [x, y, z, w] = q;
-    let r = [
-        [
-            1.0 - 2.0 * (y * y + z * z),
-            2.0 * (x * y - w * z),
-            2.0 * (x * z + w * y),
-        ],
-        [
-            2.0 * (x * y + w * z),
-            1.0 - 2.0 * (x * x + z * z),
-            2.0 * (y * z - w * x),
-        ],
-        [
-            2.0 * (x * z - w * y),
-            2.0 * (y * z + w * x),
-            1.0 - 2.0 * (x * x + y * y),
-        ],
-    ];
+    let r = quat::matrix(q);
     let mut m = IDENTITY;
     for i in 0..3 {
         for j in 0..3 {
-            m[i][j] = r[i][j] * s[j];
+            m[i][j] = r[j * 3 + i] * s[j];
         }
         m[i][3] = t[i];
     }

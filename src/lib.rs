@@ -122,6 +122,19 @@ mod material;
 pub mod mesh;
 pub mod meshopt;
 mod num;
+#[cfg_attr(
+    not(all(
+        feature = "minimal",
+        feature = "fbx",
+        feature = "usd",
+        feature = "dae",
+        feature = "x3d",
+        feature = "e57",
+        feature = "amf"
+    )),
+    allow(dead_code, reason = "each reader uses the parts it needs")
+)]
+mod quat;
 pub mod rig;
 pub mod source;
 

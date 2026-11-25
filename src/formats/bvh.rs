@@ -40,6 +40,7 @@ use super::stream::{self, f32_from, f64_from};
 use crate::Result;
 use crate::document::{self, Animation, Builder, Document, Keep, Sampler};
 use crate::num::{f32_of, usize_of};
+use crate::quat;
 use crate::source::{Axis, Fact, SourceInfo};
 
 /// Nodes (joints and end sites) a file may have: far past any skeleton.
@@ -522,26 +523,6 @@ impl Motion {
     }
 }
 
-/// The Hamilton product `a·b` of quaternions `[x, y, z, w]`: rotating by `b`, then by `a`.
-fn mul(a: [f64; 4], b: [f64; 4]) -> [f64; 4] {
-    let [ax, ay, az, aw] = a;
-    let [bx, by, bz, bw] = b;
-    [
-        aw * bx + ax * bw + ay * bz - az * by,
-        aw * by - ax * bz + ay * bw + az * bx,
-        aw * bz + ax * by - ay * bx + az * bw,
-        aw * bw - ax * bx - ay * by - az * bz,
-    ]
-}
-
-/// The rotation by `degrees` about axis `axis` (0, 1 or 2 for X, Y or Z).
-fn about(axis: usize, degrees: f64) -> [f64; 4] {
-    let (s, c) = (degrees.to_radians() * 0.5).sin_cos();
-    let mut q = [0.0, 0.0, 0.0, c];
-    q[axis] = s;
-    q
-}
-
 /// Key times for the kept rows: row k at k frame times, each later than the last even where single precision
 /// would round two together.
 fn key_times(kept: &[u64], frame_time: f64) -> Vec<f32> {
@@ -659,7 +640,7 @@ pub(super) fn load(input: Input<'_>, keep: Keep) -> Result<Document> {
                 }
                 let mut q = [0.0, 0.0, 0.0, 1.0];
                 for &(col, axis) in &track.columns {
-                    q = mul(q, about(axis, f64::from(row[col])));
+                    q = quat::mul(q, quat::about(axis, f64::from(row[col]).to_radians()));
                 }
                 let len = q.iter().map(|c| c * c).sum::<f64>().sqrt();
                 // Each quaternion on the same side as the last, so slerp takes the short way.
