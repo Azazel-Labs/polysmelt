@@ -2,6 +2,12 @@
 
 Breaking changes are allowed in minor releases until 1.0.
 
+## 0.17.7
+
+- Internal: one quaternion module replaces the readers' own rotation math (normalizing,
+  slerp, Euler and axis-angle conversion, matrix to rotation), and glTF matrices are converted
+  to and from column order in one place. About 230 fewer lines. Output is unchanged.
+
 ## 0.17.6
 
 - USDZ: a texture that inflates implausibly far (over 1 GiB, or 200 times its compressed size)
@@ -9,7 +15,7 @@ Breaking changes are allowed in minor releases until 1.0.
 - glTF 1.0: an accessor whose count runs past its buffer is an error before anything is
   allocated, and one with a count but no `bufferView` is reported as corrupt.
 - A missing meshopt fallback buffer fails before room is made for the length it declares.
-- One pixel limit (16384 × 16384) for every texture decoder; PNG, SketchUp and SGI images
+- One pixel limit (16384 Ã— 16384) for every texture decoder; PNG, SketchUp and SGI images
   were capped at a quarter of that. A large SGI image decodes only when the file holds its data.
 - Internal: the curve point budget, rotation resampling step, texture coordinate set and
   joint influence limits, and the inflate caps are each defined once. Output is unchanged.
@@ -30,7 +36,7 @@ Breaking changes are allowed in minor releases until 1.0.
 
 - Writing a GLB is faster: accessors, buffer views and animations stay typed until the document
   is written, instead of being built as JSON and read back. Small animated models (IQM, B3D,
-  `.x`, SMD, MD5, BVH) convert 6–29% faster, and the GLB step alone is up to 2.4× faster.
+  `.x`, SMD, MD5, BVH) convert 6â€“29% faster, and the GLB step alone is up to 2.4Ã— faster.
   Output is unchanged.
 - `Document::json()` builds the full JSON on first use and keeps it.
 
