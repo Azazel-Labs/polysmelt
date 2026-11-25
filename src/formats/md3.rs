@@ -42,11 +42,10 @@ use std::f64::consts::TAU;
 use serde_json::json;
 
 use super::Input;
-use super::scene::{
-    self, Animation, Bin, Channel, Interp, Node, Path, Primitive, Scene, SceneMesh, Target, Z_UP_TO_Y_UP,
-};
+use super::scene::{self, Animation, Channel, Interp, Node, Path, Primitive, Scene, SceneMesh, Target, Z_UP_TO_Y_UP};
 use crate::Result;
 use crate::assets::Assets;
+use crate::bytes::Bin;
 use crate::document::{Document, Keep};
 use crate::images::Images;
 use crate::mesh::Material;

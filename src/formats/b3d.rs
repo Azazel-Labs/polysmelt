@@ -16,9 +16,10 @@ use std::collections::HashMap;
 
 use serde_json::json;
 
-use super::scene::{self, Animation, Bin, Channel, Interp, M4, Node, Path as Key, Primitive, Scene, SceneMesh, Skin};
+use super::scene::{self, Animation, Channel, Interp, M4, Node, Path as Key, Primitive, Scene, SceneMesh, Skin};
 use crate::Result;
 use crate::assets::Assets;
+use crate::bytes::Bin;
 use crate::document::{Document, Keep};
 use crate::images::Images;
 use crate::mesh::{Material, srgb_to_linear};

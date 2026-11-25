@@ -50,9 +50,10 @@ use std::path::Path as FsPath;
 use serde_json::json;
 
 use super::inflate::inflate;
-use super::scene::{self, Animation, Bin, Channel, IDENTITY, Interp, M4, Node, Path, Primitive};
+use super::scene::{self, Animation, Channel, IDENTITY, Interp, M4, Node, Path, Primitive};
 use super::scene::{Scene, SceneMesh, Skin};
 use crate::assets::Assets;
+use crate::bytes::Bin;
 use crate::document::{Document, Keep};
 use crate::images::Images;
 use crate::mesh::{Material, srgb_to_linear};

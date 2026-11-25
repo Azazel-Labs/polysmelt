@@ -43,11 +43,10 @@ use std::collections::HashMap;
 use serde_json::{Value, json};
 
 use super::Input;
-use super::scene::{
-    self, Animation, Bin, Channel, Interp, M4, Node, Path, Primitive, Scene, SceneMesh, Skin, Z_UP_TO_Y_UP,
-};
+use super::scene::{self, Animation, Channel, Interp, M4, Node, Path, Primitive, Scene, SceneMesh, Skin, Z_UP_TO_Y_UP};
 use crate::Result;
 use crate::assets::Assets;
+use crate::bytes::Bin;
 use crate::document::{Document, Keep};
 use crate::images::Images;
 use crate::mesh::{Material, srgb_to_linear};

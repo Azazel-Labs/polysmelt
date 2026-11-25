@@ -66,7 +66,7 @@
 
 /// The shared byte buffer [`mesh::Image`] holds, from the `bytes` crate: cloning or slicing one
 /// doesn't copy its bytes.
-pub use bytes::Bytes;
+pub use ::bytes::Bytes;
 /// The JSON a [`Document`] is, from the `serde_json` crate, as [`Document::json`] hands it out.
 pub use serde_json;
 
@@ -107,6 +107,8 @@ macro_rules! err {
 }
 
 pub mod assets;
+#[allow(dead_code, reason = "which readers use it depends on the enabled features")]
+mod bytes;
 pub mod document;
 mod error;
 mod flatten;
