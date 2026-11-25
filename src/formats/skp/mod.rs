@@ -23,7 +23,6 @@ mod image;
 mod legacy;
 mod model;
 mod reader;
-mod triangulate;
 mod vff;
 mod zip;
 

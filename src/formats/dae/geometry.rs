@@ -7,6 +7,7 @@ use std::rc::Rc;
 use super::xml::{self, Dom};
 use crate::mesh::{Prim, srgb_to_linear, triangulate};
 use crate::num::u32_of;
+use crate::polygon::triangulate_holes;
 use crate::vec3::{self, cross};
 
 /// The values of a `<source>`, read through its accessor: `width` numbers to an element.
@@ -705,10 +706,14 @@ impl Corners {
             self.polygon(&flat);
             return;
         }
-        let mut tris = Vec::new();
-        bridge_and_clip(&ring, &hole_rings, &self.positions, &mut tris);
-        for t in tris {
-            self.push(t[0], t[1], t[2]);
+        // Triangulated in the outline's plane, wound as it is; the triangles count through the outline then the holes.
+        let ids: Vec<u32> = ring.iter().chain(hole_rings.iter().flatten()).copied().collect();
+        let loops: Vec<Vec<[f64; 3]>> = std::iter::once(&ring)
+            .chain(&hole_rings)
+            .map(|r| r.iter().map(|&v| self.positions[v as usize].map(f64::from)).collect())
+            .collect();
+        for t in triangulate_holes(&loops, None) {
+            self.push(ids[t[0]], ids[t[1]], ids[t[2]]);
         }
     }
 
@@ -785,158 +790,4 @@ fn hash(key: &[u32]) -> usize {
     }
     // The high bits mix best.
     usize::try_from(h >> 32).unwrap_or(0) ^ usize::try_from(h & 0xFFFF_FFFF).unwrap_or(0).rotate_left(16)
-}
-
-/// Polygons with holes past this many corners are fanned rather than clipped.
-const MAX_CLIP: usize = 4096;
-
-/// Triangulates a polygon with holes: each hole joined to the outline by a bridge to a vertex it sees (holes with
-/// the furthest-out vertex first), then the one outline ear-clipped, the bridges' doubled points ignored as
-/// blockers. Triangles keep the outline's winding.
-pub(super) fn bridge_and_clip(outer: &[u32], holes: &[Vec<u32>], pos: &[[f32; 3]], out: &mut Vec<[u32; 3]>) {
-    // The plane of the outline (Newell's normal), and a 2D view of it with the outline counter-clockwise.
-    let mut nrm = [0f64; 3];
-    for i in 0..outer.len() {
-        let a = pos[outer[i] as usize];
-        let b = pos[outer[(i + 1) % outer.len()] as usize];
-        nrm[0] += f64::from((a[1] - b[1]) * (a[2] + b[2]));
-        nrm[1] += f64::from((a[2] - b[2]) * (a[0] + b[0]));
-        nrm[2] += f64::from((a[0] - b[0]) * (a[1] + b[1]));
-    }
-    let axis = (0..3).fold(0, |m, k| if nrm[k].abs() > nrm[m].abs() { k } else { m });
-    let (u, v) = match axis {
-        0 => (1, 2),
-        1 => (2, 0),
-        _ => (0, 1),
-    };
-    let flip = nrm[axis] < 0.0;
-    let p2 = |i: u32| -> [f64; 2] {
-        let p = pos[i as usize];
-        let x = f64::from(p[u]);
-        [if flip { -x } else { x }, f64::from(p[v])]
-    };
-    let area = |ring: &[u32]| -> f64 {
-        (0..ring.len())
-            .map(|i| {
-                let a = p2(ring[i]);
-                let b = p2(ring[(i + 1) % ring.len()]);
-                a[0] * b[1] - b[0] * a[1]
-            })
-            .sum()
-    };
-    let total = outer.len() + holes.iter().map(|h| h.len() + 2).sum::<usize>();
-    if total > MAX_CLIP {
-        for k in 1..outer.len() - 1 {
-            out.push([outer[0], outer[k], outer[k + 1]]);
-        }
-        return;
-    }
-    let mut holes: Vec<Vec<u32>> = holes
-        .iter()
-        .map(|h| {
-            let mut h = h.clone();
-            if area(&h) > 0.0 {
-                h.reverse();
-            }
-            h
-        })
-        .collect();
-    let max_x = |h: &Vec<u32>| h.iter().map(|&i| p2(i)[0]).fold(f64::MIN, f64::max);
-    holes.sort_by(|a, b| max_x(b).total_cmp(&max_x(a)));
-    let mut poly: Vec<u32> = outer.to_vec();
-    for (hi, hole) in holes.iter().enumerate() {
-        let m = (0..hole.len()).fold(0, |b, k| if p2(hole[k])[0] > p2(hole[b])[0] { k } else { b });
-        let mp = p2(hole[m]);
-        let mut candidates: Vec<usize> = (0..poly.len()).collect();
-        let dist = |i: usize| {
-            let q = p2(poly[i]);
-            (q[0] - mp[0]).powi(2) + (q[1] - mp[1]).powi(2)
-        };
-        candidates.sort_by(|&a, &b| dist(a).total_cmp(&dist(b)));
-        let blocked = |a: [f64; 2], b: [f64; 2]| -> bool {
-            let rings = std::iter::once(&poly).chain(holes[hi..].iter());
-            for ring in rings {
-                for k in 0..ring.len() {
-                    let c = p2(ring[k]);
-                    let d = p2(ring[(k + 1) % ring.len()]);
-                    if crosses(a, b, c, d) {
-                        return true;
-                    }
-                }
-            }
-            false
-        };
-        let pick = candidates
-            .iter()
-            .take(64)
-            .copied()
-            .find(|&i| !blocked(mp, p2(poly[i])))
-            .unwrap_or(candidates[0]);
-        let mut merged = Vec::with_capacity(poly.len() + hole.len() + 2);
-        merged.extend_from_slice(&poly[..=pick]);
-        merged.extend_from_slice(&hole[m..]);
-        merged.extend_from_slice(&hole[..=m]);
-        merged.extend_from_slice(&poly[pick..]);
-        poly = merged;
-    }
-    ear_clip(&poly, &p2, out);
-}
-
-/// Whether segments `ab` and `cd` cross at a point inside both (touching at an end doesn't count).
-#[allow(clippy::float_cmp, reason = "the same point, exactly")]
-fn crosses(a: [f64; 2], b: [f64; 2], c: [f64; 2], d: [f64; 2]) -> bool {
-    let orient = |p: [f64; 2], q: [f64; 2], r: [f64; 2]| (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0]);
-    if a == c || a == d || b == c || b == d {
-        return false;
-    }
-    let (d1, d2) = (orient(a, b, c), orient(a, b, d));
-    let (d3, d4) = (orient(c, d, a), orient(c, d, b));
-    d1 * d2 < 0.0 && d3 * d4 < 0.0
-}
-
-/// Ear-clips a simple outline (counter-clockwise in `p2`'s view) that may touch itself at doubled points.
-#[allow(clippy::float_cmp, reason = "the same point, exactly")]
-fn ear_clip(poly: &[u32], p2: &dyn Fn(u32) -> [f64; 2], out: &mut Vec<[u32; 3]>) {
-    let pts: Vec<[f64; 2]> = poly.iter().map(|&i| p2(i)).collect();
-    let mut idx: Vec<usize> = (0..poly.len()).collect();
-    let orient = |p: [f64; 2], q: [f64; 2], r: [f64; 2]| (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0]);
-    while idx.len() > 3 {
-        let m = idx.len();
-        let mut clipped = false;
-        for k in 0..m {
-            let (ia, ib, ic) = (idx[(k + m - 1) % m], idx[k], idx[(k + 1) % m]);
-            let (a, b, c) = (pts[ia], pts[ib], pts[ic]);
-            if orient(a, b, c) <= 0.0 {
-                continue;
-            }
-            let inside = idx.iter().any(|&j| {
-                let p = pts[j];
-                if j == ia || j == ib || j == ic || p == a || p == b || p == c {
-                    return false;
-                }
-                orient(a, b, p) >= 0.0 && orient(b, c, p) >= 0.0 && orient(c, a, p) >= 0.0
-            });
-            if inside {
-                continue;
-            }
-            out.push([poly[ia], poly[ib], poly[ic]]);
-            idx.remove(k);
-            clipped = true;
-            break;
-        }
-        if !clipped {
-            // Nothing is an ear (a degenerate or self-crossing outline): drop a corner that adds no area, or
-            // clip one anyway.
-            let k = (0..m)
-                .find(|&k| orient(pts[idx[(k + m - 1) % m]], pts[idx[k]], pts[idx[(k + 1) % m]]).abs() < 1e-30)
-                .unwrap_or(0);
-            if k != 0 || orient(pts[idx[m - 1]], pts[idx[0]], pts[idx[1]]).abs() >= 1e-30 {
-                out.push([poly[idx[(k + m - 1) % m]], poly[idx[k]], poly[idx[(k + 1) % m]]]);
-            }
-            idx.remove(k);
-        }
-    }
-    if idx.len() == 3 {
-        out.push([poly[idx[0]], poly[idx[1]], poly[idx[2]]]);
-    }
 }

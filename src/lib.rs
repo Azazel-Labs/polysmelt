@@ -138,6 +138,9 @@ mod quat;
 pub mod rig;
 pub mod source;
 
+#[cfg(any(feature = "dae", feature = "skp"))]
+mod polygon;
+
 #[cfg(any(
     feature = "webp",
     feature = "skp",
