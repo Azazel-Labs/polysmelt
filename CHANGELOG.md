@@ -2,6 +2,11 @@
 
 Breaking changes are allowed in minor releases until 1.0.
 
+## 0.18.3
+
+- OFF files with face colors no longer take time that grows with the square of their size to
+  read: a 490k-vertex colored mesh took 140 s and now takes 0.3 s. The output is unchanged.
+
 ## 0.18.2
 
 - FBX export is faster: rotation curves are fit in one pass over the keys instead of searching
