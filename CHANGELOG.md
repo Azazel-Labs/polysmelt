@@ -2,6 +2,14 @@
 
 Breaking changes are allowed in minor releases until 1.0.
 
+## 0.17.8
+
+- Polygons with holes (COLLADA `<ph>`, SketchUp inner loops) are triangulated by one shared
+  routine. A hole touching the outline or another hole is bridged where it touches, and holes
+  sharing a corner no longer drop most of the face, which fixes faces that came out overlapping
+  or partly missing. COLLADA polygons are triangulated in their own plane, so tilted faces with
+  holes are exact. Large faces with many holes triangulate up to twice as fast.
+
 ## 0.17.7
 
 - Number parsing: every text reader (OBJ, OFF, COLLADA, 3MF, SMD, AC3D, DXF, AMF, MD5, `.x`,
