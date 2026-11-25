@@ -69,8 +69,7 @@ const MAX_NODES: usize = 1 << 20;
 /// The largest archive entry read.
 const MAX_ENTRY: u64 = 1 << 31;
 
-/// The most joints that move a vertex: four sets of glTF's four.
-const MAX_INFLUENCES: usize = 16;
+use crate::mesh::MAX_INFLUENCES;
 
 /// The most other documents a document's URLs bring in, theirs included.
 const MAX_DOCUMENTS: usize = 64;

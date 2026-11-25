@@ -19,6 +19,37 @@ use crate::gltf::{data_uri, mime_from_name, sniff_mime};
 use crate::mesh::Image;
 use crate::{Context as _, ErrorKind, Result};
 
+/// The most pixels a texture is decoded to, whichever decoder reads it: 16384 by 16384, the largest 2D texture
+/// Direct3D 11 and 12 require of a GPU and the largest a WebP can be, so nothing a renderer can draw whole is
+/// refused. At four bytes a pixel that is 1 GiB, which a decoder only makes room for when the file holds the data
+/// (see [`FREE`]).
+#[cfg(any(
+    feature = "flt",
+    feature = "skp",
+    feature = "tga",
+    feature = "bmp",
+    feature = "gif",
+    feature = "tiff",
+    feature = "psd",
+    feature = "dds",
+    all(feature = "obj", any(feature = "webp", feature = "amf"))
+))]
+pub(crate) const MAX_PIXELS: usize = 1 << 28;
+
+/// Bytes a decoded image may take whatever data its file holds: a small image needs no proof, but a bigger one is
+/// decoded only when at least half its data is there, so a header claiming a huge image over a few bytes makes
+/// nothing.
+#[cfg(any(
+    feature = "flt",
+    feature = "tga",
+    feature = "bmp",
+    feature = "gif",
+    feature = "tiff",
+    feature = "psd",
+    feature = "dds"
+))]
+pub(crate) const FREE: usize = 1 << 22;
+
 /// Where an image is.
 ///
 /// Non-exhaustive: other places an image can be may be added, so a `match` on one needs a
