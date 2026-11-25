@@ -138,10 +138,9 @@ impl Writer<'_> {
             match index(prim, "indices") {
                 Some(a) => {
                     let idx = doc.read_indices(a)?;
-                    if let Some(bad) = idx.iter().find(|&&i| i as usize >= n) {
-                        return Err(err!(Corrupt, "mesh {mesh} primitive {p} names vertex {bad} of {n}"));
-                    }
                     triangles(mode(prim), &idx, &mut tris);
+                    // A triangle naming a vertex that isn't there is dropped, as glTF's readers do.
+                    tris.retain(|t| t.iter().all(|&i| (i as usize) < n));
                 }
                 None => {
                     let idx: Vec<u32> = (0..u32::try_from(n).unwrap_or(u32::MAX)).collect();
@@ -200,7 +199,7 @@ impl Writer<'_> {
             Some(self.triangle_geometry(&name, prims, &tri_prims, &bases, verts, &polys, &poly_slot, slots.len())?)
         };
 
-        let lines = self.line_geometry(mesh, &name, prims)?;
+        let lines = self.line_geometry(&name, prims)?;
         if id.is_none() && lines.is_none() {
             return Ok(None);
         }
@@ -465,14 +464,14 @@ impl Writer<'_> {
     }
 
     /// Writes a mesh's lines as one `Line` geometry, with the first line primitive's material.
-    fn line_geometry(&mut self, mesh: usize, name: &str, prims: &[Value]) -> Result<Option<(i64, Option<usize>)>> {
+    fn line_geometry(&mut self, name: &str, prims: &[Value]) -> Result<Option<(i64, Option<usize>)>> {
         let doc = self.doc;
         let materials = list(self.json, "materials").len();
         let mut points: Vec<f64> = Vec::new();
         let mut index_list: Vec<i32> = Vec::new();
         let mut material = None;
         let mut any = false;
-        for (p, prim) in prims.iter().enumerate() {
+        for prim in prims {
             let m = mode(prim);
             if !matches!(m, 1..=3) {
                 continue;
@@ -491,9 +490,25 @@ impl Writer<'_> {
                 Some(a) => doc.read_indices(a)?,
                 None => (0..u32::try_from(n).unwrap_or(u32::MAX)).collect(),
             };
-            if let Some(bad) = idx.iter().find(|&&i| i as usize >= n) {
-                return Err(err!(Corrupt, "mesh {mesh} primitive {p} names vertex {bad} of {n}"));
-            }
+            // Lines naming a vertex that isn't there break into segments, without the ones touching it.
+            let (m, idx) = if idx.iter().all(|&i| (i as usize) < n) {
+                (m, idx)
+            } else {
+                let mut segments: Vec<u32> = match m {
+                    1 => idx.chunks_exact(2).flatten().copied().collect(),
+                    _ => idx.windows(2).flatten().copied().collect(),
+                };
+                if m == 2 && idx.len() >= 2 {
+                    segments.extend_from_slice(&[idx[idx.len() - 1], idx[0]]);
+                }
+                let kept = segments
+                    .chunks_exact(2)
+                    .filter(|s| s.iter().all(|&i| (i as usize) < n))
+                    .flatten()
+                    .copied()
+                    .collect();
+                (1, kept)
+            };
             #[allow(
                 clippy::cast_possible_wrap,
                 clippy::cast_possible_truncation,

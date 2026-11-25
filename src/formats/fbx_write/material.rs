@@ -69,9 +69,26 @@ impl Writer<'_> {
                 str::to_owned,
             );
         let pbr = mat.get("pbrMetallicRoughness").unwrap_or(&Value::Null);
-        let base = numbers(pbr, "baseColorFactor", [1.0; 4]);
-        let metallic = number(pbr, "metallicFactor").unwrap_or(1.0);
-        let roughness = number(pbr, "roughnessFactor").unwrap_or(1.0);
+        // A specular/glossiness material, without metal/rough values of its own, gives its diffuse as the base
+        // color, no metal, and roughness from its glossiness.
+        let gloss = ext(mat, "KHR_materials_pbrSpecularGlossiness").filter(|_| pbr.is_null());
+        let (base, metallic, roughness, color_texture) = match gloss {
+            Some(sg) => (
+                numbers(sg, "diffuseFactor", [1.0; 4]),
+                0.0,
+                1.0 - number(sg, "glossinessFactor").unwrap_or(1.0),
+                sg.get("diffuseTexture"),
+            ),
+            None => (
+                numbers(pbr, "baseColorFactor", [1.0; 4]),
+                number(pbr, "metallicFactor").unwrap_or(1.0),
+                number(pbr, "roughnessFactor").unwrap_or(1.0),
+                pbr.get("baseColorTexture"),
+            ),
+        };
+        let specular = gloss.map_or([0.2 + 0.8 * metallic.clamp(0.0, 1.0); 3], |sg| {
+            numbers(sg, "specularFactor", [1.0; 3]).map(to_srgb)
+        });
         let emissive = numbers(mat, "emissiveFactor", [0.0; 3]);
         let strength = ext(mat, "KHR_materials_emissive_strength")
             .and_then(|e| number(e, "emissiveStrength"))
@@ -91,13 +108,7 @@ impl Writer<'_> {
             p_f64("DiffuseFactor", "Number", "A", 1.0),
             p_vec("EmissiveColor", "Color", "", "A", srgb(emissive)),
             p_f64("EmissiveFactor", "Number", "A", strength),
-            p_vec(
-                "SpecularColor",
-                "Color",
-                "",
-                "A",
-                [0.2 + 0.8 * metallic.clamp(0.0, 1.0); 3],
-            ),
+            p_vec("SpecularColor", "Color", "", "A", specular),
             p_f64("Shininess", "double", "", shininess),
             p_f64("ShininessExponent", "double", "", shininess),
             p_f64("TransparencyFactor", "Number", "A", 1.0 - alpha),
@@ -268,7 +279,7 @@ impl Writer<'_> {
 
         // Textures, each connected to the property it drives; the first of a property is what a reader takes.
         let mut links: Vec<(&Value, &'static str)> = Vec::new();
-        if let Some(t) = pbr.get("baseColorTexture") {
+        if let Some(t) = color_texture {
             links.push((t, "DiffuseColor"));
             if mode != 0 {
                 links.push((t, "TransparencyFactor"));

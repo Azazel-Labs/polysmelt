@@ -279,13 +279,10 @@ pub(crate) fn write_file(top: &[Node], w: &mut dyn Write) -> Result<()> {
     }
     null(w, &mut at, wide)?;
     w.write_all(&FOOT_ID)?;
-    w.write_all(&[0; 4])?;
-    at += 20;
-    let pad = match (at % 16) as usize {
-        0 => 16,
-        r => 16 - r,
-    };
-    w.write_all(&[0; 16][..pad])?;
+    at += 16;
+    // Zeros to the next 16-byte boundary, then four more before the version.
+    let pad = (16 - (at % 16) as usize) % 16;
+    w.write_all(&[0; 20][..pad + 4])?;
     w.write_all(&version.to_le_bytes())?;
     w.write_all(&[0; 120])?;
     w.write_all(&FOOT_MAGIC)?;
@@ -356,7 +353,24 @@ mod tests {
         assert_eq!(&out[out.len() - 16..], &FOOT_MAGIC);
         let v = out.len() - 16 - 120 - 4;
         assert_eq!(u32::from_le_bytes(out[v..v + 4].try_into().unwrap()), 7400);
-        assert_eq!(v % 16, 0);
+        assert_eq!(v % 16, 4);
+    }
+
+    #[test]
+    fn the_footer_pads_to_a_boundary_whatever_the_length() {
+        // Every padding length, from none to fifteen bytes.
+        let mut pads = std::collections::BTreeSet::new();
+        for len in 0..16 {
+            let top = vec![Node::new("A").str(&"x".repeat(len))];
+            let mut out = Vec::new();
+            write_file(&top, &mut out).unwrap();
+            let id = out.windows(16).position(|w| w == FOOT_ID).unwrap() + 16;
+            let v = out.len() - 16 - 120 - 4;
+            assert_eq!(v % 16, 4);
+            assert!(out[id..v].iter().all(|&b| b == 0));
+            pads.insert(v - 4 - id);
+        }
+        assert_eq!(pads.len(), 16);
     }
 
     #[test]

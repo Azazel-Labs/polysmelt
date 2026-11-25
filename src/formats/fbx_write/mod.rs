@@ -273,13 +273,11 @@ impl<'d> Writer<'d> {
         let nodes = list(self.json, "nodes");
         let mut keep = vec![false; nodes.len()];
         let scenes = list(self.json, "scenes");
-        let scene = index(&Value::Object(Map::new()), "scene");
         let scene = self
             .json
             .get("scene")
             .and_then(Value::as_u64)
             .and_then(|s| usize::try_from(s).ok())
-            .or(scene)
             .or((!scenes.is_empty()).then_some(0));
         let mut roots: Vec<usize> = match scene.and_then(|s| scenes.get(s)) {
             Some(s) => s
@@ -409,6 +407,20 @@ impl<'d> Writer<'d> {
                 self.content(i)?;
             }
         }
+        // A document without nodes draws every mesh where it is: each on a model of its own.
+        if nodes.is_empty() {
+            for (mesh, m) in list(self.json, "meshes").iter().enumerate() {
+                let name = m
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .filter(|n| !n.is_empty())
+                    .map_or_else(|| format!("mesh_{mesh}"), str::to_owned);
+                if let Some(g) = self.geometry(mesh)? {
+                    let model = self.helper(0, &name, "Mesh", ([0.0; 3], quat::IDENTITY, [1.0; 3]));
+                    self.draw(&g, model, &name)?;
+                }
+            }
+        }
         self.animations()?;
         Ok(())
     }
@@ -510,8 +522,9 @@ impl<'d> Writer<'d> {
         Ok(())
     }
 
-    /// A new model under `parent` with `local` as its transform, for what a node holds that its own model can't.
-    fn helper(&mut self, parent: i64, name: &str, kind: &str, t: [f64; 3], r: [f64; 4]) -> i64 {
+    /// A new model under `parent` with `t`, `r` and `s` as its transform, for what a node holds that its own model
+    /// can't.
+    fn helper(&mut self, parent: i64, name: &str, kind: &str, (t, r, s): ([f64; 3], [f64; 4], [f64; 3])) -> i64 {
         let id = self.id();
         let props = vec![
             p_int("RotationActive", "bool", 1),
@@ -519,7 +532,7 @@ impl<'d> Writer<'d> {
             p_int("DefaultAttributeIndex", "int", 0),
             p_vec("Lcl Translation", "Lcl Translation", "", "A", t),
             p_vec("Lcl Rotation", "Lcl Rotation", "", "A", euler(r)),
-            p_vec("Lcl Scaling", "Lcl Scaling", "", "A", [1.0; 3]),
+            p_vec("Lcl Scaling", "Lcl Scaling", "", "A", s),
         ];
         let model = Node::new("Model")
             .i64(id)
@@ -563,12 +576,21 @@ impl<'d> Writer<'d> {
         let Some(g) = geom else {
             return Ok(());
         };
-        if let Some(gid) = g.id {
-            self.oo(gid, model);
-            for slot in &g.slots {
-                let m = self.material(*slot)?;
-                self.oo(m, model);
-            }
+        // GPU instances become a model each under the node's, drawing the same geometry; a skin places its mesh
+        // itself, so a skinned node's instances aren't kept.
+        let name = self.models[i].as_ref().expect("written").name.clone();
+        let hosts = match self.instances(node)? {
+            Some(instances) if !skinned => instances
+                .into_iter()
+                .enumerate()
+                .map(|(k, trs)| self.helper(model, &format!("{name}_instance_{k}"), "Mesh", trs))
+                .collect(),
+            _ => vec![model],
+        };
+        for &host in &hosts {
+            self.draw(&g, host, &name)?;
+        }
+        if g.id.is_some() {
             if skinned {
                 self.skin(i, &g)?;
             }
@@ -576,19 +598,77 @@ impl<'d> Writer<'d> {
                 self.morphs(i, mesh, &g)?;
             }
         }
+        Ok(())
+    }
+
+    /// Connects geometry `g`, with its materials, to model `host`, which is named `name`.
+    fn draw(&mut self, g: &geometry::Geom, host: i64, name: &str) -> Result<()> {
+        if let Some(gid) = g.id {
+            self.oo(gid, host);
+            for slot in &g.slots {
+                let m = self.material(*slot)?;
+                self.oo(m, host);
+            }
+        }
         if let Some((line, mat)) = g.lines {
             // A model's lines take its first material: beside triangles, they go on a model of their own.
             let host = if g.id.is_some() {
-                let name = format!("{}_lines", self.models[i].as_ref().expect("written").name);
-                self.helper(model, &name, "Mesh", [0.0; 3], quat::IDENTITY)
+                self.helper(
+                    host,
+                    &format!("{name}_lines"),
+                    "Mesh",
+                    ([0.0; 3], quat::IDENTITY, [1.0; 3]),
+                )
             } else {
-                model
+                host
             };
             self.oo(line, host);
             let m = self.material(mat)?;
             self.oo(m, host);
         }
         Ok(())
+    }
+
+    /// A node's `EXT_mesh_gpu_instancing` instances, as transforms within it: none when it has none.
+    fn instances(&self, node: &Value) -> Result<Option<Vec<([f64; 3], [f64; 4], [f64; 3])>>> {
+        let Some(attrs) = node.pointer("/extensions/EXT_mesh_gpu_instancing/attributes") else {
+            return Ok(None);
+        };
+        let read = |key: &str, width: usize| -> Result<Option<Vec<f64>>> {
+            let Some(a) = index(attrs, key) else { return Ok(None) };
+            let (w, v) = self.doc.read_floats(a)?;
+            Ok((w == width).then(|| v.into_iter().map(f64::from).collect()))
+        };
+        let (t, r, s) = (read("TRANSLATION", 3)?, read("ROTATION", 4)?, read("SCALE", 3)?);
+        let count = [
+            t.as_ref().map(|v| v.len() / 3),
+            r.as_ref().map(|v| v.len() / 4),
+            s.as_ref().map(|v| v.len() / 3),
+        ]
+        .into_iter()
+        .flatten()
+        .min();
+        let Some(count) = count else { return Ok(None) };
+        let at = |v: &Option<Vec<f64>>, k: usize, default: &[f64]| -> Vec<f64> {
+            v.as_ref().map_or_else(
+                || default.to_vec(),
+                |v| v[k * default.len()..(k + 1) * default.len()].to_vec(),
+            )
+        };
+        Ok(Some(
+            (0..count)
+                .map(|k| {
+                    let t = at(&t, k, &[0.0; 3]);
+                    let r = at(&r, k, &quat::IDENTITY);
+                    let s = at(&s, k, &[1.0; 3]);
+                    (
+                        [t[0], t[1], t[2]],
+                        quat::unit_above([r[0], r[1], r[2], r[3]], 0.0).unwrap_or(quat::IDENTITY),
+                        [s[0], s[1], s[2]],
+                    )
+                })
+                .collect(),
+        ))
     }
 
     /// Writes node `i`'s camera and light, on model `model`: on the model itself when it's turned for the one it
@@ -601,7 +681,12 @@ impl<'d> Writer<'d> {
             let host = if turn == Some(CAMERA_TURN.perm) {
                 model
             } else {
-                self.helper(model, &format!("{name}_camera"), "Camera", [0.0; 3], CAMERA_TURN.q)
+                self.helper(
+                    model,
+                    &format!("{name}_camera"),
+                    "Camera",
+                    ([0.0; 3], CAMERA_TURN.q, [1.0; 3]),
+                )
             };
             let attr = self.id();
             self.object("NodeAttribute", camera(attr, &name, cam));
@@ -611,7 +696,12 @@ impl<'d> Writer<'d> {
             let host = if turn == Some(LIGHT_TURN.perm) {
                 model
             } else {
-                self.helper(model, &format!("{name}_light"), "Light", [0.0; 3], LIGHT_TURN.q)
+                self.helper(
+                    model,
+                    &format!("{name}_light"),
+                    "Light",
+                    ([0.0; 3], LIGHT_TURN.q, [1.0; 3]),
+                )
             };
             let attr = self.id();
             self.object("NodeAttribute", light_attribute(attr, &name, light));
