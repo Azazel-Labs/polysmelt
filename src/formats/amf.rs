@@ -23,7 +23,7 @@ use std::io::{BufRead, BufReader, Read};
 use quick_xml::events::{BytesStart, Event};
 use serde_json::{Map, Value, json};
 
-use super::stream;
+use super::{stream, xml};
 use crate::document::{Builder, Document};
 use crate::images::Source;
 use crate::material::{Alpha, CLAMP, Full, REPEAT, Tex};
@@ -343,7 +343,7 @@ fn parse(r: impl BufRead, limit: usize) -> Result<Amf> {
             }
             Event::GeneralRef(r) => {
                 if stack.last().is_some_and(|t| t.has_text()) {
-                    reference(&r, &mut s.text);
+                    xml::push_reference(&r, &mut s.text);
                 }
             }
             Event::Eof => {
@@ -364,37 +364,9 @@ fn parse(r: impl BufRead, limit: usize) -> Result<Amf> {
     Ok(a)
 }
 
-/// An entity or character reference's text.
-fn reference(name: &[u8], out: &mut Vec<u8>) {
-    let fixed: &[u8] = match name {
-        b"amp" => b"&",
-        b"lt" => b"<",
-        b"gt" => b">",
-        b"quot" => b"\"",
-        b"apos" => b"'",
-        _ => {
-            let code = match name {
-                [b'#', b'x' | b'X', hex @ ..] => std::str::from_utf8(hex)
-                    .ok()
-                    .and_then(|h| u32::from_str_radix(h, 16).ok()),
-                [b'#', dec @ ..] => std::str::from_utf8(dec).ok().and_then(|d| d.parse().ok()),
-                _ => None,
-            };
-            if let Some(c) = code.and_then(char::from_u32) {
-                out.extend_from_slice(c.encode_utf8(&mut [0; 4]).as_bytes());
-            }
-            return;
-        }
-    };
-    out.extend_from_slice(fixed);
-}
-
+/// An attribute's value, references decoded and trimmed.
 fn attr(e: &BytesStart<'_>, name: &[u8]) -> Option<String> {
-    e.attributes()
-        .with_checks(false)
-        .flatten()
-        .find(|a| a.key.local_name().as_ref() == name)
-        .map(|a| String::from_utf8_lossy(&a.value).trim().to_owned())
+    xml::attr(e, name).map(|v| String::from_utf8_lossy(&v).trim().to_owned())
 }
 
 /// A finite number.

@@ -586,48 +586,10 @@ fn attr(attrs: &str, key: &str) -> Option<String> {
         let body = &after[1..];
         let close = body.find(quote)?;
         if k.eq_ignore_ascii_case(key) {
-            return Some(decode_entities(&body[..close]));
+            return Some(crate::formats::xml::unescape(&body[..close]).into_owned());
         }
         rest = &body[close + 1..];
     }
-}
-
-fn decode_entities(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut rest = s;
-    while let Some(amp) = rest.find('&') {
-        out.push_str(&rest[..amp]);
-        rest = &rest[amp..];
-        let Some(semi) = rest.find(';').filter(|&i| i <= 10) else {
-            out.push('&');
-            rest = &rest[1..];
-            continue;
-        };
-        let name = &rest[1..semi];
-        let decoded = match name {
-            "lt" => Some('<'),
-            "gt" => Some('>'),
-            "amp" => Some('&'),
-            "apos" => Some('\''),
-            "quot" => Some('"'),
-            _ => name
-                .strip_prefix("#x")
-                .or_else(|| name.strip_prefix("#X"))
-                .map(|h| u32::from_str_radix(h, 16))
-                .or_else(|| name.strip_prefix('#').map(str::parse))
-                .and_then(Result::ok)
-                .and_then(char::from_u32),
-        };
-        if let Some(c) = decoded {
-            out.push(c);
-            rest = &rest[semi + 1..];
-        } else {
-            out.push('&');
-            rest = &rest[1..];
-        }
-    }
-    out.push_str(rest);
-    out
 }
 
 #[cfg(test)]
@@ -683,10 +645,6 @@ mod tests {
         assert_eq!(attr(a, "colorBlue"), None);
         let t = element_attrs(xml, "texture").unwrap();
         assert_eq!(attr(t, "xScale").as_deref(), Some("12"));
-        assert_eq!(
-            decode_entities("&lt;auto&gt; &#65;&#x42; &bogus; &"),
-            "<auto> AB &bogus; &"
-        );
     }
 
     #[test]

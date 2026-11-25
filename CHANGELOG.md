@@ -8,6 +8,11 @@ Breaking changes are allowed in minor releases until 1.0.
   second model beside it, so FBX read and written again keeps its nodes and joints instead of
   gaining one each time. When the mesh's geometry is offset from its model, the writer keeps the
   offset as a geometric transform.
+- The XML readers (COLLADA, X3D, AMF, 3MF and SketchUp 2021+ materials) share one entity and character
+  reference decoder. It's faster than any of the copies it replaces. AMF and 3MF now decode
+  references in attribute values, 3MF metadata keeps its text around references and CDATA, and
+  X3D and COLLADA no longer decode some text twice (`&amp;lt;` is `&lt;`). Numeric references
+  with a sign, such as `&#+65;`, are left as written, as XML requires.
 
 ## 0.18.0
 

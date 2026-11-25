@@ -885,3 +885,17 @@ Shape { geometry Box {} }
     assert_eq!(info.unit.as_deref(), Some("meter"));
     assert_eq!(info.converted, Converted::default());
 }
+
+#[test]
+fn references_are_decoded_once() {
+    let xml = r#"<X3D><Scene><Transform DEF="A&amp;lt;B"><Shape><Box/></Shape></Transform></Scene></X3D>"#;
+    let doc = read(xml, "a.x3d");
+    let json = doc.json();
+    let names: Vec<&str> = json["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|n| n["name"].as_str())
+        .collect();
+    assert!(names.contains(&"A&lt;B"), "{names:?}");
+}

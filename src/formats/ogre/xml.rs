@@ -8,6 +8,7 @@ use super::{
     PoseOffset, SkeletonAnimation, SkeletonFile, SubMesh, Track,
 };
 use crate::Result;
+use crate::formats::stream::f32_from;
 pub(super) use crate::formats::xml::{El, Xml};
 
 use crate::formats::scene::MAX_UV_SETS;
@@ -40,7 +41,7 @@ pub(super) fn truthy(v: &str) -> bool {
 fn color(v: &str) -> [f32; 4] {
     let mut c = [0.0, 0.0, 0.0, 1.0];
     for (o, t) in c.iter_mut().zip(v.split_ascii_whitespace()) {
-        *o = t.parse().unwrap_or(0.0);
+        *o = f32_from(t.as_bytes()).unwrap_or(0.0);
     }
     c
 }
