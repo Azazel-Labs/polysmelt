@@ -15,8 +15,8 @@ const MAX_TARGETS: usize = 256;
 const MAX_TARGET_FLOATS: usize = 1 << 24;
 /// The highest texture coordinate or color set kept.
 const MAX_SET: usize = 7;
-/// The most bone influences a skin may list.
-const MAX_INFLUENCES: usize = 1 << 26;
+/// The most bone influences a skin may list, its vertices' together.
+const MAX_INFLUENCE_TOTAL: usize = 1 << 26;
 
 /// A geometry object as written into the buffer.
 pub(super) struct Geom {
@@ -794,9 +794,9 @@ fn read_skin(c: &mut Ctx<'_>, s: u32, n: usize, p: &mut Prim) -> Option<(usize, 
     }
     let mut total = 0usize;
     for &k in counts {
-        total = total.checked_add(vertex(k, MAX_INFLUENCES)? as usize)?;
+        total = total.checked_add(vertex(k, MAX_INFLUENCE_TOTAL)? as usize)?;
     }
-    if total > MAX_INFLUENCES || indices.len() != total || weights.len() != total {
+    if total > MAX_INFLUENCE_TOTAL || indices.len() != total || weights.len() != total {
         return None;
     }
     p.skin_joints = Vec::with_capacity(n);
@@ -805,7 +805,7 @@ fn read_skin(c: &mut Ctx<'_>, s: u32, n: usize, p: &mut Prim) -> Option<(usize, 
     let mut dropped = 0;
     for &k in counts {
         // Checked above to be a whole number in range.
-        let k = vertex(k, MAX_INFLUENCES).map_or(0, |k| k as usize);
+        let k = vertex(k, MAX_INFLUENCE_TOTAL).map_or(0, |k| k as usize);
         // The four strongest influences, strongest first.
         let mut top = [(0u32, 0.0f64); 4];
         for i in at..at + k {
