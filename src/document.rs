@@ -37,7 +37,10 @@ pub use crate::keep::Keep;
 
 mod typed;
 
-pub(crate) use typed::{Accessor, Animation, Channel, Limits, Sampler, Sparse, Tables, View};
+pub(crate) use typed::{Accessor, Animation, Limits, Tables, View};
+// For the readers that build animations, each behind its own feature.
+#[allow(unused_imports)]
+pub(crate) use typed::{Channel, Sampler, Sparse};
 
 /// A model as a glTF 2.0 document: its JSON, its buffers' bytes, and facts about the source.
 ///
