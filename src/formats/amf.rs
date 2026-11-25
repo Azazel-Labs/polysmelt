@@ -705,19 +705,6 @@ fn take_metadata(info: &mut SourceInfo, metadata: &mut Map<String, Value>) {
     }
 }
 
-/// Meters per unit: the units the format names, and a few spelled other ways.
-fn meters(unit: &str) -> Option<f64> {
-    Some(match unit.to_ascii_lowercase().as_str() {
-        "millimeter" | "millimeters" | "millimetre" | "mm" => 1e-3,
-        "centimeter" | "centimeters" | "centimetre" | "cm" => 1e-2,
-        "meter" | "meters" | "metre" | "m" => 1.0,
-        "inch" | "inches" | "in" => 0.0254,
-        "feet" | "foot" | "ft" => 0.3048,
-        "micron" | "microns" | "micrometer" | "micrometre" | "um" => 1e-6,
-        _ => return None,
-    })
-}
-
 fn some<const N: usize>(v: Option<&[f32; N]>) -> Option<[f32; N]> {
     v.filter(|v| !v[0].is_nan()).copied()
 }
@@ -837,7 +824,7 @@ struct Look {
 
 fn build(a: &Amf, zipped: bool) -> Result<Document> {
     let unit = a.unit.clone().unwrap_or_else(|| "millimeter".to_owned());
-    let known = meters(&unit);
+    let known = crate::source::meters_in(&unit);
     let scale = known.unwrap_or(1e-3);
     let mat_index: HashMap<&str, usize> = a
         .materials

@@ -220,19 +220,6 @@ struct Part {
     unit: Option<String>,
 }
 
-/// Meters per unit, for the units the core specification allows (millimeters when unsaid).
-fn meters(unit: Option<&str>) -> Option<f64> {
-    Some(match unit.unwrap_or("millimeter") {
-        "micron" => 1e-6,
-        "millimeter" => 1e-3,
-        "centimeter" => 1e-2,
-        "inch" => 0.0254,
-        "foot" => 0.3048,
-        "meter" => 1.0,
-        _ => return None,
-    })
-}
-
 /// What a slicer project says about filaments: their colors, and which one each object, part (Bambu Studio,
 /// `OrcaSlicer`) or range of triangles (`PrusaSlicer`'s volumes) prints in, what each part or volume is for, and
 /// its name. Filaments count from 1.
@@ -374,8 +361,10 @@ pub(crate) fn load(input: super::Input<'_>, keep: Keep) -> Result<Document> {
     let slicer = read_slicer(&mut zip, &names);
     let main = &parts[&root];
     ensure!(!main.build.is_empty(), Empty, "this 3MF builds nothing");
+    // The core specification's units are micron, millimeter (when unsaid), centimeter, inch, foot and meter; other
+    // spellings of a length are taken too.
     let unit = main.unit.clone().unwrap_or_else(|| "millimeter".to_owned());
-    let Some(scale) = meters(Some(&unit)) else {
+    let Some(scale) = crate::source::meters_in(&unit) else {
         bail!(Corrupt, "unknown 3MF unit {unit:?}")
     };
 
