@@ -2,7 +2,7 @@
 
 Breaking changes are allowed in minor releases until 1.0.
 
-## Unreleased
+## 0.20.0
 
 - `Document::flatten` scales a `KHR_materials_volume` thickness by the transform it bakes
   into the vertices, as the extension has a node scale it: a thickness of 2.27 under a node
