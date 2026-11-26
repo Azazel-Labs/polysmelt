@@ -1,0 +1,124 @@
+{
+  "spec": "C3D (biomechanics motion capture, c3d.org): a file ezc3d wrote, three markers over 20 frames, in millimeters",
+  "source": "written with ezc3d 1.7.2 by tools/corpus/thirdparty.py; expectations are what it reads back",
+  "no_mesh": true,
+  "facts": {
+    "markers": 3,
+    "frames": 20
+  },
+  "document": {
+    "animations": 1,
+    "node_names": [
+      "LASI",
+      "RASI",
+      "SACR"
+    ]
+  },
+  "animation_spans": [
+    [
+      0.0,
+      0.19
+    ]
+  ],
+  "rig": [
+    {
+      "node": "LASI",
+      "keys": {
+        "translation": 20
+      }
+    },
+    {
+      "node": "LASI",
+      "time": 0.0,
+      "world": [
+        0.0,
+        0.925,
+        0.0
+      ]
+    },
+    {
+      "node": "LASI",
+      "time": 0.1,
+      "world": [
+        0.00657,
+        0.87525,
+        -0.035
+      ]
+    },
+    {
+      "node": "LASI",
+      "time": 0.19,
+      "world": [
+        0.0067,
+        0.92087,
+        -0.0665
+      ]
+    },
+    {
+      "node": "RASI",
+      "keys": {
+        "translation": 20
+      }
+    },
+    {
+      "node": "RASI",
+      "time": 0.0,
+      "world": [
+        0.10841,
+        0.925,
+        0.05
+      ]
+    },
+    {
+      "node": "RASI",
+      "time": 0.1,
+      "world": [
+        0.10989,
+        0.924,
+        0.015
+      ]
+    },
+    {
+      "node": "RASI",
+      "time": 0.19,
+      "world": [
+        0.10987,
+        0.90984,
+        -0.0165
+      ]
+    },
+    {
+      "node": "SACR",
+      "keys": {
+        "translation": 20
+      }
+    },
+    {
+      "node": "SACR",
+      "time": 0.0,
+      "world": [
+        0.20909,
+        0.925,
+        0.1
+      ]
+    },
+    {
+      "node": "SACR",
+      "time": 0.1,
+      "world": [
+        0.20412,
+        0.87722,
+        0.065
+      ]
+    },
+    {
+      "node": "SACR",
+      "time": 0.19,
+      "world": [
+        0.20397,
+        0.89555,
+        0.0335
+      ]
+    }
+  ]
+}

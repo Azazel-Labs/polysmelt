@@ -1,0 +1,90 @@
+{
+  "spec": "C3D (biomechanics motion capture, c3d.org): a file ezc3d wrote, markers in meters beside an analog channel",
+  "source": "written with ezc3d 1.7.2 by tools/corpus/thirdparty.py; expectations are what it reads back",
+  "no_mesh": true,
+  "facts": {
+    "markers": 2,
+    "frames": 10
+  },
+  "document": {
+    "animations": 1,
+    "node_names": [
+      "HEAD",
+      "C7"
+    ]
+  },
+  "animation_spans": [
+    [
+      0.0,
+      0.075
+    ]
+  ],
+  "rig": [
+    {
+      "node": "HEAD",
+      "keys": {
+        "translation": 10
+      }
+    },
+    {
+      "node": "HEAD",
+      "time": 0.0,
+      "world": [
+        0.0,
+        925.0,
+        0.0
+      ]
+    },
+    {
+      "node": "HEAD",
+      "time": 0.041667,
+      "world": [
+        -3.50783,
+        901.76843,
+        -17.5
+      ]
+    },
+    {
+      "node": "HEAD",
+      "time": 0.075,
+      "world": [
+        0.16814,
+        877.39819,
+        -31.5
+      ]
+    },
+    {
+      "node": "C7",
+      "keys": {
+        "translation": 10
+      }
+    },
+    {
+      "node": "C7",
+      "time": 0.0,
+      "world": [
+        108.41471,
+        925.0,
+        50.0
+      ]
+    },
+    {
+      "node": "C7",
+      "time": 0.041667,
+      "world": [
+        90.2247,
+        875.25018,
+        32.5
+      ]
+    },
+    {
+      "node": "C7",
+      "time": 0.075,
+      "world": [
+        108.50436,
+        915.86731,
+        18.5
+      ]
+    }
+  ]
+}

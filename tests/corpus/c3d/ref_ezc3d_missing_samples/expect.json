@@ -1,0 +1,159 @@
+{
+  "spec": "C3D (biomechanics motion capture, c3d.org): a file ezc3d wrote, markers with samples missing",
+  "source": "written with ezc3d 1.7.2 by tools/corpus/thirdparty.py; expectations are what it reads back",
+  "no_mesh": true,
+  "facts": {
+    "markers": 4,
+    "frames": 12,
+    "missing_samples": 4
+  },
+  "document": {
+    "animations": 1,
+    "node_names": [
+      "LASI",
+      "RASI",
+      "SACR",
+      "LKNE"
+    ]
+  },
+  "animation_spans": [
+    [
+      0.0,
+      0.22
+    ]
+  ],
+  "rig": [
+    {
+      "node": "LASI",
+      "keys": {
+        "translation": 12
+      }
+    },
+    {
+      "node": "LASI",
+      "time": 0.0,
+      "world": [
+        0.0,
+        0.925,
+        0.0
+      ]
+    },
+    {
+      "node": "LASI",
+      "time": 0.12,
+      "world": [
+        -0.00872,
+        0.89432,
+        -0.021
+      ]
+    },
+    {
+      "node": "LASI",
+      "time": 0.22,
+      "world": [
+        0.00988,
+        0.87531,
+        -0.0385
+      ]
+    },
+    {
+      "node": "RASI",
+      "keys": {
+        "translation": 10
+      }
+    },
+    {
+      "node": "RASI",
+      "time": 0.04,
+      "world": [
+        0.10675,
+        0.90906,
+        0.043
+      ]
+    },
+    {
+      "node": "RASI",
+      "time": 0.14,
+      "world": [
+        0.09626,
+        0.88774,
+        0.0255
+      ]
+    },
+    {
+      "node": "RASI",
+      "time": 0.22,
+      "world": [
+        0.10663,
+        0.92376,
+        0.0115
+      ]
+    },
+    {
+      "node": "SACR",
+      "keys": {
+        "translation": 11
+      }
+    },
+    {
+      "node": "SACR",
+      "time": 0.0,
+      "world": [
+        0.20909,
+        0.925,
+        0.1
+      ]
+    },
+    {
+      "node": "SACR",
+      "time": 0.12,
+      "world": [
+        0.19917,
+        0.91587,
+        0.079
+      ]
+    },
+    {
+      "node": "SACR",
+      "time": 0.22,
+      "world": [
+        0.19728,
+        0.87777,
+        0.0615
+      ]
+    },
+    {
+      "node": "LKNE",
+      "keys": {
+        "translation": 11
+      }
+    },
+    {
+      "node": "LKNE",
+      "time": 0.0,
+      "world": [
+        0.30141,
+        0.925,
+        0.15
+      ]
+    },
+    {
+      "node": "LKNE",
+      "time": 0.1,
+      "world": [
+        0.30215,
+        0.924,
+        0.1325
+      ]
+    },
+    {
+      "node": "LKNE",
+      "time": 0.2,
+      "world": [
+        0.29456,
+        0.9211,
+        0.115
+      ]
+    }
+  ]
+}

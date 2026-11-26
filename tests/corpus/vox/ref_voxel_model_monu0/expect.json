@@ -1,0 +1,22 @@
+{
+  "spec": "MagicaVoxel .vox (ephtracy/voxel-model, MagicaVoxel-file-format-vox.txt): a real file, a monument of 12717 voxels",
+  "source": "ephtracy/voxel-model at 3bff8feaa7d9, vox/monument/monu0.vox (MIT, see ../LICENSE-voxel-model); expectations measured with py-vox-io 0.1",
+  "area": 9814,
+  "bounds": {
+    "min": [
+      40.0,
+      16.0,
+      -109.0
+    ],
+    "max": [
+      100.0,
+      120.0,
+      -25.0
+    ]
+  },
+  "facts": {
+    "voxels": 12717,
+    "voxel_size": "124x124x120"
+  },
+  "material_count": 2
+}

@@ -1,0 +1,22 @@
+{
+  "spec": "MagicaVoxel .vox (ephtracy/voxel-model, MagicaVoxel-file-format-vox.txt): a real file, a procedural shape of 529 voxels",
+  "source": "ephtracy/voxel-model at 3bff8feaa7d9, vox/procedure/ff3.vox (MIT, see ../LICENSE-voxel-model); expectations measured with py-vox-io 0.1",
+  "area": 2022,
+  "bounds": {
+    "min": [
+      0.0,
+      0.0,
+      -25.0
+    ],
+    "max": [
+      25.0,
+      25.0,
+      0.0
+    ]
+  },
+  "facts": {
+    "voxels": 529,
+    "voxel_size": "25x25x25"
+  },
+  "material_count": 2
+}

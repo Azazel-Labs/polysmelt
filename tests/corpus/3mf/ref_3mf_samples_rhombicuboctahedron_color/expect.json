@@ -1,0 +1,20 @@
+{
+  "spec": "3MF (3D Manufacturing Format core specification): a real file, a rhombicuboctahedron with a color on each face",
+  "source": "3MFConsortium/3mf-samples at 665e20dc4d77, examples/material/rhombicuboctahedron_color.3mf (BSD-2-Clause, see ../LICENSE-3mf-samples); expectations measured with lib3mf 2.5.0",
+  "tolerance": 1e-06,
+  "triangles": 44,
+  "bounds": {
+    "min": [
+      5e-06,
+      5e-06,
+      -0.120716
+    ],
+    "max": [
+      0.120716,
+      0.120716,
+      -5e-06
+    ]
+  },
+  "area": 0.05366,
+  "position_set": "positions.f32"
+}
