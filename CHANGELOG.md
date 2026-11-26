@@ -2,7 +2,7 @@
 
 Breaking changes are allowed in minor releases until 1.0.
 
-## Unreleased
+## 0.19.0
 
 - SuperSplat's compressed PLY files (`.compressed.ply`) are read as gaussian splats, with
   their spherical harmonics when the file has them. They come out as
