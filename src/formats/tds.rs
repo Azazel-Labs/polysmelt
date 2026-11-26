@@ -8,7 +8,8 @@
 //! are. The keyframer's object nodes become the hierarchy: their first keys are the rest pose and their tracks the
 //! animation, its TCB splines as glTF cubic splines (rotations as linear, between the turns the keys add up to). A
 //! placed mesh is moved into its node's space as lib3ds does (back through the mesh matrix and the pivot), unless that
-//! wouldn't put it back where the editor has it at rest; then the rest pose decides. Materials have a diffuse color, a
+//! wouldn't put it back where the editor has it at rest or at any later key (a file saved on a later frame holds that
+//! frame's vertices and mesh matrix); then the rest pose decides. Materials have a diffuse color, a
 //! transparency and maybe a texture named by file; every value they hold, maps included, is kept in `extras`. Of the
 //! other maps, the specular map tints the highlight, the self-illumination map glows, and the bump map is the normal
 //! map when its image is one (scaled by its amount); a bump map that is a height map, the shininess map (glossiness,
@@ -865,6 +866,42 @@ fn rest(n: &KfNode) -> ([f64; 3], [f64; 4], [f64; 3]) {
     (t, q, s)
 }
 
+/// Whether `back` (a mesh's way into its node's space, through its mesh matrix and pivot) undoes where the node
+/// stands at one of its keys after the first, under `above`. A file saved on a later frame records where the object
+/// stood then: its mesh matrix and vertices are that frame's, and the tracks still place it at every other.
+fn stands_at_a_key(n: &KfNode, above: Option<&M4>, back: &M4, scale: f64) -> bool {
+    // A track's value on a frame: its key there, or its only key (none: the default).
+    fn on<const N: usize>(keys: &[Key<N>], frame: i32, default: [f32; N]) -> Option<[f64; N]> {
+        let key = match keys {
+            [] => return Some(default.map(f64::from)),
+            [only] => only,
+            _ => keys.iter().find(|k| k.frame == frame)?,
+        };
+        Some(key.value.map(f64::from))
+    }
+    let turns = rotations(&n.rot);
+    let frames = n.pos.iter().map(|k| k.frame);
+    let frames = frames.chain(n.rot.iter().map(|k| k.frame));
+    let frames = frames.chain(n.scl.iter().map(|k| k.frame));
+    frames.into_iter().any(|frame| {
+        let q = match n.rot.len() {
+            0 => Some([0.0, 0.0, 0.0, 1.0]),
+            1 => turns.first().copied(),
+            _ => n
+                .rot
+                .iter()
+                .position(|k| k.frame == frame)
+                .and_then(|at| turns.get(at).copied()),
+        };
+        let (Some(t), Some(q), Some(s)) = (on(&n.pos, frame, [0.0; 3]), q, on(&n.scl, frame, [1.0; 3])) else {
+            return false;
+        };
+        let local = trs(t, q, s);
+        let world = above.map_or(local, |a| xform::mul(a, &local));
+        near_identity(&xform::mul(&world, back), scale)
+    })
+}
+
 fn near_identity(m: &M4, scale: f64) -> bool {
     (0..3).all(|i| (0..3).all(|j| (m[i][j] - IDENTITY[i][j]).abs() < 1e-3) && m[i][3].abs() < 1e-3 * scale.max(1.0))
 }
@@ -1437,7 +1474,7 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
             && matches!(objects[o].body, Body::Mesh(_))
         {
             // Back through the mesh matrix and the pivot, as lib3ds does, unless the object's first node isn't then
-            // where the editor has it: then its rest pose decides.
+            // where the editor has it, at rest or at any of its keys: then its rest pose decides.
             let m = match &objects[o].body {
                 Body::Mesh(ts) => ts.iter().find_map(|t| t.matrix).map_or(IDENTITY, |m| mesh_matrix(&m)),
                 _ => IDENTITY,
@@ -1446,8 +1483,10 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
             let lib = (xform::det3(&m).abs() > 1e-12).then(|| xform::mul(&pivot, &xform::inverse(&m)));
             let by_rest = xform::inverse(&w);
             let size = m[0][3].abs().max(m[1][3].abs()).max(m[2][3].abs());
+            let above = parent_of[i].filter(|_| parent_ok[i]).and_then(|p| world[p]);
             let into = match lib {
                 Some(l) if placed_once[o] || near_identity(&xform::mul(&w, &l), size) => l,
+                Some(l) if stands_at_a_key(n, above.as_ref(), &l, size) => l,
                 _ => by_rest,
             };
             placed_once[o] = true;
@@ -1999,6 +2038,45 @@ mod tests {
         got.sort_by_key(key);
         want.sort_by_key(key);
         assert!(got.iter().zip(&want).all(|(a, b)| close(*a, *b)), "{got:?} != {want:?}");
+    }
+
+    #[test]
+    fn a_mesh_saved_on_a_later_frame_follows_its_mesh_matrix() {
+        // A triangle that turns a quarter (clockwise, as 3DS turns) about Z by frame 30, saved on frame 30: its
+        // vertices and mesh matrix are that frame's.
+        let quarter = std::f32::consts::FRAC_PI_2;
+        let saved = [[5., 0., 0.], [5., -1., 0.], [6., 0., 0.]];
+        let mut mesh = trimesh(&saved, &[[0, 1, 2]], None);
+        mesh.extend(chunk(
+            MESH_MATRIX,
+            &f32s(&[0., -1., 0., 1., 0., 0., 0., 0., 1., 5., 0., 0.]),
+        ));
+        let editor = object("Spinner", &chunk(TRIMESH, &mesh));
+        let kf = node(
+            0,
+            "Spinner",
+            u16::MAX,
+            [0.; 3],
+            &[
+                track(POS_TRACK, &[(0, &[5., 0., 0.])]),
+                track(ROT_TRACK, &[(0, &[0., 0., 0., 1.]), (30, &[quarter, 0., 0., 1.])]),
+            ],
+        );
+        let mut main = chunk(EDITOR, &editor);
+        main.extend(chunk(KEYFRAMER, &kf));
+        let doc = read("spinner.3ds", &chunk(MAIN, &main)).unwrap();
+        let drawn = |pose| -> Vec<[f32; 3]> {
+            let mesh = doc.flatten(pose).unwrap().unwrap();
+            mesh.prims.iter().flat_map(|p| p.positions.clone()).collect()
+        };
+        let y_up = |v: &[[f32; 3]]| -> Vec<[f32; 3]> { v.iter().map(|&[x, y, z]| [x, z, -y]).collect() };
+        let same = |got: &[[f32; 3]], want: &[[f32; 3]]| want.iter().all(|w| got.iter().any(|g| close(*g, *w)));
+        // On frame 30 it is where the file has it.
+        let then = drawn(Pose::Animation { index: 0, time: 1.0 });
+        assert!(same(&then, &y_up(&saved)), "{then:?}");
+        // At rest, the first key, it hasn't turned yet.
+        let rest = drawn(Pose::Rest);
+        assert!(same(&rest, &y_up(&at([5., 0., 0.]))), "{rest:?}");
     }
 
     #[test]

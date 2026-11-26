@@ -15,6 +15,10 @@ Breaking changes are allowed in minor releases until 1.0.
   mesh's space, so it is as long as the attenuation distance once the unit's node scales
   it: 500 in a millimeter file for a distance of 0.5 m, where it was 0.5. The attenuation
   is per meter, as the materials extension gives it, whatever the model's unit.
+- 3DS: a file saved on a frame after the first holds that frame's vertices and mesh matrix.
+  Its mesh is now placed back through the mesh matrix, as 3D Studio places it, when the
+  matrix is where the object stands at any of its keys, not only the first. Before, such a
+  mesh kept the later frame's turn in every pose.
 
 ## 0.19.0
 
