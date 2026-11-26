@@ -1177,13 +1177,13 @@ def synthetic():
               "i3dm whose glTF draws its mesh from two nodes, one under a turned parent",
               extra={"document": {"nodes": 4}})
     # A stretch along the instance's axes under a node turned 45 degrees shears the mesh, which
-    # translation, rotation and scale can't hold: the instances become nodes with matrices.
+    # translation, rotation and scale can't hold: each instance becomes a node where it stands over a node where the glTF's stood.
     q = [0, 0, math.sin(math.pi / 8), math.cos(math.pi / 8)]
     fbin = floats(0, 0, 0, 10, 0, 0) + floats(1, 2, 3, 3, 1, 1)
     ft = {"INSTANCES_LENGTH": 2, "POSITION": {"byteOffset": 0}, "SCALE_NON_UNIFORM": {"byteOffset": 24}}
     tile_case("i3dm_shear", {"wedge.i3dm": instanced(ft, fbin, wedge_glb([{"mesh": 0, "rotation": q}]))},
               "wedge.i3dm", "i3dm with SCALE_NON_UNIFORM on a glTF whose node is turned 45 degrees",
-              extra={"json": {"/extensionsUsed": None, "/nodes/0/mesh": None}, "document": {"nodes": 4}})
+              extra={"json": {"/extensionsUsed": None, "/nodes/0/mesh": None}, "document": {"nodes": 6}})
     # EAST_NORTH_UP at the poles, the Earth's center and the equator, where the frame has its
     # special cases.
     fbin = floats(0, 0, 6356752, 0, 0, -6356752, 0, 0, 0, 6378137, 0, 0, 0, -6378137, 0)

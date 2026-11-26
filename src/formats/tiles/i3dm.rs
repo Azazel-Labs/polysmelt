@@ -25,7 +25,7 @@
 //!
 //! What the extension can't hold:
 //! - A node whose instances would shear (a non-uniform scale under a turned node) draws them
-//!   as nodes of its own instead, one for each, with a matrix.
+//!   as nodes of its own instead: for each, one where the instance stands over one where the node stood.
 //! - Animations are dropped: an instanced node's motion would move its instances about the
 //!   node, not each about itself.
 //! - A skinned mesh, and a node that already has instances, is left as the glTF has it, drawn
@@ -208,8 +208,10 @@ pub(super) fn read(ctx: &Ctx<'_>, data: &[u8], stats: &mut Stats) -> Result<Docu
         at
     };
     let mut attributes = Vec::new();
-    // Nodes drawn in place of a node's instances, where they would shear: (mesh, matrix).
-    let mut loose: Vec<(Value, M4)> = Vec::new();
+    // Nodes drawn in place of a node's instances, where they would shear: the mesh, where the
+    // instance stands, and where the node stood in it. Together they shear, which no one node
+    // of a glTF may; each alone does not.
+    let mut loose: Vec<(Value, M4, M4)> = Vec::new();
     let mut emptied = Vec::new();
     for (node, to) in &drawn {
         let back = xform::inverse(to);
@@ -234,11 +236,7 @@ pub(super) fn read(ctx: &Ctx<'_>, data: &[u8], stats: &mut Stats) -> Result<Docu
         } else {
             let mesh = json["nodes"][*node]["mesh"].clone();
             let from_tile = xform::inverse(&to_tile);
-            loose.extend(
-                instances
-                    .iter()
-                    .map(|m| (mesh.clone(), xform::mul(&from_tile, &xform::mul(m, to)))),
-            );
+            loose.extend(instances.iter().map(|m| (mesh.clone(), xform::mul(&from_tile, m), *to)));
             emptied.push(*node);
         }
     }
@@ -304,12 +302,13 @@ pub(super) fn read(ctx: &Ctx<'_>, data: &[u8], stats: &mut Stats) -> Result<Docu
     if let Some(over) = over.filter(|_| !loose.is_empty()) {
         let json = doc.json_mut();
         if let Some(Value::Array(nodes)) = json.get_mut("nodes") {
-            let first = nodes.len();
-            for (mesh, m) in &loose {
-                nodes.push(json!({ "mesh": mesh, "matrix": xform::to_column_major(m) }));
-            }
             let mut children: Vec<usize> = indices(&nodes[over], "children").collect();
-            children.extend(first..first + loose.len());
+            for (mesh, instance, node) in &loose {
+                let at = nodes.len();
+                nodes.push(json!({ "matrix": xform::to_column_major(instance), "children": [at + 1] }));
+                nodes.push(json!({ "mesh": mesh, "matrix": xform::to_column_major(node) }));
+                children.push(at);
+            }
             nodes[over]["children"] = json!(children);
         }
     }
