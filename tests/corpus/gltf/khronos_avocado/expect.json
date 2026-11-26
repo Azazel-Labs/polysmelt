@@ -1,0 +1,42 @@
+{
+  "spec": "glTF 2.0 (Khronos, 2021): Khronos sample Avocado",
+  "source": "KhronosGroup/glTF-Sample-Assets@e124e8d, Models/Avocado/glTF (CC0-1.0, Microsoft); textures scaled down to 64 pixels",
+  "file": "Avocado.gltf",
+  "triangles": 682,
+  "vertices": 406,
+  "area": 0.005855,
+  "bounds": {
+    "min": [
+      -0.021281,
+      -4.8e-05,
+      -0.013809
+    ],
+    "max": [
+      0.021281,
+      0.062848,
+      0.013809
+    ]
+  },
+  "material_count": 1,
+  "materials": [
+    {
+      "name": "2256_Avocado_d",
+      "double_sided": false,
+      "alpha_mode": "OPAQUE",
+      "normal_map": true,
+      "emissive": [
+        0,
+        0,
+        0
+      ],
+      "textured": true,
+      "metallic": 1,
+      "roughness": 1,
+      "color": [
+        1,
+        1,
+        1
+      ]
+    }
+  ]
+}

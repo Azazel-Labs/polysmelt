@@ -144,9 +144,14 @@ fn cases(format: &str) -> Vec<Case> {
         .filter(|p| p.is_dir())
         .collect();
     dirs.sort();
-    dirs.into_iter()
-        .map(|dir| {
-            let name = format!("{format}/{}", dir.file_name().unwrap().to_string_lossy());
+    dirs.into_iter().map(|dir| case_at(format, dir)).collect()
+}
+
+/// The case in folder `dir` of `format`'s corpus.
+fn case_at(format: &str, dir: PathBuf) -> Case {
+    let name = format!("{format}/{}", dir.file_name().unwrap().to_string_lossy());
+    {
+        {
             let text = std::fs::read_to_string(dir.join("expect.json"))
                 .unwrap_or_else(|e| panic!("{name}: no expect.json: {e}"));
             let expect: Map<String, Value> =
@@ -179,8 +184,8 @@ fn cases(format: &str) -> Vec<Case> {
                 file,
                 expect,
             }
-        })
-        .collect()
+        }
+    }
 }
 
 fn floats(v: &Value) -> Vec<f32> {
@@ -446,13 +451,16 @@ fn decoded(case: &Case, ext: &str, want: Option<&Mesh>, tol: f32) -> Result<(), 
         .open(&case.file)
         .map_err(|e| e.to_string())?;
     doc.decode().map_err(|err| format!("doesn't decode: {err}"))?;
-    // The gltf crate refuses attribute names it doesn't know, KHR_gaussian_splatting's among them.
-    let splats = doc
-        .json()
-        .get("extensionsUsed")
-        .and_then(Value::as_array)
-        .is_some_and(|used| used.iter().any(|e| e == "KHR_gaussian_splatting"));
-    if !splats && let Some(why) = agrees_with_gltf_crate(&doc)? {
+    // The gltf crate refuses attribute names and animation targets it doesn't know (KHR_gaussian_splatting's,
+    // KHR_animation_pointer's), and any required extension but the texture ones it's built with here.
+    let listed = |key: &str| {
+        let list = doc.json().get(key).and_then(Value::as_array);
+        list.into_iter().flatten().filter_map(Value::as_str)
+    };
+    let foreign = listed("extensionsUsed").any(|e| e == "KHR_gaussian_splatting" || e == "KHR_animation_pointer")
+        || listed("extensionsRequired")
+            .any(|e| !["KHR_texture_basisu", "EXT_texture_webp", "MSFT_texture_dds"].contains(&e));
+    if !foreign && let Some(why) = agrees_with_gltf_crate(&doc)? {
         return Err(format!("decoded, the gltf crate can't read it: {why}"));
     }
     let text = serde_json::to_string(doc.json()).unwrap();
@@ -488,7 +496,7 @@ fn decoded(case: &Case, ext: &str, want: Option<&Mesh>, tol: f32) -> Result<(), 
     let glb = doc
         .to_glb()
         .map_err(|err| format!("decoded, it doesn't write as GLB: {err}"))?;
-    if !splats {
+    if !foreign {
         gltf::Gltf::from_slice(&glb).map_err(|err| format!("decoded, the gltf crate rejects it: {err}"))?;
     }
     let back =
@@ -729,6 +737,183 @@ fn round_trip(mesh: &Mesh, bytes: &[u8], tol: f32) -> Result<(), String> {
     Ok(())
 }
 
+/// How far apart two meshes' values may be and still be the same: each is the largest difference in any
+/// component.
+#[derive(Clone, Copy, Debug)]
+struct Tolerances {
+    positions: f32,
+    normals: f32,
+    uvs: f32,
+    colors: f32,
+}
+
+impl Tolerances {
+    /// `same_as`'s `positions`, `normals`, `uvs` and `colors`, each `1e-5` when it isn't given.
+    fn of(v: &Value) -> Self {
+        let get = |key: &str| v.get(key).and_then(Value::as_f64).unwrap_or(1e-5) as f32;
+        Self {
+            positions: get("positions"),
+            normals: get("normals"),
+            uvs: get("uvs"),
+            colors: get("colors"),
+        }
+    }
+}
+
+/// A triangle's corners: position, normal, texture coordinates and color, zeros for what its primitive lacks.
+type Corners = [[f32; 12]; 3];
+
+/// A mesh's triangles, each with its material and which of normals, texture coordinates and colors it has.
+fn soup(mesh: &Mesh) -> Vec<(usize, [bool; 3], Corners)> {
+    let mut out = Vec::new();
+    for p in &mesh.prims {
+        let has = [!p.normals.is_empty(), !p.uvs.is_empty(), !p.colors.is_empty()];
+        let corner = |i: u32| {
+            let i = i as usize;
+            let mut c = [0f32; 12];
+            c[..3].copy_from_slice(&p.positions[i]);
+            if has[0] {
+                c[3..6].copy_from_slice(&p.normals[i]);
+            }
+            if has[1] {
+                c[6..8].copy_from_slice(&p.uvs[i]);
+            }
+            if has[2] {
+                c[8..].copy_from_slice(&p.colors[i]);
+            }
+            c
+        };
+        for t in p.indices.chunks_exact(3) {
+            out.push((p.material, has, [corner(t[0]), corner(t[1]), corner(t[2])]));
+        }
+    }
+    out
+}
+
+/// Whether two meshes draw the same: the same materials and images, and the same triangles in each material,
+/// in any order and starting at any corner but wound the same way, every value within `tol`. Vertices may be
+/// shared differently. On success, the largest differences found between matched corners.
+fn same_mesh(got: &Mesh, want: &Mesh, tol: Tolerances) -> Result<Tolerances, String> {
+    if got.materials != want.materials {
+        let at = got.materials.iter().zip(&want.materials).position(|(a, b)| a != b);
+        return Err(match at {
+            Some(i) => format!(
+                "material {i} is {:?}, expected {:?}",
+                got.materials[i], want.materials[i]
+            ),
+            None => format!("{} materials, expected {}", got.materials.len(), want.materials.len()),
+        });
+    }
+    if got.images != want.images {
+        return Err(format!(
+            "{} images that aren't the other's {}",
+            got.images.len(),
+            want.images.len()
+        ));
+    }
+    let (a, b) = (soup(got), soup(want));
+    if a.len() != b.len() {
+        return Err(format!("{} triangles, expected {}", a.len(), b.len()));
+    }
+    // The other's triangles by where their centers are, in cells much larger than the tolerance: a match is
+    // in the same cell or one beside it.
+    let cell = (tol.positions * 8.0).max(1e-9);
+    let key = |t: &Corners| -> [i64; 3] {
+        std::array::from_fn(|k| (f64::from(t[0][k] + t[1][k] + t[2][k]) / 3.0 / f64::from(cell)).floor() as i64)
+    };
+    let mut cells: std::collections::HashMap<(usize, [i64; 3]), Vec<usize>> = std::collections::HashMap::new();
+    for (i, (m, _, t)) in b.iter().enumerate() {
+        cells.entry((*m, key(t))).or_default().push(i);
+    }
+    let limits: [f32; 12] = std::array::from_fn(|k| match k {
+        0..3 => tol.positions,
+        3..6 => tol.normals,
+        6..8 => tol.uvs,
+        _ => tol.colors,
+    });
+    // How far apart two triangles are in each value, at the first rotation that fits; `None` past `limits`.
+    // The differences are the largest over the corners.
+    let apart = |x: &Corners, y: &Corners| -> Option<[f32; 12]> {
+        (0..3).find_map(|r| {
+            let mut worst = [0f32; 12];
+            for c in 0..3 {
+                for k in 0..12 {
+                    let d = (x[c][k] - y[(c + r) % 3][k]).abs();
+                    // A NaN is never the same.
+                    if d.is_nan() || d > limits[k] {
+                        return None;
+                    }
+                    worst[k] = worst[k].max(d);
+                }
+            }
+            Some(worst)
+        })
+    };
+    let mut used = vec![false; b.len()];
+    let mut worst = [0f32; 12];
+    let mut unmatched = Vec::new();
+    for (m, has, t) in &a {
+        let k = key(t);
+        let near = (0..27).map(|n| [k[0] + n % 3 - 1, k[1] + n / 3 % 3 - 1, k[2] + n / 9 - 1]);
+        // The closest of those that fit, so a fine mesh's neighboring triangles aren't taken for each other.
+        let found = near
+            .filter_map(|cell| cells.get(&(*m, cell)))
+            .flatten()
+            .filter(|&&i| !used[i] && b[i].1 == *has)
+            .filter_map(|&i| Some((i, apart(t, &b[i].2)?)))
+            .min_by(|x, y| x.1[..3].iter().sum::<f32>().total_cmp(&y.1[..3].iter().sum()));
+        match found {
+            Some((i, d)) => {
+                used[i] = true;
+                for k in 0..12 {
+                    worst[k] = worst[k].max(d[k]);
+                }
+            }
+            None => unmatched.push((*m, *t)),
+        }
+    }
+    if let Some((m, t)) = unmatched.first() {
+        return Err(format!(
+            "{} of {} triangles aren't in the other mesh within {tol:?}, the first in material {m} at {:?}, {:?}, {:?}",
+            unmatched.len(),
+            a.len(),
+            &t[0][..3],
+            &t[1][..3],
+            &t[2][..3]
+        ));
+    }
+    let most = |r: std::ops::Range<usize>| worst[r].iter().fold(0f32, |a, &b| a.max(b));
+    Ok(Tolerances {
+        positions: most(0..3),
+        normals: most(3..6),
+        uvs: most(6..8),
+        colors: most(8..12),
+    })
+}
+
+/// `same_as`: the case's flat mesh is the same as the one another case of its format makes (`case`), as
+/// [`same_mesh`] compares them, within the tolerances it gives.
+fn same_as(case: &Case, mesh: &Mesh) -> Result<(), String> {
+    let Some(s) = case.expect.get("same_as") else {
+        return Ok(());
+    };
+    let name = s
+        .get("case")
+        .and_then(Value::as_str)
+        .ok_or("`same_as` names no `case`")?;
+    let format = case.name.split('/').next().unwrap();
+    let other = case_at(format, corpus().join(format).join(name));
+    let want = Loader::new()
+        .assets(Folder::new(&other.dir))
+        .open(&other.file)
+        .and_then(|doc| doc.flatten(Pose::Rest))
+        .map_err(|err| format!("{}, which it should be the same as, fails to load: {err}", other.name))?
+        .ok_or_else(|| format!("{}, which it should be the same as, draws nothing", other.name))?;
+    let worst = same_mesh(mesh, &want, Tolerances::of(s)).map_err(|why| format!("not the same as {name}: {why}"))?;
+    println!("{}: the same as {name}, at most {worst:?} apart", case.name);
+    Ok(())
+}
+
 /// What an error says, without the path it names first: `error` is matched against this, so a
 /// case's folder name can't match it.
 fn message(err: &polysmelt::Error) -> String {
@@ -802,6 +987,7 @@ fn run(case: &Case) -> Result<(), String> {
         };
     }
     let mesh = mesh.ok_or("produced no mesh")?;
+    same_as(case, &mesh)?;
     let bytes = mesh.to_glb().map_err(|err| format!("to_glb failed: {err}"))?;
     keep_mesh_glb(case, &bytes);
     round_trip(&mesh, &bytes, tol)?;
@@ -1303,6 +1489,149 @@ fn irr() {
 #[test]
 fn xgl() {
     check("xgl");
+}
+
+/// Khronos sample models too large for the corpus, read from a folder laid out as the samples' `Models` folder
+/// is: `POLYSMELT_KHRONOS_SAMPLES`, or `target/khronos-samples`, which `python tools/corpus/khronos.py --large`
+/// fills. A model that isn't there is passed over, so the test checks nothing on a fresh checkout.
+///
+/// A compressed variant must flatten to the mesh its plain one does, as `same_as` cases must, and a model
+/// whose animation points at materials is drawn the same at any time: a flat mesh has no animated materials.
+#[test]
+fn khronos_large_samples() {
+    /// The tolerances for a variant, given it and its plain model's largest extent.
+    type Step = dyn Fn(&Document, f32) -> Tolerances;
+    if !enabled("gltf") {
+        return;
+    }
+    let root = std::env::var_os("POLYSMELT_KHRONOS_SAMPLES").map_or_else(
+        || Path::new(env!("CARGO_MANIFEST_DIR")).join("target/khronos-samples"),
+        PathBuf::from,
+    );
+    let open = |rel: &str| -> Option<Document> {
+        let path = root.join(rel);
+        if !path.is_file() {
+            println!("khronos_large_samples: no {}, passed over", path.display());
+            return None;
+        }
+        let dir = path.parent().unwrap();
+        Some(
+            Loader::new()
+                .assets(Folder::new(dir))
+                .open(&path)
+                .unwrap_or_else(|err| panic!("{rel}: {err}")),
+        )
+    };
+    let flat = |doc: &Document, rel: &str, pose: Pose| -> Mesh {
+        let mesh = doc.flatten(pose).unwrap_or_else(|err| panic!("{rel}: {err}"));
+        mesh.unwrap_or_else(|| panic!("{rel} draws nothing"))
+    };
+    // The largest extent of what a mesh draws: what Draco and gltfpack spread their position bits over.
+    let extent = |mesh: &Mesh| -> f32 {
+        let (mut min, mut max) = ([f32::MAX; 3], [f32::MIN; 3]);
+        for v in mesh.prims.iter().flat_map(|p| &p.positions) {
+            for k in 0..3 {
+                min[k] = min[k].min(v[k]);
+                max[k] = max[k].max(v[k]);
+            }
+        }
+        (0..3).map(|k| max[k] - min[k]).fold(0.0, f32::max)
+    };
+    // Half a step, and a little for the arithmetic, of: Draco's 11-bit positions over the mesh's extent,
+    // 8-bit normals and 10-bit texture coordinates, as the corpus's Draco samples have; gltfpack's integer
+    // positions, a step of which is the scale of the node it puts each mesh on, and 12-bit texture
+    // coordinates. Its normals are 8 bits on an octahedron (meshopt's filter), as far as 0.018 off.
+    let draco = |_: &Document, size: f32| Tolerances {
+        positions: 0.51 * size / 2047.0,
+        normals: 0.015,
+        uvs: 0.51 / 1023.0,
+        colors: 1e-5,
+    };
+    let gltfpack = |variant: &Document, _: f32| {
+        let nodes = variant.json().get("nodes").and_then(Value::as_array);
+        let scales = nodes
+            .into_iter()
+            .flatten()
+            .filter(|n| n.get("mesh").is_some())
+            .flat_map(|n| floats(&n["scale"]));
+        Tolerances {
+            positions: 0.51 * scales.fold(0.0, f32::max),
+            normals: 0.02,
+            uvs: 0.51 / 4095.0,
+            colors: 1e-5,
+        }
+    };
+    let pairs: [(&str, &str, &str, &Step); 3] = [
+        (
+            "Corset/glTF/Corset.gltf",
+            "Corset/glTF-Draco/Corset.gltf",
+            "draco",
+            &draco,
+        ),
+        (
+            "DragonAttenuation/glTF/DragonAttenuation.gltf",
+            "DragonAttenuation/glTF-Meshopt/DragonAttenuation.gltf",
+            "",
+            &gltfpack,
+        ),
+        (
+            "DragonAttenuation/glTF/DragonAttenuation.gltf",
+            "DragonAttenuation/glTF-Meshopt-EXT/DragonAttenuation.gltf",
+            "",
+            &gltfpack,
+        ),
+    ];
+    for (plain, variant, needs, step) in pairs {
+        if !needs.is_empty() && !has_feature(needs) {
+            continue;
+        }
+        let (Some(a), Some(b)) = (open(plain), open(variant)) else {
+            continue;
+        };
+        let mut want = flat(&a, plain, Pose::Rest);
+        let mut got = flat(&b, variant, Pose::Rest);
+        assert_eq!(got.triangles(), b.counts().triangles, "{variant}");
+        // gltfpack leaves two things in the quantized mesh's own space, which a flat mesh keeps as they
+        // are: a volume's thickness (scaled by the node, as KHR_materials_volume has it), and the texture
+        // coordinates of a material with no color texture, whose other textures carry the transform that
+        // undoes the quantization. Neither is compared.
+        for mesh in [&mut want, &mut got] {
+            let Mesh { prims, materials, .. } = mesh;
+            for p in prims.iter_mut().filter(|p| materials[p.material].color_image.is_none()) {
+                p.uvs.clear();
+            }
+            for volume in materials
+                .iter_mut()
+                .filter_map(|m| m.extensions.as_mut()?.volume.as_mut())
+            {
+                volume.thickness = polysmelt::mesh::Factor::of(0.0);
+            }
+        }
+        let worst = same_mesh(&got, &want, step(&b, extent(&want)))
+            .unwrap_or_else(|why| panic!("{variant} isn't the same as {plain}: {why}"));
+        println!("{variant}: the same as {plain}, at most {worst:?} apart");
+    }
+    for rel in [
+        "AnimationPointerUVs/glTF/AnimationPointerUVs.gltf",
+        "PotOfCoalsAnimationPointer/glTF/PotOfCoalsAnimationPointer.gltf",
+    ] {
+        let Some(doc) = open(rel) else { continue };
+        let rest = flat(&doc, rel, Pose::Rest);
+        assert_eq!(rest.triangles(), doc.counts().triangles, "{rel}");
+        let animations = doc
+            .json()
+            .get("animations")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+        assert!(animations > 0, "{rel} has no animation");
+        for index in 0..animations {
+            for time in [0.0, 0.7, 2.3] {
+                let posed = flat(&doc, rel, Pose::Animation { index, time });
+                assert!(posed == rest, "{rel}: animation {index} at {time} moves the mesh");
+            }
+        }
+        println!("{rel}: {} triangles, the same at any time", rest.triangles());
+    }
 }
 
 /// Every extension a [`Format`] has has cases (and `.xml`, read as the format its root names), and every format a

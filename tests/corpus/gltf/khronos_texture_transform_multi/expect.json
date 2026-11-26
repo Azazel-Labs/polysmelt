@@ -1,0 +1,574 @@
+{
+  "spec": "KHR_texture_transform: Khronos sample TextureTransformMultiTest, a transform on every texture slot",
+  "source": "KhronosGroup/glTF-Sample-Assets@e124e8d, Models/TextureTransformMultiTest/glTF (CC-BY-4.0, Ed Mackey, Analytical Graphics, Inc.); textures scaled down to 64 pixels",
+  "file": "TextureTransformMultiTest.gltf",
+  "triangles": 3956,
+  "vertices": 2302,
+  "area": 7.067056,
+  "bounds": {
+    "min": [
+      -1.0,
+      -1.4,
+      -0.025
+    ],
+    "max": [
+      1.0,
+      1.0,
+      0.035052
+    ]
+  },
+  "material_count": 29,
+  "materials": [
+    {
+      "name": "BaseColorTest0Mat",
+      "double_sided": false,
+      "alpha_mode": "OPAQUE",
+      "normal_map": false,
+      "emissive": [
+        0,
+        0,
+        0
+      ],
+      "textured": true,
+      "metallic": 0,
+      "roughness": 1,
+      "color": [
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "name": "BaseColorTest1Mat",
+      "double_sided": false,
+      "alpha_mode": "OPAQUE",
+      "normal_map": false,
+      "emissive": [
+        0,
+        0,
+        0
+      ],
+      "textured": true,
+      "metallic": 0,
+      "roughness": 1,
+      "color": [
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "name": "BaseColorSampleMat",
+      "double_sided": false,
+      "alpha_mode": "OPAQUE",
+      "normal_map": false,
+      "emissive": [
+        0,
+        0,
+        0
+      ],
+      "textured": true,
+      "metallic": 0,
+      "roughness": 1,
+      "color": [
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "name": "BackgroundMat",
+      "double_sided": true,
+      "alpha_mode": "OPAQUE",
+      "normal_map": false,
+      "emissive": [
+        0,
+        0,
+        0
+      ],
+      "textured": false,
+      "metallic": 0,
+      "roughness": 1,
+      "color": [
+        0.007408552337437868,
+        0.07486194372177124,
+        0.4639684557914734
+      ]
+    },
+    {
+      "name": "LabelMat",
+      "double_sided": true,
+      "alpha_mode": "OPAQUE",
+      "normal_map": false,
+      "emissive": [
+        0,
+        0,
+        0
+      ],
+      "textured": true,
+      "metallic": 0,
+      "roughness": 1,
+      "color": [
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "name": "EmissionTest0Mat",
+      "double_sided": false,
+      "alpha_mode": "OPAQUE",
+      "normal_map": false,
+      "emissive": [
+        1,
+        1,
+        1
+      ],
+      "textured": false,
+      "metallic": 0,
+      "roughness": 1,
+      "color": [
+        0,
+        0.15000000596046448,
+        0
+      ]
+    },
+    {
+      "name": "EmissionTest1Mat",
+      "double_sided": false,
+      "alpha_mode": "OPAQUE",
+      "normal_map": false,
+      "emissive": [
+        1,
+        1,
+        1
+      ],
+      "textured": false,
+      "metallic": 0,
+      "roughness": 1,
+      "color": [
+        0,
+        0.15000000596046448,
+        0
+      ]
+    },
+    {
+      "name": "EmissionSampleMat",
+      "double_sided": false,
+      "alpha_mode": "OPAQUE",
+      "normal_map": false,
+      "emissive": [
+        1,
+        1,
+        1
+      ],
+      "textured": false,
+      "metallic": 0,
+      "roughness": 1,
+      "color": [
+        0,
+        0.15000000596046448,
+        0
+      ]
+    },
+    {
+      "name": "NormalTest0Mat",
+      "double_sided": false,
+      "alpha_mode": "OPAQUE",
+      "normal_map": true,
+      "emissive": [
+        0,
+        0,
+        0
+      ],
+      "textured": false,
+      "metallic": 0,
+      "roughness": 0.10000000149011612,
+      "color": [
+        0.800000011920929,
+        0.800000011920929,
+        0.800000011920929
+      ]
+    },
+    {
+      "name": "NormalTest1Mat",
+      "double_sided": false,
+      "alpha_mode": "OPAQUE",
+      "normal_map": true,
+      "emissive": [
+        0,
+        0,
+        0
+      ],
+      "textured": false,
+      "metallic": 0,
+      "roughness": 0.10000000149011612,
+      "color": [
+        0.800000011920929,
+        0.800000011920929,
+        0.800000011920929
+      ]
+    },
+    {
+      "name": "NormalSampleMat",
+      "double_sided": false,
+      "alpha_mode": "OPAQUE",
+      "normal_map": true,
+      "emissive": [
+        0,
+        0,
+        0
+      ],
+      "textured": false,
+      "metallic": 0,
+      "roughness": 0.10000000149011612,
+      "color": [
+        0.800000011920929,
+        0.800000011920929,
+        0.800000011920929
+      ]
+    },
+    {
+      "name": "MetalRoughTest0Mat",
+      "double_sided": false,
+      "alpha_mode": "OPAQUE",
+      "normal_map": false,
+      "emissive": [
+        0,
+        0,
+        0
+      ],
+      "textured": false,
+      "metallic": 1,
+      "roughness": 1,
+      "color": [
+        0.800000011920929,
+        0.800000011920929,
+        0.800000011920929
+      ]
+    },
+    {
+      "name": "MetalRoughTest1Mat",
+      "double_sided": false,
+      "alpha_mode": "OPAQUE",
+      "normal_map": false,
+      "emissive": [
+        0,
+        0,
+        0
+      ],
+      "textured": false,
+      "metallic": 1,
+      "roughness": 1,
+      "color": [
+        0.800000011920929,
+        0.800000011920929,
+        0.800000011920929
+      ]
+    },
+    {
+      "name": "MetalRoughSampleMat",
+      "double_sided": false,
+      "alpha_mode": "OPAQUE",
+      "normal_map": false,
+      "emissive": [
+        0,
+        0,
+        0
+      ],
+      "textured": false,
+      "metallic": 1,
+      "roughness": 1,
+      "color": [
+        0.800000011920929,
+        0.800000011920929,
+        0.800000011920929
+      ]
+    },
+    {
+      "name": "OcclusionTest0Mat",
+      "double_sided": false,
+      "alpha_mode": "OPAQUE",
+      "normal_map": false,
+      "emissive": [
+        0,
+        0,
+        0
+      ],
+      "textured": false,
+      "metallic": 0,
+      "roughness": 1,
+      "color": [
+        0.800000011920929,
+        0.800000011920929,
+        0.800000011920929
+      ]
+    },
+    {
+      "name": "OcclusionTest1Mat",
+      "double_sided": false,
+      "alpha_mode": "OPAQUE",
+      "normal_map": false,
+      "emissive": [
+        0,
+        0,
+        0
+      ],
+      "textured": false,
+      "metallic": 0,
+      "roughness": 1,
+      "color": [
+        0.800000011920929,
+        0.800000011920929,
+        0.800000011920929
+      ]
+    },
+    {
+      "name": "OcclusionSampleMat",
+      "double_sided": false,
+      "alpha_mode": "OPAQUE",
+      "normal_map": false,
+      "emissive": [
+        0,
+        0,
+        0
+      ],
+      "textured": false,
+      "metallic": 0,
+      "roughness": 1,
+      "color": [
+        0.800000011920929,
+        0.800000011920929,
+        0.800000011920929
+      ]
+    },
+    {
+      "name": "UnlitTest0Mat",
+      "double_sided": false,
+      "alpha_mode": "OPAQUE",
+      "normal_map": false,
+      "emissive": [
+        0,
+        0,
+        0
+      ],
+      "textured": true,
+      "metallic": 1,
+      "roughness": 1,
+      "color": [
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "name": "UnlitTest1Mat",
+      "double_sided": false,
+      "alpha_mode": "OPAQUE",
+      "normal_map": false,
+      "emissive": [
+        0,
+        0,
+        0
+      ],
+      "textured": true,
+      "metallic": 1,
+      "roughness": 1,
+      "color": [
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "name": "UnlitSampleMat",
+      "double_sided": false,
+      "alpha_mode": "OPAQUE",
+      "normal_map": false,
+      "emissive": [
+        0,
+        0,
+        0
+      ],
+      "textured": true,
+      "metallic": 1,
+      "roughness": 1,
+      "color": [
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "name": "ClearcoatTest0Mat",
+      "double_sided": false,
+      "alpha_mode": "OPAQUE",
+      "normal_map": false,
+      "emissive": [
+        0,
+        0,
+        0
+      ],
+      "textured": false,
+      "metallic": 1,
+      "roughness": 1,
+      "color": [
+        0.0040703266859054565,
+        0.030168700963258743,
+        0.16859287023544312
+      ]
+    },
+    {
+      "name": "ClearcoatTest1Mat",
+      "double_sided": false,
+      "alpha_mode": "OPAQUE",
+      "normal_map": false,
+      "emissive": [
+        0,
+        0,
+        0
+      ],
+      "textured": false,
+      "metallic": 1,
+      "roughness": 1,
+      "color": [
+        0.0040703266859054565,
+        0.030168700963258743,
+        0.16859287023544312
+      ]
+    },
+    {
+      "name": "ClearcoatSampleMat",
+      "double_sided": false,
+      "alpha_mode": "OPAQUE",
+      "normal_map": false,
+      "emissive": [
+        0,
+        0,
+        0
+      ],
+      "textured": false,
+      "metallic": 1,
+      "roughness": 1,
+      "color": [
+        0.0040703266859054565,
+        0.030168700963258743,
+        0.16859287023544312
+      ]
+    },
+    {
+      "name": "ClearcoatRoughTest0Mat",
+      "double_sided": false,
+      "alpha_mode": "OPAQUE",
+      "normal_map": false,
+      "emissive": [
+        0,
+        0,
+        0
+      ],
+      "textured": false,
+      "metallic": 1,
+      "roughness": 1,
+      "color": [
+        0.0040703266859054565,
+        0.030168700963258743,
+        0.16859287023544312
+      ]
+    },
+    {
+      "name": "ClearcoatRoughTest1Mat",
+      "double_sided": false,
+      "alpha_mode": "OPAQUE",
+      "normal_map": false,
+      "emissive": [
+        0,
+        0,
+        0
+      ],
+      "textured": false,
+      "metallic": 1,
+      "roughness": 1,
+      "color": [
+        0.0040703266859054565,
+        0.030168700963258743,
+        0.16859287023544312
+      ]
+    },
+    {
+      "name": "ClearcoatRoughSampleMat",
+      "double_sided": false,
+      "alpha_mode": "OPAQUE",
+      "normal_map": false,
+      "emissive": [
+        0,
+        0,
+        0
+      ],
+      "textured": false,
+      "metallic": 1,
+      "roughness": 1,
+      "color": [
+        0.0040703266859054565,
+        0.030168700963258743,
+        0.16859287023544312
+      ]
+    },
+    {
+      "name": "ClearcoatNormalTest0Mat",
+      "double_sided": false,
+      "alpha_mode": "OPAQUE",
+      "normal_map": false,
+      "emissive": [
+        0,
+        0,
+        0
+      ],
+      "textured": false,
+      "metallic": 1,
+      "roughness": 1,
+      "color": [
+        0.0040703266859054565,
+        0.030168700963258743,
+        0.16859287023544312
+      ]
+    },
+    {
+      "name": "ClearcoatNormalTest1Mat",
+      "double_sided": false,
+      "alpha_mode": "OPAQUE",
+      "normal_map": false,
+      "emissive": [
+        0,
+        0,
+        0
+      ],
+      "textured": false,
+      "metallic": 1,
+      "roughness": 1,
+      "color": [
+        0.0040703266859054565,
+        0.030168700963258743,
+        0.16859287023544312
+      ]
+    },
+    {
+      "name": "ClearcoatNormalSampleMat",
+      "double_sided": false,
+      "alpha_mode": "OPAQUE",
+      "normal_map": false,
+      "emissive": [
+        0,
+        0,
+        0
+      ],
+      "textured": false,
+      "metallic": 1,
+      "roughness": 1,
+      "color": [
+        0.0040703266859054565,
+        0.030168700963258743,
+        0.16859287023544312
+      ]
+    }
+  ]
+}

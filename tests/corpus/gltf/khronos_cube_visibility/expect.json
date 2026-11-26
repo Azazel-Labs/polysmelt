@@ -1,0 +1,55 @@
+{
+  "spec": "KHR_node_visibility: Khronos sample CubeVisibility, a hidden node's descendants, and a node an animation pointer shows and hides",
+  "source": "KhronosGroup/glTF-Sample-Assets@e124e8d, Models/CubeVisibility/glTF (CC0-1.0, Aaron Franke, Khronos Group)",
+  "file": "CubeVisibility.gltf",
+  "triangles": 24,
+  "vertices": 48,
+  "area": 12.0,
+  "bounds": {
+    "min": [
+      -0.5,
+      -0.5,
+      -0.5
+    ],
+    "max": [
+      2.0,
+      0.5,
+      0.5
+    ]
+  },
+  "material_count": 2,
+  "poses": [
+    {
+      "animation": 0,
+      "time": 0.75,
+      "bounds": {
+        "min": [
+          -0.5,
+          -0.5,
+          -0.5
+        ],
+        "max": [
+          0.5,
+          0.5,
+          0.5
+        ]
+      }
+    },
+    {
+      "animation": 0,
+      "time": 1.25,
+      "bounds": {
+        "min": [
+          -0.5,
+          -0.5,
+          -0.5
+        ],
+        "max": [
+          2.0,
+          0.5,
+          0.5
+        ]
+      }
+    }
+  ]
+}

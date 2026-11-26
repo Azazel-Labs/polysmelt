@@ -1,0 +1,95 @@
+{
+  "spec": "KHR_materials_pbrSpecularGlossiness: Khronos sample SpecGlossVsMetalRough, one bottle in each workflow",
+  "source": "KhronosGroup/glTF-Sample-Assets@e124e8d, Models/SpecGlossVsMetalRough/glTF (CC-BY-4.0, Microsoft); textures scaled down to 64 pixels",
+  "file": "SpecGlossVsMetalRough.gltf",
+  "triangles": 9028,
+  "vertices": 5114,
+  "area": 0.246933,
+  "bounds": {
+    "min": [
+      -0.155,
+      -0.13022,
+      -0.05445
+    ],
+    "max": [
+      0.155,
+      0.189645,
+      0.05445
+    ]
+  },
+  "material_count": 4,
+  "materials": [
+    {
+      "name": "BottleMat_SpecGloss",
+      "double_sided": false,
+      "alpha_mode": "OPAQUE",
+      "normal_map": true,
+      "emissive": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "textured": true,
+      "color": [
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "name": "BottleMat_MR",
+      "double_sided": false,
+      "alpha_mode": "OPAQUE",
+      "normal_map": true,
+      "emissive": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "textured": true,
+      "metallic": 1,
+      "roughness": 1,
+      "color": [
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "name": "Label Material MetalRough",
+      "double_sided": false,
+      "alpha_mode": "OPAQUE",
+      "normal_map": false,
+      "emissive": [
+        0,
+        0,
+        0
+      ],
+      "textured": true,
+      "metallic": 0.0,
+      "roughness": 1,
+      "color": [
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "name": "Label Material SpecGloss",
+      "double_sided": false,
+      "alpha_mode": "OPAQUE",
+      "normal_map": false,
+      "emissive": [
+        0,
+        0,
+        0
+      ],
+      "textured": true,
+      "color": [
+        1,
+        1,
+        1
+      ]
+    }
+  ]
+}

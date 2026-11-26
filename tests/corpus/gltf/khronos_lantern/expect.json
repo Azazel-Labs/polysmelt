@@ -1,0 +1,42 @@
+{
+  "spec": "glTF 2.0 (Khronos, 2021): Khronos sample Lantern, three meshes",
+  "source": "KhronosGroup/glTF-Sample-Assets@e124e8d, Models/Lantern/glTF (CC0-1.0, Microsoft; Draco compression by Frank Galligan); textures scaled down to 64 pixels",
+  "file": "Lantern.gltf",
+  "triangles": 5394,
+  "vertices": 4145,
+  "area": 434.924209,
+  "bounds": {
+    "min": [
+      -3.922445,
+      0.183921,
+      -2.31571
+    ],
+    "max": [
+      11.568753,
+      25.848139,
+      2.31571
+    ]
+  },
+  "material_count": 1,
+  "materials": [
+    {
+      "name": "LanternPost_Mat",
+      "double_sided": false,
+      "alpha_mode": "OPAQUE",
+      "normal_map": true,
+      "emissive": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "textured": true,
+      "metallic": 1,
+      "roughness": 1,
+      "color": [
+        1,
+        1,
+        1
+      ]
+    }
+  ]
+}

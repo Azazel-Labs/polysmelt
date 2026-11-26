@@ -1,0 +1,65 @@
+{
+  "spec": "KHR_materials_unlit: Khronos sample UnlitTest",
+  "source": "KhronosGroup/glTF-Sample-Assets@e124e8d, Models/UnlitTest/glTF (CC-BY-4.0, Ed Mackey, Analytical Graphics, Inc.)",
+  "file": "UnlitTest.gltf",
+  "triangles": 88,
+  "vertices": 192,
+  "area": 37.957985,
+  "bounds": {
+    "min": [
+      -2.2,
+      -1.0,
+      -1.0
+    ],
+    "max": [
+      2.2,
+      1.0,
+      1.0
+    ]
+  },
+  "material_count": 2,
+  "materials": [
+    {
+      "name": "Orange",
+      "double_sided": false,
+      "alpha_mode": "OPAQUE",
+      "normal_map": false,
+      "emissive": [
+        0,
+        0,
+        0
+      ],
+      "textured": false,
+      "metallic": 1,
+      "roughness": 1,
+      "color": [
+        1,
+        0.217637640824031,
+        0
+      ]
+    },
+    {
+      "name": "Blue",
+      "double_sided": false,
+      "alpha_mode": "OPAQUE",
+      "normal_map": false,
+      "emissive": [
+        0,
+        0,
+        0
+      ],
+      "textured": false,
+      "metallic": 1,
+      "roughness": 1,
+      "color": [
+        0,
+        0.217637640824031,
+        1
+      ]
+    }
+  ],
+  "flat_json": {
+    "/materials/0/extensions/KHR_materials_unlit": {},
+    "/materials/1/extensions/KHR_materials_unlit": {}
+  }
+}

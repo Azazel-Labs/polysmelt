@@ -1,0 +1,21 @@
+{
+  "spec": "KHR_mesh_quantization: Khronos sample MeshoptCubeTest read from its uncompressed fallback buffer",
+  "source": "KhronosGroup/glTF-Sample-Assets@e124e8d, Models/MeshoptCubeTest/glTF (CC0-1.0, Arseny Kapoulkine); the JSON's KHR_meshopt_compression objects taken out, so it reads the fallback buffer; textures scaled down to 64 pixels",
+  "file": "MeshoptCubeTest.gltf",
+  "triangles": 320,
+  "vertices": 640,
+  "area": 201.2,
+  "bounds": {
+    "min": [
+      -6.1,
+      -0.8,
+      -0.5
+    ],
+    "max": [
+      17.6,
+      19.8,
+      0.5
+    ]
+  },
+  "material_count": 11
+}
