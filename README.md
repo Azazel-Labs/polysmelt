@@ -103,11 +103,15 @@ Early. What exists today:
   lines and points, a directional light), VTK (legacy `.vtk`, ASCII and binary, and XML `.vtp`
   and `.vtu`, zlib-compressed or not: poly data, unstructured and structured grids as triangles,
   lines and points, volume cells as their boundary faces, point and cell data as normals, texture
-  coordinates, colors and custom attributes) and OGC 3D Tiles (`.b3dm` batched models with their
+  coordinates, colors and custom attributes), OGC 3D Tiles (`.b3dm` batched models with their
   batch tables, `.i3dm` instanced models as `EXT_mesh_gpu_instancing`, `.pnts` point clouds,
   quantized, oct-encoded and Draco-compressed ones too, `.cmpt` composites, and a `tileset.json`
   of them or of glTF at its finest level of detail, each tile under its transform; positions on
-  the globe keep their precision in node translations). The XML formats read UTF-16 files too.
+  the globe keep their precision in node translations), Gmsh (`.msh` versions 1.0 to 4.1, ASCII
+  and binary in either byte order: every element type by its corner nodes, each physical group a
+  mesh of its own, node and element data as custom attributes) and Medit (`.mesh` and binary
+  `.meshb` versions 1 to 4: vertices, edges, surface and volume elements, each reference a mesh
+  of its own, normals and tangents). The XML formats read UTF-16 files too.
   Game and animation formats too: MikuMikuDance models (`.pmx` 2.0 and 2.1, `.pmd`, skinned,
   with morph targets, IK and materials) and `.vmd` motions, DirectX `.x` (text, binary and
   compressed, with frames, skins and animation sets), Quake II `.md2` and Quake III `.md3`
@@ -264,10 +268,12 @@ Early. What exists today:
 | `xgl` | XGL (`.xgl`) and zipped XGL (`.zgl`) | none |
 | `vtk` | VTK: legacy `.vtk` (ASCII and binary), XML `.vtp` and `.vtu` (zlib-compressed or not) | `flate2` |
 | `tiles` | 3D Tiles: `.b3dm`, `.i3dm`, `.pnts` and `.cmpt` tiles, and a `tileset.json` of them or of glTF (needs `gltf`; Draco point clouds with `draco`) | none |
+| `msh` | Gmsh meshes (`.msh`), versions 1.0 to 4.1, ASCII and binary | none |
+| `medit` | Medit (INRIA) meshes: `.mesh` as text, `.meshb` as binary | none |
 | `fs` | Reading files: `open`, `Loader::open`, `assets::Folder`, `gltf::files_in` | none |
 
 Every reader is on by default, and so are `fs`, `webp` and the six texture decoders. `minimal`
-is the thirty-four readers with no dependencies, plus `fs`, for
+is the thirty-six readers with no dependencies, plus `fs`, for
 `default-features = false, features = ["minimal"]`. Asking
 `open` for a format whose feature is off returns an error that names the feature.
 

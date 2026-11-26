@@ -304,7 +304,7 @@ impl Reader<'_> {
         let raw = el.raw();
         let inline = &raw.as_bytes()[..raw.find('<').unwrap_or(raw.len())];
         let src = match format.as_str() {
-            "ascii" => return Ok(Some((ty, ascii(&mut Cursor::new(inline))?))),
+            "ascii" => return Ok(Some((ty, ascii(&mut Cursor::new(inline, "VTK"))?))),
             "binary" => {
                 let inline = stream::trim(inline);
                 if inline.is_empty() {
@@ -390,7 +390,9 @@ impl Reader<'_> {
                 Role::Other
             };
             let mut array = Array::new(&label, comps, role, values);
-            array.bytes_are_colors(ty);
+            if ty == Ty::U8 {
+                array.bytes_are_colors();
+            }
             into.push(array);
         }
         Ok(())

@@ -75,6 +75,8 @@ cases.
 | XGL (`xgl/`: XGL and ZGL) | 26 | 19 | none |
 | VTK (`vtk/`: legacy and XML) | 86 | 72 | none |
 | 3D Tiles (`tiles/`: b3dm, i3dm, pnts, cmpt, tileset.json) | 81 | 39 | none |
+| Gmsh (`msh/`) | 88 | 86 | none |
+| Medit (`medit/`: `.mesh` and `.meshb`) | 60 | 57 | none |
 
 - **Generated** cases are written byte by byte by `tools/corpus/<format>.py` (3DS is
   `tds.py`, 3MF is `threemf.py`, COLLADA is `dae.py`, PMX, PMD and VMD are `mmd.py`, DirectX
@@ -127,6 +129,26 @@ cases.
   each instance's transform, the batch table decoded, and each tile's placement in a tileset.
   Draco data isn't decoded there: the three Draco tiles hold the same clouds as uncompressed
   tiles beside them, and are held to those, point for point.
+- **Gmsh** cases are written by `tools/corpus/msh.py` (`gmsh.py` would hide the module it imports)
+  with Gmsh's own writer in every version and encoding it has, with meshio's, and with small
+  writers of its own for the rest (big-endian files, a 4-byte `size_t`, binary 4.0, versions 2.0
+  and 2.1, parametric nodes, sparse tags). It needs `pip install gmsh meshio vtk`. The
+  expectations come from Gmsh: each file is read back with `gmsh.open`, which gives the nodes,
+  the elements by entity, each entity's physical groups and the views; where meshio reads the
+  file too, its points give the nodes' order and its cells must agree. A file the generator wrote
+  itself is expected to hold what was written, and Gmsh must agree where it reads the file. What's
+  drawn is worked out with VTK in `tools/corpus/cellmesh.py`: each group's boundary is the faces
+  only one of its elements has, a count held against `vtkDataSetSurfaceFilter`'s. Its other 2
+  cases are real files from meshio's test meshes (MIT, `msh/LICENSE-meshio`). Each case also has
+  a `reference.json` of hashes of the exact points and of every triangle, line and point drawn
+  with its attributes, mesh by mesh, which `tests/fem.rs` compares with Polysmelt's.
+- **Medit** cases are written by `tools/corpus/medit.py` with Gmsh (text), meshio (text, and
+  binary versions 3 and 4) and writers of its own (binary versions 1 and 2, big-endian files,
+  two dimensions, the higher-order keywords, normals and tangents). The expectations come from
+  meshio reading each file back, or from what the generator wrote where meshio doesn't read
+  it, drawn with VTK the same way and compared by `tests/fem.rs` through each case's
+  `reference.json`. Its other 3 cases are real files from meshio's test meshes (MIT,
+  `medit/LICENSE-meshio`).
 - **Blender** cases (`blender_*` folders) are real exporter output, from
   `tools/corpus/blender_export.py`.
 - **Khronos samples** (glTF's other 18 cases, `khronos_*` folders) are models from
@@ -521,6 +543,26 @@ writes what its version writes, so `blender_export.py` can differ under another 
   counts and properties the body can't hold, quantized positions without their volume, no
   positions, a missing or absolute glTF URI, a bad `gltfFormat`, vector tiles, a file that
   isn't a tile, and tilesets with implicit tiling, no root, a bad transform or nothing there.
+
+- **Gmsh**: a cube of tetrahedra with a physical volume and a physical surface in every version
+  and encoding (4.1, 4.0, 2.2, 2.1, 2.0 and 1.0, ASCII and binary, either byte order, a 4-byte
+  and an 8-byte `size_t`, meshio's spellings, CRLF, a `$Comments` section, partition tags,
+  parametric nodes, sparse and gapped tags, every entity saved), node, element and element-node
+  data as scalars, vectors and tensors, every shape (hexahedron, pyramid, prism, tetrahedron,
+  triangle, quadrangle, line, point) at first, second (complete and incomplete) and third order,
+  one of each volume element facing outward, two volumes sharing a face, no groups at all,
+  partitioned meshes, and nodes alone. Errors: files cut short, counts the file can't hold,
+  version 3, a bad data size or byte-order mark, a binary polyhedron, a post-processing file, no
+  nodes, and a file that isn't Gmsh's.
+
+- **Medit**: a cube of tetrahedra with its faces and edges by reference, as Gmsh and meshio
+  write it and in binary versions 1 to 4 in either byte order, CRLF, comments, exponents
+  (Fortran's too), no `End`, no keyword positions, and keywords that aren't read; every element
+  keyword and the higher-order ones; one of each volume element facing outward; a
+  two-dimensional mesh; normals for every vertex, assigned out of order, one each, and for some
+  vertices only; tangents; and vertices alone. Errors: files cut short, counts the file can't
+  hold, dimension 4, a binary version 5, vertices before the dimension, no vertices, and a file
+  that isn't Medit's.
 
 ## `expect.json`
 

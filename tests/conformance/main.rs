@@ -79,7 +79,18 @@ fn enabled(ext: &str) -> bool {
         "xgl" | "zgl" => cfg!(feature = "xgl"),
         "vtk" | "vtp" | "vtu" => cfg!(feature = "vtk"),
         "b3dm" | "i3dm" | "pnts" | "cmpt" => cfg!(feature = "tiles"),
+        "msh" => cfg!(feature = "msh"),
+        "meshb" => cfg!(feature = "medit"),
         _ => false,
+    }
+}
+
+/// Whether this build reads `case`'s model. A `.mesh` file is OGRE's, or in Medit's corpus a Medit mesh.
+fn reads(case: &Case) -> bool {
+    if case.name.starts_with("medit/") {
+        cfg!(feature = "medit")
+    } else {
+        enabled(&reader_of(&case.file))
     }
 }
 
@@ -121,7 +132,8 @@ const ALL_EXTENSIONS: &[&str] = &[
     "zae", "kmz", "off", "vrm", "vrma", "x3d", "x3dv", "x3dz", "wrl", "wrz", "dxf", "splat", "spz", "sog", "las",
     "laz", "pcd", "xyz", "pts", "ptx", "asc", "e57", "amf", "lwo", "ac", "pmx", "pmd", "vmd", "x", "md2", "md3",
     "md5mesh", "md5anim", "iqm", "smd", "vta", "ms3d", "b3d", "asf", "amc", "c3d", "trc", "htr", "mesh", "skeleton",
-    "xml", "flt", "ogex", "irrmesh", "irr", "xgl", "zgl", "vtk", "vtp", "vtu", "b3dm", "i3dm", "pnts", "cmpt",
+    "xml", "flt", "ogex", "irrmesh", "irr", "xgl", "zgl", "vtk", "vtp", "vtu", "b3dm", "i3dm", "pnts", "cmpt", "msh",
+    "meshb",
 ];
 
 fn ext_of(p: &Path) -> String {
@@ -1365,7 +1377,7 @@ fn check(format: &str) {
     let mut ran = 0;
     for case in &cases {
         let needs = case.expect.get("needs").and_then(Value::as_str);
-        if !enabled(&reader_of(&case.file)) || needs.is_some_and(|f| !has_feature(f)) {
+        if !reads(case) || needs.is_some_and(|f| !has_feature(f)) {
             continue;
         }
         ran += 1;
@@ -1723,6 +1735,16 @@ fn tiles() {
     check("tiles");
 }
 
+#[test]
+fn msh() {
+    check("msh");
+}
+
+#[test]
+fn medit() {
+    check("medit");
+}
+
 /// Every extension a [`Format`] has has cases (and `.xml`, read as the format its root names), and every format a
 /// corpus folder.
 #[test]
@@ -1768,9 +1790,8 @@ fn reading_less_matches_pruning() {
             continue;
         }
         for case in cases(&dir.file_name().to_string_lossy()) {
-            let ext = reader_of(&case.file);
             let needs = case.expect.get("needs").and_then(Value::as_str);
-            if !enabled(&ext) || needs.is_some_and(|f| !has_feature(f)) || case.expect.contains_key("error") {
+            if !reads(&case) || needs.is_some_and(|f| !has_feature(f)) || case.expect.contains_key("error") {
                 continue;
             }
             let loader = Loader::new().assets(Folder::new(&case.dir));
@@ -1852,9 +1873,8 @@ fn unread_images_load_as_read_ones() {
             continue;
         }
         for case in cases(&dir.file_name().to_string_lossy()) {
-            let ext = reader_of(&case.file);
             let needs = case.expect.get("needs").and_then(Value::as_str);
-            if !enabled(&ext) || needs.is_some_and(|f| !has_feature(f)) || case.expect.contains_key("error") {
+            if !reads(&case) || needs.is_some_and(|f| !has_feature(f)) || case.expect.contains_key("error") {
                 continue;
             }
             let assets = Folder::new(&case.dir);

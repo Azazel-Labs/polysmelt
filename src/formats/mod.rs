@@ -7,8 +7,9 @@
 //! `KHR_gaussian_splatting`), point clouds (LAS and LAZ
 //! lidar, PCD, E57 scans, and text: `.xyz`, `.pts`, `.ptx`, `.asc`), AMF, `LightWave` objects
 //! (`.lwo`), AC3D (`.ac`), `OpenFlight` (`.flt`), `OpenGEX` (`.ogex`), Irrlicht meshes and scenes
-//! (`.irrmesh`, `.irr`), XGL (`.xgl`, and zipped `.zgl`), VTK (`.vtk`, `.vtp`, `.vtu`) and 3D Tiles
-//! (`.b3dm`, `.i3dm`, `.pnts`, `.cmpt`, and a `tileset.json` of them). Game and animation formats: `MikuMikuDance` (`.pmx`, `.pmd`,
+//! (`.irrmesh`, `.irr`), XGL (`.xgl`, and zipped `.zgl`), VTK (`.vtk`, `.vtp`, `.vtu`), 3D Tiles
+//! (`.b3dm`, `.i3dm`, `.pnts`, `.cmpt`, and a `tileset.json` of them), Gmsh (`.msh`) and Medit (`.mesh`,
+//! `.meshb`). Game and animation formats: `MikuMikuDance` (`.pmx`, `.pmd`,
 //! `.vmd`), `DirectX` `.x`, MD2, MD3, MD5 (`.md5mesh`, `.md5anim`), IQM, SMD (`.smd`, `.vta`),
 //! `MilkShape` 3D (`.ms3d`), `Blitz3D` (`.b3d`), OGRE (`.mesh`, `.skeleton`, and their `.xml` forms, with
 //! `.material` scripts), and motion capture: ASF/AMC, C3D, TRC and HTR.
@@ -41,6 +42,12 @@ mod b3d;
 mod bvh;
 #[cfg(feature = "c3d")]
 mod c3d;
+#[cfg(any(feature = "vtk", feature = "msh", feature = "medit"))]
+#[cfg_attr(
+    not(feature = "vtk"),
+    allow(dead_code, reason = "VTK's structured grids, lookup tables and cell kinds")
+)]
+mod cells;
 #[cfg(any(feature = "lwo", feature = "ac3d"))]
 mod crease;
 #[cfg(feature = "dae")]
@@ -90,10 +97,14 @@ mod md2;
 mod md3;
 #[cfg(feature = "md5")]
 mod md5;
+#[cfg(feature = "medit")]
+mod medit;
 #[cfg(feature = "mmd")]
 mod mmd;
 #[cfg(feature = "ms3d")]
 mod ms3d;
+#[cfg(feature = "msh")]
+mod msh;
 #[cfg(any(feature = "dxf", feature = "fbx", feature = "usd"))]
 mod nurbs;
 #[cfg(feature = "obj")]
@@ -195,7 +206,9 @@ mod stl;
     feature = "trc",
     feature = "las",
     feature = "e57",
-    feature = "vtk"
+    feature = "vtk",
+    feature = "msh",
+    feature = "medit"
 ))]
 #[cfg_attr(
     not(all(
@@ -225,7 +238,9 @@ mod stl;
         feature = "trc",
         feature = "las",
         feature = "e57",
-        feature = "vtk"
+        feature = "vtk",
+        feature = "msh",
+        feature = "medit"
     )),
     allow(dead_code, reason = "each text reader uses its own part")
 )]
@@ -288,7 +303,8 @@ pub(crate) const EXTENSIONS: &[&str] = &[
     "zae", "kmz", "off", "vrm", "vrma", "x3d", "x3dv", "x3dz", "wrl", "wrz", "dxf", "splat", "spz", "sog", "las",
     "laz", "pcd", "xyz", "pts", "ptx", "asc", "e57", "amf", "lwo", "ac", "pmx", "pmd", "vmd", "x", "md2", "md3",
     "md5mesh", "md5anim", "iqm", "smd", "vta", "ms3d", "b3d", "asf", "amc", "c3d", "trc", "htr", "mesh", "skeleton",
-    "xml", "flt", "ogex", "irrmesh", "irr", "xgl", "zgl", "vtk", "vtp", "vtu", "b3dm", "i3dm", "pnts", "cmpt",
+    "xml", "flt", "ogex", "irrmesh", "irr", "xgl", "zgl", "vtk", "vtp", "vtu", "b3dm", "i3dm", "pnts", "cmpt", "msh",
+    "meshb",
 ];
 
 /// The format of a model whose bytes (all of them, or its start) are `bytes`, told from its
@@ -299,9 +315,17 @@ fn detect(bytes: &[u8]) -> Option<&'static str> {
 }
 
 /// The extension a model with extension `ext` is read under when it's read as `format`: see
-/// [`Format::extension_for`].
+/// [`Format::extension_for`]. With no format named, a `.mesh` file that starts as a Medit mesh does is read as one.
 fn extension_as<'e>(input: Input<'_>, ext: &'e str, format: Option<Format>) -> &'e str {
     match format {
+        // `.mesh` is OGRE's extension and Medit's: a Medit mesh is told by how it starts.
+        None if ext.eq_ignore_ascii_case("mesh")
+            && input
+                .head(detect::HEAD)
+                .is_ok_and(|head| detect::sniff(&head, input.len()) == Some("meshb")) =>
+        {
+            "meshb"
+        }
         None => ext,
         Some(f) => f.extension_for(ext, || {
             let head = input.head(detect::HEAD).ok()?;
@@ -379,7 +403,9 @@ pub(crate) struct Input<'a> {
             feature = "off",
             feature = "x3d",
             feature = "dxf",
-            feature = "vtk"
+            feature = "vtk",
+            feature = "msh",
+            feature = "medit"
         )),
         allow(dead_code, reason = "only readers that build triangles check it")
     )]
@@ -749,6 +775,10 @@ fn convert(input: Input<'_>, ext: &str, assets: &dyn Assets, keep: Keep) -> Resu
         "vtk" | "vtp" | "vtu" => vtk::load(input),
         #[cfg(feature = "tiles")]
         "b3dm" | "i3dm" | "pnts" | "cmpt" => tiles::load(input, assets, keep),
+        #[cfg(feature = "msh")]
+        "msh" => msh::load(input),
+        #[cfg(feature = "medit")]
+        "meshb" => medit::load(input),
         e if EXTENSIONS.contains(&e) => bail!(FeatureDisabled, "built without the `{}` feature", feature_for(e)),
         _ => bail!(UnknownFormat, "not a model format handled here: .{ext}"),
     }
@@ -773,6 +803,7 @@ fn feature_for(ext: &str) -> &str {
         "zgl" => "xgl",
         "vtp" | "vtu" => "vtk",
         "b3dm" | "i3dm" | "pnts" | "cmpt" => "tiles",
+        "meshb" => "medit",
         e => e,
     }
 }

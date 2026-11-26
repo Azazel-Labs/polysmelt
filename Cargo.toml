@@ -20,7 +20,7 @@ all-features = true
 [features]
 default = ["minimal", "fbx", "3mf", "usd", "draco", "webp", "skp", "dae", "x3d", "tga", "bmp", "gif", "tiff", "psd", "dds", "spz", "sog", "laz", "e57", "amf", "vtk"]
 # The readers with no dependencies, and file access: `default-features = false, features = ["minimal"]`.
-minimal = ["fs", "stl", "ply", "vox", "obj", "3ds", "gltf", "bvh", "off", "dxf", "splat", "mmd", "directx", "md2", "md3", "md5", "iqm", "smd", "ms3d", "b3d", "asf", "c3d", "trc", "htr", "las", "pcd", "xyz", "lwo", "ac3d", "ogre", "flt", "ogex", "irr", "xgl", "tiles"]
+minimal = ["fs", "stl", "ply", "vox", "obj", "3ds", "gltf", "bvh", "off", "dxf", "splat", "mmd", "directx", "md2", "md3", "md5", "iqm", "smd", "ms3d", "b3d", "asf", "c3d", "trc", "htr", "las", "pcd", "xyz", "lwo", "ac3d", "ogre", "flt", "ogex", "irr", "xgl", "tiles", "msh", "medit"]
 # Reading from the file system: `open`, `Loader::open`, `assets::Folder` and `gltf::files_in`.
 # Without it (for wasm, say), models load from memory with `read`, `Loader::read` and `assets::Memory`.
 fs = []
@@ -123,6 +123,10 @@ vtk = ["dep:flate2"]
 # OGC 3D Tiles: `.b3dm`, `.i3dm`, `.pnts` and `.cmpt` tiles, and a `tileset.json` of them. Draco point
 # clouds (`3DTILES_draco_point_compression`) need `draco` too.
 tiles = ["gltf", "draco-core?/point_cloud_decode"]
+# Gmsh meshes (`.msh`), versions 1 to 4.1, ASCII and binary.
+msh = []
+# Medit (INRIA) meshes: `.mesh` as text and `.meshb` as binary.
+medit = []
 
 [dependencies]
 serde_json = "1"

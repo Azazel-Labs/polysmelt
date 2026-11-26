@@ -76,6 +76,8 @@ fn binary(head: &[u8], len: Option<u64>) -> Option<&'static str> {
         "mesh"
     } else if contains(&head[..head.len().min(64)], b"[Serializer_") {
         "skeleton"
+    } else if meshb(head) {
+        "meshb"
     } else if openflight(head) {
         "flt"
     } else if zgl(head) {
@@ -138,6 +140,24 @@ fn zip(head: &[u8]) -> Option<&'static str> {
     })
 }
 
+/// Whether `head` starts a binary Medit mesh: the integer one in either byte order, a version from 1 to 4, and
+/// the `Dimension` keyword's code.
+fn meshb(head: &[u8]) -> bool {
+    let word = |i: usize, big: bool| {
+        head.get(i..i + 4).map(|b| {
+            let b = [b[0], b[1], b[2], b[3]];
+            if big {
+                u32::from_be_bytes(b)
+            } else {
+                u32::from_le_bytes(b)
+            }
+        })
+    };
+    [false, true].iter().any(|&big| {
+        word(0, big) == Some(1) && word(4, big).is_some_and(|v| (1..=4).contains(&v)) && word(8, big) == Some(3)
+    })
+}
+
 /// Whether `head` starts with an `OpenFlight` header record: opcode 1, a record long enough to
 /// be one, and a format revision it has had.
 fn openflight(head: &[u8]) -> bool {
@@ -185,6 +205,11 @@ fn text(text: &str) -> Option<&'static str> {
         .is_some_and(|s| s.eq_ignore_ascii_case("# vtk DataFile Version"))
     {
         "vtk"
+    } else if starts("$MeshFormat") || starts("$NOD") {
+        "msh"
+    } else if medit(t) {
+        // A text Medit mesh, read under the binary's extension: `.mesh` is OGRE's.
+        "meshb"
     } else if starts("#VRML") {
         "wrl"
     } else if starts("#X3D") {
@@ -241,6 +266,15 @@ fn text(text: &str) -> Option<&'static str> {
         return None;
     };
     Some(found)
+}
+
+/// Whether the text's first word (comments aside) is the keyword a Medit mesh starts with.
+fn medit(t: &str) -> bool {
+    t.lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.starts_with('#'))
+        .and_then(|l| l.split_ascii_whitespace().next())
+        .is_some_and(|word| word.eq_ignore_ascii_case("MeshVersionFormatted"))
 }
 
 /// Whether the text's first statement (comments aside) is one only OBJ starts with.

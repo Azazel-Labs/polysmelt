@@ -1,0 +1,39 @@
+{
+  "spec": "Medit mesh format (libMeshb): a real file: text, version 1: a cube of tetrahedra with its boundary triangles, and corners, ridges and required vertices, which aren't read",
+  "source": "meshio's test meshes (tests/meshes/medit), MIT license, see ../LICENSE-meshio; expectations computed with meshio 5.3.5 and VTK 9.7.2",
+  "triangles": 144,
+  "bounds": {
+    "min": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "max": [
+      1.0,
+      1.0,
+      1.0
+    ]
+  },
+  "area": 12.0,
+  "facts": {
+    "triangles": 144
+  },
+  "vertices": 104,
+  "document": {
+    "nodes": 7,
+    "attributes": [
+      "_REF"
+    ],
+    "node_names": [
+      "Volume 1",
+      "Surface 1",
+      "Surface 2",
+      "Surface 3",
+      "Surface 4",
+      "Surface 5",
+      "Surface 6"
+    ]
+  },
+  "colors": false,
+  "uvs": false
+}

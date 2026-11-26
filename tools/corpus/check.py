@@ -11,7 +11,7 @@ Run from the repository root:
     python tools/corpus/check.py --path <dir>    # with packages installed by `pip install --target <dir>`
 
 A generator is passed over, with the reason, when what it needs isn't there: a Python package
-(numpy, Pillow, usd-core, vtk, meshio), Blender (`--blender <blender.exe>`, or `blender` on the
+(numpy, Pillow, usd-core, vtk, meshio, gmsh), Blender (`--blender <blender.exe>`, or `blender` on the
 path) or the network (`--network`: khronos.py fetches the sample models it doesn't have in
 target/khronos-samples). The exit code is 1 when a generator fails or writes something else, and 0
 otherwise, passed over or not.
@@ -35,7 +35,7 @@ REPO = os.path.normpath(os.path.join(HERE, "..", ".."))
 CORPUS = os.path.join(REPO, "tests", "corpus")
 
 # Modules the generators share, and this script.
-NOT_GENERATORS = {"common.py", "packed_splats.py", "check.py"}
+NOT_GENERATORS = {"common.py", "packed_splats.py", "cellmesh.py", "check.py"}
 # Run by Blender's own Python, once for every format it exports.
 BLENDER = "blender_export.py"
 # Fetches what its cache doesn't have.

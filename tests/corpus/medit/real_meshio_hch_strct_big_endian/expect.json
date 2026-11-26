@@ -1,0 +1,32 @@
+{
+  "spec": "Medit mesh format (libMeshb): a real file: binary, big-endian: the same mesh",
+  "source": "meshio's test meshes (tests/meshes/medit), MIT license, see ../LICENSE-meshio; expectations computed with meshio 5.3.5 and VTK 9.7.2",
+  "triangles": 736,
+  "bounds": {
+    "min": [
+      -99.5,
+      0.0,
+      -95.10565185546875
+    ],
+    "max": [
+      100.5,
+      82.36390686035156,
+      95.10565185546875
+    ]
+  },
+  "area": 167763.314202,
+  "facts": {
+    "triangles": 736
+  },
+  "vertices": 392,
+  "document": {
+    "nodes": 4,
+    "node_names": [
+      "Surface 1",
+      "Surface 2",
+      "Surface 3"
+    ]
+  },
+  "colors": false,
+  "uvs": false
+}

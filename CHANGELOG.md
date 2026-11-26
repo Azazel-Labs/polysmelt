@@ -59,6 +59,27 @@ Breaking changes are allowed in minor releases until 1.0.
   keys read as if in the scene's space. A camera or light nothing hangs under stays where
   the editor has it, as before. Nodes of every kind now count toward the ids of a file that
   has none.
+- Gmsh meshes (`.msh`) are read, behind the new `msh` feature (on by default, no
+  dependencies, part of `minimal`): versions 1.0, 2.0 to 2.2, 4.0 and 4.1, ASCII and binary in
+  either byte order, with a 4-byte or 8-byte `size_t`. Every element type is drawn by its
+  corner nodes: points, lines, triangles and quadrangles as they are, and tetrahedra,
+  hexahedra, prisms and pyramids as the faces only one of them has. `Format::Gmsh` names the
+  format.
+- Each Gmsh physical group is a mesh and a node of its own, named by `$PhysicalNames` (or
+  `Physical Surface 3` without a name), with its tag and dimension in the mesh's `extras`; a
+  partitioned file's groups are read from `$PartitionedEntities`. Elements in no group are
+  one mesh with no name. `$NodeData`, `$ElementData` and `$ElementNodeData` views become
+  custom attributes (`_TEMPERATURE`), a view's first time step only.
+- Medit (INRIA) meshes are read, behind the new `medit` feature (on by default, no
+  dependencies, part of `minimal`): `.mesh` as text and `.meshb` as binary, versions 1 to 4 in
+  either byte order. Vertices, edges, triangles, quadrilaterals, tetrahedra, hexahedra, prisms
+  and pyramids are drawn, their higher-order forms by their corner nodes, and the elements of
+  each reference are a mesh of their own (`Surface 3`, `Volume 1`). Normals become `NORMAL`
+  when every vertex has one, and tangents a `_TANGENT` attribute. `Format::Medit` names the
+  format.
+- A `.mesh` file is read as a Medit mesh when it starts as one (`MeshVersionFormatted`, or the
+  binary form's header) and as an OGRE mesh otherwise, as before. Format detection tells Gmsh
+  and Medit files from their first bytes.
 
 ## 0.19.0
 

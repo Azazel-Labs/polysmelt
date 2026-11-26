@@ -178,7 +178,7 @@ fn three(mut words: stream::Tokens<'_>, what: &str) -> Result<[f64; 3]> {
 const START: &[u8] = b"# vtk DataFile Version";
 
 pub(super) fn read(data: &[u8]) -> Result<Model> {
-    let mut c = Cursor::new(data);
+    let mut c = Cursor::new(data, "VTK");
     let first = c.line().unwrap_or_default();
     let version = first
         .split_at_checked(START.len())
@@ -300,7 +300,9 @@ pub(super) fn read(data: &[u8]) -> Result<Model> {
                         }
                         Mode::Points(_) | Mode::Cells(_) => {
                             let mut a = Array::new(&label, comps, Role::Other, values);
-                            a.bytes_are_colors(ty);
+                            if ty == Ty::U8 {
+                                a.bytes_are_colors();
+                            }
                             match mode {
                                 Mode::Points(_) => piece.point_data.push(a),
                                 _ => piece.cell_data.push(a),
@@ -331,7 +333,9 @@ pub(super) fn read(data: &[u8]) -> Result<Model> {
                 let ty = r.ty(kind, n)?;
                 let mut a = Array::new(&label, comps, Role::Other, r.floats(ty, n, "SCALARS")?);
                 a.table = table;
-                a.bytes_are_colors(ty);
+                if ty == Ty::U8 {
+                    a.bytes_are_colors();
+                }
                 array = Some(a);
             }
             b"COLOR_SCALARS" => {

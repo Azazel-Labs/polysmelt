@@ -17,7 +17,8 @@
 /// COLLADA, `xyz` for the text point clouds, `ac3d` for `.ac`, `mmd` for PMX, PMD and VMD,
 /// `directx` for `.x`, `asf` for ASF and AMC, `irr` for Irrlicht's two, `md5` for MD5's two,
 /// `smd` for SMD and VTA, `gltf` for glTF and VRM, `las` for LAS and LAZ (`laz` adds LAZ's
-/// decompression), `vtk` for VTK's legacy and XML files, `tiles` for 3D Tiles.
+/// decompression), `vtk` for VTK's legacy and XML files, `tiles` for 3D Tiles, `msh` for Gmsh, `medit` for
+/// Medit's text and binary meshes.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Format {
@@ -135,6 +136,11 @@ pub enum Format {
     /// `.pnts`, `.cmpt`), and a `tileset.json` of them, which has no extension of its own and is
     /// told by its content.
     Tiles,
+    /// Gmsh meshes, ASCII and binary (`.msh`).
+    Gmsh,
+    /// Medit (INRIA) meshes: binary `.meshb`, and text `.mesh`, an extension OGRE's meshes have too, so those
+    /// are told by their first bytes.
+    Medit,
 }
 
 /// Each format with its name and extensions, the first of them the one it's dispatched under.
@@ -194,6 +200,8 @@ const TABLE: &[(Format, &str, &[&str])] = &[
     (Format::Xgl, "XGL", &["xgl", "zgl"]),
     (Format::Vtk, "VTK", &["vtk", "vtp", "vtu"]),
     (Format::Tiles, "3D Tiles", &["b3dm", "i3dm", "pnts", "cmpt"]),
+    (Format::Gmsh, "Gmsh", &["msh"]),
+    (Format::Medit, "Medit", &["meshb"]),
 ];
 
 impl Format {
