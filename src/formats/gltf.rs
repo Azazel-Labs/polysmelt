@@ -8,6 +8,8 @@
 //!   buffer that isn't there holds nothing: views on it decode from their compressed data.
 //! - Images named by URI (a data URI, or a file found as buffers are) move into a buffer, so the
 //!   document stands on its own. One that isn't found keeps its URI.
+//! - A texture whose images are all in a format Polysmelt doesn't decode (KTX2, AVIF) isn't
+//!   drawn: `asset.extras.source.droppedTextures` counts them.
 //! - glTF 1.0 (and its binary GLB, `KHR_binary_glTF`) is upgraded to 2.0 first; see
 //!   [`super::gltf1`].
 
@@ -47,23 +49,18 @@ pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
         .to_owned();
     if version.starts_with('1') {
         // A 1.0 label on a 2.0 document: read as the 2.0 it is, the label kept as its source's.
-        let asset = &mut json["asset"];
-        asset["version"] = "2.0".into();
-        let extras = &mut asset["extras"];
-        if !extras.is_object() {
-            *extras = Value::Object(Map::new());
-        }
-        let source = &mut extras["source"];
-        if !source.is_object() {
-            *source = Value::Object(Map::new());
-        }
-        source["version"] = version.into();
+        json["asset"]["version"] = "2.0".into();
+        source(&mut json)["version"] = version.into();
     } else {
         ensure!(
             version.starts_with("2."),
             Unsupported,
             "glTF version {version:?} isn't 1.x or 2.x"
         );
+    }
+    let dropped = undecodable_textures(&json);
+    if dropped > 0 {
+        source(&mut json)["droppedTextures"] = json!(dropped);
     }
     let mut doc = Document::new(json, Vec::new(), Map::new(), crate::images::Refs::new());
     let n = doc.base.get("buffers").and_then(Value::as_array).map_or(0, Vec::len);
@@ -111,6 +108,65 @@ pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
         }
     }
     Ok(doc)
+}
+
+/// The asset's `extras.source`, made if it isn't there. `json` has its `asset`.
+fn source(json: &mut Map<String, Value>) -> &mut Value {
+    let extras = &mut json["asset"]["extras"];
+    if !extras.is_object() {
+        *extras = Value::Object(Map::new());
+    }
+    let source = &mut extras["source"];
+    if !source.is_object() {
+        *source = Value::Object(Map::new());
+    }
+    source
+}
+
+/// How many textures have images, none in a format Polysmelt decodes: KTX2
+/// (`KHR_texture_basisu`), AVIF (`EXT_texture_avif`), or WebP without the `webp` feature. Such
+/// a texture isn't drawn. An image's format is the type it declares, or its name's, not its
+/// bytes', so the count is the same however much of the file is read.
+fn undecodable_textures(json: &Map<String, Value>) -> usize {
+    let list = |key: &str| json.get(key).and_then(Value::as_array).map_or(&[][..], Vec::as_slice);
+    let images = list("images");
+    let undecodable = |source: &Value| {
+        let Some(img) = source.as_u64().and_then(|i| images.get(usize_of(i))) else {
+            return false;
+        };
+        let uri = img.get("uri").and_then(Value::as_str).unwrap_or("");
+        let named = if let Some(rest) = uri.strip_prefix("data:") {
+            rest.split([';', ',']).next().map(str::to_owned)
+        } else {
+            let name = container::percent_decode(uri).to_ascii_lowercase();
+            let known = [
+                (".ktx2", "image/ktx2"),
+                (".avif", "image/avif"),
+                (".webp", "image/webp"),
+            ];
+            known
+                .iter()
+                .find(|(ext, _)| name.ends_with(ext))
+                .map(|(_, m)| (*m).to_owned())
+        };
+        match img.get("mimeType").and_then(Value::as_str).or(named.as_deref()) {
+            Some("image/ktx2" | "image/avif") => true,
+            Some("image/webp") => !cfg!(feature = "webp"),
+            _ => false,
+        }
+    };
+    list("textures")
+        .iter()
+        .filter(|t| {
+            let extensions = t.get("extensions").and_then(Value::as_object);
+            let mut sources = t
+                .get("source")
+                .into_iter()
+                .chain(extensions.into_iter().flatten().filter_map(|(_, e)| e.get("source")))
+                .peekable();
+            sources.peek().is_some() && sources.all(undecodable)
+        })
+        .count()
 }
 
 /// Moves each image named by URI into a buffer of its own, when it's found and its type known.
@@ -356,8 +412,18 @@ mod tests {
     }
 
     /// The JSON without what writing may restate: views' default `byteOffset`, where in the
-    /// binary chunk each view sits, and empty buffers at the end, which no view can use.
+    /// binary chunk each view sits, and empty buffers at the end, which no view can use. Nor
+    /// the count of dropped textures, the one note reading adds.
     fn normalized(mut json: Value) -> Value {
+        if let Some(asset) = json.get_mut("asset").and_then(Value::as_object_mut) {
+            let extras = asset.get_mut("extras").and_then(Value::as_object_mut);
+            if let Some(source) = extras.and_then(|e| e.get_mut("source")?.as_object_mut()) {
+                source.remove("droppedTextures");
+            }
+            if asset.get("extras") == Some(&serde_json::json!({ "source": {} })) {
+                asset.remove("extras");
+            }
+        }
         if let Some(list) = json.get_mut("buffers").and_then(Value::as_array_mut) {
             while list.len() > 1 && list.last().and_then(|b| b["byteLength"].as_u64()) == Some(0) {
                 list.pop();
@@ -378,7 +444,8 @@ mod tests {
     fn glbs() -> Vec<PathBuf> {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/gltf");
         let mut out = Vec::new();
-        for case in std::fs::read_dir(root).unwrap().flatten() {
+        // Case folders: a license sits beside them.
+        for case in std::fs::read_dir(root).unwrap().flatten().filter(|e| e.path().is_dir()) {
             for f in std::fs::read_dir(case.path()).unwrap().flatten() {
                 if f.path().extension().is_some_and(|e| e == "glb") {
                     out.push(f.path());

@@ -37,7 +37,7 @@ cases.
 | 3MF | 54 | 54 | none |
 | FBX | 134 | 116 | 18 |
 | USD | 141 | 121 | 20 |
-| glTF | 80 | 65 | 15 |
+| glTF | 102 | 69 | 15 |
 | SketchUp | 31 | 7 | none |
 | BVH | 41 | 41 | none |
 | COLLADA | 77 | 77 | none |
@@ -107,6 +107,15 @@ cases.
   Pillow) decodes them.
 - **Blender** cases (`blender_*` folders) are real exporter output, from
   `tools/corpus/blender_export.py`.
+- **Khronos samples** (glTF's other 18 cases, `khronos_*` folders) are models from
+  KhronosGroup/glTF-Sample-Assets at a pinned commit, CC0 or CC-BY 4.0 only
+  (`gltf/LICENSE-khronos-samples.md` lists each one's license, credit and what was changed:
+  textures over 64 pixels are scaled down). `tools/corpus/khronos.py` copies them and writes
+  their expectations from the uncompressed variant, measured by its own small reader. A
+  compressed or quantized variant is `same_as` the plain one. Samples too large for the
+  corpus are read by the `khronos_large_samples` test from `target/khronos-samples` (or
+  `POLYSMELT_KHRONOS_SAMPLES`) when `python tools/corpus/khronos.py --large` has fetched them
+  there, and passed over otherwise.
 - **Real files** from other projects' test data sit in their case folders, with the
   project's license beside them: PDAL's `simple.las` and `simple.laz` (BSD,
   `las/LICENSE-PDAL`), PCL's `bun0.pcd` and `car6.pcd` (BSD, `pcd/LICENSE-PCL`), two scans
@@ -203,7 +212,12 @@ python tools/corpus/obj.py
   binary glTF, `KHR_materials_common` and technique materials, accessor strides, a node's
   several meshes, skins found by joint name with a bind shape matrix, animation parameters,
   cameras and lights. Errors: Draco, truncation, buffers named by absolute path, and
-  accessors that overrun their views.
+  accessors that overrun their views. Textures only in KTX2 or AVIF, counted as dropped, and
+  one only in DDS (`MSFT_texture_dds`). Khronos samples: Avocado and Lantern plain, quantized
+  and Draco-compressed, WaterBottle plain and Draco-compressed, MeshoptCubeTest against its
+  fallback buffer, SimpleInstancing, NodeVisibilityTest, CubeVisibility (a node an animation
+  pointer shows and hides), TextureTransformTest, TextureTransformMultiTest, UnlitTest and
+  SpecGlossVsMetalRough.
 - **SketchUp**: every layout from SketchUp 3 to 2026: the legacy object stream (3 to 6,
   2013 to 2020) and the ZIP container of 2021 on. Covers faces bounded by arcs beside a loose
   arc with no face, textured materials stored inline, groups and components nested inside
@@ -436,6 +450,8 @@ are required. Every other key is optional and is checked only when present.
 | `winding_matches_normals` | Every triangle winds counter-clockwise when seen from the side its normals point to. |
 | `faces_outward` | For convex models: every triangle faces away from the center of the bounds. Catches mirrors that turn faces inside out. |
 | `tolerance` | Relative tolerance for the numeric checks (default `1e-4`). |
+| `same_as` | `{"case": "<another case of the format>"}`: the flat mesh has the same materials and images as that case's, and the same triangles in each material, in any order, whatever vertices they share. `positions`, `normals`, `uvs` and `colors` beside `case` give the largest difference allowed in any component (default `1e-5`). |
+| `poses` | A list of `{"animation", "time", "bounds"}`: the bounds of what's drawn in that animation at that time (seconds). |
 | `materials` | A list of material checks (below). |
 | `document` | Counts in the document's glTF JSON (`nodes`, `skins`, `animations`, `cameras`, `lights`, `joints`, `morph_targets`, `channels`), plus `node_names` and primitive `attributes` that must be there. |
 | `json` | Values in the document's glTF JSON, keyed by JSON pointer (`/materials/0/extensions/KHR_materials_ior/ior`). Numbers match to within `1e-4`, and objects match on the members given. `null` means the pointer must lead nowhere. |

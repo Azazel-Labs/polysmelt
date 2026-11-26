@@ -17,6 +17,20 @@ Breaking changes are allowed in minor releases until 1.0.
   its chunks is.
 - Format detection tells a SOG's `meta.json` and a zipped SOG from their content, so they
   open without the `.sog` extension.
+- glTF: a node hidden or shown by an animation through `KHR_animation_pointer`
+  (`/nodes/N/extensions/KHR_node_visibility/visible`) is drawn or left out at the time asked
+  for. The flag holds between keys.
+- glTF: a texture whose images are all in a format Polysmelt doesn't decode (KTX2 through
+  `KHR_texture_basisu`, AVIF through `EXT_texture_avif`) is still not drawn, but is now
+  counted in `asset.extras.source.droppedTextures`.
+- glTF: files that require `KHR_node_selectability`, `KHR_node_hoverability`,
+  `KHR_interactivity`, `EXT_structural_metadata`, `EXT_mesh_features`, `GODOT_single_root`,
+  `CESIUM_primitive_outline` or `EXT_mesh_manifold` flatten instead of failing: none changes
+  the triangles drawn (outlines aren't drawn).
+- glTF 1.0: `WEB3D_quantized_attributes` accessors are decoded by their `decodeMatrix`, and
+  `CESIUM_RTC`'s center is added to the root nodes. Both drew in the wrong place before.
+- The glTF corpus gains 18 Khronos sample models: Draco, quantized and meshopt variants are
+  checked triangle for triangle against their uncompressed ones.
 
 ## 0.18.4
 
