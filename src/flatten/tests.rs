@@ -952,3 +952,54 @@ fn draco_compressed_accessors_read_as_their_stream_decodes() {
         decoded.read_indices(indices).unwrap()
     );
 }
+
+#[test]
+fn a_volumes_thickness_scales_with_its_node() {
+    let prim =
+        |material: u32| serde_json::json!({ "attributes": { "POSITION": 0 }, "indices": 2, "material": material });
+    let meshes = serde_json::json!([{ "primitives": [prim(0), prim(1)] }]);
+    let h = std::f64::consts::FRAC_1_SQRT_2;
+    // As written, a quarter the size twice (once turned, under a parent), stretched by 1, 2 and 4, and mirrored.
+    let nodes = serde_json::json!([
+        { "mesh": 0 },
+        { "mesh": 0, "scale": [0.25, 0.25, 0.25] },
+        { "children": [3], "scale": [0.5, 0.5, 0.5] },
+        { "mesh": 0, "rotation": [0.0, h, 0.0, h], "scale": [0.5, 0.5, 0.5] },
+        { "mesh": 0, "scale": [1.0, 2.0, 4.0] },
+        { "mesh": 0, "scale": [-1.0, 1.0, 1.0] },
+    ]);
+    let mut doc = corners(meshes, nodes);
+    doc.json_mut()["scenes"] = serde_json::json!([{ "nodes": [0, 1, 2, 4, 5] }]);
+    let volume = |thickness: f64| serde_json::json!({ "thicknessFactor": thickness, "attenuationDistance": 3.0 });
+    doc.json_mut().insert(
+        "materials".into(),
+        serde_json::json!([
+            { "name": "thick", "extensions": { "KHR_materials_volume": volume(2.0) } },
+            { "name": "thin", "extensions": { "KHR_materials_volume": volume(0.0) } },
+        ]),
+    );
+    let mesh = doc.flatten(Pose::Rest).unwrap().unwrap();
+    let volumes: Vec<(&str, f32, Option<f32>)> = mesh
+        .materials
+        .iter()
+        .map(|m| {
+            let v = m.extensions.as_ref().unwrap().volume.as_ref().unwrap();
+            (m.name.as_str(), v.thickness.factor, v.attenuation_distance)
+        })
+        .collect();
+    // The thick material once for each scale, the thin one once; the attenuation distance is the world's.
+    let d = Some(3.0);
+    assert_eq!(
+        volumes,
+        [
+            ("thick", 2.0, d),
+            ("thin", 0.0, d),
+            ("thick", 0.5, d),
+            ("thick", 4.0, d)
+        ]
+    );
+    // The mesh is read once for each scale, and drawn at every node of that scale.
+    let drawn: Vec<(usize, usize)> = mesh.prims.iter().map(|p| (p.material, p.indices.len() / 3)).collect();
+    assert_eq!(drawn, [(0, 4), (1, 4), (2, 4), (1, 4), (3, 2), (1, 2)]);
+    assert_eq!(mesh.triangles(), doc.counts().triangles);
+}

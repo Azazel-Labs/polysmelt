@@ -234,6 +234,8 @@ struct Skinned {
     strongest: Vec<u32>,
     joints: Vec<[u32; 4]>,
     weights: Vec<[f32; 4]>,
+    /// What the joints scale a volume's thickness by; `None` when they don't move the mesh.
+    thickness: Option<f32>,
 }
 
 /// Triangle lists from a primitive's indices, by mode (4 triangles, 5 strip, 6 fan), per the
@@ -734,7 +736,7 @@ impl Reader<'_> {
             skin_joints: skinned.joints,
             skin_weights: skinned.weights,
         };
-        let material = self.material(material, mesh);
+        let material = self.material(material, skinned.thickness.unwrap_or(u.thickness), mesh);
         self.charge(&g.draws, u.transforms.len());
         mesh.prims.push(place(g, &u.transforms, material));
         Ok(())
@@ -877,10 +879,16 @@ impl Reader<'_> {
             joints.get(j as usize).copied()
         };
         let n = positions.len();
+        // A volume's thickness takes the geometric mean of the joints' scales, but for joints that
+        // flatten the mesh.
+        let scales = mats.iter().map(|m| det3(m).abs().cbrt().ln()).filter(|s| s.is_finite());
+        let (sum, count) = scales.fold((0.0, 0.0), |(sum, count), s| (sum + s, count + 1.0));
+        let mean = if count > 0.0 { (sum / count).exp() } else { 1.0 };
         let mut out = Skinned {
             strongest: Vec::with_capacity(n),
             joints: Vec::with_capacity(n),
             weights: Vec::with_capacity(n),
+            thickness: Some(self.scale_met(mean)),
         };
         #[allow(
             clippy::cast_possible_truncation,

@@ -22,10 +22,14 @@ impl Reader<'_> {
             .map_or((0, None), mapping)
     }
 
-    /// The mesh material for glTF material `i` (or glTF's default material).
-    pub(super) fn material(&mut self, i: Option<usize>, mesh: &mut Mesh) -> usize {
-        let slot = match i {
-            Some(i) if i < self.materials.len() => self.materials[i],
+    /// The mesh material for glTF material `i` (or glTF's default material), where its mesh is drawn `scale`
+    /// times its size: a volume's thickness is in the mesh's space, so each scale makes a material of its own.
+    pub(super) fn material(&mut self, i: Option<usize>, scale: f32, mesh: &mut Mesh) -> usize {
+        #[allow(clippy::float_cmp, reason = "a scale within rounding of 1 was made exactly 1")]
+        let scaled = i.filter(|&i| scale != 1.0 && self.materials_json.get(i).is_some_and(thick));
+        let slot = match (scaled, i) {
+            (Some(i), _) => self.scaled_materials.get(&(i, scale.to_bits())).copied(),
+            (None, Some(i)) if i < self.materials.len() => self.materials[i],
             _ => self.default_material,
         };
         if let Some(s) = slot {
@@ -108,10 +112,18 @@ impl Reader<'_> {
                 m.extensions = self.extensions(ext, uv, mesh).map(Box::new);
             }
         }
+        if scaled.is_some()
+            && let Some(volume) = m.extensions.as_mut().and_then(|e| e.volume.as_mut())
+        {
+            volume.thickness.factor *= scale;
+        }
         mesh.materials.push(m);
         let s = mesh.materials.len() - 1;
-        match i {
-            Some(i) if i < self.materials.len() => self.materials[i] = Some(s),
+        match (scaled, i) {
+            (Some(i), _) => {
+                self.scaled_materials.insert((i, scale.to_bits()), s);
+            }
+            (None, Some(i)) if i < self.materials.len() => self.materials[i] = Some(s),
             _ => self.default_material = Some(s),
         }
         s
@@ -293,6 +305,13 @@ impl Reader<'_> {
         self.images[s] = Some(out);
         out
     }
+}
+
+/// Whether a material is a volume with a thickness (`KHR_materials_volume`), which its mesh's node scales.
+pub(super) fn thick(material: &Value) -> bool {
+    at(material, &["extensions", "KHR_materials_volume", "thicknessFactor"])
+        .and_then(Value::as_f64)
+        .is_some_and(|t| t > 0.0)
 }
 
 /// The texture coordinate set a texture info reads, and its `KHR_texture_transform` as a 2x3

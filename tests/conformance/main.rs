@@ -1592,20 +1592,27 @@ fn khronos_large_samples() {
         let mut want = flat(&a, plain, Pose::Rest);
         let mut got = flat(&b, variant, Pose::Rest);
         assert_eq!(got.triangles(), b.counts().triangles, "{variant}");
-        // gltfpack leaves two things in the quantized mesh's own space, which a flat mesh keeps as they
-        // are: a volume's thickness (scaled by the node, as KHR_materials_volume has it), and the texture
-        // coordinates of a material with no color texture, whose other textures carry the transform that
-        // undoes the quantization. Neither is compared.
+        // gltfpack leaves the texture coordinates of a material with no color texture in the quantized
+        // mesh's own space, which a flat mesh keeps as they are: its other textures carry the transform
+        // that undoes the quantization. They aren't compared.
         for mesh in [&mut want, &mut got] {
             let Mesh { prims, materials, .. } = mesh;
             for p in prims.iter_mut().filter(|p| materials[p.material].color_image.is_none()) {
                 p.uvs.clear();
             }
-            for volume in materials
-                .iter_mut()
-                .filter_map(|m| m.extensions.as_mut()?.volume.as_mut())
-            {
-                volume.thickness = polysmelt::mesh::Factor::of(0.0);
+        }
+        // It leaves a volume's thickness in that space too, which the node scales (as KHR_materials_volume
+        // has it) and so does the flat mesh: the same but for the rounding of the scales it went through.
+        for (g, w) in got.materials.iter_mut().zip(&want.materials) {
+            let g = g.extensions.as_mut().and_then(|e| e.volume.as_mut());
+            let w = w.extensions.as_ref().and_then(|e| e.volume.as_ref());
+            if let (Some(g), Some(w)) = (g, w) {
+                let (a, b) = (g.thickness.factor, w.thickness.factor);
+                assert!(
+                    (a - b).abs() <= 1e-5 * b.abs(),
+                    "{variant}: a volume {a} thick, {b} in {plain}"
+                );
+                g.thickness.factor = b;
             }
         }
         let worst = same_mesh(&got, &want, step(&b, extent(&want)))

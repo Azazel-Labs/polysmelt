@@ -2,6 +2,20 @@
 
 Breaking changes are allowed in minor releases until 1.0.
 
+## Unreleased
+
+- `Document::flatten` scales a `KHR_materials_volume` thickness by the transform it bakes
+  into the vertices, as the extension has a node scale it: a thickness of 2.27 under a node
+  scaled by 0.25 is 0.5675 in the flat mesh, where it used to stay 2.27. The scale is the
+  cube root of the transform's volume change (the scale itself when uniform, the mean of the
+  three otherwise). A material drawn at several scales becomes one material for each, and a
+  skinned mesh takes the mean scale of its skin's joints. The attenuation distance is in
+  world space and is left alone.
+- 3MF: a translucent display property's thickness is written in the model's unit, the
+  mesh's space, so it is as long as the attenuation distance once the unit's node scales
+  it: 500 in a millimeter file for a distance of 0.5 m, where it was 0.5. The attenuation
+  is per meter, as the materials extension gives it, whatever the model's unit.
+
 ## 0.19.0
 
 - SuperSplat's compressed PLY files (`.compressed.ply`) are read as gaussian splats, with

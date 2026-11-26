@@ -132,7 +132,7 @@ enum Finish {
     Metal { metallic: u32, roughness: u32 },
     /// `pbspecular`: the specular color (sRGB) and glossiness.
     Specular { color: [u8; 3], glossiness: u32 },
-    /// `translucent`: attenuation per unit length in RGB, the index of refraction in RGB, and roughness.
+    /// `translucent`: attenuation per meter in RGB, the index of refraction in RGB, and roughness.
     Translucent {
         attenuation: [u32; 3],
         ior: [u32; 3],
@@ -141,7 +141,8 @@ enum Finish {
 }
 
 impl Finish {
-    fn full(self, mut m: Full) -> Full {
+    /// The material `m` with this finish, in a model of `unit` meters to its unit.
+    fn full(self, mut m: Full, unit: f64) -> Full {
         let f = f32::from_bits;
         match self {
             Finish::Metal { metallic, roughness } => {
@@ -173,9 +174,11 @@ impl Finish {
                 let most = a[0].max(a[1]).max(a[2]);
                 if most > 0.0 && most.is_finite() {
                     // As far as the most absorbed channel takes to fall to 1/e, and each channel's color there.
+                    // The attenuation is per meter whatever the model's unit, and glTF's distance is the
+                    // world's, in meters; its thickness is in the mesh's space, the model's unit.
                     let d = 1.0 / most;
                     m.volume = Some(Volume {
-                        thickness: Factor::of(d),
+                        thickness: Factor::of(crate::num::f32_of(f64::from(d) / unit)),
                         attenuation_distance: Some(d),
                         attenuation_color: a.map(|a| (-a * d).exp()),
                     });
@@ -443,7 +446,7 @@ pub(crate) fn load(input: super::Input<'_>, keep: Keep) -> Result<Document> {
             Look::Color(c, finish) => {
                 let m = Full::from(Material::plain(&named(format!("color_{i}")), linear(c)));
                 match finish {
-                    Some(f) => f.full(m),
+                    Some(f) => f.full(m, scale),
                     None => m,
                 }
             }

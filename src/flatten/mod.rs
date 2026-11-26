@@ -26,6 +26,11 @@
 //!   `KHR_texture_transform` (relative to the color texture's, which the coordinates have baked
 //!   in), when their images are PNG or JPEG, or a format a feature re-encodes as PNG (WebP with
 //!   `EXT_texture_webp`, TGA, BMP, GIF, TIFF, PSD, DDS).
+//! - A volume's thickness (`KHR_materials_volume`) is in its mesh's space and scales with the node, so
+//!   it is scaled as the vertices are: by the cube root of the transform's volume change, which is
+//!   the scale when it is uniform and the mean of the three otherwise. A material drawn at several
+//!   scales becomes a material for each. A skinned mesh takes the mean scale of its skin's joints.
+//!   The attenuation distance is in world space, and stays.
 //! - Meshopt-compressed views are decoded as they are read; Draco
 //!   (`KHR_draco_mesh_compression`) needs the `draco` feature.
 //! - A required extension it can't honour is an error, unless it only changes how surfaces look
@@ -402,6 +407,8 @@ struct Use {
     weights: Vec<f32>,
     skin: Option<usize>,
     transforms: Vec<M4>,
+    /// What the transforms scale a volume's thickness by: one scale for them all.
+    thickness: f32,
 }
 
 struct Reader<'d> {
@@ -421,6 +428,10 @@ struct Reader<'d> {
     meshopt: HashMap<usize, Vec<u8>>,
     /// glTF material → mesh material.
     materials: Vec<Option<usize>>,
+    /// (glTF material, thickness scale's bits) → mesh material, for a volume drawn at a scale other than 1.
+    scaled_materials: HashMap<(usize, u32), usize>,
+    /// The thickness scales met so far: one within rounding of another is taken as it.
+    scales: Vec<f32>,
     /// The material for primitives that name none.
     default_material: Option<usize>,
     /// glTF image → mesh image, once tried: `None` until then, `Some(None)` if it didn't embed.
@@ -614,6 +625,8 @@ impl<'d> Reader<'d> {
             scratch: Vec::new(),
             meshopt: HashMap::new(),
             materials: vec![None; n("materials")],
+            scaled_materials: HashMap::new(),
+            scales: vec![1.0],
             default_material: None,
             images: vec![None; n("images")],
             world: Vec::new(),
@@ -666,14 +679,24 @@ impl<'d> Reader<'d> {
                     weights: Vec::new(),
                     skin: None,
                     transforms: vec![IDENTITY],
+                    thickness: 1.0,
                 })
                 .collect());
         };
 
+        // The meshes with a volume's thickness, which their nodes scale: a use is of one scale.
+        let thick: Vec<bool> = self.materials_json.iter().map(material::thick).collect();
+        let thick: Vec<bool> = if thick.contains(&true) {
+            let is = |p: &Value| index(p, "material").is_some_and(|m| thick.get(m) == Some(&true));
+            let any = |m: &Value| items(m, "primitives").iter().any(is);
+            self.meshes.iter().map(any).collect()
+        } else {
+            Vec::new()
+        };
         let mut uses: Vec<Use> = Vec::new();
-        // Each use by (mesh, skin, weights' bits): a scan of every use per node is quadratic
-        // in a scene of many meshes.
-        let mut seen: HashMap<(usize, Option<usize>, Vec<u32>), usize> = HashMap::new();
+        // Each use by (mesh, skin, weights' bits, thickness scale's bits): a scan of every use per
+        // node is quadratic in a scene of many meshes.
+        let mut seen: HashMap<(usize, Option<usize>, Vec<u32>, u32), usize> = HashMap::new();
         for i in order {
             let n = &views[i];
             let Some(mesh) = n.mesh.and_then(Value::as_u64).map(usize_of) else {
@@ -694,24 +717,61 @@ impl<'d> Reader<'d> {
             } else {
                 self.instances(n.extensions, &w)?
             };
-            let key = (mesh, skin, weights.iter().map(|x| x.to_bits()).collect());
-            match seen.get(&key) {
-                Some(_) if skin.is_some() => {}
-                Some(&u) => uses[u].transforms.extend(transforms),
-                None => {
-                    seen.insert(key, uses.len());
-                    uses.push(Use {
-                        mesh,
-                        weights,
-                        skin,
-                        transforms,
-                    });
+            let bits: Vec<u32> = weights.iter().map(|x| x.to_bits()).collect();
+            // A skin's joints scale its thickness, not its node.
+            let scaled = skin.is_none() && thick.get(mesh) == Some(&true);
+            let mut rest = transforms;
+            while !rest.is_empty() {
+                // The transforms of the first one's scale, in the order they came.
+                let (transforms, thickness) = if scaled {
+                    let s = self.thickness_scale(&rest[0]);
+                    let same = |t: &M4| self.thickness_scale(t).to_bits() == s.to_bits();
+                    let (same, other) = rest.into_iter().partition(same);
+                    rest = other;
+                    (same, s)
+                } else {
+                    (std::mem::take(&mut rest), 1.0)
+                };
+                let key = (mesh, skin, bits.clone(), thickness.to_bits());
+                match seen.get(&key) {
+                    Some(_) if skin.is_some() => {}
+                    Some(&u) => uses[u].transforms.extend(transforms),
+                    None => {
+                        seen.insert(key, uses.len());
+                        uses.push(Use {
+                            mesh,
+                            weights: weights.clone(),
+                            skin,
+                            transforms,
+                            thickness,
+                        });
+                    }
                 }
             }
         }
         // Joints need every node's transform, in the scene or not.
         self.world = world.into_iter().map(|w| w.unwrap_or(IDENTITY)).collect();
         Ok(uses)
+    }
+
+    /// What a transform scales a volume's thickness by: the cube root of how much it scales volumes,
+    /// which is its scale when that is uniform.
+    fn thickness_scale(&mut self, m: &M4) -> f32 {
+        self.scale_met(det3(m).abs().cbrt())
+    }
+
+    /// A thickness scale as the one within rounding of it met before, if any: 1 at first, so rotations
+    /// don't make materials of their own.
+    fn scale_met(&mut self, s: f64) -> f32 {
+        let s = f32_of(s);
+        if !s.is_finite() {
+            return 1.0;
+        }
+        if let Some(&near) = self.scales.iter().find(|&&k| (k - s).abs() <= 1e-6 * k) {
+            return near;
+        }
+        self.scales.push(s);
+        s
     }
 
     /// A node's transforms: its own, or one per `EXT_mesh_gpu_instancing` instance.
