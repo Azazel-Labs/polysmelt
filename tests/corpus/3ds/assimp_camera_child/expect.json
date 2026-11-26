@@ -1,0 +1,133 @@
+{
+  "spec": "3DS (Autodesk 3D Studio chunk format, as lib3ds documents it): a real file, an object node whose parent is a camera's node: its keys are in the frame the camera aims (at its target's node, Z up, looking down -Z)",
+  "source": "assimp/assimp at 711b4e9bbde2, test/models/3DS/CameraRollAnimWithChildObject.3ds (BSD-3-Clause, see ../LICENSE-assimp); expectations read from the file by tools/corpus/tds.py: its vertices' bounds and area, each box's place from its mesh matrix's origin, and keys as its tracks have them. The generator checks that the camera's look-at frame (from its position and its target's, no roll on frame 0) times Box02's first position and rotation keys is Box02's mesh matrix, to 1e-4. The file doesn't say which way a roll turns (it is 0 where the file was saved), so nothing that depends on the roll is compared. A target's node is named as 3ds Max names it, `<camera>.Target`",
+  "triangles": 24,
+  "bounds": {
+    "min": [
+      -54.889869689941406,
+      0.0,
+      -23.076923370361328
+    ],
+    "max": [
+      45.86894607543945,
+      38.746437072753906,
+      97.4171142578125
+    ]
+  },
+  "area": 30058.8493,
+  "tolerance": 0.001,
+  "document": {
+    "nodes": 5,
+    "meshes": 2,
+    "cameras": 1,
+    "animations": 1,
+    "node_names": [
+      "Box01",
+      "Camera01",
+      "Box02",
+      "Camera01.Target",
+      "RootNode"
+    ]
+  },
+  "poses": [
+    {
+      "animation": 0,
+      "time": 0.0,
+      "bounds": {
+        "min": [
+          -54.889869689941406,
+          0.0,
+          -23.076923370361328
+        ],
+        "max": [
+          45.86894607543945,
+          38.746437072753906,
+          97.4171142578125
+        ]
+      }
+    }
+  ],
+  "rig": [
+    {
+      "node": "Box01",
+      "parent": "RootNode",
+      "world": [
+        10.54131,
+        0.0,
+        0.854701
+      ]
+    },
+    {
+      "node": "Camera01",
+      "parent": "RootNode",
+      "world": [
+        -152.362564,
+        22.791485,
+        -3.250464
+      ],
+      "keys": {
+        "translation": null
+      }
+    },
+    {
+      "node": "Box02",
+      "parent": "Camera01",
+      "world": [
+        -15.387161,
+        2.466209,
+        72.276512
+      ],
+      "translation": [
+        71.365181,
+        -23.019596,
+        -138.768921
+      ],
+      "keys": {
+        "translation": 119,
+        "rotation": 2
+      }
+    },
+    {
+      "node": "Box02",
+      "time": 0.0,
+      "world": [
+        -15.387161,
+        2.466209,
+        72.276512
+      ]
+    },
+    {
+      "node": "Box02",
+      "time": 4.0,
+      "translation": [
+        56.994209,
+        10.680326,
+        -139.976562
+      ]
+    },
+    {
+      "node": "Camera01.Target",
+      "parent": "RootNode",
+      "world": [
+        -36.513363,
+        25.038631,
+        0.242016
+      ],
+      "keys": {
+        "translation": [
+          0.0,
+          3.333333
+        ]
+      }
+    },
+    {
+      "node": "Camera01.Target",
+      "time": 3.333333,
+      "world": [
+        -36.513363,
+        46.084633,
+        0.242017
+      ]
+    }
+  ]
+}

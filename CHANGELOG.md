@@ -50,6 +50,15 @@ Breaking changes are allowed in minor releases until 1.0.
   in double precision, so tiles on the globe keep their detail.
 - Format detection tells the four tile formats by their magic and a `tileset.json` by its
   content, before taking it for a glTF.
+- 3DS: an object whose parent in the keyframer is a camera, a light or the target one aims
+  at is now under that node. A camera's or spotlight's node stands where its position track
+  has it and faces its target's node, rolled as its roll track says, so its children are in
+  the frame it aims, at rest and as the camera, its target or its roll moves (the turn is
+  sampled on every frame). The camera or light is on that node. Before, the keyframer's
+  hierarchy was its object nodes alone, and such an object landed under the root with its
+  keys read as if in the scene's space. A camera or light nothing hangs under stays where
+  the editor has it, as before. Nodes of every kind now count toward the ids of a file that
+  has none.
 
 ## 0.19.0
 

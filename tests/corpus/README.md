@@ -33,7 +33,7 @@ cases.
 | PLY | 46 | 41 | 4 |
 | VOX | 31 | 27 | none |
 | OBJ | 64 | 55 | 9 |
-| 3DS | 55 | 49 | none |
+| 3DS | 56 | 49 | none |
 | 3MF | 62 | 54 | none |
 | FBX | 134 | 116 | 18 |
 | USD | 141 | 121 | 20 |
@@ -142,7 +142,7 @@ cases.
   project's license beside them: PDAL's `simple.las` and `simple.laz` (BSD,
   `las/LICENSE-PDAL`), PCL's `bun0.pcd` and `car6.pcd` (BSD, `pcd/LICENSE-PCL`), two scans
   from the e57 crate's test data (MIT, `e57/LICENSE-e57`), and assimp's AMF, LWO, AC,
-  OpenGEX, IRRMesh and XGL test models (BSD, `LICENSE-assimp` in each), and two gaussian
+  OpenGEX, IRRMesh, XGL and 3DS test models (BSD, `LICENSE-assimp` in each), and two gaussian
   splat scenes from the PlayCanvas engine's examples: the first two chunks of
   `guitar.compressed.ply` (MIT, `ply/LICENSE-playcanvas`) and a level of detail of PLAYBOT by
   Stephane Agullo as an unzipped SOG (CC-BY-4.0, `sog/LICENSE-playbot.txt`). The generator reads each file with its own small
@@ -228,7 +228,8 @@ writes what its version writes, so `blender_export.py` can differ under another 
   image is one (by its pixels, a gray image's header, or its name), scaled by its amount; a
   height map, the shininess map and the reflection map stay in `extras`. Also cameras, point and spot lights, and
   the keyframer: its hierarchy, pivots, dummies, instances and tracks; a scene of only a
-  camera and a light. Also truncated and
+  camera and a light. A real file has a box whose parent is a camera's node, placed in the
+  frame the camera aims: its mesh matrix says where that is. Also truncated and
   malformed chunks.
 - **3MF**: units, build items and components with transforms (including mirrored ones), the
   production extension, and colors from base materials, color groups and gradients.
