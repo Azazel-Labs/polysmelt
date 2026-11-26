@@ -25,7 +25,7 @@ media = ["dep:pollster", "dep:image", "wgpu/dx12", "wgpu/vulkan", "wgpu/metal"]
 # which doesn't build for wasm, and `fs` has no file system to read.
 polysmelt = { path = "..", default-features = false, features = [
     "stl", "ply", "obj", "gltf", "draco", "vox", "3ds", "webp", "skp", "bvh", "off", "dxf", "fbx", "3mf", "dae",
-    "x3d", "tga", "bmp", "gif", "tiff", "psd", "dds", "splat", "spz", "mmd", "directx", "md2", "md3", "md5", "iqm",
+    "x3d", "tga", "bmp", "gif", "tiff", "psd", "dds", "splat", "spz", "sog", "mmd", "directx", "md2", "md3", "md5", "iqm",
     "smd", "ms3d", "b3d", "asf", "c3d", "trc", "htr", "las", "laz", "pcd", "xyz", "e57", "amf", "lwo", "ac3d", "ogre",
     "flt", "ogex",
 ] }

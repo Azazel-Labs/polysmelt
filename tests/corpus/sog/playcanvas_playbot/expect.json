@@ -1,0 +1,153 @@
+{
+  "spec": "SOG version 2 as splat-transform 0.16.0 wrote it: a level of detail of a streamed scene, harmonics of 2 bands in a palette of 1024",
+  "source": "PlayCanvas engine examples (assets/splats/playbot/6_0), PLAYBOT by Stephane Agullo, CC-BY-4.0, see ../LICENSE-playbot.txt",
+  "triangles": 0,
+  "points": 1873,
+  "vertices": 1873,
+  "colors": true,
+  "tolerance": 0.001,
+  "facts": {
+    "points": 1873,
+    "splats": 1873
+  },
+  "bounds": {
+    "min": [
+      -1.022584,
+      -0.037379,
+      -1.028749
+    ],
+    "max": [
+      1.022539,
+      1.074482,
+      1.02361
+    ]
+  },
+  "positions_include": [
+    [
+      -1.003802,
+      0.021,
+      1.001879
+    ],
+    [
+      0.08389,
+      0.017186,
+      0.824312
+    ],
+    [
+      -0.13226,
+      0.691462,
+      0.106528
+    ],
+    [
+      -0.501946,
+      0.021895,
+      0.289533
+    ],
+    [
+      0.013035,
+      0.500808,
+      0.167125
+    ],
+    [
+      0.155197,
+      1.031674,
+      0.004128
+    ],
+    [
+      -0.55604,
+      0.037053,
+      -0.309491
+    ],
+    [
+      0.540762,
+      0.092387,
+      -0.288663
+    ],
+    [
+      -0.204314,
+      0.014465,
+      -0.961678
+    ]
+  ],
+  "colors_include": [
+    [
+      0.0186,
+      0.0159,
+      0.0186,
+      0.9961
+    ],
+    [
+      0.2062,
+      0.146,
+      0.1382,
+      0.7922
+    ],
+    [
+      0.0,
+      0.0,
+      0.0,
+      0.9961
+    ],
+    [
+      0.3549,
+      0.2907,
+      0.2643,
+      0.8078
+    ],
+    [
+      0.531,
+      0.2005,
+      0.0334,
+      0.9961
+    ],
+    [
+      0.6755,
+      0.7634,
+      0.8925,
+      0.4784
+    ],
+    [
+      0.0065,
+      0.0129,
+      0.0061,
+      0.9961
+    ],
+    [
+      0.0071,
+      0.0614,
+      0.0,
+      0.3843
+    ],
+    [
+      0.0212,
+      0.0204,
+      0.0195,
+      0.9922
+    ]
+  ],
+  "document": {
+    "attributes": [
+      "POSITION",
+      "COLOR_0",
+      "KHR_gaussian_splatting:ROTATION",
+      "KHR_gaussian_splatting:SCALE",
+      "KHR_gaussian_splatting:OPACITY",
+      "KHR_gaussian_splatting:SH_DEGREE_0_COEF_0",
+      "KHR_gaussian_splatting:SH_DEGREE_1_COEF_0",
+      "KHR_gaussian_splatting:SH_DEGREE_1_COEF_1",
+      "KHR_gaussian_splatting:SH_DEGREE_1_COEF_2",
+      "KHR_gaussian_splatting:SH_DEGREE_2_COEF_0",
+      "KHR_gaussian_splatting:SH_DEGREE_2_COEF_1",
+      "KHR_gaussian_splatting:SH_DEGREE_2_COEF_2",
+      "KHR_gaussian_splatting:SH_DEGREE_2_COEF_3",
+      "KHR_gaussian_splatting:SH_DEGREE_2_COEF_4"
+    ],
+    "source": {
+      "format": "SOG",
+      "shDegree": 2,
+      "version": "2",
+      "tool": "splat-transform v0.16.0"
+    }
+  },
+  "file": "meta.json"
+}

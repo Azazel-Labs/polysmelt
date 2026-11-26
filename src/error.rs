@@ -308,7 +308,7 @@ impl Foreign for std::str::Utf8Error {}
 impl Foreign for std::string::FromUtf8Error {}
 impl Foreign for std::collections::TryReserveError {}
 impl Foreign for serde_json::Error {}
-#[cfg(any(feature = "3mf", feature = "dae", feature = "usd", feature = "amf"))]
+#[cfg(any(feature = "3mf", feature = "dae", feature = "usd", feature = "amf", feature = "sog"))]
 impl Foreign for zip::result::ZipError {}
 #[cfg(any(feature = "3mf", feature = "dae", feature = "x3d", feature = "amf"))]
 impl Foreign for quick_xml::Error {}

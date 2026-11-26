@@ -10,11 +10,13 @@
 //! logarithm, rotation normalized, the harmonics in whole degrees, and the axes (right, down,
 //! forward) flipped to glTF's; [`Keep::max_points`] caps the splats. Splat-like files with only
 //! some of those properties show their color: the zero-order spherical harmonics and `opacity`
-//! give the vertex colors when the file has no other. A zero normal (splat files write nothing
-//! else) is a placeholder: a mesh's vertex takes a made one, and a file of nothing but zeros has
-//! none. Made normals are smooth across vertices split only by texture coordinates. Header lines
-//! may end in a lone `\r`, and a leading byte order mark is skipped. Counts the header gives are
-//! checked against the bytes left before anything is allocated for them.
+//! give the vertex colors when the file has no other. `SuperSplat`'s compressed PLY (a `chunk`
+//! element and packed vertices) is read as the same splats: see [`compressed`]. A zero normal
+//! (splat files write nothing else) is a placeholder: a mesh's vertex takes a made one, and a
+//! file of nothing but zeros has none. Made normals are smooth across vertices split only by
+//! texture coordinates. Header lines may end in a lone `\r`, and a leading byte order mark is
+//! skipped. Counts the header gives are checked against the bytes left before anything is
+//! allocated for them.
 //!
 //! Nothing the vertices carry is lost: properties beyond those are custom attributes, named as
 //! the file names them in capitals after an underscore (`_CONFIDENCE`, `_F_DC_0`). A file without
@@ -42,6 +44,8 @@ use crate::num::{f32_of, u32_of};
 use crate::source::SourceInfo;
 use crate::vec3;
 use crate::{Context as _, ErrorKind, Result};
+
+mod compressed;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Format {
@@ -681,6 +685,12 @@ pub(crate) fn ply(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<D
         }
         want *= 2;
     };
+    if compressed::is_compressed(&elements) {
+        // Packed splats are unpacked from the whole file, not a block at a time.
+        drop(blocks);
+        let data = input.read()?;
+        return compressed::load(data.get(start..).unwrap_or(&[]), &head, &elements, keep.points());
+    }
     blocks.consume(start);
     let room = blocks.size_hint().saturating_sub(start);
     let has_faces = elements

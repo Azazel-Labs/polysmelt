@@ -1,0 +1,132 @@
+{
+  "spec": "SuperSplat compressed PLY as SuperSplat 2.7.1 wrote it: the first 512 splats (two chunks) of a scene of 90,854",
+  "source": "PlayCanvas engine examples (assets/splats/guitar.compressed.ply), its header's counts cut to two chunks; MIT license, see ../LICENSE-playcanvas",
+  "triangles": 0,
+  "points": 512,
+  "vertices": 512,
+  "colors": true,
+  "tolerance": 0.001,
+  "facts": {
+    "points": 512,
+    "splats": 512
+  },
+  "bounds": {
+    "min": [
+      -0.539408,
+      4.035048,
+      -0.016954
+    ],
+    "max": [
+      -0.425248,
+      4.271468,
+      0.174385
+    ]
+  },
+  "positions_include": [
+    [
+      -0.472491,
+      4.078205,
+      0.166346
+    ],
+    [
+      -0.496037,
+      4.199472,
+      0.04156
+    ],
+    [
+      -0.479099,
+      4.065887,
+      0.033054
+    ],
+    [
+      -0.513085,
+      4.237488,
+      0.000245
+    ],
+    [
+      -0.475375,
+      4.106941,
+      0.028167
+    ],
+    [
+      -0.440115,
+      4.106723,
+      0.154626
+    ],
+    [
+      -0.450111,
+      4.077748,
+      0.147374
+    ],
+    [
+      -0.425429,
+      4.100623,
+      0.122878
+    ]
+  ],
+  "colors_include": [
+    [
+      0.2503,
+      0.0555,
+      0.0066,
+      0.6824
+    ],
+    [
+      0.0507,
+      0.0173,
+      0.0,
+      0.2824
+    ],
+    [
+      0.0585,
+      0.0354,
+      0.0151,
+      0.0549
+    ],
+    [
+      0.0289,
+      0.0047,
+      0.0,
+      0.3569
+    ],
+    [
+      0.1376,
+      0.0619,
+      0.0141,
+      0.9608
+    ],
+    [
+      0.1208,
+      0.041,
+      0.0557,
+      0.349
+    ],
+    [
+      0.1114,
+      0.0269,
+      0.0049,
+      0.9961
+    ],
+    [
+      0.3622,
+      0.1541,
+      0.0581,
+      0.1843
+    ]
+  ],
+  "document": {
+    "attributes": [
+      "POSITION",
+      "COLOR_0",
+      "KHR_gaussian_splatting:ROTATION",
+      "KHR_gaussian_splatting:SCALE",
+      "KHR_gaussian_splatting:OPACITY",
+      "KHR_gaussian_splatting:SH_DEGREE_0_COEF_0"
+    ],
+    "source": {
+      "format": "PLY",
+      "compressed": true,
+      "tool": "SuperSplat 2.7.1"
+    }
+  }
+}

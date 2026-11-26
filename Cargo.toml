@@ -18,7 +18,7 @@ include = ["/src", "/examples", "/README.md", "/CHANGELOG.md", "/LICENSE", "/Car
 all-features = true
 
 [features]
-default = ["minimal", "fbx", "3mf", "usd", "draco", "webp", "skp", "dae", "x3d", "tga", "bmp", "gif", "tiff", "psd", "dds", "spz", "laz", "e57", "amf"]
+default = ["minimal", "fbx", "3mf", "usd", "draco", "webp", "skp", "dae", "x3d", "tga", "bmp", "gif", "tiff", "psd", "dds", "spz", "sog", "laz", "e57", "amf"]
 # The readers with no dependencies, and file access: `default-features = false, features = ["minimal"]`.
 minimal = ["fs", "stl", "ply", "vox", "obj", "3ds", "gltf", "bvh", "off", "dxf", "splat", "mmd", "directx", "md2", "md3", "md5", "iqm", "smd", "ms3d", "b3d", "asf", "c3d", "trc", "htr", "las", "pcd", "xyz", "lwo", "ac3d", "ogre", "flt", "ogex", "irr", "xgl"]
 # Reading from the file system: `open`, `Loader::open`, `assets::Folder` and `gltf::files_in`.
@@ -69,6 +69,9 @@ htr = []
 splat = []
 # Gaussian splats in gzipped `.spz`, versions 1 to 3 (KHR_gaussian_splatting).
 spz = ["dep:flate2"]
+# Gaussian splats in SOG, versions 1 to 3: a zipped `.sog`, or a `meta.json` beside its WebP images
+# (KHR_gaussian_splatting).
+sog = ["dep:zip", "dep:image-webp"]
 fbx =["dep:flate2"]
 3mf = ["dep:zip", "dep:quick-xml"]
 # COLLADA `.dae`, and `.zae` and `.kmz` archives holding one.

@@ -23,7 +23,7 @@
 pub enum Format {
     /// STL, binary and ASCII (`.stl`).
     Stl,
-    /// PLY, ASCII and binary, with gaussian splats (`.ply`).
+    /// PLY, ASCII and binary, with gaussian splats, plain or compressed (`.ply`).
     Ply,
     /// `MagicaVoxel` (`.vox`).
     Vox,
@@ -57,6 +57,9 @@ pub enum Format {
     Splat,
     /// Gaussian splats, gzipped (`.spz`).
     Spz,
+    /// SOG gaussian splats: a zip of a `meta.json` and its WebP images, or that `meta.json`
+    /// beside them (`.sog`).
+    Sog,
     /// LAS and LAZ lidar point clouds (`.las`, `.laz`).
     Las,
     /// PCD point clouds (`.pcd`).
@@ -148,6 +151,7 @@ const TABLE: &[(Format, &str, &[&str])] = &[
     (Format::Dxf, "DXF", &["dxf"]),
     (Format::Splat, "splat", &["splat"]),
     (Format::Spz, "SPZ", &["spz"]),
+    (Format::Sog, "SOG", &["sog"]),
     (Format::Las, "LAS", &["las", "laz"]),
     (Format::Pcd, "PCD", &["pcd"]),
     (Format::Xyz, "XYZ", &["xyz"]),

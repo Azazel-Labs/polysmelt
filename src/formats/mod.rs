@@ -3,7 +3,8 @@
 //! glTF (`.gltf` and `.glb`), `SketchUp` (`.skp`), BVH motion capture, COLLADA (`.dae`, and
 //! the `.zae` and `.kmz` archives that hold one), VRM (`.vrm`, `.vrma`), OFF, X3D and VRML97
 //! (`.x3d`, `.x3dv`, `.wrl`, and gzipped `.x3dz`, `.wrz`), DXF meshes, gaussian splats
-//! (`.splat`, `.spz`, and PLY's own, as `KHR_gaussian_splatting`), point clouds (LAS and LAZ
+//! (`.splat`, `.spz`, `.sog`, and PLY's own, plain or compressed, as
+//! `KHR_gaussian_splatting`), point clouds (LAS and LAZ
 //! lidar, PCD, E57 scans, and text: `.xyz`, `.pts`, `.ptx`, `.asc`), AMF, `LightWave` objects
 //! (`.lwo`), AC3D (`.ac`), `OpenFlight` (`.flt`), `OpenGEX` (`.ogex`), Irrlicht meshes and scenes
 //! (`.irrmesh`, `.irr`) and XGL (`.xgl`, and zipped `.zgl`). Game and animation formats: `MikuMikuDance` (`.pmx`, `.pmd`,
@@ -150,6 +151,8 @@ mod scene;
 mod skp;
 #[cfg(feature = "smd")]
 mod smd;
+#[cfg(feature = "sog")]
+mod sog;
 #[cfg(feature = "splat")]
 mod splat;
 #[cfg(feature = "spz")]
@@ -266,10 +269,10 @@ pub use loader::{Loader, read};
 /// The extensions read, whether or not this build has their feature: [`Format`]'s, and `xml`.
 pub(crate) const EXTENSIONS: &[&str] = &[
     "stl", "ply", "vox", "obj", "fbx", "3ds", "3mf", "usd", "usda", "usdc", "usdz", "gltf", "glb", "skp", "bvh", "dae",
-    "zae", "kmz", "off", "vrm", "vrma", "x3d", "x3dv", "x3dz", "wrl", "wrz", "dxf", "splat", "spz", "las", "laz",
-    "pcd", "xyz", "pts", "ptx", "asc", "e57", "amf", "lwo", "ac", "pmx", "pmd", "vmd", "x", "md2", "md3", "md5mesh",
-    "md5anim", "iqm", "smd", "vta", "ms3d", "b3d", "asf", "amc", "c3d", "trc", "htr", "mesh", "skeleton", "xml", "flt",
-    "ogex", "irrmesh", "irr", "xgl", "zgl",
+    "zae", "kmz", "off", "vrm", "vrma", "x3d", "x3dv", "x3dz", "wrl", "wrz", "dxf", "splat", "spz", "sog", "las",
+    "laz", "pcd", "xyz", "pts", "ptx", "asc", "e57", "amf", "lwo", "ac", "pmx", "pmd", "vmd", "x", "md2", "md3",
+    "md5mesh", "md5anim", "iqm", "smd", "vta", "ms3d", "b3d", "asf", "amc", "c3d", "trc", "htr", "mesh", "skeleton",
+    "xml", "flt", "ogex", "irrmesh", "irr", "xgl", "zgl",
 ];
 
 /// The format of a model whose bytes (all of them, or its start) are `bytes`, told from its
@@ -377,26 +380,40 @@ enum Data<'a> {
 }
 
 /// A stream that seeks, for zip archives.
-#[cfg(any(feature = "3mf", feature = "usd", feature = "las", feature = "e57", feature = "amf"))]
+#[cfg(any(
+    feature = "3mf",
+    feature = "usd",
+    feature = "las",
+    feature = "e57",
+    feature = "amf",
+    feature = "sog"
+))]
 pub(crate) trait ReadSeek: io::Read + io::Seek {}
 
-#[cfg(any(feature = "3mf", feature = "usd", feature = "las", feature = "e57", feature = "amf"))]
+#[cfg(any(
+    feature = "3mf",
+    feature = "usd",
+    feature = "las",
+    feature = "e57",
+    feature = "amf",
+    feature = "sog"
+))]
 impl<T: io::Read + io::Seek> ReadSeek for T {}
 
 /// The largest ZIP entry [`inflate_capped`] reads: real `SketchUp` `model.dat` files and `.usdz` textures run to
 /// tens of megabytes.
-#[cfg(any(feature = "skp", feature = "usd"))]
+#[cfg(any(feature = "skp", feature = "usd", feature = "sog"))]
 const MAX_ENTRY_BYTES: u64 = 1 << 30;
 
 /// How far past its `compressed` size [`inflate_capped`] lets an entry inflate: real entries compress about 10:1,
 /// so twenty times that is a decompression bomb, not a model.
-#[cfg(any(feature = "skp", feature = "usd"))]
+#[cfg(any(feature = "skp", feature = "usd", feature = "sog"))]
 const MAX_RATIO: u64 = 200;
 
 /// The bytes of ZIP entry `name`, read from `inflated` (its data as it inflates), when they're no more than
 /// [`MAX_RATIO`] times its `compressed` size (and a megabyte) and [`MAX_ENTRY_BYTES`]: past that is an error, found
 /// before more than the cap is inflated.
-#[cfg(any(feature = "skp", feature = "usd"))]
+#[cfg(any(feature = "skp", feature = "usd", feature = "sog"))]
 pub(crate) fn inflate_capped(inflated: impl io::Read, compressed: u64, name: &str) -> Result<Vec<u8>> {
     use crate::Context as _;
     use io::Read as _;
@@ -542,7 +559,14 @@ impl<'a> Input<'a> {
     }
 
     /// The model as a stream that seeks.
-    #[cfg(any(feature = "3mf", feature = "usd", feature = "las", feature = "e57", feature = "amf"))]
+    #[cfg(any(
+        feature = "3mf",
+        feature = "usd",
+        feature = "las",
+        feature = "e57",
+        feature = "amf",
+        feature = "sog"
+    ))]
     #[cfg_attr(
         not(feature = "fs"),
         allow(clippy::unnecessary_wraps, reason = "only reading a file fails")
@@ -650,6 +674,8 @@ fn convert(input: Input<'_>, ext: &str, assets: &dyn Assets, keep: Keep) -> Resu
         "splat" => splat::load(input, keep),
         #[cfg(feature = "spz")]
         "spz" => spz::load(input, keep),
+        #[cfg(feature = "sog")]
+        "sog" => sog::load(input, assets, keep),
         #[cfg(feature = "dxf")]
         "dxf" => dxf::load(input),
         #[cfg(feature = "mmd")]

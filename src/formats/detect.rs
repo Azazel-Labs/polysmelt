@@ -83,7 +83,8 @@ fn binary(head: &[u8], len: Option<u64>) -> Option<&'static str> {
 }
 
 /// A zip archive's format, from the names of its first entries: 3MF's content types and model
-/// part, a USDZ's layer, a KMZ's `doc.kml`, a ZAE's manifest.
+/// part, a USDZ's layer, a KMZ's `doc.kml`, a ZAE's manifest, a SOG's `meta.json` or the images
+/// of positions that come before it.
 fn zip(head: &[u8]) -> Option<&'static str> {
     let mut at = 0;
     let mut names = Vec::new();
@@ -120,6 +121,8 @@ fn zip(head: &[u8]) -> Option<&'static str> {
                 "x3dz"
             } else if ends(".amf") {
                 "amf"
+            } else if n == "meta.json" || n.starts_with("means_") && ends(".webp") {
+                "sog"
             } else {
                 return None;
             },
@@ -204,6 +207,9 @@ fn text(text: &str) -> Option<&'static str> {
         "amc"
     } else if starts(":version") || t.contains("\n:root") {
         "asf"
+    } else if starts("{") && ["\"means\"", "\"mins\"", "\"maxs\""].iter().all(|k| t.contains(k)) {
+        // A SOG's `meta.json`, which may name its generator under `asset` as glTF does.
+        "sog"
     } else if starts("{") && t.contains("\"asset\"") {
         "gltf"
     } else if t.contains("Metric") && (t.contains("GeometryNode") || t.contains("GeometryObject")) {
@@ -389,6 +395,8 @@ mod tests {
             e
         };
         assert_eq!(sniff(&entry("[Content_Types].xml"), None), Some("3mf"));
+        assert_eq!(sniff(&entry("meta.json"), None), Some("sog"));
+        assert_eq!(sniff(&entry("means_l.webp"), None), Some("sog"));
         assert_eq!(sniff(&entry("Model.usdc"), None), Some("usdz"));
         assert_eq!(sniff(&entry("doc.kml"), None), Some("kmz"));
         let mut two = entry("readme.txt");
@@ -411,6 +419,10 @@ mod tests {
             ("version 1\nnodes\n", "smd"),
             ("xof 0302txt 0032\n", "x"),
             ("{\n  \"asset\": {\"version\": \"2.0\"}\n}", "gltf"),
+            (
+                "{\"version\":2,\"asset\":{\"generator\":\"x\"},\"count\":1,\"means\":{\"mins\":[0,0,0],\"maxs\":[1,1,1]",
+                "sog",
+            ),
             ("# made by hand\nmtllib a.mtl\nv 0 0 0\n", "obj"),
             ("#VRML V2.0 utf8\n", "wrl"),
         ] {

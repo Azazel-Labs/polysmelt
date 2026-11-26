@@ -80,7 +80,8 @@ Early. What exists today:
   sets, Extrusion, the 2D nodes and PROTO and EXTERNPROTO instances included) and DXF meshes, lines and points (3D faces, polyface and polygon meshes,
   MESH entities, lines, points, 2D and 3D polylines with their arcs, circles, arcs, ellipses
   and splines, and block inserts, text or binary), and gaussian splats (3D gaussian splatting's
-  PLY files, `.splat` and gzipped `.spz`, versions 1 to 3) as `KHR_gaussian_splatting`, which
+  PLY files and SuperSplat's compressed ones, `.splat`, gzipped `.spz`, versions 1 to 3, and
+  PlayCanvas's SOG, zipped as `.sog` or a `meta.json` beside its images) as `KHR_gaussian_splatting`, which
   the glTF reader also reads: `to_glb` keeps every splat's spherical harmonics, scale and
   rotation, and `flatten` draws the splats as points in their base color. Point clouds:
   LAS lidar (1.0 to 1.4, point formats 0 to 10) and LAZ, PCD (ascii, binary and
@@ -203,7 +204,7 @@ Early. What exists today:
 | Feature | Format | Extra dependencies |
 | --- | --- | --- |
 | `stl` | STL | none |
-| `ply` | PLY, 3D gaussian splatting's files included | none |
+| `ply` | PLY, 3D gaussian splatting's files and SuperSplat's compressed ones included | none |
 | `vox` | MagicaVoxel | none |
 | `obj` | OBJ + MTL | none |
 | `3ds` | 3DS | none |
@@ -213,6 +214,7 @@ Early. What exists today:
 | `dxf` | DXF meshes, lines and points | none |
 | `splat` | Gaussian splats in the 32-byte `.splat` layout | none |
 | `spz` | Gaussian splats in SPZ, versions 1 to 3 (gzip) | `flate2` |
+| `sog` | Gaussian splats in SOG, versions 1 to 3 (`.sog`, or `meta.json` and its WebP images) | `zip`, `image-webp` |
 | `mmd` | MikuMikuDance `.pmx` (2.0 and 2.1) and `.pmd` models, `.vmd` motions | none |
 | `directx` | DirectX `.x` (text, binary, MSZIP-compressed; 32- and 64-bit floats) | none |
 | `md2` | Quake II `.md2`, frames as morph targets | none |

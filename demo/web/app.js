@@ -16,7 +16,7 @@ const SAMPLES = [
 ];
 
 // What polysmelt reads, by extension (formats::EXTENSIONS), and which of those this build can't.
-const EXTENSIONS = "stl ply vox obj fbx 3ds 3mf usd usda usdc usdz gltf glb skp bvh dae zae kmz off vrm vrma x3d x3dv x3dz wrl wrz dxf splat spz las laz pcd xyz pts ptx asc e57 amf lwo ac pmx pmd vmd x md2 md3 md5mesh md5anim iqm smd vta ms3d b3d asf amc c3d trc htr mesh skeleton xml flt ogex".split(" ");
+const EXTENSIONS = "stl ply vox obj fbx 3ds 3mf usd usda usdc usdz gltf glb skp bvh dae zae kmz off vrm vrma x3d x3dv x3dz wrl wrz dxf splat spz sog las laz pcd xyz pts ptx asc e57 amf lwo ac pmx pmd vmd x md2 md3 md5mesh md5anim iqm smd vta ms3d b3d asf amc c3d trc htr mesh skeleton xml flt ogex".split(" ");
 const UNSUPPORTED = new Set(["usd", "usda", "usdc", "usdz"]);
 // Folders not worth reading when a big tree is dropped.
 const SKIP_DIRS = new Set([".git", "node_modules", "__MACOSX", ".svn"]);

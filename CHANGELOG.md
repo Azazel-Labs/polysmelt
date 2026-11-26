@@ -2,6 +2,22 @@
 
 Breaking changes are allowed in minor releases until 1.0.
 
+## Unreleased
+
+- SuperSplat's compressed PLY files (`.compressed.ply`) are read as gaussian splats, with
+  their spherical harmonics when the file has them. They come out as
+  `KHR_gaussian_splatting`, the same as a plain 3D gaussian splatting PLY. This is part of
+  the `ply` feature.
+- New reader: PlayCanvas's SOG gaussian splats, versions 1 to 3, behind the new `sog`
+  feature (on by default; it uses `zip` and `image-webp`). A `.sog` file opens directly, and
+  an unzipped one opens by its `meta.json`, with the WebP images read from beside it.
+  Spherical harmonics are kept up to degree 3; version 3's fourth band is dropped, its
+  opacities above 1 are held to 1, and its blind data become custom attributes.
+  `Format::Sog` names the format. A streamed SOG's `lod-meta.json` isn't read, but each of
+  its chunks is.
+- Format detection tells a SOG's `meta.json` and a zipped SOG from their content, so they
+  open without the `.sog` extension.
+
 ## 0.18.4
 
 - FBX export allocates less: key arrays are sized up front and the rotation curve fitting

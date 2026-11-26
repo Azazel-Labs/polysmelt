@@ -30,7 +30,7 @@ cases.
 | Format | Cases | Generated | Blender 5.2 exports |
 | --- | --- | --- | --- |
 | STL | 29 | 27 | 2 |
-| PLY | 37 | 33 | 4 |
+| PLY | 46 | 41 | 4 |
 | VOX | 27 | 27 | none |
 | OBJ | 64 | 55 | 9 |
 | 3DS | 49 | 49 | none |
@@ -47,6 +47,7 @@ cases.
 | DXF | 34 | 34 | none |
 | Gaussian splats (`.splat`) | 7 | 7 | none |
 | SPZ | 19 | 19 | none |
+| SOG | 29 | 28 | none |
 | MikuMikuDance (`mmd/`: PMX, PMD, VMD) | 21 | 21 | none |
 | DirectX (`x/`) | 48 | 42 | none |
 | MD2 | 13 | 13 | none |
@@ -99,13 +100,21 @@ cases.
   defines, converted to quaternions; the readers' own quaternion products aren't used.
   **MikuMikuDance** motions sampled along their Bézier curves are worked out in `mmd.py` by
   bisection, apart from the reader's solver.
+- **Compressed PLY and SOG** cases are written by `tools/corpus/packed_splats.py`, WebP
+  images included, from PlayCanvas's SOG specification and, for what it leaves out, its
+  splat-transform source. It returns each splat as its quantized form decodes by the format's
+  own rule, and the expectations are those. The real SOG's come from its images as ffmpeg (or
+  Pillow) decodes them.
 - **Blender** cases (`blender_*` folders) are real exporter output, from
   `tools/corpus/blender_export.py`.
 - **Real files** from other projects' test data sit in their case folders, with the
   project's license beside them: PDAL's `simple.las` and `simple.laz` (BSD,
   `las/LICENSE-PDAL`), PCL's `bun0.pcd` and `car6.pcd` (BSD, `pcd/LICENSE-PCL`), two scans
   from the e57 crate's test data (MIT, `e57/LICENSE-e57`), and assimp's AMF, LWO, AC,
-  OpenGEX, IRRMesh and XGL test models (BSD, `LICENSE-assimp` in each). The generator reads each file with its own small
+  OpenGEX, IRRMesh and XGL test models (BSD, `LICENSE-assimp` in each), and two gaussian
+  splat scenes from the PlayCanvas engine's examples: the first two chunks of
+  `guitar.compressed.ply` (MIT, `ply/LICENSE-playcanvas`) and a level of detail of PLAYBOT by
+  Stephane Agullo as an unzipped SOG (CC-BY-4.0, `sog/LICENSE-playbot.txt`). The generator reads each file with its own small
   parser, written from the specification, and writes the expectations from that, so these
   too are checked against the standard rather than against Polysmelt. A generator keeps
   these files when it empties its folder (or takes them from the folder given as its first
@@ -131,7 +140,9 @@ python tools/corpus/obj.py
   colors in each encoding, the various UV property names, n-gons and triangle strips, point
   clouds and gaussian splats (read as `KHR_gaussian_splatting`, with spherical harmonics of
   degree 1). Also unknown elements, broken headers, and data shorter than the header says,
-  which keeps the whole faces it holds.
+  which keeps the whole faces it holds. SuperSplat's compressed PLY: chunks with and without
+  color bounds, a part chunk, an `sh` element of 1 and 3 bands, and a real file's first two
+  chunks. Errors there: truncation, too few chunks, a count past `Keep::max_points`.
 - **VOX**: palettes (default and off-by-one), materials, and the scene graph: transforms,
   rotations, mirrors, groups, instances and hidden layers or nodes. Also version 150 packs
   and unknown chunks.
@@ -278,6 +289,15 @@ python tools/corpus/obj.py
   antialiased flag, and the coordinate system record (axes flipped, or turned on the node)
   among other records or without the flag that says records follow. Errors: truncation, a
   count past `Keep::max_points`, version 4, an unknown version, an unzipped stream.
+- **SOG**: versions 1 to 3, zipped and as a `meta.json` beside its images. Covers bounds and
+  codebooks, the smallest-three and exponential-map rotations, each opacity encoding
+  (version 3's above 1 held to 1), harmonics of 1 to 3 bands in a palette (a fourth band
+  dropped, and bands told by the palette image's width where the meta doesn't state them),
+  version 3's blind data as custom attributes, and its model, extras and comments; one real
+  scene of splat-transform's. Errors: missing images, images that aren't WebP or are cut
+  short, a count past the images' pixels or `Keep::max_points`, a short codebook, a palette
+  image of the wrong width, an unknown version, a broken `meta.json`, a zip without one and a
+  zip cut short.
 - **MikuMikuDance** (`mmd/`): PMX 2.0 with UTF-16 and UTF-8 text and index sizes 1, 2 and 4,
   and PMX 2.1 with every deform (BDEF1, BDEF2, BDEF4, SDEF, QDEF), additional UVs, vertex
   colors and a translucent material. Covers bones with IK and inherited rotation, vertex,
