@@ -23,12 +23,13 @@ ROOT = os.path.normpath(os.environ.get("POLYSMELT_CORPUS") or os.path.join(REPO,
 
 
 def fresh(fmt, keep_prefix=None):
-    """Empties tests/corpus/<fmt> of its case folders, except those starting with `keep_prefix` (made
-    by other tools). Files beside the cases (license notices) stay."""
+    """Empties tests/corpus/<fmt>, except case folders starting with `keep_prefix` (made by
+    other tools), the `ref_*` folders thirdparty.py writes, and license files."""
     d = os.path.join(ROOT, fmt)
     if os.path.isdir(d):
         for name in os.listdir(d):
-            if os.path.isdir(os.path.join(d, name)) and not (keep_prefix and name.startswith(keep_prefix)):
+            kept = name.startswith("ref_") or (keep_prefix and name.startswith(keep_prefix))
+            if not kept and os.path.isdir(os.path.join(d, name)):
                 shutil.rmtree(os.path.join(d, name))
     os.makedirs(d, exist_ok=True)
     return d

@@ -200,6 +200,20 @@ fn close(a: &[f32], b: &[f32], tol: f32) -> bool {
 }
 
 /// A path under `root`, `/`-separated and relative to it.
+/// The first of `points` that isn't within `tol` of any of `among`, by `close`'s measure.
+fn outside(points: &[[f32; 3]], among: &[[f32; 3]], tol: f32) -> Option<[f32; 3]> {
+    let mut sorted = among.to_vec();
+    sorted.sort_by(|a, b| a[0].total_cmp(&b[0]));
+    points.iter().copied().find(|p| {
+        let reach = 2.0 * tol * (1.0 + p[0].abs());
+        let from = sorted.partition_point(|q| q[0] < p[0] - reach);
+        !sorted[from..]
+            .iter()
+            .take_while(|q| q[0] <= p[0] + reach)
+            .any(|q| close(p, q, tol))
+    })
+}
+
 fn relative(p: &Path, root: &Path) -> String {
     p.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/")
 }
@@ -380,10 +394,20 @@ fn poses(e: &Map<String, Value>, doc: &Document, tol: f32) -> Result<(), String>
 /// or with `time` (seconds) in animation `animation` (0 by default) at that time, and its `keys`: per path
 /// (`translation`, `rotation`, `scale`), the channel's key count, its key times, or `null` for no channel.
 fn rig(e: &Map<String, Value>, doc: &Document, tol: f32) -> Result<(), String> {
-    let Some(entries) = e.get("rig").and_then(Value::as_array) else {
+    if !e.contains_key("rig") && !e.contains_key("animation_spans") {
         return Ok(());
-    };
+    }
+    let none = Vec::new();
+    let entries = e.get("rig").and_then(Value::as_array).unwrap_or(&none);
     let rig = doc.rig().map_err(|err| format!("no rig: {err}"))?;
+    // `animation_spans`: each animation's first and last key times, in seconds.
+    if let Some(spans) = e.get("animation_spans").and_then(Value::as_array) {
+        let got: Vec<[f32; 2]> = rig.animations.iter().map(|a| a.span().into()).collect();
+        let same = got.len() == spans.len() && got.iter().zip(spans).all(|(g, w)| close(g, &floats(w), tol));
+        if !same {
+            return Err(format!("animations span {got:?}, expected {spans:?}"));
+        }
+    }
     for entry in entries {
         let name = entry["node"].as_str().ok_or("a rig entry needs \"node\"")?;
         let node = rig.find(name).ok_or_else(|| format!("rig has no node {name:?}"))?;
@@ -396,15 +420,24 @@ fn rig(e: &Map<String, Value>, doc: &Document, tol: f32) -> Result<(), String> {
             }
         }
         let animation = entry["animation"].as_u64().unwrap_or(0) as usize;
-        let (trs, when) = match entry.get("time").and_then(Value::as_f64) {
+        let (pose, when) = match entry.get("time").and_then(Value::as_f64) {
             Some(t) => {
                 if animation >= rig.animations.len() {
                     return Err(format!("{name}: no animation {animation}"));
                 }
-                (rig.pose(Some(animation), t as f32)[node], format!("at {t}"))
+                (rig.pose(Some(animation), t as f32), format!("at {t}"))
             }
-            None => (rig.nodes[node].rest, "at rest".to_owned()),
+            None => (rig.nodes.iter().map(|n| n.rest).collect(), "at rest".to_owned()),
         };
+        let trs = pose[node];
+        // `world`: where the node's origin is in the scene, its parents' transforms applied.
+        if let Some(want) = entry.get("world") {
+            let m = rig.world(&pose)[node];
+            let (got, want) = ([m[12], m[13], m[14]], floats(want));
+            if !close(&got, &want, tol) {
+                return Err(format!("{name} {when}: its origin is at {got:?}, expected {want:?}"));
+            }
+        }
         let negated = trs.rotation.map(|c| -c);
         for (key, got, alt) in [
             ("translation", &trs.translation[..], None),
@@ -1081,6 +1114,31 @@ fn run(case: &Case) -> Result<(), String> {
             return Err(format!(
                 "bounds are {min:?}..{max:?}, expected {want_min:?}..{want_max:?}"
             ));
+        }
+    }
+    // `position_set`: the distinct positions drawn are the ones another tool read from the file, whatever
+    // their order and however either tool welds them.
+    if let Some(name) = e.get("position_set").and_then(Value::as_str) {
+        let bytes = std::fs::read(case.dir.join(name)).map_err(|err| format!("position_set {name}: {err}"))?;
+        let want: Vec<[f32; 3]> = bytes
+            .as_chunks::<12>()
+            .0
+            .iter()
+            .map(|c| [0, 4, 8].map(|k| f32::from_le_bytes([c[k], c[k + 1], c[k + 2], c[k + 3]])))
+            .collect();
+        let drawn: Vec<[f32; 3]> = g
+            .prims
+            .iter()
+            .flat_map(|p| {
+                let used = p.indices.iter().chain(&p.lines).chain(&p.points);
+                used.map(|&i| p.positions[i as usize])
+            })
+            .collect();
+        if let Some(p) = outside(&drawn, &want, tol) {
+            return Err(format!("position {p:?} is none of the {} in {name}", want.len()));
+        }
+        if let Some(p) = outside(&want, &drawn, tol) {
+            return Err(format!("no position matches {p:?} of {name}"));
         }
     }
     let flag = |key: &str, has: bool| -> Result<(), String> {

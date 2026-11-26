@@ -31,48 +31,48 @@ cases.
 | --- | --- | --- | --- |
 | STL | 29 | 27 | 2 |
 | PLY | 46 | 41 | 4 |
-| VOX | 27 | 27 | none |
+| VOX | 31 | 27 | none |
 | OBJ | 64 | 55 | 9 |
-| 3DS | 49 | 49 | none |
-| 3MF | 54 | 54 | none |
+| 3DS | 55 | 49 | none |
+| 3MF | 62 | 54 | none |
 | FBX | 134 | 116 | 18 |
 | USD | 141 | 121 | 20 |
 | glTF | 102 | 69 | 15 |
 | SketchUp | 31 | 7 | none |
-| BVH | 41 | 41 | none |
-| COLLADA | 77 | 77 | none |
-| OFF | 23 | 23 | none |
+| BVH | 42 | 41 | none |
+| COLLADA | 90 | 77 | none |
+| OFF | 25 | 23 | none |
 | VRM | 7 | 7 | none |
 | X3D | 53 | 53 | none |
-| DXF | 34 | 34 | none |
+| DXF | 38 | 34 | none |
 | Gaussian splats (`.splat`) | 7 | 7 | none |
 | SPZ | 19 | 19 | none |
 | SOG | 29 | 28 | none |
 | MikuMikuDance (`mmd/`: PMX, PMD, VMD) | 22 | 22 | none |
-| DirectX (`x/`) | 48 | 42 | none |
-| MD2 | 13 | 13 | none |
+| DirectX (`x/`) | 53 | 42 | none |
+| MD2 | 14 | 13 | none |
 | MD3 | 15 | 15 | none |
-| MD5 | 13 | 13 | none |
+| MD5 | 14 | 13 | none |
 | IQM | 16 | 16 | none |
-| SMD | 9 | 9 | none |
-| MilkShape 3D | 12 | 12 | none |
-| Blitz3D | 11 | 11 | none |
+| SMD | 11 | 9 | none |
+| MilkShape 3D | 14 | 12 | none |
+| Blitz3D | 12 | 11 | none |
 | ASF/AMC (`asf/`) | 26 | 26 | none |
-| C3D | 26 | 26 | none |
+| C3D | 29 | 26 | none |
 | TRC | 19 | 19 | none |
 | HTR | 31 | 31 | none |
 | LAS and LAZ | 17 | 15 | none |
 | PCD | 25 | 23 | none |
 | Text point clouds (`xyz/`) | 21 | 21 | none |
 | E57 | 3 | 1 | none |
-| AMF | 23 | 21 | none |
-| LightWave (`lwo/`) | 23 | 20 | none |
-| AC3D (`ac/`) | 15 | 11 | none |
-| OGRE | 31 | 31 | none |
+| AMF | 26 | 21 | none |
+| LightWave (`lwo/`) | 32 | 20 | none |
+| AC3D (`ac/`) | 16 | 11 | none |
+| OGRE | 32 | 31 | none |
 | OpenFlight | 21 | 21 | none |
-| OpenGEX | 28 | 24 | none |
-| Irrlicht (`irr/`: IRRMesh and scenes) | 26 | 25 | none |
-| XGL (`xgl/`: XGL and ZGL) | 22 | 19 | none |
+| OpenGEX | 30 | 24 | none |
+| Irrlicht (`irr/`: IRRMesh and scenes) | 28 | 25 | none |
+| XGL (`xgl/`: XGL and ZGL) | 26 | 19 | none |
 | VTK (`vtk/`: legacy and XML) | 86 | 72 | none |
 
 - **Generated** cases are written byte by byte by `tools/corpus/<format>.py` (3DS is
@@ -138,6 +138,22 @@ cases.
   too are checked against the standard rather than against Polysmelt. A generator keeps
   these files when it empties its folder (or takes them from the folder given as its first
   argument).
+
+- **Reference cases** (`ref_*` folders, 75 of them across 21 formats) are files from other
+  projects, measured by other tools: `tools/corpus/thirdparty.py` fetches each at a pinned
+  commit and writes its expectations from an independent reader, never from Polysmelt and
+  never from a parser of this project's. assimp 6.0.5 (through `assimp-py`) measures its own
+  test models (BSD, `LICENSE-assimp` in each format's folder; a model with terms of its own
+  has them beside it) for 3DS, COLLADA, DirectX, LightWave, AC3D, AMF, XGL, IRRMesh,
+  OpenGEX, OGRE, OFF, MD2, MD5, SMD, MilkShape 3D, Blitz3D, DXF and BVH. lib3mf measures the
+  3MF Consortium's samples (BSD, `3mf/LICENSE-3mf-samples`), py-vox-io MagicaVoxel's
+  author's models (MIT, `vox/LICENSE-voxel-model`), and ezdxf two of assimp's DXF files that
+  hold lines and points. C3D has no sample files with clear terms, so its three are written
+  by ezc3d and read back with it. Each case compares what's drawn (triangles, bounds, area and
+  the set of positions) and, where the file has them, node names, where each bone is at rest
+  and at a key, and the animations' spans. The generator states how each tool's space maps to
+  glTF's, and a case's `source` names what the tool gets wrong about the file, which is then
+  left out. The table's Cases column counts them; its Generated column doesn't.
 
 Regenerate a format from the repository root:
 
@@ -493,6 +509,8 @@ are required. Every other key is optional and is checked only when present.
 | `lines`, `points` | Exact counts of line segments and points in the GLB. A primitive's lines and points share its vertices, so they add no primitives or vertices of their own. |
 | `bounds` | `{"min": [x,y,z], "max": [x,y,z]}`, glTF space (Y up, meters). |
 | `area` | Total surface area. Catches polygons triangulated outside their outline. |
+| `position_set` | A file beside the model of little-endian `f32` triples, glTF space: the distinct positions another tool read. Every position drawn must be one of them and each of them must be drawn, in any order and however either side welds. |
+| `animation_spans` | A list of `[first, last]` key times in seconds, one for each animation. |
 | `uvs`, `colors` | Whether any primitive has `TEXCOORD_0` / `COLOR_0`. |
 | `positions_include`, `uvs_include`, `colors_include` | Lists of values that must each appear somewhere. Colors are linear RGBA. |
 | `normals_in` | Every normal must be one of these directions. |
@@ -505,7 +523,7 @@ are required. Every other key is optional and is checked only when present.
 | `document` | Counts in the document's glTF JSON (`nodes`, `skins`, `animations`, `cameras`, `lights`, `joints`, `morph_targets`, `channels`), plus `node_names` and primitive `attributes` that must be there. |
 | `json` | Values in the document's glTF JSON, keyed by JSON pointer (`/materials/0/extensions/KHR_materials_ior/ior`). Numbers match to within `1e-4`, and objects match on the members given. `null` means the pointer must lead nowhere. |
 | `flat_json` | The same, in the glTF JSON of the flat mesh written as GLB, so what reaches the mesh (its materials, textures and samplers) can be checked. |
-| `rig` | A list of checks on what `Document::rig` makes of a node, found by `node` name. Each may give its `parent` (a name, or `null` for a root) and its `translation`, `rotation` (either sign) and `scale`. These are in the rest pose, or with `time` (seconds), posed by animation `animation` (default 0) at that time. `keys` maps a path (`translation`, `rotation`, `scale`) to the channel's key count, its key times, or `null` for no channel. |
+| `rig` | A list of checks on what `Document::rig` makes of a node, found by `node` name. Each may give its `parent` (a name, or `null` for a root) and its `translation`, `rotation` (either sign) and `scale`. These are in the rest pose, or with `time` (seconds), posed by animation `animation` (default 0) at that time. `world` is where the node's origin is in the scene, its parents' transforms applied. `keys` maps a path (`translation`, `rotation`, `scale`) to the channel's key count, its key times, or `null` for no channel. |
 
 Each `materials` entry is matched by `name`, or by position when it has no name:
 
