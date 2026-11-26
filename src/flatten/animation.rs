@@ -8,8 +8,12 @@ use crate::num::f32_of;
 use crate::quat;
 use crate::{Context as _, ErrorKind, Result};
 
+/// The pointer path, under a node, of its `KHR_node_visibility` flag.
+pub(super) const VISIBLE: &str = "extensions/KHR_node_visibility/visible";
+
 /// The node and property (`translation`, `rotation`, `scale` or `weights`) an animation
-/// channel's target animates: named outright, or by a `KHR_animation_pointer` to one of them.
+/// channel's target animates: named outright, or by a `KHR_animation_pointer` to one of them
+/// or to the node's `KHR_node_visibility` flag ([`VISIBLE`]).
 pub(crate) fn node_target(target: &Value) -> Option<(usize, &str)> {
     if let (Some(node), Some(path)) = (index(target, "node"), target.get("path").and_then(Value::as_str))
         && path != "pointer"
@@ -22,7 +26,7 @@ pub(crate) fn node_target(target: &Value) -> Option<(usize, &str)> {
     if node.is_empty() || !node.bytes().all(|b| b.is_ascii_digit()) || (node.len() > 1 && node.starts_with('0')) {
         return None;
     }
-    let path = ["translation", "rotation", "scale", "weights"]
+    let path = ["translation", "rotation", "scale", "weights", VISIBLE]
         .into_iter()
         .find(|&p| p == path)?;
     Some((node.parse().ok()?, path))
@@ -80,9 +84,11 @@ impl Reader<'_> {
             let values: Vec<f32> = match path {
                 "translation" | "scale" => self.read::<3>(output, [0.0; 3])?.into_flattened(),
                 "rotation" => self.read::<4>(output, [0.0, 0.0, 0.0, 1.0])?.into_flattened(),
-                "weights" => self.read::<1>(output, [0.0])?.into_flattened(),
+                "weights" | VISIBLE => self.read::<1>(output, [0.0])?.into_flattened(),
                 _ => continue,
             };
+            // A flag has nothing between its keys: it holds each until the next.
+            let interpolation = if path == VISIBLE { "STEP" } else { interpolation };
             let Some(v) = sample(&times, &values, interpolation, time, path == "rotation") else {
                 continue;
             };
@@ -94,6 +100,7 @@ impl Reader<'_> {
                 ("scale", &[x, y, z]) => p.scale = Some([x, y, z]),
                 ("rotation", &[x, y, z, w]) => p.rotation = Some([x, y, z, w]),
                 ("weights", _) => p.weights = Some(v.into_iter().map(f32_of).collect()),
+                (VISIBLE, &[x]) => p.visible = Some(x != 0.0),
                 _ => {}
             }
         }

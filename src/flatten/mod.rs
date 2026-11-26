@@ -4,7 +4,8 @@
 //! - The default scene is drawn (else scene 0; with no scenes, every root node; with no nodes,
 //!   every mesh). Node transforms are baked into the vertices; a mirroring transform flips the
 //!   winding back. `EXT_mesh_gpu_instancing` instances are baked the same way. A node
-//!   `KHR_node_visibility` hides isn't drawn, nor anything under it.
+//!   `KHR_node_visibility` hides isn't drawn, nor anything under it; an animation can show
+//!   or hide a node through `KHR_animation_pointer`.
 //! - The pose is the nodes' own transforms and weights, or an animation's at a time
 //!   ([`Pose`]): translation, rotation, scale and morph weights, with linear, step and
 //!   cubic-spline interpolation.
@@ -27,7 +28,8 @@
 //!   `EXT_texture_webp`, TGA, BMP, GIF, TIFF, PSD, DDS).
 //! - Meshopt-compressed views are decoded as they are read; Draco
 //!   (`KHR_draco_mesh_compression`) needs the `draco` feature.
-//! - A required extension it can't honour is an error, unless it only changes how surfaces look.
+//! - A required extension it can't honour is an error, unless it only changes how surfaces look
+//!   or changes nothing drawn (interaction, metadata).
 //!
 //! Accessors are read from their buffers in place, so the peak is little more than the mesh.
 
@@ -208,7 +210,7 @@ impl Document {
 /// See [`Document::counts`]. A document whose default scene doesn't exist counts nothing.
 fn counts(json: &Map<String, Value>, tabs: Tabs<'_>) -> Counts {
     let mut c = Counts::default();
-    let Ok(order) = scene_order(json) else {
+    let Ok(order) = scene_order(json, |_| None) else {
         return c;
     };
     let meshes = list(json, "meshes");
@@ -346,8 +348,9 @@ fn children(nodes: &[Value]) -> Vec<bool> {
 
 /// The nodes the default scene draws, parents before children, each once, leaving out those
 /// `KHR_node_visibility` hides and everything under them; `None` for a
-/// document without nodes, which draws every mesh as it is.
-fn scene_order(json: &Map<String, Value>) -> Result<Option<Vec<usize>>> {
+/// document without nodes, which draws every mesh as it is. `posed` is whether a pose shows or
+/// hides a node, over what the node says.
+fn scene_order(json: &Map<String, Value>, posed: impl Fn(usize) -> Option<bool>) -> Result<Option<Vec<usize>>> {
     let nodes = list(json, "nodes");
     let scenes = list(json, "scenes");
     let roots: Vec<usize> = if scenes.is_empty() {
@@ -379,7 +382,7 @@ fn scene_order(json: &Map<String, Value>) -> Result<Option<Vec<usize>>> {
             .get("extensions")
             .and_then(|e| e.get("KHR_node_visibility"))
             .and_then(|v| v.get("visible"));
-        if visible == Some(&Value::Bool(false)) {
+        if !posed(i).unwrap_or(visible != Some(&Value::Bool(false))) {
             continue;
         }
         order.push(i);
@@ -451,6 +454,8 @@ struct Posed {
     rotation: Option<[f64; 4]>,
     scale: Option<[f64; 3]>,
     weights: Option<Vec<f32>>,
+    /// Shown or hidden (`KHR_node_visibility`).
+    visible: Option<bool>,
     /// Set by the caller rather than an animation, so it holds for a node written as a matrix
     /// too.
     given: bool,
@@ -503,8 +508,8 @@ fn floats<const N: usize>(v: Option<&Value>, default: [f64; N]) -> [f64; N] {
     out
 }
 
-/// Required extensions a flat view draws: the geometry ones it decodes, and any that only change how surfaces
-/// look (materials, textures, lights), which it shows as best it can.
+/// Required extensions a flat view draws: the geometry ones it decodes, any that only change how surfaces
+/// look (materials, textures, lights), which it shows as best it can, and those that change nothing drawn.
 fn drawable(extension: &str) -> bool {
     const DECODED: &[&str] = &[
         "KHR_draco_mesh_compression",
@@ -534,7 +539,23 @@ fn drawable(extension: &str) -> bool {
     // Levels of detail: the node itself is the finest, which is what's drawn.
     // VRM 0.x names its extension plainly, without a vendor prefix.
     const ALSO: &[&str] = &["MSFT_lod", "VRM"];
-    DECODED.contains(&extension) || ALSO.contains(&extension) || LOOKS.iter().any(|p| extension.starts_with(p))
+    // What draws the same without them: how a viewer answers the pointer, behavior graphs
+    // (the scene at rest is drawn), metadata and feature IDs, a promise about the node
+    // hierarchy or the mesh's topology, and edges to outline, which aren't drawn.
+    const SAME: &[&str] = &[
+        "KHR_node_selectability",
+        "KHR_node_hoverability",
+        "KHR_interactivity",
+        "EXT_structural_metadata",
+        "EXT_mesh_features",
+        "GODOT_single_root",
+        "CESIUM_primitive_outline",
+        "EXT_mesh_manifold",
+    ];
+    DECODED.contains(&extension)
+        || ALSO.contains(&extension)
+        || SAME.contains(&extension)
+        || LOOKS.iter().any(|p| extension.starts_with(p))
 }
 
 fn f32s<const N: usize>(v: Option<&Value>, default: [f32; N]) -> [f32; N] {
@@ -637,7 +658,7 @@ impl<'d> Reader<'d> {
                 }
             }
         }
-        let Some(order) = scene_order(self.json)? else {
+        let Some(order) = scene_order(self.json, |i| self.posed[i].visible)? else {
             // No nodes at all: every mesh, as it is.
             return Ok((0..self.meshes.len())
                 .map(|mesh| Use {

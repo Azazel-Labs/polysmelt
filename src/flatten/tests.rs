@@ -336,6 +336,70 @@ fn an_animation_pointer_to_a_node_moves_it() {
 }
 
 #[test]
+fn an_animation_pointer_shows_and_hides_nodes() {
+    let floats: Vec<f32> = [
+        &[0., 0., 0., 1., 0., 0., 0., 1., 0.][..], // POSITION
+        &[0., 1.],                                 // times
+    ]
+    .concat();
+    let mut bin: Vec<u8> = floats.iter().flat_map(|f| f.to_le_bytes()).collect();
+    // Node 0 is shown at the second key, when node 1 is hidden.
+    bin.extend_from_slice(&[0, 1, 1, 0]);
+    let visible = |node: usize, sampler: usize| {
+        let pointer = format!("/nodes/{node}/extensions/KHR_node_visibility/visible");
+        serde_json::json!({ "sampler": sampler, "target": { "path": "pointer",
+        "extensions": { "KHR_animation_pointer": { "pointer": pointer } } } })
+    };
+    let gltf = serde_json::json!({
+        "asset": { "version": "2.0" },
+        "extensionsUsed": ["KHR_animation_pointer", "KHR_node_visibility"],
+        "buffers": [{ "uri": "a.bin", "byteLength": bin.len() }],
+        "bufferViews": [
+            { "buffer": 0, "byteOffset": 0, "byteLength": 36 },
+            { "buffer": 0, "byteOffset": 36, "byteLength": 8 },
+            { "buffer": 0, "byteOffset": 44, "byteLength": 4 },
+        ],
+        "accessors": [
+            { "bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3",
+              "min": [0, 0, 0], "max": [1, 1, 0] },
+            { "bufferView": 1, "componentType": 5126, "count": 2, "type": "SCALAR", "min": [0], "max": [1] },
+            { "bufferView": 2, "componentType": 5121, "count": 2, "type": "SCALAR" },
+            { "bufferView": 2, "byteOffset": 2, "componentType": 5121, "count": 2, "type": "SCALAR" },
+        ],
+        "meshes": [{ "primitives": [{ "attributes": { "POSITION": 0 } }] }],
+        "nodes": [
+            { "mesh": 0, "extensions": { "KHR_node_visibility": { "visible": false } } },
+            { "mesh": 0, "translation": [5, 0, 0] },
+        ],
+        "scenes": [{ "nodes": [0, 1] }],
+        "animations": [{
+            // Linear by default, but a flag holds each key until the next.
+            "samplers": [{ "input": 1, "output": 2 }, { "input": 1, "output": 3, "interpolation": "STEP" }],
+            "channels": [visible(0, 0), visible(1, 1)],
+        }],
+    });
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.bin"), &bin).unwrap();
+    std::fs::write(dir.path().join("a.gltf"), gltf.to_string()).unwrap();
+    let doc = crate::formats::load(&dir.path().join("a.gltf"), "gltf", &Folder::new(dir.path()), Keep::ALL).unwrap();
+    let firsts = |pose: Pose| -> Vec<[f32; 3]> {
+        let mesh = doc.flatten(pose).unwrap().unwrap();
+        mesh.prims
+            .iter()
+            .flat_map(|p| p.positions.iter().step_by(3).copied())
+            .collect()
+    };
+    let at = |time: f32| firsts(Pose::Animation { index: 0, time });
+    assert_eq!(firsts(Pose::Rest), [[5., 0., 0.]], "node 0 is hidden at rest");
+    assert_eq!(at(0.0), [[5., 0., 0.]]);
+    assert_eq!(at(0.75), [[5., 0., 0.]], "nothing changes between the keys");
+    assert_eq!(at(1.0), [[0., 0., 0.]], "node 0 is shown and node 1 hidden");
+    // The rig has no channel for them, and the animation still spans its keys.
+    assert_eq!(doc.rig().unwrap().animations[0].channels.len(), 0);
+    assert_eq!(doc.animation_bounds(0, 3).unwrap().unwrap().max, [6., 1., 0.]);
+}
+
+#[test]
 fn reads_back_what_to_glb_writes() {
     let dir = tempfile::tempdir().unwrap();
     let mesh = grid(30);
@@ -541,6 +605,22 @@ fn a_required_extension_it_cant_draw_is_an_error() {
         doc.flatten(Pose::Rest).unwrap().is_some(),
         "a look is drawn as best it can be"
     );
+    // Interaction, behavior, metadata and promises about the file change nothing drawn.
+    doc.json_mut().insert(
+        "extensionsRequired".into(),
+        serde_json::json!([
+            "KHR_node_selectability",
+            "KHR_node_hoverability",
+            "KHR_interactivity",
+            "EXT_structural_metadata",
+            "EXT_mesh_features",
+            "GODOT_single_root",
+            "CESIUM_primitive_outline",
+            "EXT_mesh_manifold"
+        ]),
+    );
+    let mesh = doc.flatten(Pose::Rest).unwrap().unwrap();
+    assert_eq!(mesh.triangles(), grid(2).triangles());
     doc.json_mut().insert(
         "extensionsRequired".into(),
         serde_json::json!(["EXT_some_future_geometry"]),
