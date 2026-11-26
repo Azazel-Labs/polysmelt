@@ -155,7 +155,8 @@ case(FMT, "unit_unsaid", {"cube.3mf": package({"3D/3dmodel.model": one_cube(unit
       "document": {"source": {"unit": "millimeter", "metersPerUnit": 0.001, "assumed": ["metersPerUnit"]}}})
 
 case(FMT, "unit_unknown", {"cube.3mf": package({"3D/3dmodel.model": one_cube(unit="parsec")})},
-     {"spec": CORE + ": a unit the specification doesn't allow", "source": SRC, "error": "unit"})
+     {"spec": CORE + ": a unit the specification doesn't allow", "source": SRC, "error": "unit",
+      "error_kind": "Corrupt"})
 
 case(FMT, "no_relationships", {"cube.3mf": package({"3D/3dmodel.model": one_cube()}, root=False)},
      {"spec": CORE + ": a package missing _rels/.rels; the model is at the usual name", "source": SRC, **CUBE})
@@ -514,24 +515,25 @@ for mode, lo, hi, spec in [("inside", (0, 4, 4), (10, 6, 6), "inside a cube: onl
 
 beam_case("beam_lattice_too_short", "every beam shorter than minlength, so nothing to draw",
           lattice([(0, 0, 0), (2, 0, 0)], [(0, 1, "")], ' radius="1" minlength="5" cap="butt"'),
-          {"error": "no triangles"})
+          {"error": "no triangles", "error_kind": "Empty"})
 
 case(FMT, "volumetric_level_set",
      {"levelset.3mf": package({"3D/3dmodel.model": model(
          obj(1, CUBE_MESH) + obj(2, '<v:levelset functionid="9" meshid="1" channel="shape" meshbboxonly="true"/>'),
          item(2), ns=f' xmlns:v="{NS_VOL}"')})},
      {"spec": VOL + ": a build of only a level set, a shape given by an implicit function, which has no "
-      "triangles", "source": SRC, "error": "volumetric level sets"})
+      "triangles", "source": SRC, "error": "volumetric level sets", "error_kind": "Unsupported"})
 
 # --- invalid ----------------------------------------------------------------------------------
 
 case(FMT, "no_build_items", {"cube.3mf": package({"3D/3dmodel.model": model(obj(1, CUBE_MESH), "")})},
-     {"spec": CORE + ": a model with an empty build", "source": SRC, "error": "builds nothing"})
+     {"spec": CORE + ": a model with an empty build", "source": SRC, "error": "builds nothing", "error_kind": "Empty"})
 
 case(FMT, "no_model_part", {"empty.3mf": package({})},
-     {"spec": CORE + ": a package without its model part", "source": SRC, "error": "no 3D model"})
+     {"spec": CORE + ": a package without its model part", "source": SRC, "error": "no 3D model",
+      "error_kind": "Corrupt"})
 
 case(FMT, "not_a_zip", {"text.3mf": "this is not a zip\n"},
-     {"spec": "a file that isn't an OPC package", "source": SRC, "error": "zip"})
+     {"spec": "a file that isn't an OPC package", "source": SRC, "error": "zip", "error_kind": "UnknownFormat"})
 
 print("3mf corpus written")

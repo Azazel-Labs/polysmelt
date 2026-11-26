@@ -147,7 +147,29 @@ python tools/corpus/obj.py
 ```
 
 `usd.py` needs `pip install usd-core`. A generator replaces its own cases and leaves the
-`blender_*` folders alone, and the reverse is also true.
+`blender_*` folders alone, and the reverse is also true. Each one finds the modules it shares
+with the others (`common.py`, `packed_splats.py`) beside itself, so `python -I` runs it too.
+
+Running a generator must write the corpus that is checked in, byte for byte.
+`tools/corpus/check.py` checks that: it runs each generator on a copy of the corpus in a
+scratch folder (never on `tests/corpus`) and lists every file that comes out different,
+missing or new.
+
+```
+python tools/corpus/check.py                  # every generator
+python tools/corpus/check.py obj gltf         # only these
+python tools/corpus/check.py --path <dir>     # with packages from `pip install --target <dir>`
+python tools/corpus/check.py --blender "<blender.exe>" --network
+```
+
+It runs the generators as `python -I`, which leaves out the environment and the user's site
+packages; `--path` (repeatable) names folders of packages for them. A generator whose needs
+aren't met is passed over, with the reason: a Python package that isn't installed (numpy,
+Pillow, usd-core, vtk, meshio), Blender (`blender_export.py`, unless `--blender` names one or
+`blender` is on the path), or the network (`khronos.py`, unless `--network` is given). The
+exit code is 1 when a generator fails or writes something else. When an expectation changes
+(a reader was fixed), change the generator and regenerate, so the two stay in step. Blender
+writes what its version writes, so `blender_export.py` can differ under another one.
 
 ## What the cases cover
 

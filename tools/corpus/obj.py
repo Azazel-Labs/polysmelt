@@ -5,10 +5,14 @@ channels where they're laid out otherwise) and `norm` normal maps.
 """
 
 import math
+import os
 import struct
+import sys
 import zlib
 
-from common import (AXES, CUBE_BOUNDS, CUBE_QUADS, CUBE_V, case, fresh, pil_image, png, polygon_area, psd,
+# The shared modules are beside this script, which `python -I` leaves off the path.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from common import (AXES, CUBE_BOUNDS, CUBE_QUADS, CUBE_V, case, fresh, pil_image, png, polygon_area, psd,  # noqa: E402
                     r, srgb_to_linear, webp)
 
 FMT = "obj"
@@ -223,7 +227,7 @@ case(FMT, "only_points_and_lines", {"model.obj": "v 0 0 0\nv 1 0 0\nv 1 1 0\nl 1
 })
 
 case(FMT, "empty", {"model.obj": ""}, {
-    "spec": OBJ_SPEC + ": an empty file", "source": SRC, "error": "no faces",
+    "spec": OBJ_SPEC + ": an empty file", "source": SRC, "error": "no faces", "error_kind": "Empty",
 })
 
 # --- Vertex colors (MeshLab / ZBrush extension: v x y z r g b) ---------------------------------

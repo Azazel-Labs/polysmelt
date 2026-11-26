@@ -34,14 +34,15 @@ import sys
 import urllib.parse
 import urllib.request
 
-from common import ROOT, case
+# The shared modules are beside this script, which `python -I` leaves off the path.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from common import REPO as CHECKOUT, ROOT, case  # noqa: E402
 
 FMT = "gltf"
 COMMIT = "e124e8d8d7330a5372bc2b4d00d39a4a9d7997ea"
 REPO = "KhronosGroup/glTF-Sample-Assets"
 RAW = f"https://raw.githubusercontent.com/{REPO}/{COMMIT}/Models/"
-CACHE = os.environ.get("POLYSMELT_KHRONOS_SAMPLES") or os.path.normpath(
-    os.path.join(ROOT, "..", "..", "target", "khronos-samples"))
+CACHE = os.environ.get("POLYSMELT_KHRONOS_SAMPLES") or os.path.join(CHECKOUT, "target", "khronos-samples")
 TEXTURE_SIZE = 64
 
 # Each model's license and whom it credits, from its LICENSE.md and metadata.json at COMMIT.

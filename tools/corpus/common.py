@@ -6,6 +6,9 @@ it chose, the colors it set), never from reading the result back with Polysmelt,
 checks the reader against the standard rather than against itself.
 
 Run from the repository root:  python tools/corpus/<format>.py
+
+With POLYSMELT_CORPUS set, the cases are written under that folder instead of tests/corpus:
+tools/corpus/check.py does so to compare what the generators write with what is checked in.
 """
 
 import json
@@ -15,16 +18,17 @@ import shutil
 import struct
 import zlib
 
-ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "tests", "corpus"))
+REPO = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
+ROOT = os.path.normpath(os.environ.get("POLYSMELT_CORPUS") or os.path.join(REPO, "tests", "corpus"))
 
 
 def fresh(fmt, keep_prefix=None):
-    """Empties tests/corpus/<fmt>, except case folders starting with `keep_prefix` (made by
-    other tools)."""
+    """Empties tests/corpus/<fmt> of its case folders, except those starting with `keep_prefix` (made
+    by other tools). Files beside the cases (license notices) stay."""
     d = os.path.join(ROOT, fmt)
     if os.path.isdir(d):
         for name in os.listdir(d):
-            if not (keep_prefix and name.startswith(keep_prefix)):
+            if os.path.isdir(os.path.join(d, name)) and not (keep_prefix and name.startswith(keep_prefix)):
                 shutil.rmtree(os.path.join(d, name))
     os.makedirs(d, exist_ok=True)
     return d

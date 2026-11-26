@@ -3,9 +3,9 @@
 SketchUp's format is closed, so these cases are files SketchUp itself saved (through the desktop
 application or its C API), taken from openskp's test fixtures (MIT, see LICENSE-openskp beside
 the cases). Their expectations come from what openskp's tests assert about each file and what
-its fixture notes say was drawn, never from reading them back with Polysmelt. The application
-fact is the version string in each file's header, read here. The damaged and invalid cases are
-written here.
+its fixture notes say was drawn, never from reading them back with Polysmelt. The tool (the
+document's `source.tool`) is the version string in each file's header, read here. The damaged and
+invalid cases are written here.
 
 Run from the repository root:
 
@@ -20,7 +20,9 @@ import re
 import shutil
 import sys
 
-from common import ROOT, case, fresh
+# The shared modules are beside this script, which `python -I` leaves off the path.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from common import REPO, ROOT, case, fresh  # noqa: E402
 
 FMT = "skp"
 INCH = 0.0254
@@ -81,16 +83,17 @@ def area(points):
 
 fixtures = load_fixtures()
 LICENSE = os.path.join(ROOT, FMT, "LICENSE-openskp")
-if os.path.exists(LICENSE):
-    os.remove(LICENSE)
 fresh(FMT)
-shutil.copyfile(os.path.join(ROOT, "..", "..", "src", "formats", "skp", "LICENSE-openskp"), LICENSE)
+# The notice beside the cases stays as it is; the reader's copy stands in when there is none.
+if not os.path.exists(LICENSE):
+    shutil.copyfile(os.path.join(REPO, "src", "formats", "skp", "LICENSE-openskp"), LICENSE)
 
 
 def fixture(name, spec, **expect):
     data = fixtures[name]
-    facts = {"application": application(data), **expect.pop("facts", {})}
-    case(FMT, name, {name + ".skp": data}, {"spec": SPEC + ": " + spec, "source": SRC, "facts": facts, **expect})
+    document = {**expect.pop("document", {}), "source": {"tool": application(data)}}
+    case(FMT, name, {name + ".skp": data},
+         {"spec": SPEC + ": " + spec, "source": SRC, "document": document, **expect})
 
 
 # --- geometry -----------------------------------------------------------------------------------
@@ -174,23 +177,23 @@ def header(version):
 v3 = fixtures["legacy_v3_textured"]
 case(FMT, "truncated_legacy", {"cut.skp": v3[:len(v3) // 2]},
      {"spec": SPEC + ": a SketchUp 3 file cut off halfway through its object stream", "source": GEN,
-      "error": "reading a SketchUp 3 file"})
+      "error": "reading a SketchUp 3 file", "error_kind": "Corrupt"})
 vff = fixtures["nesting_2021"]
 case(FMT, "truncated_vff", {"cut.skp": vff[:len(vff) // 2]},
      {"spec": SPEC + ": a 2021+ file cut off halfway through its ZIP container", "source": GEN,
-      "error": "reading a SketchUp 2025 file"})
+      "error": "reading a SketchUp 2025 file", "error_kind": "Corrupt"})
 case(FMT, "header_only", {"header.skp": header("{15.0.9350}")},
      {"spec": SPEC + ": a SketchUp 2015 header with nothing after it", "source": GEN,
-      "error": "reading a SketchUp 2015 file"})
+      "error": "reading a SketchUp 2015 file", "error_kind": "Corrupt"})
 case(FMT, "version_2", {"old.skp": header("{2.0.1}")},
      {"spec": SPEC + ": a SketchUp 2 header, older than any version known", "source": GEN,
-      "error": "SketchUp 2 files are not supported"})
+      "error": "SketchUp 2 files are not supported", "error_kind": "Unsupported"})
 case(FMT, "no_version", {"bad.skp": header("{x}")},
      {"spec": SPEC + ": a header whose version string holds no number", "source": GEN,
-      "error": "no version in its header"})
+      "error": "no version in its header", "error_kind": "Corrupt"})
 case(FMT, "not_sketchup", {"text.skp": "this is not a SketchUp file\n"},
-     {"spec": "not a SketchUp file", "source": GEN, "error": "not a SketchUp file"})
+     {"spec": "not a SketchUp file", "source": GEN, "error": "not a SketchUp file", "error_kind": "UnknownFormat"})
 case(FMT, "empty_file", {"empty.skp": b""},
-     {"spec": "an empty file", "source": GEN, "error": "not a SketchUp file"})
+     {"spec": "an empty file", "source": GEN, "error": "not a SketchUp file", "error_kind": "UnknownFormat"})
 
 print("skp corpus written")
