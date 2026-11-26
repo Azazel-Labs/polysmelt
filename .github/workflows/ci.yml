@@ -112,6 +112,23 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --target wasm32-unknown-unknown --no-default-features --features stl,ply,obj,gltf,draco,vox,3ds,webp,skp,bvh,off,dxf,fbx,3mf,dae,x3d,tga,bmp,gif,tiff,psd,dds,splat,spz,mmd,directx,md2,md3,md5,iqm,smd,ms3d,b3d,asf,c3d,trc,htr,las,laz,pcd,xyz,e57,amf,lwo,ac3d,ogre,flt,ogex,irr,xgl -- -D warnings
 
+  # Every dependency is Rust: nothing compiles C or links a native library. The `-sys` crates allowed are
+  # declarations of what the platform already has, with no build of their own.
+  pure-rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - name: No C compilers, build tools or native libraries among the dependencies
+        run: |
+          cargo tree -e normal,build --prefix none --target all --all-features | sed 's/ .*//' | sort -u > deps.txt
+          if grep -E -x 'cc|cmake|bindgen|pkg-config|vcpkg|nasm-rs|autotools|link-cplusplus|cxx|cxx-build' deps.txt; then
+            echo "a dependency builds native code"; exit 1
+          fi
+          if grep -E -- '-sys$' deps.txt | grep -v -E -x 'windows-sys|js-sys|web-sys|linux-raw-sys'; then
+            echo "a dependency links a native library"; exit 1
+          fi
+
   msrv:
     runs-on: ubuntu-latest
     strategy:
