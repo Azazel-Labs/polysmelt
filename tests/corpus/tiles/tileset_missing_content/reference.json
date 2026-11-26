@@ -1,0 +1,30 @@
+{
+ "kind": "tileset",
+ "placements": [
+  {
+   "name": "here.b3dm",
+   "matrix": [
+    1.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    1.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    1.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    1.0
+   ]
+  }
+ ],
+ "missing": [
+  "gone.b3dm",
+  "https://example.com/far.b3dm"
+ ]
+}

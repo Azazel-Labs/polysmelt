@@ -28,6 +28,14 @@ fn binary(head: &[u8], len: Option<u64>) -> Option<&'static str> {
         } else {
             "glb"
         }
+    } else if starts(b"b3dm") {
+        "b3dm"
+    } else if starts(b"i3dm") {
+        "i3dm"
+    } else if starts(b"pnts") {
+        "pnts"
+    } else if starts(b"cmpt") {
+        "cmpt"
     } else if starts(b"Kaydara FBX Binary") {
         "fbx"
     } else if starts(b"PXR-USDC") {
@@ -215,6 +223,14 @@ fn text(text: &str) -> Option<&'static str> {
     } else if starts("{") && ["\"means\"", "\"mins\"", "\"maxs\""].iter().all(|k| t.contains(k)) {
         // A SOG's `meta.json`, which may name its generator under `asset` as glTF does.
         "sog"
+    } else if starts("{")
+        && ["\"geometricError\"", "\"boundingVolume\"", "\"tilesetVersion\""]
+            .iter()
+            .any(|k| t.contains(k))
+    {
+        // A 3D Tiles tileset, which has an `asset` as glTF does. The tile reader goes by the
+        // file's first bytes, not the extension, so any of its extensions reads it.
+        "cmpt"
     } else if starts("{") && t.contains("\"asset\"") {
         "gltf"
     } else if t.contains("Metric") && (t.contains("GeometryNode") || t.contains("GeometryObject")) {

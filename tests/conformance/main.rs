@@ -78,6 +78,7 @@ fn enabled(ext: &str) -> bool {
         "irrmesh" | "irr" => cfg!(feature = "irr"),
         "xgl" | "zgl" => cfg!(feature = "xgl"),
         "vtk" | "vtp" | "vtu" => cfg!(feature = "vtk"),
+        "b3dm" | "i3dm" | "pnts" | "cmpt" => cfg!(feature = "tiles"),
         _ => false,
     }
 }
@@ -109,6 +110,7 @@ fn has_feature(name: &str) -> bool {
         ("obj", cfg!(feature = "obj")),
         ("irr", cfg!(feature = "irr")),
         ("xgl", cfg!(feature = "xgl")),
+        ("tiles", cfg!(feature = "tiles")),
     ];
     features.iter().any(|&(f, on)| on && f == name)
 }
@@ -119,13 +121,24 @@ const ALL_EXTENSIONS: &[&str] = &[
     "zae", "kmz", "off", "vrm", "vrma", "x3d", "x3dv", "x3dz", "wrl", "wrz", "dxf", "splat", "spz", "sog", "las",
     "laz", "pcd", "xyz", "pts", "ptx", "asc", "e57", "amf", "lwo", "ac", "pmx", "pmd", "vmd", "x", "md2", "md3",
     "md5mesh", "md5anim", "iqm", "smd", "vta", "ms3d", "b3d", "asf", "amc", "c3d", "trc", "htr", "mesh", "skeleton",
-    "xml", "flt", "ogex", "irrmesh", "irr", "xgl", "zgl", "vtk", "vtp", "vtu",
+    "xml", "flt", "ogex", "irrmesh", "irr", "xgl", "zgl", "vtk", "vtp", "vtu", "b3dm", "i3dm", "pnts", "cmpt",
 ];
 
 fn ext_of(p: &Path) -> String {
     p.extension()
         .map(|e| e.to_string_lossy().to_lowercase())
         .unwrap_or_default()
+}
+
+/// The extension whose reader reads a case's model: its own, but for a `.json`, which is an unzipped SOG's
+/// `meta.json` or else a 3D Tiles tileset, read as the tiles are.
+fn reader_of(p: &Path) -> String {
+    let ext = ext_of(p);
+    if ext == "json" && p.file_name().is_some_and(|n| n != "meta.json") {
+        "cmpt".into()
+    } else {
+        ext
+    }
 }
 
 /// A case: its folder, model file and expectations.
@@ -1352,7 +1365,7 @@ fn check(format: &str) {
     let mut ran = 0;
     for case in &cases {
         let needs = case.expect.get("needs").and_then(Value::as_str);
-        if !enabled(&ext_of(&case.file)) || needs.is_some_and(|f| !has_feature(f)) {
+        if !enabled(&reader_of(&case.file)) || needs.is_some_and(|f| !has_feature(f)) {
             continue;
         }
         ran += 1;
@@ -1705,6 +1718,11 @@ fn vtk() {
     check("vtk");
 }
 
+#[test]
+fn tiles() {
+    check("tiles");
+}
+
 /// Every extension a [`Format`] has has cases (and `.xml`, read as the format its root names), and every format a
 /// corpus folder.
 #[test]
@@ -1750,7 +1768,7 @@ fn reading_less_matches_pruning() {
             continue;
         }
         for case in cases(&dir.file_name().to_string_lossy()) {
-            let ext = ext_of(&case.file);
+            let ext = reader_of(&case.file);
             let needs = case.expect.get("needs").and_then(Value::as_str);
             if !enabled(&ext) || needs.is_some_and(|f| !has_feature(f)) || case.expect.contains_key("error") {
                 continue;
@@ -1834,7 +1852,7 @@ fn unread_images_load_as_read_ones() {
             continue;
         }
         for case in cases(&dir.file_name().to_string_lossy()) {
-            let ext = ext_of(&case.file);
+            let ext = reader_of(&case.file);
             let needs = case.expect.get("needs").and_then(Value::as_str);
             if !enabled(&ext) || needs.is_some_and(|f| !has_feature(f)) || case.expect.contains_key("error") {
                 continue;

@@ -4,6 +4,10 @@
     clippy::cast_possible_truncation,
     reason = "indices into a glTF document in memory fit in usize"
 )]
+#![cfg_attr(
+    not(feature = "irr"),
+    allow(dead_code, reason = "only Irrlicht scenes place a graft a second time")
+)]
 
 use serde_json::{Map, Value, json};
 

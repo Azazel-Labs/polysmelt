@@ -1,0 +1,21 @@
+{
+ "kind": "pnts",
+ "points": 1000,
+ "absolute": "208684d5479a6025",
+ "colors": {
+  "levels": [
+   255,
+   255,
+   255,
+   255
+  ],
+  "hash": "55407c63a92df2c1"
+ },
+ "attributes": {
+  "_TEMPERATURE": "68bc0e56d3676816",
+  "_SECONDARYCOLOR_0": "363e7463a861e973",
+  "_SECONDARYCOLOR_1": "94eb5aa73e186ba5",
+  "_SECONDARYCOLOR_2": "94eb5aa73e186ba5",
+  "_ID": "3b47b52f982867a8"
+ }
+}

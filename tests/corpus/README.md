@@ -74,6 +74,7 @@ cases.
 | Irrlicht (`irr/`: IRRMesh and scenes) | 28 | 25 | none |
 | XGL (`xgl/`: XGL and ZGL) | 26 | 19 | none |
 | VTK (`vtk/`: legacy and XML) | 86 | 72 | none |
+| 3D Tiles (`tiles/`: b3dm, i3dm, pnts, cmpt, tileset.json) | 81 | 39 | none |
 
 - **Generated** cases are written byte by byte by `tools/corpus/<format>.py` (3DS is
   `tds.py`, 3MF is `threemf.py`, COLLADA is `dae.py`, PMX, PMD and VMD are `mmd.py`, DirectX
@@ -115,6 +116,17 @@ cases.
   test meshes (MIT, `vtk/LICENSE-meshio`), measured the same way. Each case also has a
   `reference.json` of hashes of the exact points, triangles and attributes VTK reads, which
   `tests/vtk.rs` compares with Polysmelt's.
+- **3D Tiles**' other 42 cases (`cesium_*` folders) are real tiles from CesiumJS's test data
+  (CesiumGS/cesium, `Specs/Data/Cesium3DTiles`, at the commit `tools/corpus/tiles.py` names;
+  Apache-2.0, `tiles/LICENSE-cesium`), unchanged. The generator is a reference decoder written
+  from the specification: it reads each tile's header, tables and glTF, places the instances,
+  points and tiles, and writes the expectations from that, for the real tiles and the ones it
+  writes alike. Each case also has a `reference.json` of what `tests/tiles.rs` compares
+  exactly: hashes of the positions as the file's single-precision values, of the colors as the
+  levels the file stores and of each attribute, the node translation the file's center gives,
+  each instance's transform, the batch table decoded, and each tile's placement in a tileset.
+  Draco data isn't decoded there: the three Draco tiles hold the same clouds as uncompressed
+  tiles beside them, and are held to those, point for point.
 - **Blender** cases (`blender_*` folders) are real exporter output, from
   `tools/corpus/blender_export.py`.
 - **Khronos samples** (glTF's other 18 cases, `khronos_*` folders) are models from
@@ -491,6 +503,23 @@ writes what its version writes, so `blender_export.py` can differ under another 
   alone, two pieces, and structured points, rectilinear and structured grids as blocks, sheets
   and rows. Errors: LZ4 and LZMA compression, files cut short, a count the file can't hold,
   image data, a parallel file, polyhedra alone, no points, and a file that isn't VTK.
+
+- **3D Tiles**: batched models with a JSON and a binary batch table, without one, with no
+  batch ids, with a small `RTC_CENTER` and none, under both legacy headers, with both centers
+  at once (the glTF's own `CESIUM_RTC`, in glTF 2.0 and binary glTF 1.0), with globals in the
+  binary body and with no tables at all; instanced models with each orientation (plain,
+  oct-encoded, `EAST_NORTH_UP`, at the poles too, none), quantized positions, `RTC_CENTER`,
+  both scales, batch ids of each width, a glTF by URI (escaped, in a folder), several and
+  turned nodes, instances that shear, an animated glTF and no instances; point clouds with
+  each color encoding, plain and oct-encoded normals, quantized positions, batches, per-point
+  properties of every type, positions on the globe without a center, Draco data whole, in
+  part and batched, and no points; composites of each tile, of composites and of nothing;
+  tilesets of tilesets, with transforms, with `REPLACE` and `ADD` mixed and inherited, with
+  `gltfUpAxis`, with several contents and glTF content, and with content missing. Errors:
+  tiles cut short, lengths past the file, a version that isn't 1, tables that aren't JSON,
+  counts and properties the body can't hold, quantized positions without their volume, no
+  positions, a missing or absolute glTF URI, a bad `gltfFormat`, vector tiles, a file that
+  isn't a tile, and tilesets with implicit tiling, no root, a bad transform or nothing there.
 
 ## `expect.json`
 

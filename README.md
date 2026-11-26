@@ -100,10 +100,14 @@ Early. What exists today:
   each vertex type with their materials; `.irr`: the node tree, cubes, spheres, sky boxes and
   billboards, mesh nodes naming other files, lights, cameras and animators as animations), XGL
   (`.xgl`, zipped `.zgl`: objects and their transforms, meshes placed by reference, materials,
-  lines and points, a directional light) and VTK (legacy `.vtk`, ASCII and binary, and XML `.vtp`
+  lines and points, a directional light), VTK (legacy `.vtk`, ASCII and binary, and XML `.vtp`
   and `.vtu`, zlib-compressed or not: poly data, unstructured and structured grids as triangles,
   lines and points, volume cells as their boundary faces, point and cell data as normals, texture
-  coordinates, colors and custom attributes). The XML formats read UTF-16 files too.
+  coordinates, colors and custom attributes) and OGC 3D Tiles (`.b3dm` batched models with their
+  batch tables, `.i3dm` instanced models as `EXT_mesh_gpu_instancing`, `.pnts` point clouds,
+  quantized, oct-encoded and Draco-compressed ones too, `.cmpt` composites, and a `tileset.json`
+  of them or of glTF at its finest level of detail, each tile under its transform; positions on
+  the globe keep their precision in node translations). The XML formats read UTF-16 files too.
   Game and animation formats too: MikuMikuDance models (`.pmx` 2.0 and 2.1, `.pmd`, skinned,
   with morph targets, IK and materials) and `.vmd` motions, DirectX `.x` (text, binary and
   compressed, with frames, skins and animation sets), Quake II `.md2` and Quake III `.md3`
@@ -259,10 +263,11 @@ Early. What exists today:
 | `irr` | Irrlicht meshes (`.irrmesh`) and scenes (`.irr`) | none |
 | `xgl` | XGL (`.xgl`) and zipped XGL (`.zgl`) | none |
 | `vtk` | VTK: legacy `.vtk` (ASCII and binary), XML `.vtp` and `.vtu` (zlib-compressed or not) | `flate2` |
+| `tiles` | 3D Tiles: `.b3dm`, `.i3dm`, `.pnts` and `.cmpt` tiles, and a `tileset.json` of them or of glTF (needs `gltf`; Draco point clouds with `draco`) | none |
 | `fs` | Reading files: `open`, `Loader::open`, `assets::Folder`, `gltf::files_in` | none |
 
 Every reader is on by default, and so are `fs`, `webp` and the six texture decoders. `minimal`
-is the thirty-three readers with no dependencies, plus `fs`, for
+is the thirty-four readers with no dependencies, plus `fs`, for
 `default-features = false, features = ["minimal"]`. Asking
 `open` for a format whose feature is off returns an error that names the feature.
 

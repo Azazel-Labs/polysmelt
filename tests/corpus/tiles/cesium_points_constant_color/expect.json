@@ -1,0 +1,48 @@
+{
+  "spec": "3D Tiles 1.0 (OGC 18-053r2): pnts with CONSTANT_RGBA",
+  "source": "CesiumGS/cesium Specs/Data/Cesium3DTiles/PointCloud/PointCloudConstantColor at 49f9cfe7c2c0 (Apache-2.0, LICENSE-cesium); expectations decoded by tools/corpus/tiles.py",
+  "triangles": 0,
+  "facts": {
+    "tiles": 1,
+    "triangles": 0,
+    "points": 1000
+  },
+  "points": 1000,
+  "vertices": 1000,
+  "bounds": {
+    "min": [
+      1215009.5861,
+      4081601.699,
+      4736309.0182
+    ],
+    "max": [
+      1215016.1797,
+      4081608.7436,
+      4736317.0842
+    ]
+  },
+  "document": {
+    "nodes": 1,
+    "source": {
+      "format": "3D Tiles",
+      "upAxis": "+Z",
+      "converted": [
+        "upAxis"
+      ]
+    }
+  },
+  "json": {
+    "/nodes/0/extras/tile": "pnts",
+    "/nodes/0/translation": [
+      1215012.8828876738,
+      4081605.22126042,
+      4736313.051199594
+    ],
+    "/meshes/0/extras/constant/COLOR_0": [
+      1.0,
+      1.0,
+      0.0,
+      0.2
+    ]
+  }
+}

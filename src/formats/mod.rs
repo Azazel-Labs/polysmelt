@@ -7,7 +7,8 @@
 //! `KHR_gaussian_splatting`), point clouds (LAS and LAZ
 //! lidar, PCD, E57 scans, and text: `.xyz`, `.pts`, `.ptx`, `.asc`), AMF, `LightWave` objects
 //! (`.lwo`), AC3D (`.ac`), `OpenFlight` (`.flt`), `OpenGEX` (`.ogex`), Irrlicht meshes and scenes
-//! (`.irrmesh`, `.irr`), XGL (`.xgl`, and zipped `.zgl`) and VTK (`.vtk`, `.vtp`, `.vtu`). Game and animation formats: `MikuMikuDance` (`.pmx`, `.pmd`,
+//! (`.irrmesh`, `.irr`), XGL (`.xgl`, and zipped `.zgl`), VTK (`.vtk`, `.vtp`, `.vtu`) and 3D Tiles
+//! (`.b3dm`, `.i3dm`, `.pnts`, `.cmpt`, and a `tileset.json` of them). Game and animation formats: `MikuMikuDance` (`.pmx`, `.pmd`,
 //! `.vmd`), `DirectX` `.x`, MD2, MD3, MD5 (`.md5mesh`, `.md5anim`), IQM, SMD (`.smd`, `.vta`),
 //! `MilkShape` 3D (`.ms3d`), `Blitz3D` (`.b3d`), OGRE (`.mesh`, `.skeleton`, and their `.xml` forms, with
 //! `.material` scripts), and motion capture: ASF/AMC, C3D, TRC and HTR.
@@ -68,6 +69,8 @@ mod format;
 pub(crate) mod gltf;
 #[cfg(feature = "gltf")]
 mod gltf1;
+#[cfg(any(feature = "irr", feature = "tiles"))]
+mod graft;
 #[cfg(feature = "htr")]
 mod htr;
 #[cfg(any(feature = "directx", feature = "xgl"))]
@@ -105,7 +108,13 @@ mod ogre;
 mod pcd;
 #[cfg(feature = "ply")]
 mod ply;
-#[cfg(any(feature = "las", feature = "pcd", feature = "xyz", feature = "e57"))]
+#[cfg(any(
+    feature = "las",
+    feature = "pcd",
+    feature = "xyz",
+    feature = "e57",
+    feature = "tiles"
+))]
 mod points;
 #[cfg(any(
     feature = "mmd",
@@ -225,6 +234,8 @@ mod stream;
 mod tds;
 #[cfg(feature = "3mf")]
 mod threemf;
+#[cfg(feature = "tiles")]
+mod tiles;
 #[cfg(feature = "trc")]
 mod trc;
 #[cfg(feature = "usd")]
@@ -277,7 +288,7 @@ pub(crate) const EXTENSIONS: &[&str] = &[
     "zae", "kmz", "off", "vrm", "vrma", "x3d", "x3dv", "x3dz", "wrl", "wrz", "dxf", "splat", "spz", "sog", "las",
     "laz", "pcd", "xyz", "pts", "ptx", "asc", "e57", "amf", "lwo", "ac", "pmx", "pmd", "vmd", "x", "md2", "md3",
     "md5mesh", "md5anim", "iqm", "smd", "vta", "ms3d", "b3d", "asf", "amc", "c3d", "trc", "htr", "mesh", "skeleton",
-    "xml", "flt", "ogex", "irrmesh", "irr", "xgl", "zgl", "vtk", "vtp", "vtu",
+    "xml", "flt", "ogex", "irrmesh", "irr", "xgl", "zgl", "vtk", "vtp", "vtu", "b3dm", "i3dm", "pnts", "cmpt",
 ];
 
 /// The format of a model whose bytes (all of them, or its start) are `bytes`, told from its
@@ -736,6 +747,8 @@ fn convert(input: Input<'_>, ext: &str, assets: &dyn Assets, keep: Keep) -> Resu
         "xgl" | "zgl" => xgl::load(input, ext, assets, keep),
         #[cfg(feature = "vtk")]
         "vtk" | "vtp" | "vtu" => vtk::load(input),
+        #[cfg(feature = "tiles")]
+        "b3dm" | "i3dm" | "pnts" | "cmpt" => tiles::load(input, assets, keep),
         e if EXTENSIONS.contains(&e) => bail!(FeatureDisabled, "built without the `{}` feature", feature_for(e)),
         _ => bail!(UnknownFormat, "not a model format handled here: .{ext}"),
     }
@@ -759,6 +772,7 @@ fn feature_for(ext: &str) -> &str {
         "irrmesh" => "irr",
         "zgl" => "xgl",
         "vtp" | "vtu" => "vtk",
+        "b3dm" | "i3dm" | "pnts" | "cmpt" => "tiles",
         e => e,
     }
 }

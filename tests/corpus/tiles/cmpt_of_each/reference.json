@@ -1,0 +1,71 @@
+{
+ "kind": "cmpt",
+ "tiles": [
+  {
+   "kind": "pnts",
+   "points": 2,
+   "absolute": "5c1697c2f125f158",
+   "attributes": {}
+  },
+  {
+   "kind": "b3dm",
+   "translation": [
+    0.0,
+    50.0,
+    -0.0
+   ],
+   "batchLength": 1,
+   "batchTable": {
+    "id": [
+     3
+    ]
+   },
+   "positions": "b59e80275b262428"
+  },
+  {
+   "kind": "cmpt",
+   "tiles": [
+    {
+     "kind": "i3dm",
+     "batchLength": 2,
+     "batchTable": {},
+     "instances": [
+      {
+       "mesh": 0,
+       "matrices": [
+        [
+         1.0,
+         0.0,
+         0.0,
+         100.0,
+         0.0,
+         1.0,
+         0.0,
+         0.0,
+         0.0,
+         0.0,
+         1.0,
+         0.0
+        ],
+        [
+         1.0,
+         0.0,
+         0.0,
+         200.0,
+         0.0,
+         1.0,
+         0.0,
+         0.0,
+         0.0,
+         0.0,
+         1.0,
+         0.0
+        ]
+       ]
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

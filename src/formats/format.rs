@@ -17,7 +17,7 @@
 /// COLLADA, `xyz` for the text point clouds, `ac3d` for `.ac`, `mmd` for PMX, PMD and VMD,
 /// `directx` for `.x`, `asf` for ASF and AMC, `irr` for Irrlicht's two, `md5` for MD5's two,
 /// `smd` for SMD and VTA, `gltf` for glTF and VRM, `las` for LAS and LAZ (`laz` adds LAZ's
-/// decompression), `vtk` for VTK's legacy and XML files.
+/// decompression), `vtk` for VTK's legacy and XML files, `tiles` for 3D Tiles.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Format {
@@ -131,6 +131,10 @@ pub enum Format {
     Xgl,
     /// VTK: legacy files, and XML poly data and unstructured grids (`.vtk`, `.vtp`, `.vtu`).
     Vtk,
+    /// OGC 3D Tiles: batched, instanced, point cloud and composite tiles (`.b3dm`, `.i3dm`,
+    /// `.pnts`, `.cmpt`), and a `tileset.json` of them, which has no extension of its own and is
+    /// told by its content.
+    Tiles,
 }
 
 /// Each format with its name and extensions, the first of them the one it's dispatched under.
@@ -189,6 +193,7 @@ const TABLE: &[(Format, &str, &[&str])] = &[
     (Format::Irr, "Irrlicht scene", &["irr"]),
     (Format::Xgl, "XGL", &["xgl", "zgl"]),
     (Format::Vtk, "VTK", &["vtk", "vtp", "vtu"]),
+    (Format::Tiles, "3D Tiles", &["b3dm", "i3dm", "pnts", "cmpt"]),
 ];
 
 impl Format {

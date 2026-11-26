@@ -1,0 +1,11 @@
+{
+ "kind": "i3dm",
+ "batchLength": 0,
+ "batchTable": {},
+ "instances": [
+  {
+   "mesh": 0,
+   "matrices": []
+  }
+ ]
+}

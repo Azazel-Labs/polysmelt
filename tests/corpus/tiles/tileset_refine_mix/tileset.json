@@ -1,0 +1,278 @@
+{
+ "asset": {
+  "version": "1.0"
+ },
+ "geometricError": 200,
+ "root": {
+  "boundingVolume": {
+   "box": [
+    0,
+    0,
+    0,
+    500,
+    0,
+    0,
+    0,
+    500,
+    0,
+    0,
+    0,
+    500
+   ]
+  },
+  "geometricError": 100,
+  "refine": "REPLACE",
+  "content": {
+   "uri": "root.b3dm"
+  },
+  "children": [
+   {
+    "boundingVolume": {
+     "box": [
+      0,
+      0,
+      0,
+      4,
+      0,
+      0,
+      0,
+      4,
+      0,
+      0,
+      0,
+      4
+     ]
+    },
+    "geometricError": 50,
+    "transform": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     10,
+     0,
+     0,
+     1
+    ],
+    "content": {
+     "uri": "a.b3dm"
+    },
+    "refine": "ADD",
+    "children": [
+     {
+      "boundingVolume": {
+       "box": [
+        0,
+        0,
+        0,
+        4,
+        0,
+        0,
+        0,
+        4,
+        0,
+        0,
+        0,
+        4
+       ]
+      },
+      "geometricError": 0,
+      "transform": [
+       1,
+       0,
+       0,
+       0,
+       0,
+       1,
+       0,
+       0,
+       0,
+       0,
+       1,
+       0,
+       0,
+       10,
+       0,
+       1
+      ],
+      "content": {
+       "uri": "a1.b3dm"
+      }
+     },
+     {
+      "boundingVolume": {
+       "box": [
+        0,
+        0,
+        0,
+        4,
+        0,
+        0,
+        0,
+        4,
+        0,
+        0,
+        0,
+        4
+       ]
+      },
+      "geometricError": 10,
+      "transform": [
+       1,
+       0,
+       0,
+       0,
+       0,
+       1,
+       0,
+       0,
+       0,
+       0,
+       1,
+       0,
+       0,
+       20,
+       0,
+       1
+      ],
+      "content": {
+       "uri": "a2.b3dm"
+      },
+      "children": [
+       {
+        "boundingVolume": {
+         "box": [
+          0,
+          0,
+          0,
+          4,
+          0,
+          0,
+          0,
+          4,
+          0,
+          0,
+          0,
+          4
+         ]
+        },
+        "geometricError": 0,
+        "transform": [
+         1,
+         0,
+         0,
+         0,
+         0,
+         1,
+         0,
+         0,
+         0,
+         0,
+         1,
+         0,
+         0,
+         0,
+         10,
+         1
+        ],
+        "content": {
+         "uri": "a21.b3dm"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "boundingVolume": {
+     "box": [
+      0,
+      0,
+      0,
+      4,
+      0,
+      0,
+      0,
+      4,
+      0,
+      0,
+      0,
+      4
+     ]
+    },
+    "geometricError": 50,
+    "transform": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     -10,
+     0,
+     0,
+     1
+    ],
+    "content": {
+     "uri": "b.b3dm"
+    },
+    "children": [
+     {
+      "boundingVolume": {
+       "box": [
+        0,
+        0,
+        0,
+        4,
+        0,
+        0,
+        0,
+        4,
+        0,
+        0,
+        0,
+        4
+       ]
+      },
+      "geometricError": 0,
+      "transform": [
+       1,
+       0,
+       0,
+       0,
+       0,
+       1,
+       0,
+       0,
+       0,
+       0,
+       1,
+       0,
+       0,
+       0,
+       40,
+       1
+      ],
+      "content": {
+       "uri": "b1.b3dm"
+      }
+     }
+    ]
+   }
+  ]
+ }
+}

@@ -7,12 +7,12 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 
 use super::Ctx;
-use super::graft::{self, Placed};
 use super::material::{Attrs, IrrMaterial};
 use super::mesh::{self, Mesh};
 use crate::Result;
 use crate::assets::Assets;
 use crate::document::{Document, Keep};
+use crate::formats::graft::{self, Placed};
 use crate::formats::scene::{self, Animation, Channel, Interp, M4, Node, Path as Key, Primitive};
 use crate::formats::xml::{El, Xml};
 use crate::mesh::srgb_to_linear;

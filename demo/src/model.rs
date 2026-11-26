@@ -64,7 +64,7 @@ fn union(a: Option<Bounds>, b: Option<Bounds>) -> Option<Bounds> {
 /// alone, which needs a model to mean much.
 const MODELS: &[&str] = &[
     "gltf", "glb", "vrm", "fbx", "dae", "zae", "kmz", "usdz", "usd", "usda", "usdc", "3mf", "skp", "obj", "3ds", "x3d",
-    "x3dv", "x3dz", "wrl", "wrz", "amf", "lwo", "ac", "flt", "ogex", "vtu", "vtp", "vtk", "x", "pmx", "pmd", "md2", "md3", "md5mesh", "iqm",
+    "x3dv", "x3dz", "wrl", "wrz", "amf", "lwo", "ac", "flt", "ogex", "vtu", "vtp", "vtk", "cmpt", "b3dm", "i3dm", "pnts", "x", "pmx", "pmd", "md2", "md3", "md5mesh", "iqm",
     "ms3d", "b3d", "mesh", "smd", "stl", "ply", "off", "dxf", "vox", "splat", "spz", "sog", "las", "laz", "pcd", "e57", "xyz",
     "pts", "ptx", "asc",
 ];

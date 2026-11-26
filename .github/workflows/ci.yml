@@ -84,6 +84,8 @@ jobs:
           - --no-default-features --features irr
           - --no-default-features --features xgl
           - --no-default-features --features vtk
+          - --no-default-features --features tiles
+          - --no-default-features --features tiles,draco
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install && rustup component add clippy
@@ -112,7 +114,7 @@ jobs:
       - uses: actions/checkout@v4
       - run: rustup toolchain install && rustup target add wasm32-unknown-unknown && rustup component add clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --target wasm32-unknown-unknown --no-default-features --features stl,ply,obj,gltf,draco,vox,3ds,webp,skp,bvh,off,dxf,fbx,3mf,dae,x3d,tga,bmp,gif,tiff,psd,dds,splat,spz,sog,mmd,directx,md2,md3,md5,iqm,smd,ms3d,b3d,asf,c3d,trc,htr,las,laz,pcd,xyz,e57,amf,lwo,ac3d,ogre,flt,ogex,irr,xgl,vtk,usd -- -D warnings
+      - run: cargo clippy --target wasm32-unknown-unknown --no-default-features --features stl,ply,obj,gltf,draco,vox,3ds,webp,skp,bvh,off,dxf,fbx,3mf,dae,x3d,tga,bmp,gif,tiff,psd,dds,splat,spz,sog,mmd,directx,md2,md3,md5,iqm,smd,ms3d,b3d,asf,c3d,trc,htr,las,laz,pcd,xyz,e57,amf,lwo,ac3d,ogre,flt,ogex,irr,xgl,vtk,tiles,usd -- -D warnings
 
   # Every dependency is Rust: nothing compiles C or links a native library. The `-sys` crates allowed are
   # declarations of what the platform already has, with no build of their own.

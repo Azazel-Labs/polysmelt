@@ -270,6 +270,10 @@ impl Cloud {
 }
 
 /// Room for `n` more items, or an error where there isn't memory for them.
+#[cfg_attr(
+    not(any(feature = "las", feature = "pcd", feature = "xyz", feature = "e57")),
+    allow(dead_code, reason = "not every reader uses it")
+)]
 pub(crate) fn reserve<T>(v: &mut Vec<T>, n: usize, what: &str) -> Result<()> {
     v.try_reserve(n).with_context(ErrorKind::LimitExceeded, || {
         format!("not enough memory for the {what} points")

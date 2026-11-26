@@ -1,0 +1,56 @@
+{
+  "spec": "3D Tiles 1.0 (OGC 18-053r2): i3dm with SCALE",
+  "source": "CesiumGS/cesium Specs/Data/Cesium3DTiles/Instanced/InstancedScale at 49f9cfe7c2c0 (Apache-2.0, LICENSE-cesium); expectations decoded by tools/corpus/tiles.py",
+  "triangles": 300,
+  "facts": {
+    "tiles": 1,
+    "triangles": 300,
+    "instances": 25
+  },
+  "vertices": 600,
+  "bounds": {
+    "min": [
+      1214906.4658,
+      4081528.3103,
+      4736229.77
+    ],
+    "max": [
+      1215118.6677,
+      4081688.2375,
+      4736403.4195
+    ]
+  },
+  "json": {
+    "/nodes/1/extras/batchLength": 25,
+    "/nodes/1/extras/tile": "i3dm",
+    "/nodes/1/extras/batchTable": {
+      "Height": [
+        20,
+        20,
+        20,
+        20,
+        20,
+        20,
+        20,
+        20,
+        20,
+        20,
+        20,
+        20,
+        20,
+        20,
+        20,
+        20,
+        20,
+        20,
+        20,
+        20,
+        20,
+        20,
+        20,
+        20,
+        20
+      ]
+    }
+  }
+}

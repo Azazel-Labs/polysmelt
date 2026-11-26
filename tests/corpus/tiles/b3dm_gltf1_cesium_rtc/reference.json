@@ -1,0 +1,11 @@
+{
+ "kind": "b3dm",
+ "translation": [
+  6378137.0,
+  2000.0,
+  -1000.0
+ ],
+ "batchLength": 0,
+ "batchTable": {},
+ "positions": "b59e80275b262428"
+}

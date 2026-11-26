@@ -19,6 +19,37 @@ Breaking changes are allowed in minor releases until 1.0.
   Its mesh is now placed back through the mesh matrix, as 3D Studio places it, when the
   matrix is where the object stands at any of its keys, not only the first. Before, such a
   mesh kept the later frame's turn in every pose.
+- New reader: OGC 3D Tiles, behind the new `tiles` feature (on by default, and part of
+  `minimal`; it needs `gltf` and adds no dependency). `Format::Tiles` names the format. A
+  tile is told by its first bytes, whatever its extension.
+- `.b3dm` (Batched 3D Model): the embedded glTF, 2.0 or 1.0, is the document, with either
+  legacy header layout read too. The batch table is kept in the extras of a node over the
+  glTF: `batchLength`, and `batchTable` with a list of one value for each feature under each
+  property's name, binary properties decoded. A `BATCHID` attribute takes the name
+  `_BATCHID`.
+- `.i3dm` (Instanced 3D Model): the instances become `EXT_mesh_gpu_instancing` on each node
+  that draws a mesh, from positions (plain or quantized), `NORMAL_UP` and `NORMAL_RIGHT`
+  (plain or oct-encoded), `SCALE`, `SCALE_NON_UNIFORM` and `EAST_NORTH_UP` on the WGS84
+  ellipsoid. The glTF is embedded or found by its URI through the `Assets`. `BATCH_ID` is the
+  `_BATCHID` instance attribute. Instances that would shear a turned node become nodes with
+  matrices, and an instanced glTF's animations are dropped.
+- `.pnts` (Point Cloud): positions (plain or quantized), `RGB`, `RGBA`, `RGB565` and
+  `CONSTANT_RGBA` colors, `NORMAL` and `NORMAL_OCT16P`, `BATCH_ID` as `_BATCHID`, and
+  per-point batch table properties as custom attributes. `3DTILES_draco_point_compression`
+  is decoded with the `draco` feature, and refused with an error that names it without.
+- `.cmpt` (Composite): its tiles under one node, composites inside composites too.
+- `tileset.json`: the tileset at its finest level of detail (`REPLACE` and `ADD` refinement,
+  external tilesets, several `contents`, glTF and GLB content as 3D Tiles 1.1 has it), each
+  tile under a node with its transform. At most 1024 tiles are drawn: past that the coarsest
+  are refined first and the `unrefined_tiles` fact is set. Content that isn't among the
+  assets is left out and listed in `asset.extras.source.missingTiles`. Implicit tiling is
+  refused with an error that says so.
+- 3D Tiles is Z up and its glTF Y up: everything in tile space is turned Y up, and the source
+  info says `+Z`, converted. An `RTC_CENTER`, a glTF's `CESIUM_RTC` center and a quantized
+  volume's offset are never added to single-precision positions: they are node translations
+  in double precision, so tiles on the globe keep their detail.
+- Format detection tells the four tile formats by their magic and a `tileset.json` by its
+  content, before taking it for a glTF.
 
 ## 0.19.0
 

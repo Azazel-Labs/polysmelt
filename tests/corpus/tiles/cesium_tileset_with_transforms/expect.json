@@ -1,0 +1,31 @@
+{
+  "spec": "3D Tiles 1.0 (OGC 18-053r2): tileset.json with a transform on the root and another on its child",
+  "source": "CesiumGS/cesium Specs/Data/Cesium3DTiles/Tilesets/TilesetWithTransforms at 49f9cfe7c2c0 (Apache-2.0, LICENSE-cesium); expectations decoded by tools/corpus/tiles.py",
+  "file": "tileset.json",
+  "triangles": 420,
+  "facts": {
+    "tiles": 2,
+    "triangles": 420,
+    "instances": 25,
+    "features": 10
+  },
+  "vertices": 840,
+  "bounds": {
+    "min": [
+      1214922.0063,
+      4081525.4478,
+      4736238.1639
+    ],
+    "max": [
+      1215121.5903,
+      4081670.8301,
+      4736399.2069
+    ]
+  },
+  "document": {
+    "source": {
+      "format": "3D Tiles",
+      "version": "1.0"
+    }
+  }
+}

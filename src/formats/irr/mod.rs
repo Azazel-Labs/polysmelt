@@ -31,7 +31,6 @@
 //! Irrlicht is Y up and left-handed, so everything is mirrored through the XY plane: in the source info the
 //! handedness is declared left and converted, the up axis an assumed `+Y`, the units' length unknown.
 
-mod graft;
 mod material;
 mod mesh;
 mod world;

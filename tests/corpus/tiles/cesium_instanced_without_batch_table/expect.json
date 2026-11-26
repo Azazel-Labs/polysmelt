@@ -1,0 +1,27 @@
+{
+  "spec": "3D Tiles 1.0 (OGC 18-053r2): i3dm with EAST_NORTH_UP and no batch table",
+  "source": "CesiumGS/cesium Specs/Data/Cesium3DTiles/Instanced/InstancedWithoutBatchTable at 49f9cfe7c2c0 (Apache-2.0, LICENSE-cesium); expectations decoded by tools/corpus/tiles.py",
+  "triangles": 300,
+  "facts": {
+    "tiles": 1,
+    "triangles": 300,
+    "instances": 25
+  },
+  "vertices": 600,
+  "bounds": {
+    "min": [
+      1214910.3129,
+      4081533.1608,
+      4736230.8677
+    ],
+    "max": [
+      1215117.3125,
+      4081683.8392,
+      4736402.6321
+    ]
+  },
+  "json": {
+    "/nodes/1/extras/batchLength": 25,
+    "/nodes/1/extras/tile": "i3dm"
+  }
+}

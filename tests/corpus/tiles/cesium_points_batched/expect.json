@@ -1,0 +1,112 @@
+{
+  "spec": "3D Tiles 1.0 (OGC 18-053r2): pnts with BATCH_ID and a batch table of eight batches, JSON and binary",
+  "source": "CesiumGS/cesium Specs/Data/Cesium3DTiles/PointCloud/PointCloudBatched at 49f9cfe7c2c0 (Apache-2.0, LICENSE-cesium); expectations decoded by tools/corpus/tiles.py",
+  "triangles": 0,
+  "facts": {
+    "tiles": 1,
+    "triangles": 0,
+    "points": 1000,
+    "features": 8
+  },
+  "points": 1000,
+  "vertices": 1000,
+  "bounds": {
+    "min": [
+      1215007.9049,
+      4081600.2313,
+      4736308.0638
+    ],
+    "max": [
+      1215017.875,
+      4081610.2186,
+      4736318.0346
+    ]
+  },
+  "document": {
+    "nodes": 1,
+    "source": {
+      "format": "3D Tiles",
+      "upAxis": "+Z",
+      "converted": [
+        "upAxis"
+      ]
+    },
+    "attributes": [
+      "_BATCHID",
+      "NORMAL"
+    ]
+  },
+  "json": {
+    "/nodes/0/extras/tile": "pnts",
+    "/nodes/0/translation": [
+      1215012.8828876738,
+      4081605.22126042,
+      4736313.051199594
+    ],
+    "/nodes/0/extras/batchLength": 8,
+    "/nodes/0/extras/batchTable": {
+      "name": [
+        "section0",
+        "section1",
+        "section2",
+        "section3",
+        "section4",
+        "section5",
+        "section6",
+        "section7"
+      ],
+      "dimensions": [
+        [
+          0.4139624834060669,
+          0.6495107412338257,
+          0.6296182870864868
+        ],
+        [
+          0.09649518877267838,
+          0.7785842418670654,
+          0.9744280576705933
+        ],
+        [
+          0.8515577912330627,
+          0.40942132472991943,
+          0.8164126873016357
+        ],
+        [
+          0.5450160503387451,
+          0.16607709228992462,
+          0.5038632750511169
+        ],
+        [
+          0.8283895254135132,
+          0.6359679698944092,
+          0.05862906575202942
+        ],
+        [
+          0.07815811783075333,
+          0.20017068088054657,
+          0.08992884308099747
+        ],
+        [
+          0.6229267120361328,
+          0.0777490884065628,
+          0.11469253152608871
+        ],
+        [
+          0.18406569957733154,
+          0.6033475995063782,
+          0.40270721912384033
+        ]
+      ],
+      "id": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ]
+    }
+  }
+}

@@ -1,0 +1,61 @@
+{
+  "spec": "3D Tiles 1.0 (OGC 18-053r2): pnts with per-point batch table properties",
+  "source": "CesiumGS/cesium Specs/Data/Cesium3DTiles/PointCloud/PointCloudWithPerPointProperties at 49f9cfe7c2c0 (Apache-2.0, LICENSE-cesium); expectations decoded by tools/corpus/tiles.py",
+  "triangles": 0,
+  "facts": {
+    "tiles": 1,
+    "triangles": 0,
+    "points": 1000
+  },
+  "points": 1000,
+  "vertices": 1000,
+  "bounds": {
+    "min": [
+      -2.5,
+      -2.5,
+      -2.5
+    ],
+    "max": [
+      2.5,
+      2.5,
+      2.5
+    ]
+  },
+  "document": {
+    "nodes": 1,
+    "source": {
+      "format": "3D Tiles",
+      "upAxis": "+Z",
+      "converted": [
+        "upAxis"
+      ]
+    },
+    "attributes": [
+      "_ID",
+      "_SECONDARYCOLOR_0",
+      "_TEMPERATURE",
+      "COLOR_0"
+    ]
+  },
+  "colors": true,
+  "colors_include": [
+    [
+      0.258183,
+      0.309469,
+      0.467784,
+      1.0
+    ],
+    [
+      0.371238,
+      0.019382,
+      0.212231,
+      1.0
+    ]
+  ],
+  "tolerance": 0.001,
+  "json": {
+    "/nodes/0/extras/tile": "pnts",
+    "/meshes/0/extras/constant/_SECONDARYCOLOR_1": 0.0,
+    "/meshes/0/extras/constant/_SECONDARYCOLOR_2": 0.0
+  }
+}

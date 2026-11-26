@@ -1,0 +1,33 @@
+{
+ "kind": "pnts",
+ "points": 4,
+ "absolute": "236e2411f1aa1865",
+ "colors": {
+  "levels": [
+   255,
+   255,
+   255,
+   255
+  ],
+  "hash": "76e0245cb1a74725"
+ },
+ "batchTable": {
+  "label": [
+   "a",
+   "b",
+   "c",
+   "d"
+  ]
+ },
+ "attributes": {
+  "_TINT_0": "06e21a8238b0a848",
+  "_TINT_1": "949cc1e1ba9f8875",
+  "_TINT_2": "c6a04c0d4afb7cf5",
+  "_TINT_3": "1ac6746d17acd742",
+  "_COUNT": "f9e5ade341398498",
+  "_UV_0": "a58fc8023234e740",
+  "_UV_1": "7caf1fe4237b154c",
+  "_DELTA": "44df8c46878812d5",
+  "_RETURN_NUMBER": "6c015acfaf0f0445"
+ }
+}
