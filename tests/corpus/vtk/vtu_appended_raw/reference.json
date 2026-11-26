@@ -1,0 +1,20 @@
+{
+  "points": "a471b9cca34b533b",
+  "triangles": "13904a6755e2f2f5",
+  "lines": "cbf29ce484222325",
+  "verts": "cbf29ce484222325",
+  "attributes": {
+    "_TEMPERATURE": {
+      "width": 1,
+      "hash": "73ef9a5450b76b7d"
+    },
+    "_VELOCITY": {
+      "width": 3,
+      "hash": "bbd17e5dbd849625"
+    }
+  },
+  "soup": "ac1889f97dd987f5",
+  "soup_attributes": [],
+  "boundary_faces": 24,
+  "surface_filter_triangles": 48
+}

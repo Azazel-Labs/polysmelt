@@ -18,7 +18,7 @@ include = ["/src", "/examples", "/README.md", "/CHANGELOG.md", "/LICENSE", "/Car
 all-features = true
 
 [features]
-default = ["minimal", "fbx", "3mf", "usd", "draco", "webp", "skp", "dae", "x3d", "tga", "bmp", "gif", "tiff", "psd", "dds", "spz", "sog", "laz", "e57", "amf"]
+default = ["minimal", "fbx", "3mf", "usd", "draco", "webp", "skp", "dae", "x3d", "tga", "bmp", "gif", "tiff", "psd", "dds", "spz", "sog", "laz", "e57", "amf", "vtk"]
 # The readers with no dependencies, and file access: `default-features = false, features = ["minimal"]`.
 minimal = ["fs", "stl", "ply", "vox", "obj", "3ds", "gltf", "bvh", "off", "dxf", "splat", "mmd", "directx", "md2", "md3", "md5", "iqm", "smd", "ms3d", "b3d", "asf", "c3d", "trc", "htr", "las", "pcd", "xyz", "lwo", "ac3d", "ogre", "flt", "ogex", "irr", "xgl"]
 # Reading from the file system: `open`, `Loader::open`, `assets::Folder` and `gltf::files_in`.
@@ -118,6 +118,8 @@ ogex = []
 irr = []
 # XGL and zipped XGL (`.xgl`, `.zgl`).
 xgl = []
+# VTK meshes: legacy `.vtk`, and XML `.vtp` and `.vtu`, zlib-compressed or not.
+vtk = ["dep:flate2"]
 
 [dependencies]
 serde_json = "1"

@@ -7,7 +7,7 @@
 //! `KHR_gaussian_splatting`), point clouds (LAS and LAZ
 //! lidar, PCD, E57 scans, and text: `.xyz`, `.pts`, `.ptx`, `.asc`), AMF, `LightWave` objects
 //! (`.lwo`), AC3D (`.ac`), `OpenFlight` (`.flt`), `OpenGEX` (`.ogex`), Irrlicht meshes and scenes
-//! (`.irrmesh`, `.irr`) and XGL (`.xgl`, and zipped `.zgl`). Game and animation formats: `MikuMikuDance` (`.pmx`, `.pmd`,
+//! (`.irrmesh`, `.irr`), XGL (`.xgl`, and zipped `.zgl`) and VTK (`.vtk`, `.vtp`, `.vtu`). Game and animation formats: `MikuMikuDance` (`.pmx`, `.pmd`,
 //! `.vmd`), `DirectX` `.x`, MD2, MD3, MD5 (`.md5mesh`, `.md5anim`), IQM, SMD (`.smd`, `.vta`),
 //! `MilkShape` 3D (`.ms3d`), `Blitz3D` (`.b3d`), OGRE (`.mesh`, `.skeleton`, and their `.xml` forms, with
 //! `.material` scripts), and motion capture: ASF/AMC, C3D, TRC and HTR.
@@ -185,7 +185,8 @@ mod stl;
     feature = "htr",
     feature = "trc",
     feature = "las",
-    feature = "e57"
+    feature = "e57",
+    feature = "vtk"
 ))]
 #[cfg_attr(
     not(all(
@@ -214,7 +215,8 @@ mod stl;
         feature = "htr",
         feature = "trc",
         feature = "las",
-        feature = "e57"
+        feature = "e57",
+        feature = "vtk"
     )),
     allow(dead_code, reason = "each text reader uses its own part")
 )]
@@ -231,6 +233,8 @@ mod usd;
 mod vox;
 #[cfg(feature = "gltf")]
 mod vrm;
+#[cfg(feature = "vtk")]
+mod vtk;
 #[cfg(any(feature = "las", feature = "e57"))]
 mod wkt;
 #[cfg(feature = "x3d")]
@@ -253,7 +257,8 @@ mod xgl;
         feature = "3mf",
         feature = "ogre",
         feature = "irr",
-        feature = "xgl"
+        feature = "xgl",
+        feature = "vtk"
     )),
     allow(dead_code, reason = "each XML reader uses the parts it needs")
 )]
@@ -272,7 +277,7 @@ pub(crate) const EXTENSIONS: &[&str] = &[
     "zae", "kmz", "off", "vrm", "vrma", "x3d", "x3dv", "x3dz", "wrl", "wrz", "dxf", "splat", "spz", "sog", "las",
     "laz", "pcd", "xyz", "pts", "ptx", "asc", "e57", "amf", "lwo", "ac", "pmx", "pmd", "vmd", "x", "md2", "md3",
     "md5mesh", "md5anim", "iqm", "smd", "vta", "ms3d", "b3d", "asf", "amc", "c3d", "trc", "htr", "mesh", "skeleton",
-    "xml", "flt", "ogex", "irrmesh", "irr", "xgl", "zgl",
+    "xml", "flt", "ogex", "irrmesh", "irr", "xgl", "zgl", "vtk", "vtp", "vtu",
 ];
 
 /// The format of a model whose bytes (all of them, or its start) are `bytes`, told from its
@@ -362,7 +367,8 @@ pub(crate) struct Input<'a> {
             feature = "dae",
             feature = "off",
             feature = "x3d",
-            feature = "dxf"
+            feature = "dxf",
+            feature = "vtk"
         )),
         allow(dead_code, reason = "only readers that build triangles check it")
     )]
@@ -728,6 +734,8 @@ fn convert(input: Input<'_>, ext: &str, assets: &dyn Assets, keep: Keep) -> Resu
         "irrmesh" | "irr" => irr::load(input, ext, assets, keep),
         #[cfg(feature = "xgl")]
         "xgl" | "zgl" => xgl::load(input, ext, assets, keep),
+        #[cfg(feature = "vtk")]
+        "vtk" | "vtp" | "vtu" => vtk::load(input),
         e if EXTENSIONS.contains(&e) => bail!(FeatureDisabled, "built without the `{}` feature", feature_for(e)),
         _ => bail!(UnknownFormat, "not a model format handled here: .{ext}"),
     }
@@ -750,6 +758,7 @@ fn feature_for(ext: &str) -> &str {
         "mesh" | "skeleton" | "xml" => "ogre",
         "irrmesh" => "irr",
         "zgl" => "xgl",
+        "vtp" | "vtu" => "vtk",
         e => e,
     }
 }

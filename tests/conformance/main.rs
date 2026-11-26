@@ -77,6 +77,7 @@ fn enabled(ext: &str) -> bool {
         "ogex" => cfg!(feature = "ogex"),
         "irrmesh" | "irr" => cfg!(feature = "irr"),
         "xgl" | "zgl" => cfg!(feature = "xgl"),
+        "vtk" | "vtp" | "vtu" => cfg!(feature = "vtk"),
         _ => false,
     }
 }
@@ -118,7 +119,7 @@ const ALL_EXTENSIONS: &[&str] = &[
     "zae", "kmz", "off", "vrm", "vrma", "x3d", "x3dv", "x3dz", "wrl", "wrz", "dxf", "splat", "spz", "sog", "las",
     "laz", "pcd", "xyz", "pts", "ptx", "asc", "e57", "amf", "lwo", "ac", "pmx", "pmd", "vmd", "x", "md2", "md3",
     "md5mesh", "md5anim", "iqm", "smd", "vta", "ms3d", "b3d", "asf", "amc", "c3d", "trc", "htr", "mesh", "skeleton",
-    "xml", "flt", "ogex", "irrmesh", "irr", "xgl", "zgl",
+    "xml", "flt", "ogex", "irrmesh", "irr", "xgl", "zgl", "vtk", "vtp", "vtu",
 ];
 
 fn ext_of(p: &Path) -> String {
@@ -1632,6 +1633,11 @@ fn khronos_large_samples() {
         }
         println!("{rel}: {} triangles, the same at any time", rest.triangles());
     }
+}
+
+#[test]
+fn vtk() {
+    check("vtk");
 }
 
 /// Every extension a [`Format`] has has cases (and `.xml`, read as the format its root names), and every format a

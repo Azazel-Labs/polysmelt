@@ -73,6 +73,7 @@ cases.
 | OpenGEX | 28 | 24 | none |
 | Irrlicht (`irr/`: IRRMesh and scenes) | 26 | 25 | none |
 | XGL (`xgl/`: XGL and ZGL) | 22 | 19 | none |
+| VTK (`vtk/`: legacy and XML) | 86 | 72 | none |
 
 - **Generated** cases are written byte by byte by `tools/corpus/<format>.py` (3DS is
   `tds.py`, 3MF is `threemf.py`, COLLADA is `dae.py`, PMX, PMD and VMD are `mmd.py`, DirectX
@@ -105,6 +106,15 @@ cases.
   splat-transform source. It returns each splat as its quantized form decodes by the format's
   own rule, and the expectations are those. The real SOG's come from its images as ffmpeg (or
   Pillow) decodes them.
+- **VTK** cases are written by `tools/corpus/vtkfile.py` (`vtk.py` would hide the module it
+  imports) with VTK's own writers and meshio's, in every encoding each has, and a few by hand. It
+  needs `pip install vtk meshio`. The expectations come from VTK: each file is read back with
+  VTK's readers, and what's drawn is worked out from VTK's cells and their faces, the boundary
+  being the faces only one cell has; that count is held against `vtkDataSetSurfaceFilter`'s.
+  Its other 14 cases are real files from VTK's test data (BSD, `vtk/LICENSE-VTK`) and meshio's
+  test meshes (MIT, `vtk/LICENSE-meshio`), measured the same way. Each case also has a
+  `reference.json` of hashes of the exact points, triangles and attributes VTK reads, which
+  `tests/vtk.rs` compares with Polysmelt's.
 - **Blender** cases (`blender_*` folders) are real exporter output, from
   `tools/corpus/blender_export.py`.
 - **Khronos samples** (glTF's other 18 cases, `khronos_*` folders) are models from
@@ -432,6 +442,17 @@ python tools/corpus/obj.py
   points, object transforms nested, a mesh placed by two references, a directional light,
   the ambient light and the background, unsupported tags, and broken references. Errors:
   files that aren't XGL, no geometry; three real assimp models.
+
+- **VTK**: a block of hexahedra in every encoding (legacy ASCII and binary in the 4.2 and 5.1
+  layouts, a 2.0 header, CRLF, doubles; XML as text, inline base64 and appended raw and base64
+  data, with 32-bit and 64-bit headers, either byte order and zlib; meshio's own spellings of
+  each), cells of every drawn kind sharing faces (tetrahedron, voxel, hexahedron, wedge,
+  pyramid, prisms, their quadratic forms, surface, line and vertex cells), cell data splitting
+  vertices, poly data with vertices, lines, polygons and strips, normals, texture coordinates
+  and byte colors, `COLOR_SCALARS`, lookup tables, field arrays, a concave polygon, points
+  alone, two pieces, and structured points, rectilinear and structured grids as blocks, sheets
+  and rows. Errors: LZ4 and LZMA compression, files cut short, a count the file can't hold,
+  image data, a parallel file, polyhedra alone, no points, and a file that isn't VTK.
 
 ## `expect.json`
 

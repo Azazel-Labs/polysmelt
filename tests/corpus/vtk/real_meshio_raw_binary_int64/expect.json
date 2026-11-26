@@ -1,0 +1,29 @@
+{
+  "spec": "VTK File Formats: a real file: XML appended raw, 64-bit headers",
+  "source": "meshio's test meshes (tests/meshes), MIT license, see ../LICENSE-meshio; expectations computed with VTK 9.7.2",
+  "triangles": 108,
+  "bounds": {
+    "min": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "max": [
+      1.0,
+      1.0,
+      1.0
+    ]
+  },
+  "area": 6.0,
+  "facts": {
+    "triangles": 108
+  },
+  "document": {
+    "attributes": [
+      "_M"
+    ]
+  },
+  "colors": false,
+  "uvs": false,
+  "vertices": 56
+}

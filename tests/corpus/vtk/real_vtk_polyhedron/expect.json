@@ -1,0 +1,24 @@
+{
+  "spec": "VTK File Formats: a real file: XML in two pieces, each a pyramid and a polyhedron on it: polyhedra aren't drawn, so the face under each is",
+  "source": "VTK's test data (Testing/Data), BSD license, see ../LICENSE-VTK; expectations computed with VTK 9.7.2",
+  "triangles": 12,
+  "bounds": {
+    "min": [
+      0.0,
+      0.0,
+      1.0
+    ],
+    "max": [
+      1.0,
+      3.0,
+      2.0
+    ]
+  },
+  "area": 6.472136,
+  "facts": {
+    "triangles": 12
+  },
+  "colors": false,
+  "uvs": false,
+  "vertices": 10
+}

@@ -1,0 +1,13 @@
+{
+  "points": null,
+  "triangles": null,
+  "lines": null,
+  "verts": null,
+  "attributes": null,
+  "soup": "050265065396f005",
+  "soup_attributes": [
+    "_ZONE"
+  ],
+  "boundary_faces": 32,
+  "surface_filter_triangles": 64
+}

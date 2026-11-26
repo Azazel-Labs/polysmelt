@@ -1,0 +1,31 @@
+{
+  "spec": "VTK File Formats: a real file: legacy ASCII 1.0, poly data of a cube with cell scalars and a lookup table",
+  "source": "VTK's test data (Testing/Data), BSD license, see ../LICENSE-VTK; expectations computed with VTK 9.7.2",
+  "triangles": 12,
+  "bounds": {
+    "min": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "max": [
+      1.0,
+      1.0,
+      1.0
+    ]
+  },
+  "area": 6.0,
+  "facts": {
+    "triangles": 12
+  },
+  "document": {
+    "attributes": [
+      "COLOR_0",
+      "NORMAL",
+      "_CELL_SCALARS",
+      "_MY_SCALARS"
+    ]
+  },
+  "colors": true,
+  "uvs": false
+}

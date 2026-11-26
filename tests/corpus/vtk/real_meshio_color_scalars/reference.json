@@ -1,0 +1,37 @@
+{
+  "points": "28930ec58f0e5f75",
+  "triangles": "756241e1be8c9396",
+  "lines": "47d80f19da3291a2",
+  "verts": "cbf29ce484222325",
+  "attributes": {
+    "COLOR_0": {
+      "width": 4,
+      "values": [
+        1.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        1.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        1.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    }
+  },
+  "soup": "2fcc352f58a90135",
+  "soup_attributes": [],
+  "boundary_faces": 0,
+  "surface_filter_triangles": 1
+}

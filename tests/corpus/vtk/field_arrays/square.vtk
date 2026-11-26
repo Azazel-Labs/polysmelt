@@ -1,0 +1,31 @@
+# vtk DataFile Version 3.0
+a square
+ASCII
+DATASET POLYDATA
+FIELD FieldData 1
+TIME 1 1 double
+2.5
+POINTS 4 float
+0 0 0  1 0 0
+1 1 0  0 1 0
+POLYGONS 1 5
+4 0 1 2 3
+POINT_DATA 4
+FIELD FieldData 3
+my%20value 1 4 float
+1 2 3 4
+pair 2 4 int
+1 2 3 4 5 6 7 8
+flags 1 4 bit
+1 0 1 1
+VECTORS push double
+0 0 1  0 0 2  0 0 3  0 0 4
+TEXTURE_COORDINATES uv 2 float
+0 0  1 0  1 1  0 1
+NORMALS up float
+0 0 2  0 0 2  0 0 2  0 0 2
+TENSORS strain float
+1 0 0 0 1 0 0 0 1
+2 0 0 0 2 0 0 0 2
+3 0 0 0 3 0 0 0 3
+4 0 0 0 4 0 0 0 4

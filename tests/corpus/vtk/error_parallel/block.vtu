@@ -1,0 +1,7 @@
+<?xml version="1.0"?>
+<VTKFile type="PUnstructuredGrid" version="0.1" byte_order="LittleEndian">
+  <PUnstructuredGrid GhostLevel="0">
+    <PPoints><PDataArray type="Float32" NumberOfComponents="3"/></PPoints>
+    <Piece Source="block_0.vtu"/>
+  </PUnstructuredGrid>
+</VTKFile>

@@ -98,9 +98,12 @@ Early. What exists today:
   OpenGEX (`.ogex`: nodes and their transforms, meshes, materials and textures, skins, morph
   targets, lights, cameras and animation tracks), Irrlicht meshes and scenes (`.irrmesh`: buffers of
   each vertex type with their materials; `.irr`: the node tree, cubes, spheres, sky boxes and
-  billboards, mesh nodes naming other files, lights, cameras and animators as animations) and XGL
+  billboards, mesh nodes naming other files, lights, cameras and animators as animations), XGL
   (`.xgl`, zipped `.zgl`: objects and their transforms, meshes placed by reference, materials,
-  lines and points, a directional light). The XML formats read UTF-16 files too.
+  lines and points, a directional light) and VTK (legacy `.vtk`, ASCII and binary, and XML `.vtp`
+  and `.vtu`, zlib-compressed or not: poly data, unstructured and structured grids as triangles,
+  lines and points, volume cells as their boundary faces, point and cell data as normals, texture
+  coordinates, colors and custom attributes). The XML formats read UTF-16 files too.
   Game and animation formats too: MikuMikuDance models (`.pmx` 2.0 and 2.1, `.pmd`, skinned,
   with morph targets, IK and materials) and `.vmd` motions, DirectX `.x` (text, binary and
   compressed, with frames, skins and animation sets), Quake II `.md2` and Quake III `.md3`
@@ -255,6 +258,7 @@ Early. What exists today:
 | `ogex` | OpenGEX (`.ogex`) | none |
 | `irr` | Irrlicht meshes (`.irrmesh`) and scenes (`.irr`) | none |
 | `xgl` | XGL (`.xgl`) and zipped XGL (`.zgl`) | none |
+| `vtk` | VTK: legacy `.vtk` (ASCII and binary), XML `.vtp` and `.vtu` (zlib-compressed or not) | `flate2` |
 | `fs` | Reading files: `open`, `Loader::open`, `assets::Folder`, `gltf::files_in` | none |
 
 Every reader is on by default, and so are `fs`, `webp` and the six texture decoders. `minimal`

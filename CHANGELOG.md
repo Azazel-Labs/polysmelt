@@ -37,6 +37,17 @@ Breaking changes are allowed in minor releases until 1.0.
 - DDS textures: a BC3 alpha, BC4 or BC5 value between a block's two ends is the nearest
   value, as Direct3D defines it, where it was rounded down. Such texels come out up to
   1/255 brighter.
+- VTK files are read, behind the new `vtk` feature (on by default): legacy `.vtk` (versions
+  1.0 to 5.1, ASCII and binary) and XML `.vtp` and `.vtu` (text, base64 and appended data,
+  either byte order, zlib-compressed or not, in any number of pieces). Poly data, unstructured
+  grids, structured grids, images and rectilinear grids are drawn as triangles, lines and
+  points. Volume cells are drawn as the mesh's boundary faces, and quadratic cells by their
+  corner nodes; a structured dataset is its outer faces.
+- VTK normals, texture coordinates and colors become `NORMAL`, `TEXCOORD_0` and `COLOR_0`.
+  Every other point or cell array is kept as a custom attribute (`_PRESSURE`, `_VELOCITY`),
+  and scalars with a lookup table in the file are colored through it.
+- LZ4 and LZMA compressed VTK files, parallel files (`.pvtu`, `.pvtp`), `.vtm` and the XML
+  image and grid files (`.vti`, `.vtr`, `.vts`) are refused with an error that says why.
 
 ## 0.18.4
 

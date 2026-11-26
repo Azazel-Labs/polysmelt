@@ -172,6 +172,11 @@ fn text(text: &str) -> Option<&'static str> {
         "usda"
     } else if starts("; FBX") {
         "fbx"
+    } else if t
+        .get(..22)
+        .is_some_and(|s| s.eq_ignore_ascii_case("# vtk DataFile Version"))
+    {
+        "vtk"
     } else if starts("#VRML") {
         "wrl"
     } else if starts("#X3D") {
@@ -264,6 +269,8 @@ fn root(t: &str) -> Option<&'static str> {
         "skeleton" => "skeleton",
         "irr_scene" => "irr",
         n if n.eq_ignore_ascii_case("world") => "xgl",
+        // Poly data or a grid: the reader goes by the root's type, not the extension.
+        "VTKFile" => "vtu",
         _ => return None,
     })
 }
