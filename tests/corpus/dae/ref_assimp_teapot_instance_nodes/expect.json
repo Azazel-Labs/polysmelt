@@ -1,0 +1,19 @@
+{
+  "spec": "COLLADA 1.4.1: a real file, teapots placed by <instance_node>",
+  "source": "assimp/assimp at 711b4e9bbde2, test/models/Collada/teapot_instancenodes.DAE (BSD-3-Clause, see ../LICENSE-assimp); expectations measured with assimp 6.0.5 (assimp-py 1.2.0)",
+  "triangles": 1984,
+  "bounds": {
+    "min": [
+      -4.823608,
+      0.0,
+      -1.236898
+    ],
+    "max": [
+      1.798858,
+      1.741637,
+      1.040253
+    ]
+  },
+  "area": 31.519686,
+  "position_set": "positions.f32"
+}

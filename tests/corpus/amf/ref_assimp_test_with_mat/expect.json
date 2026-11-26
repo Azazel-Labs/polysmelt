@@ -1,0 +1,16 @@
+{
+  "spec": "AMF (ISO/ASTM 52915): a real file, a pyramid of two volumes in inches",
+  "source": "assimp/assimp at 711b4e9bbde2, test/models/AMF/test_with_mat.amf (BSD-3-Clause, see ../LICENSE-assimp); expectations measured with assimp 6.0.5 (assimp-py 1.2.0). assimp 6.0.5 returns one of each mesh's two volumes (half the triangles the file lists), so only the bounds are compared",
+  "bounds": {
+    "min": [
+      0.0,
+      0.0,
+      -0.0254
+    ],
+    "max": [
+      0.0254,
+      0.0254,
+      0.0
+    ]
+  }
+}

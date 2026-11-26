@@ -1,0 +1,19 @@
+{
+  "spec": "DXF (DXF Reference, 2013 edition): a real file, 3DFACE entities LightWave exported",
+  "source": "assimp/assimp at 711b4e9bbde2, test/models/DXF/PinkEggFromLW.dxf (BSD-3-Clause, see ../LICENSE-assimp); expectations measured with assimp 6.0.5 (assimp-py 1.2.0)",
+  "triangles": 528,
+  "bounds": {
+    "min": [
+      -2.15,
+      -2.5,
+      -2.1
+    ],
+    "max": [
+      2.15,
+      2.6,
+      2.1
+    ]
+  },
+  "area": 63.522414,
+  "position_set": "positions.f32"
+}

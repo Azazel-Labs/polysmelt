@@ -1,0 +1,19 @@
+{
+  "spec": "DirectX .x (X File Format Reference, DirectX 9 SDK): a real file, a cube with vertex colors kW Xport exported",
+  "source": "assimp/assimp at 711b4e9bbde2, test/models/X/kwxport_test_cubewithvcolors.x (MIT, kW Xport's notice in kwxport_test_cubewithvcolors.source.txt beside it); expectations measured with assimp 6.0.5 (assimp-py 1.2.0)",
+  "triangles": 12,
+  "bounds": {
+    "min": [
+      -0.492126,
+      -0.492126,
+      -0.492126
+    ],
+    "max": [
+      0.492126,
+      0.492126,
+      0.492126
+    ]
+  },
+  "area": 5.812512,
+  "position_set": "positions.f32"
+}

@@ -1,0 +1,19 @@
+{
+  "spec": "3DS (Autodesk 3D Studio chunk format, as lib3ds documents it): a real file, nine boxes with three materials",
+  "source": "assimp/assimp at 711b4e9bbde2, test/models/3DS/test1.3ds (BSD-3-Clause, see ../LICENSE-assimp); expectations measured with assimp 6.0.5 (assimp-py 1.2.0)",
+  "triangles": 108,
+  "bounds": {
+    "min": [
+      -10.343209,
+      -10.155075,
+      -10.230273
+    ],
+    "max": [
+      9.850852,
+      10.247582,
+      0.194163
+    ]
+  },
+  "area": 3453.478441,
+  "position_set": "positions.f32"
+}

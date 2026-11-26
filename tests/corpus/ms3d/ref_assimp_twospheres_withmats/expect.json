@@ -1,0 +1,19 @@
+{
+  "spec": "MilkShape 3D (MS3D version 4): a real file, two spheres with materials",
+  "source": "assimp/assimp at 711b4e9bbde2, test/models/MS3D/twospheres_withmats.ms3d (BSD-3-Clause, see ../LICENSE-assimp); expectations measured with assimp 6.0.5 (assimp-py 1.2.0)",
+  "triangles": 240,
+  "bounds": {
+    "min": [
+      -63.0,
+      -13.5,
+      -94.0
+    ],
+    "max": [
+      167.0,
+      181.0,
+      94.0
+    ]
+  },
+  "area": 122847.363318,
+  "position_set": "positions.f32"
+}

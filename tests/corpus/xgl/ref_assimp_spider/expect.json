@@ -1,0 +1,19 @@
+{
+  "spec": "XGL 1.0 (the XGL file format specification): a real file, a spider of 1312 triangles, compressed",
+  "source": "assimp/assimp at 711b4e9bbde2, test/models/XGL/Spider_ascii.zgl (BSD-3-Clause, see ../LICENSE-assimp); expectations measured with assimp 6.0.5 (assimp-py 1.2.0)",
+  "triangles": 1312,
+  "bounds": {
+    "min": [
+      -3.114895,
+      -4.0,
+      -1.649329
+    ],
+    "max": [
+      3.114895,
+      4.0,
+      1.649329
+    ]
+  },
+  "area": 56.947581,
+  "position_set": "positions.f32"
+}

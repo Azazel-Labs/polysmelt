@@ -1,0 +1,19 @@
+{
+  "spec": "Irrlicht mesh and scene formats (the Irrlicht Engine's XML formats): a real file, a mesh of two buffers",
+  "source": "assimp/assimp at 711b4e9bbde2, test/models/IRRMesh/cellar.irrmesh (BSD-3-Clause, see ../LICENSE-assimp); expectations measured with assimp 6.0.5 (assimp-py 1.2.0)",
+  "triangles": 272,
+  "bounds": {
+    "min": [
+      -198.610886,
+      -40.792053,
+      -162.326492
+    ],
+    "max": [
+      129.228073,
+      51.635353,
+      61.869953
+    ]
+  },
+  "area": 327535.871715,
+  "position_set": "positions.f32"
+}

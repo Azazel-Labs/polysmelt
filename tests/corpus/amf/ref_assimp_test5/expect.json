@@ -1,0 +1,19 @@
+{
+  "spec": "AMF (ISO/ASTM 52915): a real file, a tetrahedron with colors on its object, volume, triangles and vertices",
+  "source": "assimp/assimp at 711b4e9bbde2, test/models/AMF/test5.amf (BSD-3-Clause, see ../LICENSE-assimp); expectations measured with assimp 6.0.5 (assimp-py 1.2.0)",
+  "triangles": 4,
+  "bounds": {
+    "min": [
+      -0.0005,
+      0.0,
+      -0.0005
+    ],
+    "max": [
+      0.001,
+      0.004,
+      0.0005
+    ]
+  },
+  "area": 9e-06,
+  "position_set": "positions.f32"
+}

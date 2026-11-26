@@ -1,0 +1,19 @@
+{
+  "spec": "3DS (Autodesk 3D Studio chunk format, as lib3ds documents it): a real file, cubes with transparent materials",
+  "source": "assimp/assimp at 711b4e9bbde2, test/models/3DS/cubes_with_alpha.3DS (BSD-3-Clause, see ../LICENSE-assimp); expectations measured with assimp 6.0.5 (assimp-py 1.2.0)",
+  "triangles": 60,
+  "bounds": {
+    "min": [
+      -856.310974,
+      -268.159119,
+      -1227.140869
+    ],
+    "max": [
+      98.810499,
+      248.437958,
+      55.100883
+    ]
+  },
+  "area": 3300000.109482,
+  "position_set": "positions.f32"
+}

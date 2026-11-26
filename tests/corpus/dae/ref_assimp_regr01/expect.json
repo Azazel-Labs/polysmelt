@@ -1,0 +1,20 @@
+{
+  "spec": "COLLADA 1.4.1: a real file, six meshes sharing seven materials",
+  "source": "assimp/assimp at 711b4e9bbde2, test/models/Collada/regr01.dae (BSD-3-Clause, see ../LICENSE-assimp); expectations measured with assimp 6.0.5 (assimp-py 1.2.0)",
+  "tolerance": 1e-06,
+  "triangles": 172,
+  "bounds": {
+    "min": [
+      -0.0051,
+      0.0,
+      0.0
+    ],
+    "max": [
+      0.0078,
+      0.0162,
+      0.0042
+    ]
+  },
+  "area": 0.0005,
+  "position_set": "positions.f32"
+}

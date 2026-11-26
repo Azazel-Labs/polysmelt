@@ -1,0 +1,140 @@
+{
+  "spec": "COLLADA 1.4.1: a real file, a skinned mesh with two animation clips",
+  "source": "assimp/assimp at 711b4e9bbde2, test/models/Collada/library_animation_clips.dae (BSD-3-Clause, see ../LICENSE-assimp); expectations measured with assimp 6.0.5 (assimp-py 1.2.0). assimp 6.0.5 loses the first vertex's weight (the file binds it wholly to the first joint), so the skinned mesh isn't compared in a pose, only where the joints are. It also keeps the keys before a clip's start, which COLLADA leaves out of the clip, so the animations' spans aren't compared",
+  "triangles": 52,
+  "bounds": {
+    "min": [
+      -1.0,
+      -1.0,
+      -2.928973
+    ],
+    "max": [
+      1.0,
+      7.0,
+      1.000001
+    ]
+  },
+  "area": 81.861689,
+  "position_set": "positions.f32",
+  "document": {
+    "animations": 2
+  },
+  "rig": [
+    {
+      "node": "Bone",
+      "world": [
+        0.0,
+        -1.0,
+        0.0
+      ],
+      "parent": "Armature"
+    },
+    {
+      "node": "Bone.001",
+      "world": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "parent": "Bone"
+    },
+    {
+      "node": "Bone.002",
+      "world": [
+        0.0,
+        3.0,
+        0.0
+      ],
+      "parent": "Bone.001"
+    },
+    {
+      "node": "Bone.003",
+      "world": [
+        0.0,
+        5.0,
+        0.0
+      ],
+      "parent": "Bone.002"
+    },
+    {
+      "node": "Bone",
+      "animation": 0,
+      "time": 0.291667,
+      "world": [
+        0.0,
+        1.10704,
+        0.0
+      ]
+    },
+    {
+      "node": "Bone.001",
+      "animation": 0,
+      "time": 0.291667,
+      "world": [
+        0.0,
+        3.10704,
+        0.0
+      ]
+    },
+    {
+      "node": "Bone.002",
+      "animation": 0,
+      "time": 0.291667,
+      "world": [
+        0.43363,
+        5.05947,
+        0.0
+      ]
+    },
+    {
+      "node": "Bone.003",
+      "animation": 0,
+      "time": 0.291667,
+      "world": [
+        1.89174,
+        6.42368,
+        -0.1133
+      ]
+    },
+    {
+      "node": "Bone",
+      "animation": 1,
+      "time": 0.416667,
+      "world": [
+        0.0,
+        -1.0,
+        0.0
+      ]
+    },
+    {
+      "node": "Bone.001",
+      "animation": 1,
+      "time": 0.416667,
+      "world": [
+        0.0,
+        1.0,
+        0.0
+      ]
+    },
+    {
+      "node": "Bone.002",
+      "animation": 1,
+      "time": 0.416667,
+      "world": [
+        0.0,
+        3.0,
+        0.0
+      ]
+    },
+    {
+      "node": "Bone.003",
+      "animation": 1,
+      "time": 0.416667,
+      "world": [
+        0.0,
+        5.0,
+        0.0
+      ]
+    }
+  ]
+}

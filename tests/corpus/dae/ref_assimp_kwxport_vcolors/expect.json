@@ -1,0 +1,19 @@
+{
+  "spec": "COLLADA 1.4.1: a real file, a cube with vertex colors kW Xport exported",
+  "source": "assimp/assimp at 711b4e9bbde2, test/models/Collada/kwxport_test_vcolors.dae (MIT, kW Xport's notice in kwxport_test_vcolors.dae.source.txt beside it); expectations measured with assimp 6.0.5 (assimp-py 1.2.0)",
+  "triangles": 12,
+  "bounds": {
+    "min": [
+      -0.499999,
+      -0.499999,
+      -0.499999
+    ],
+    "max": [
+      0.499999,
+      0.500001,
+      0.499999
+    ]
+  },
+  "area": 5.999986,
+  "position_set": "positions.f32"
+}

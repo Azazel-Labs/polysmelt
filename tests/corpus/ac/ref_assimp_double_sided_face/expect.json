@@ -1,0 +1,24 @@
+{
+  "spec": "AC3D (the AC3D file format): a real file, a two-sided quad",
+  "source": "assimp/assimp at 711b4e9bbde2, test/models/AC/doubleSidedFace.ac (BSD-3-Clause, see ../LICENSE-assimp); expectations measured with assimp 6.0.5 (assimp-py 1.2.0)",
+  "triangles": 2,
+  "bounds": {
+    "min": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "max": [
+      2.0,
+      1.0,
+      0.0
+    ]
+  },
+  "area": 2.0,
+  "position_set": "positions.f32",
+  "materials": [
+    {
+      "double_sided": true
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "spec": "DXF (DXF Reference, 2013 edition): a real file, polyface meshes in inches",
+  "source": "assimp/assimp at 711b4e9bbde2, test/models/DXF/issue_2229.dxf (BSD-3-Clause, see ../LICENSE-assimp); expectations measured with assimp 6.0.5 (assimp-py 1.2.0)",
+  "triangles": 1520,
+  "bounds": {
+    "min": [
+      -15.24,
+      0.0,
+      0.0
+    ],
+    "max": [
+      15.24,
+      2.9464,
+      10.668
+    ]
+  },
+  "area": 1058.901179,
+  "position_set": "positions.f32"
+}

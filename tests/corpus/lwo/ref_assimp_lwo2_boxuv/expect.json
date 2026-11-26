@@ -1,0 +1,19 @@
+{
+  "spec": "LightWave object (LWO2 and LWOB file formats): a real file, an LWO2 box with a UV map",
+  "source": "assimp/assimp at 711b4e9bbde2, test/models/LWO/LWO2/boxuv.lwo (BSD-3-Clause, see ../LICENSE-assimp); expectations measured with assimp 6.0.5 (assimp-py 1.2.0)",
+  "triangles": 12,
+  "bounds": {
+    "min": [
+      -0.5,
+      -0.5,
+      -0.5
+    ],
+    "max": [
+      0.5,
+      0.5,
+      0.5
+    ]
+  },
+  "area": 6.0,
+  "position_set": "positions.f32"
+}

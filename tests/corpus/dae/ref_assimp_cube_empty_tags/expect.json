@@ -1,0 +1,19 @@
+{
+  "spec": "COLLADA 1.4.1: a real file, a cube with empty elements",
+  "source": "assimp/assimp at 711b4e9bbde2, test/models/Collada/cube_emptyTags.dae (BSD-3-Clause, see ../LICENSE-assimp); expectations measured with assimp 6.0.5 (assimp-py 1.2.0)",
+  "triangles": 12,
+  "bounds": {
+    "min": [
+      -50.0,
+      -50.0,
+      -50.0
+    ],
+    "max": [
+      50.0,
+      50.0,
+      50.0
+    ]
+  },
+  "area": 60000.0,
+  "position_set": "positions.f32"
+}

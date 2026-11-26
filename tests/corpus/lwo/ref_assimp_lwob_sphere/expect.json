@@ -1,0 +1,19 @@
+{
+  "spec": "LightWave object (LWO2 and LWOB file formats): a real file, an LWOB sphere with a glossy surface",
+  "source": "assimp/assimp at 711b4e9bbde2, test/models/LWO/LWOB/sphere_with_mat_gloss_10pc.lwo (BSD-3-Clause, see ../LICENSE-assimp); expectations measured with assimp 6.0.5 (assimp-py 1.2.0)",
+  "triangles": 528,
+  "bounds": {
+    "min": [
+      -2.15,
+      -2.1,
+      -2.5
+    ],
+    "max": [
+      2.15,
+      2.1,
+      2.6
+    ]
+  },
+  "area": 63.522419,
+  "position_set": "positions.f32"
+}

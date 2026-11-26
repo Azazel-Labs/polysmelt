@@ -1,0 +1,19 @@
+{
+  "spec": "COLLADA 1.4.1: a real file, a cube of <tristrips>",
+  "source": "assimp/assimp at 711b4e9bbde2, test/models/Collada/cube_tristrips.dae (BSD-3-Clause, see ../LICENSE-assimp); expectations measured with assimp 6.0.5 (assimp-py 1.2.0)",
+  "triangles": 12,
+  "bounds": {
+    "min": [
+      -49.999997,
+      -50.000002,
+      -50.000002
+    ],
+    "max": [
+      49.999997,
+      50.000002,
+      50.000002
+    ]
+  },
+  "area": 59999.997616,
+  "position_set": "positions.f32"
+}

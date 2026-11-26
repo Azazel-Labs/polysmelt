@@ -1,0 +1,19 @@
+{
+  "spec": "Quake II MD2 (qfiles.h, version 8): a real file, a character of 198 frames, drawn in its first",
+  "source": "assimp/assimp at 711b4e9bbde2, test/models/MD2/sydney.md2 (the Irrlicht Engine license, in sidney-source.txt beside it); expectations measured with assimp 6.0.5 (assimp-py 1.2.0)",
+  "triangles": 679,
+  "bounds": {
+    "min": [
+      -7.734574,
+      -24.01433,
+      -10.102956
+    ],
+    "max": [
+      5.501323,
+      30.943087,
+      11.988738
+    ]
+  },
+  "area": 1643.012925,
+  "position_set": "positions.f32"
+}

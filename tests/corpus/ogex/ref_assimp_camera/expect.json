@@ -1,0 +1,19 @@
+{
+  "spec": "OpenGEX 3.0 (the OpenGEX specification): a real file, a cube, a light and a camera",
+  "source": "assimp/assimp at 711b4e9bbde2, test/models/OpenGEX/camera.ogex (BSD-3-Clause, see ../LICENSE-assimp); expectations measured with assimp 6.0.5 (assimp-py 1.2.0)",
+  "triangles": 12,
+  "bounds": {
+    "min": [
+      -1.0,
+      -1.0,
+      -1.0
+    ],
+    "max": [
+      1.0,
+      1.0,
+      1.000001
+    ]
+  },
+  "area": 23.999999,
+  "position_set": "positions.f32"
+}
