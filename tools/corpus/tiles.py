@@ -43,6 +43,7 @@ import os
 import struct
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import ROOT, case, fresh, srgb_to_linear
 
 FMT = "tiles"

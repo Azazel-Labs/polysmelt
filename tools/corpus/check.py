@@ -39,7 +39,7 @@ NOT_GENERATORS = {"common.py", "packed_splats.py", "check.py"}
 # Run by Blender's own Python, once for every format it exports.
 BLENDER = "blender_export.py"
 # Fetches what its cache doesn't have.
-NETWORK = {"khronos.py"}
+NETWORK = {"khronos.py", "thirdparty.py"}
 # The packages to install for a module that can't be imported.
 PACKAGES = {"PIL": "Pillow", "pxr": "usd-core"}
 
