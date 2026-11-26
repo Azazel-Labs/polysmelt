@@ -149,6 +149,8 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 # The glTF reader downstream tools render with: decompressed and decoded output must load in it
 # (`extras` for custom `_ATTRIBUTES`, as Farthing reads them).
 gltf = { version = "1.4", default-features = false, features = ["allow_empty_texture", "extras", "utils"] }
+# The robustness test counts what a load of a damaged file allocates.
+peak_alloc = "0.3"
 
 [[example]]
 name = "meshopt"
