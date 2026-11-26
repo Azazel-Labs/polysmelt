@@ -1100,6 +1100,143 @@ fn morph_targets_and_their_weights_come_back() {
     }
 }
 
+/// Three materials that between them use everything the writer carries: specular and glossiness in place of
+/// metal and roughness; blending with every extension and a texture on every slot; and an unlit one.
+fn material_scene() -> Document {
+    let mut g = Glb::default();
+    let prims = [quad(&mut g, 2.0, 0), quad(&mut g, 1.0, 1), quad(&mut g, 0.5, 2)];
+    let images: Vec<Value> = (0..3)
+        .map(|k| json!({"bufferView": g.view(&png(10 + k)), "mimeType": "image/png"}))
+        .collect();
+    let tex = |index: usize| json!({"index": index});
+    g.build(json!({
+        "scene": 0,
+        "scenes": [{"nodes": [0]}],
+        "nodes": [{"name": "Panel", "mesh": 0}],
+        "meshes": [{"name": "Panel", "primitives": prims}],
+        "materials": [
+            {"name": "Glossy", "extensions": {"KHR_materials_pbrSpecularGlossiness": {
+                "diffuseFactor": [0.5, 0.25, 0.125, 1.0], "specularFactor": [0.25, 0.5, 0.75],
+                "glossinessFactor": 0.75, "diffuseTexture": tex(0)}}},
+            {"name": "Glass",
+             "pbrMetallicRoughness": {
+                "baseColorFactor": [0.25, 0.5, 0.75, 0.5], "baseColorTexture": tex(0),
+                "metallicFactor": 0.25, "roughnessFactor": 0.5, "metallicRoughnessTexture": tex(1)},
+             "normalTexture": {"index": 2, "scale": 0.5},
+             "occlusionTexture": {"index": 1, "strength": 0.75},
+             "emissiveTexture": tex(0),
+             "emissiveFactor": [1.0, 0.5, 0.25],
+             "alphaMode": "BLEND",
+             "doubleSided": true,
+             "extensions": {
+                "KHR_materials_emissive_strength": {"emissiveStrength": 4.0},
+                "KHR_materials_ior": {"ior": 1.25},
+                "KHR_materials_transmission": {"transmissionFactor": 0.75, "transmissionTexture": tex(1)},
+                "KHR_materials_clearcoat": {
+                    "clearcoatFactor": 0.5, "clearcoatRoughnessFactor": 0.25, "clearcoatTexture": tex(1),
+                    "clearcoatRoughnessTexture": tex(1), "clearcoatNormalTexture": tex(2)},
+                "KHR_materials_sheen": {
+                    "sheenColorFactor": [0.125, 0.25, 0.5], "sheenRoughnessFactor": 0.375,
+                    "sheenColorTexture": tex(0), "sheenRoughnessTexture": tex(1)},
+                "KHR_materials_specular": {
+                    "specularFactor": 0.875, "specularColorFactor": [1.0, 0.5, 0.5],
+                    "specularTexture": tex(1), "specularColorTexture": tex(0)},
+                "KHR_materials_volume": {
+                    "thicknessFactor": 2.0, "attenuationDistance": 5.0, "attenuationColor": [0.75, 0.5, 0.25],
+                    "thicknessTexture": tex(1)},
+                "KHR_materials_anisotropy": {
+                    "anisotropyStrength": 0.25, "anisotropyRotation": 1.25, "anisotropyTexture": tex(2)},
+                "KHR_materials_iridescence": {
+                    "iridescenceFactor": 0.5, "iridescenceIor": 1.5, "iridescenceThicknessMinimum": 150.0,
+                    "iridescenceThicknessMaximum": 500.0, "iridescenceTexture": tex(1),
+                    "iridescenceThicknessTexture": tex(1)},
+                "KHR_materials_dispersion": {"dispersion": 0.25}
+             }},
+            {"name": "Flat", "pbrMetallicRoughness": {"baseColorFactor": [0.0, 1.0, 0.0, 1.0]},
+             "extensions": {"KHR_materials_unlit": {}}}
+        ],
+        "textures": [{"source": 0}, {"source": 1}, {"source": 2}],
+        "images": images
+    }))
+}
+
+/// Every number under `at` in `want` is the same number in `got`, and every texture there names the same image.
+/// What differs is added to `out` by its path.
+fn same_values(doc: (&Document, &Document), want: &Value, got: Option<&Value>, at: &str, out: &mut Vec<String>) {
+    let image = |d: &Document, info: &Value| -> Option<u64> {
+        let t = info.get("index")?.as_u64()?;
+        let source = d.json()["textures"][t as usize]["source"].as_u64()?;
+        let image = &d.json()["images"][source as usize];
+        let view = &d.json()["bufferViews"][image["bufferView"].as_u64()? as usize];
+        let start = view.get("byteOffset").and_then(Value::as_u64).unwrap_or(0) as usize;
+        let bytes = d.buffer(view["buffer"].as_u64()? as usize).ok()?;
+        Some(hash(&bytes[start..start + view["byteLength"].as_u64()? as usize]))
+    };
+    match want {
+        Value::Object(o) if at.ends_with("Texture") => {
+            let same = got.is_some_and(|g| image(doc.0, want).is_some() && image(doc.0, want) == image(doc.1, g));
+            if !same {
+                out.push(format!("{at}: the image"));
+            }
+            for key in ["scale", "strength"] {
+                if let Some(w) = o.get(key) {
+                    same_values(doc, w, got.and_then(|g| g.get(key)), &format!("{at}/{key}"), out);
+                }
+            }
+        }
+        Value::Object(o) => {
+            for (k, w) in o {
+                same_values(doc, w, got.and_then(|g| g.get(k)), &format!("{at}/{k}"), out);
+            }
+        }
+        Value::Array(a) => {
+            for (k, w) in a.iter().enumerate() {
+                same_values(doc, w, got.and_then(|g| g.get(k)), &format!("{at}/{k}"), out);
+            }
+        }
+        Value::Number(w) => {
+            let same = got
+                .and_then(Value::as_f64)
+                .is_some_and(|g| close(w.as_f64().unwrap(), g, 1e-5));
+            if !same {
+                out.push(format!("{at}: {w}, came back {got:?}"));
+            }
+        }
+        other => {
+            if got != Some(other) {
+                out.push(format!("{at}: {other}, came back {got:?}"));
+            }
+        }
+    }
+}
+
+#[test]
+fn material_extensions_and_their_textures_come_back() {
+    let doc = material_scene();
+    let (_, back) = round_trip(&doc, "materials");
+    let material = |d: &Document, name: &str| -> Value {
+        let all = d.json()["materials"].as_array().unwrap();
+        all.iter()
+            .find(|m| m["name"] == name)
+            .unwrap_or_else(|| panic!("no {name}"))
+            .clone()
+    };
+    let mut wrong = Vec::new();
+    // Blending, and every extension's numbers and textures, exactly as they went in.
+    let (want, got) = (material(&doc, "Glass"), material(&back, "Glass"));
+    same_values((&doc, &back), &want, Some(&got), "Glass", &mut wrong);
+    let (want, got) = (material(&doc, "Flat"), material(&back, "Flat"));
+    same_values((&doc, &back), &want, Some(&got), "Flat", &mut wrong);
+    // Specular and glossiness come back as metal and roughness: the diffuse color and texture as the base color's,
+    // no metal, and roughness one less the glossiness.
+    let glossy = material(&back, "Glossy");
+    let want = json!({"pbrMetallicRoughness": {
+        "baseColorFactor": [0.5, 0.25, 0.125, 1.0], "metallicFactor": 0.0, "roughnessFactor": 0.25,
+        "baseColorTexture": {"index": 0}}});
+    same_values((&doc, &back), &want, Some(&glossy), "Glossy", &mut wrong);
+    assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
+}
+
 #[test]
 fn cameras_lights_and_extras_come_back() {
     let doc = staging_scene();

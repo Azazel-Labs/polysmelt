@@ -1893,6 +1893,14 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         if block.is_some() && image.is_none() && (textures || missing()) {
             dropped_textures += 1;
         }
+        // A block maps the mesh when its image is there: read, or, when textures aren't kept and nothing is read,
+        // found among the assets. The texture coordinates are the mesh's, kept whether or not the texture is, so
+        // they come out as a full read's do.
+        let there = |b: &Block, read: Option<usize>| {
+            read.is_some()
+                || (!textures && clip_file(b).is_some_and(|f| dirs.iter().any(|d| assets.find(&f, d).is_some())))
+        };
+        let color_block = block.filter(|&b| there(b, image));
         let tex = image.zip(block).map(|(i, b)| {
             let mut t = Tex::new(i);
             t.wrap = [wrap_mode(b.wrap[0]), wrap_mode(b.wrap[1])];
@@ -1912,8 +1920,9 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
             .as_ref()
             .and_then(|n| n.normal.as_ref())
             .filter(|n| n.file.is_some() && n.proj == 5)
-            .filter(|n| image.and(block).is_none_or(|b| b.proj == 5 && b.uv == n.uv));
+            .filter(|n| color_block.is_none_or(|b| b.proj == 5 && b.uv == n.uv));
         let normal = normal_block.and_then(|b| image_for(&clip_file(b)?));
+        let normal_block = normal_block.filter(|&b| there(b, normal));
         let (mut full, color) = material(s, tex, vcol.is_some());
         if let Some(i) = normal {
             let mut t = Tex::new(i);
@@ -1927,7 +1936,7 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         looks.push(Look {
             material: materials.len(),
             cos: (sman > 0.0).then(|| sman.min(std::f32::consts::PI).cos()),
-            tex: image.and(block).or(normal.and(normal_block)).cloned(),
+            tex: color_block.or(normal_block).cloned(),
             vcol,
             color,
         });
@@ -2604,6 +2613,35 @@ mod tests {
         assert!(read(b"FORM\0\0\0\x04ILBM", &Memory::new()).is_err());
         // An object with nothing drawn.
         assert!(read(&file(*b"LWO2", &[layr(0, [0.0; 3], "", None)]), &Memory::new()).is_err());
+    }
+
+    #[test]
+    fn projected_coordinates_stay_when_textures_are_not_read() {
+        // A planar image map: the texture coordinates come from the points, not from a UV map.
+        let textured = classic(
+            true,
+            &[
+                s0("Red"),
+                sub(*b"CTEX", &s0("Planar Image Map")),
+                sub(*b"TIMG", &s0("skin.png")),
+            ],
+        );
+        let assets = Memory::new().with("skin.png", png());
+        let attributes = |keep: Keep| {
+            let doc = load(Input::memory(&textured, "t.lwo"), &assets, keep).unwrap();
+            doc.json()["meshes"][0]["primitives"][0]["attributes"].clone()
+        };
+        let full = attributes(Keep::ALL);
+        assert!(full.get("TEXCOORD_0").is_some(), "{full}");
+        assert_eq!(attributes(Keep::ALL.with_textures(false)), full);
+        assert_eq!(attributes(Keep::ALL.with_materials(false)), full);
+        // An image that isn't there maps nothing, read or not.
+        let none = Memory::new();
+        for keep in [Keep::ALL, Keep::ALL.with_textures(false)] {
+            let doc = load(Input::memory(&textured, "t.lwo"), &none, keep).unwrap();
+            let attributes = &doc.json()["meshes"][0]["primitives"][0]["attributes"];
+            assert!(attributes.get("TEXCOORD_0").is_none(), "{attributes}");
+        }
     }
 
     #[test]

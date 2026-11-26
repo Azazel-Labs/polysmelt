@@ -563,6 +563,90 @@ case(FMT, "animated_group", {"anim.flt": w.bytes()},
                 {"animation": 0, "time": 1.5, "bounds": square_bounds([(0, 0, 2)])},
                 {"animation": 0, "time": 2.5, "bounds": square_bounds([(0, 0, 3)])}]})
 
+# A subface: a face drawn on the face before it, between push-subface and pop-subface records. The
+# face after the pop is the object's again.
+w = Flt()
+off = w.vertices(quad_at(0, size=2.0) + quad_at(0.5, 0.5) + quad_at(3))
+w.push().object("wall").push()
+w.face("wall", off[0:4])
+w.rec(19, b"")
+w.face("sign", off[4:8], flags=F_PACKED, packed=(255, 0, 0))
+w.rec(20, b"")
+w.face("door", off[8:12])
+w.pop().pop()
+case(FMT, "subfaces", {"subface.flt": w.bytes()},
+     {"spec": SPEC + ": a subface between push-subface and pop-subface records, drawn with its face, and a face "
+      "after it", "source": SRC, "triangles": 6, "area": 6.0,
+      "bounds": square_bounds([(0, 0, 2), (3, 0, 1)]), "colors_include": [[1.0, 0.0, 0.0, 1.0]],
+      "facts": {"faces": 3}, "document": {"node_names": ["wall"], "source": {"subfaces": 1}}})
+
+# Light point nodes: a light point system holding a light point of three vertices and an indexed
+# light point of one, each a string of points; and a binary separating plane, a node like any other.
+w = Flt()
+LAMPS = [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (2.0, 0.0, 1.0), (0.0, 3.0, 0.0)]
+off = w.vertices([{"p": p} for p in LAMPS] + quad_at(0, 5))
+w.push()
+w.node(131, 24, "runway", [(12, struct.pack(">f", 0.5))]).push()
+w.node(111, 156, "edge", [(20, struct.pack(">if", 1, 0.75))]).push()
+w.rec(72, b"".join(struct.pack(">i", c) for c in off[0:3])).pop()
+w.node(130, 28, "apron", [(12, struct.pack(">ii", 3, 4))]).push()
+w.rec(72, struct.pack(">i", off[3])).pop()
+w.pop()
+w.node(55, 48, "split").push().face("ground", off[4:8]).pop()
+w.pop()
+case(FMT, "light_point_nodes", {"lights.flt": w.bytes()},
+     {"spec": SPEC + ": a light point system of a light point record and an indexed light point record, their "
+      "vertices drawn as points, and a binary separating plane node", "source": SRC,
+      "triangles": 2, "points": 4,
+      "bounds": bounds([z_up(p) for p in LAMPS] + [z_up((0, 5, 0)), z_up((1, 6, 0))]),
+      "document": {"node_names": ["runway", "edge", "apron", "split"]},
+      "json": {"/nodes/1/extras/openflight/intensity": 0.5,
+               "/nodes/2/extras/openflight": {"type": "lightPoint", "displayMode": 1, "intensity": 0.75},
+               "/nodes/3/extras/openflight": {"type": "lightPoint", "appearance": 3, "animation": 4},
+               "/nodes/4/extras/openflight/type": "bsp"}})
+
+# Extension and attribute blocks belong to other applications: what's between their push and pop
+# records isn't read, here a face in each.
+w = Flt()
+off = w.vertices(quad_at(0) + quad_at(2) + quad_at(4))
+w.push().face("kept", off[0:4])
+w.rec(21, bytes(20))
+w.face("theirs", off[4:8])
+w.rec(21, bytes(20)).rec(22, bytes(20))
+w.rec(22, bytes(20))
+w.rec(122, bytes(4))
+w.face("theirs2", off[8:12])
+w.rec(123, b"")
+w.pop()
+case(FMT, "extension_blocks", {"extension.flt": w.bytes()},
+     {"spec": SPEC + ": push-extension and push-attribute blocks (one nested), skipped to their pop records",
+      "source": SRC, "triangles": 2, "bounds": square_bounds([(0, 0, 1)]), "facts": {"faces": 1},
+      "document": {"source": {"extensions": 2}}})
+
+# Version 14.2: materials in one table of 64 entries (ambient, diffuse, specular, emissive, shininess,
+# alpha, flags, a name and 28 spare words each) rather than a record apiece.
+w = Flt(version=1420)
+table = bytearray(4 + 64 * 184)
+OLD = {3: ("paint", (0.5, 0.25, 1.0), (0.5, 0.5, 0.5), 30.0, 1.0),
+       5: ("glass", (0.2, 0.4, 0.6), (0.0, 0.0, 0.0), 0.0, 0.5)}
+for k, (name, diffuse, specular, shininess, alpha) in OLD.items():
+    at = 4 + k * 184
+    put(table, at, struct.pack(">3f", 0.2, 0.2, 0.2) + struct.pack(">3f", *diffuse)
+        + struct.pack(">3f", *specular) + bytes(12) + struct.pack(">ffI", shininess, alpha, 0)
+        + name_bytes(name, 12))
+w.raw(66, table)
+off = w.vertices(quad_at(0) + quad_at(2))
+w.push().face("a", off[0:4], material=3).face("b", off[4:8], material=5).pop()
+case(FMT, "old_material_table", {"table.flt": w.bytes()},
+     {"spec": "OpenFlight 14.2: the material table of 64 materials, two of them used", "source": SRC,
+      "triangles": 4, "material_count": 2,
+      "materials": [{"name": "paint", "color": [srgb_to_linear(c) for c in (0.5, 0.25, 1.0)] + [1.0],
+                     "roughness": (2 / (30.0 + 2)) ** 0.25, "alpha_mode": "OPAQUE"},
+                    {"name": "glass", "color": [srgb_to_linear(c) for c in (0.2, 0.4, 0.6)] + [0.5],
+                     "roughness": 1.0, "alpha_mode": "BLEND"}],
+      "document": {"source": {"version": "14.2"}}})
+
+
 
 # --- errors ----------------------------------------------------------------------------------------
 

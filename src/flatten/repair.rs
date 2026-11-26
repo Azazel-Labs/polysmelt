@@ -1886,4 +1886,106 @@ mod tests {
         let uv = index(&d.json()["meshes"][0]["primitives"][0]["attributes"], "TEXCOORD_0").unwrap();
         assert!(d.json()["accessors"][uv].get("bufferView").is_none());
     }
+
+    /// The bytes accessor `a` holds.
+    fn stored(d: &Document, a: usize) -> Vec<u8> {
+        let mut r = Reader::bare(d);
+        let acc = r.acc(a).unwrap();
+        raw(&mut r, &acc).unwrap().to_vec()
+    }
+
+    #[test]
+    fn a_zero_normal_takes_its_triangles_normal() {
+        let mut b = Build::default();
+        // A triangle in the XZ plane, counterclockwise seen from +Y, and a vertex no triangle uses.
+        let p = b.floats(
+            &[0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 5.0, 5.0, 5.0],
+            "VEC3",
+            &json!({ "min": [0.0, 0.0, 0.0], "max": [5.0, 5.0, 5.0] }),
+        );
+        let n = b.floats(
+            &[0.0, 0.0, 0.0, 0.0, 3.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            "VEC3",
+            &json!({}),
+        );
+        let i = b.indices(&[0, 1, 2]);
+        let d = repaired_doc(b.doc(json!({
+            "meshes": [{ "primitives": [{ "attributes": { "POSITION": p, "NORMAL": n }, "indices": i }] }],
+        })));
+        // The triangle's corners face +Y, the long normal is cut to length, and the loose vertex faces +Z.
+        assert_eq!(
+            values(&d, n),
+            [0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+        );
+    }
+
+    #[test]
+    fn tangents_are_made_unit_with_a_handedness_of_one() {
+        let mut b = Build::default();
+        let p = triangle(&mut b);
+        let n = b.floats(&[0.0, 0.0, 1.0].repeat(3), "VEC3", &json!({}));
+        // Too long, no direction at all, and a handedness that's neither 1 nor -1.
+        let t = b.floats(
+            &[2.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, -3.0, 0.0, 1.0, 0.0, 0.5],
+            "VEC4",
+            &json!({}),
+        );
+        let d = repaired_doc(b.doc(json!({
+            "meshes": [{ "primitives": [{ "attributes": { "POSITION": p, "NORMAL": n, "TANGENT": t } }] }],
+        })));
+        let got = values(&d, t);
+        assert_eq!(got[..4], [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(got[8..], [0.0, 1.0, 0.0, 1.0]);
+        // The one with no direction gets some unit direction, and keeps its side.
+        let len = got[4..7].iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!((len - 1.0).abs() < 1e-6, "{got:?}");
+        assert_eq!(got[7], -1.0);
+    }
+
+    #[test]
+    fn integer_weights_sum_to_the_whole_of_their_type() {
+        let skinned = |b: Build, w: usize, j: usize, p: usize| {
+            repaired_doc(b.doc(json!({
+                "meshes": [{ "primitives": [{ "attributes": { "POSITION": p, "JOINTS_0": j, "WEIGHTS_0": w } }] }],
+                "nodes": [{ "mesh": 0, "skin": 0 }, {}],
+                "skins": [{ "joints": [1] }],
+            })))
+        };
+        // Bytes: two thirds and a third of 192, nothing at all, and a vertex that's right already.
+        let mut b = Build::default();
+        let p = triangle(&mut b);
+        let j = b.add(&[0; 12], 5121, "VEC4", 3, &json!({}));
+        let w = b.add(
+            &[128, 64, 0, 0, 0, 0, 0, 0, 255, 0, 0, 0],
+            5121,
+            "VEC4",
+            3,
+            &json!({ "normalized": true }),
+        );
+        let d = skinned(b, w, j, p);
+        assert_eq!(stored(&d, w), [170, 85, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0]);
+        // Shorts: two equal weights can't halve 65535, so one takes the odd one.
+        let mut b = Build::default();
+        let p = triangle(&mut b);
+        let j = b.add(&[0; 12], 5121, "VEC4", 3, &json!({}));
+        let weights: [u16; 12] = [30000, 30000, 0, 0, 0, 0, 0, 7, 65535, 0, 0, 0];
+        let bytes: Vec<u8> = weights.iter().flat_map(|x| x.to_le_bytes()).collect();
+        let w = b.add(&bytes, 5123, "VEC4", 3, &json!({ "normalized": true }));
+        let d = skinned(b, w, j, p);
+        let got: Vec<u16> = stored(&d, w)
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        assert_eq!(u32::from(got[0]) + u32::from(got[1]), 65535, "{got:?}");
+        assert!(got[0].abs_diff(got[1]) <= 1, "{got:?}");
+        assert_eq!(got[2..], [0, 0, 0, 0, 0, 65535, 65535, 0, 0, 0]);
+        // Weights that sum to the whole are left as they are.
+        let mut b = Build::default();
+        let p = triangle(&mut b);
+        let j = b.add(&[0; 12], 5121, "VEC4", 3, &json!({}));
+        let whole = [100, 100, 55, 0, 255, 0, 0, 0, 1, 254, 0, 0];
+        let w = b.add(&whole, 5121, "VEC4", 3, &json!({ "normalized": true }));
+        let d = skinned(b, w, j, p);
+        assert_eq!(stored(&d, w), whole);
+    }
 }

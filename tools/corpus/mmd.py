@@ -151,6 +151,16 @@ def pmx(names, vertices, faces, textures, materials, bones, morphs, utf8=False, 
                 w.vidx(o[0]), w.f(*o[1])
             elif kind == 2:
                 w.idx(o[0]), w.f(*o[1], *o[2])
+            elif 3 <= kind <= 7:  # UV, and additional UVs 1 to 4: a vertex and four numbers.
+                w.vidx(o[0]), w.f(*o[1])
+            elif kind == 8:  # Material: an operation, then each of the material's values.
+                w.idx(o["material"]), w.u8(o["operation"])
+                w.f(*o["diffuse"], *o["specular"], o["power"], *o["ambient"], *o["edge_color"], o["edge_size"],
+                    *o["texture"], *o["sphere"], *o["toon"])
+            elif kind == 9:  # Flip (2.1): morphs and ratios, as a group.
+                w.idx(o[0]), w.f(o[1])
+            elif kind == 10:  # Impulse (2.1): a rigid body, whether local, a velocity and a torque.
+                w.idx(o[0]), w.u8(o[1]), w.f(*o[2], *o[3])
     if tail:
         w.i32(0), w.i32(0), w.i32(0)
         if version > 2.05:
@@ -270,6 +280,50 @@ case(FMT, "pmx21_deforms_colors", {"pmx21_deforms_colors.pmx": data}, {
                  "source": {"version": "2.1", "encoding": "UTF-8", "additionalUvs": 2}},
     "facts": {"triangles": 3, "vertices": 5, "sdef_vertices": 1, "qdef_vertices": 1, "faces_without_material": 1},
     "json": {"/materials/0/doubleSided": None, "/meshes/0/primitives/1/material": None},
+})
+
+# Every morph that isn't made of vertex offsets: UV and additional UV morphs, a material morph of each operation,
+# and 2.1's flip and impulse morphs. They're kept as data beside the vertex morph they come after.
+TINT = {"material": 0, "operation": 1, "diffuse": [0.5, 0.25, 0.125, 1.0], "specular": [0.1, 0.2, 0.3], "power": 5.0,
+        "ambient": [0.4, 0.5, 0.6], "edge_color": [1.0, 0.0, 0.0, 1.0], "edge_size": 2.0,
+        "texture": [1.0, 1.0, 1.0, 0.5], "sphere": [0.25, 0.25, 0.25, 1.0], "toon": [0.75, 0.75, 0.75, 1.0]}
+FADE = dict(TINT, material=-1, operation=0)
+KINDS = [
+    ("smile", 3, 1, [SMILE]),
+    ("slide", 3, 3, [(0, [0.5, 0.25, 0.0, 0.0]), (1, [0.5, 0.25, 0.0, 0.0])]),
+    ("slide2", 3, 4, [(2, [0.0, 0.0, 1.0, 1.0])]),
+    ("slide5", 3, 7, [(3, [1.0, 0.0, 0.0, 0.0])]),
+    ("tint", 4, 8, [TINT, FADE]),
+    ("either", 4, 9, [(0, 1.0), (1, 0.5)]),
+    ("kick", 4, 10, [(0, 1, [0.0, 1.0, 0.0], [0.0, 0.0, 2.0])]),
+]
+plain = {"name": "plain", "diffuse": [1.0, 1.0, 1.0, 1.0], "faces": 2}
+data = pmx(NAMES, QUAD_V, QUAD_FACES, [], [plain], BONES, KINDS, utf8=True, size=1, version=2.1)
+case(FMT, "pmx21_morph_kinds", {"pmx21_morph_kinds.pmx": data}, {
+    "spec": f"{PMX_SPEC}: version 2.1 with a UV morph, additional UV morphs 1 and 4, a material morph (one offset "
+            "adding to a material, one multiplying every material), a flip morph and an impulse morph after a vertex "
+            "morph: only the vertex morph is a morph target, the rest are kept as data",
+    "source": SRC,
+    "triangles": 2,
+    "bounds": bounds(QUAD),
+    "document": {"morph_targets": 1, "joints": 2, "source": {"version": "2.1"}},
+    "facts": {"triangles": 2, "vertices": 4, "bones": 2, "morphs": 7},
+    "json": {
+        "/meshes/0/extras/targetNames": ["smile"],
+        "/meshes/0/extras/morphs/0": {"index": 1, "name": "slide", "type": "uv", "panel": 3, "count": 2},
+        "/meshes/0/extras/morphs/1": {"index": 2, "name": "slide2", "type": "additionalUv", "uv": 1, "count": 1},
+        "/meshes/0/extras/morphs/2": {"index": 3, "name": "slide5", "type": "additionalUv", "uv": 4, "count": 1},
+        "/meshes/0/extras/morphs/3/type": "material",
+        "/meshes/0/extras/morphs/3/offsets/0": {
+            "material": 0, "operation": "add", "diffuse": TINT["diffuse"], "specular": TINT["specular"],
+            "specularPower": 5.0, "ambient": TINT["ambient"], "edgeColor": TINT["edge_color"], "edgeSize": 2.0,
+            "texture": TINT["texture"], "sphere": TINT["sphere"], "toon": TINT["toon"]},
+        "/meshes/0/extras/morphs/3/offsets/1/material": -1,
+        "/meshes/0/extras/morphs/3/offsets/1/operation": "multiply",
+        "/meshes/0/extras/morphs/4": {"index": 5, "name": "either", "type": "flip",
+                                      "members": [{"morph": 0, "ratio": 1.0}, {"morph": 1, "ratio": 0.5}]},
+        "/meshes/0/extras/morphs/5": {"index": 6, "name": "kick", "type": "impulse", "count": 1},
+    },
 })
 
 # Broken PMX files.

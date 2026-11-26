@@ -15,6 +15,7 @@ the first argument). Their expectations come from reading them here: the triangl
 makes (n - 2 for n points), and the bounds of their points placed at their layers' pivots.
 """
 
+import math
 import os
 import struct
 import sys
@@ -220,6 +221,155 @@ case(FMT, "no_polygons", {"points.lwo": form(b"LWO2", [layr(0), pnts(TRI)])},
      {"spec": f"{SPEC}: points without polygons", "source": SRC, "error": "no polygons"})
 case(FMT, "index_past_points", {"cube.lwo": form(b"LWO2", [layr(0), pnts(TRI), pols([(0, 1, 2), (0, 1, 9)])])},
      {"spec": f"{SPEC}: a polygon naming a point that isn't there is dropped", "source": SRC, "triangles": 1})
+
+# An image sequence clip names its first frame: a prefix, the frame number in so many digits, a
+# suffix. A reference clip stands for the clip it names. The surface's image is the reference.
+iseq = ck(b"CLIP", struct.pack(">I", 1) + sub(b"ISEQ", bytes([3, 0]) + struct.pack(">hHhh", 0, 0, 7, 9)
+                                              + s0("skin_") + s0(".png")))
+xref = ck(b"CLIP", struct.pack(">I", 2) + sub(b"XREF", struct.pack(">I", 1) + s0("again")))
+blok2 = blok.replace(sub(b"IMAG", vx(1)), sub(b"IMAG", vx(2)))
+assert blok2 != blok
+case(FMT, "clip_sequence_and_reference",
+     {"cube.lwo": form(b"LWO2", BASIC + [txuv, iseq, xref, surf("Default", extra=blok2)]),
+      "skin_007.png": png((40, 90, 160))},
+     {"spec": f"{SPEC}: an image sequence clip (its first frame's file) used through a clip that refers to it",
+      "source": SRC, **CUBE, "uvs": True, "image_count": 1, "materials": [{"name": "Default", "textured": True}]})
+
+# An LWOB texture: its type names the projection, and the chunks after it the image and its flags
+# (the axis), size and center. A planar map along Z puts x and y, less the center and over the
+# size, on the image from its middle; v runs up in LightWave and down in glTF.
+T_SIZE, T_CENTER = (2.0, 4.0, 1.0), (0.5, 0.25, 0.0)
+ctex = (sub(b"CTEX", s0("Planar Image Map")) + sub(b"TIMG", s0("skin.png")) + sub(b"TFLG", u2(4 | 32))
+        + sub(b"TSIZ", f4(*T_SIZE)) + sub(b"TCTR", f4(*T_CENTER)) + sub(b"TWRP", u2(2) + u2(3))
+        + sub(b"TFP0", f4(1.0)) + sub(b"TFP1", f4(1.0)) + sub(b"TOPC", f4(1.0)))
+lwob_tex = form(b"LWOB", [pnts(CUBE_V), ck(b"SRFS", s0("Shell")), lwob_pols(QUADS, [1] * 6),
+                          ck(b"SURF", s0("Shell") + sub(b"COLR", bytes([255, 255, 255, 0])) + sub(b"DIFF", u2(256))
+                             + ctex)])
+case(FMT, "lwob_planar_texture", {"cube.lwo": lwob_tex, "skin.png": png((40, 90, 160))},
+     {"spec": f"{SPEC}: an LWOB color texture, a planar image map along Z with a size and a center, projected into "
+              "texture coordinates", "source": SRC, **CUBE, "uvs": True, "image_count": 1,
+      "uvs_include": [[r((x - T_CENTER[0]) / T_SIZE[0] + 0.5), r(1 - ((y - T_CENTER[1]) / T_SIZE[1] + 0.5))]
+                      for x, y, _ in CUBE_V],
+      "materials": [{"name": "Shell", "textured": True}]})
+
+
+# Cylindrical and spherical image maps about Y, as the format's notes on projection work them out:
+# the heading of (-x, z) about the axis, a turn of it taken from 1, is u; v is the height over the
+# size, down from the middle (cylindrical), or the pitch over a half turn (spherical).
+def heading(x, z):
+    if x == 0 and z == 0:
+        return 0.0
+    if z == 0:
+        return math.pi / 2 if x < 0 else -math.pi / 2
+    return -math.atan(x / z) + (math.pi if z < 0 else 0.0)
+
+
+def around_y(point, size, spherical):
+    """Where a point (in glTF's axes) lands on the image, v down from the top."""
+    x, y, z = gltf_to_lw(point)
+    u = (1 - heading(-x, z) / (2 * math.pi)) % 1.0
+    v = 0.5 - math.atan(y / math.hypot(x, z)) / math.pi if spherical else -y / size[1] + 0.5
+    return [r(u), r(v)]
+
+
+CENTERED = [(x - 0.5, y - 0.5, z - 0.5) for x, y, z in CUBE_V]
+M_SIZE = (1.0, 2.0, 1.0)
+for kind, proj in (("cylindrical", 1), ("spherical", 2)):
+    wrapped = sub(b"BLOK", sub(b"IMAP", s0("\x80") + sub(b"CHAN", b"COLR") + sub(b"ENAB", u2(1)))
+                  + sub(b"TMAP", sub(b"CNTR", f4(0, 0, 0) + vx(0)) + sub(b"SIZE", f4(*M_SIZE) + vx(0)))
+                  + sub(b"PROJ", u2(proj)) + sub(b"AXIS", u2(1)) + sub(b"IMAG", vx(1))
+                  + sub(b"WRAP", u2(1) + u2(1)))
+    case(FMT, f"{kind}_map",
+         {"cube.lwo": form(b"LWO2", [ck(b"TAGS", s0("Default")), layr(0), pnts(CENTERED), pols(QUADS),
+                                     ptag([0] * 6), clip, surf("Default", extra=wrapped)]),
+          "skin.png": png((40, 90, 160))},
+         {"spec": f"{SPEC}: a {kind} image map about the Y axis, projected into texture coordinates",
+          "source": SRC, "triangles": 12, "area": 6.0, "bounds": {"min": [-0.5] * 3, "max": [0.5] * 3},
+          "uvs": True, "image_count": 1, "uvs_include": [around_y(v, M_SIZE, proj == 2) for v in CENTERED],
+          "materials": [{"name": "Default", "textured": True}]})
+
+
+# LWO3 (LightWave 2018 on): every chunk's size is four bytes, a form's own data sits in a chunk
+# named with four spaces, and a surface is a node graph. Its nodes (NNDS) are each a server name
+# and a tag form holding the node's name and data; the connections (NCON) name a node, its input,
+# and the node feeding it. The node feeding the Surface node's Material input is the shader, whose
+# attributes are entries of a name and a value form: a type name, then a count and that many
+# doubles. An Image node names its file in a clip form, its UV map and its projection.
+BLANK = b"    "
+
+
+def u4(v):
+    return struct.pack(">I", v)
+
+
+def lform(kind, *chunks):
+    return ck(b"FORM", kind + b"".join(chunks))
+
+
+def entry(name, *numbers):
+    kind = "vparam3" if len(numbers) == 3 else "vparam"
+    inner = lform(b"VALU", ck(BLANK, u4(len(numbers)) + struct.pack(f">{len(numbers)}d", *numbers)))
+    return lform(b"ENTR", ck(b"NAME", s0(name)), ck(b"FLAG", u4(0)), lform(b"VALU", ck(BLANK, s0(kind)), inner))
+
+
+def attributes(*entries):
+    return lform(b"ATTR", lform(b"META", ck(b"VERS", u4(1)), ck(b"ENUM", u4(0)), lform(b"ADAT", *entries)))
+
+
+def node(server, name, data=b""):
+    return ck(b"NSRV", s0(server)) + lform(b"NTAG", ck(b"NRNM", s0(server)), ck(b"NNME", s0(name)),
+                                           ck(b"NCRD", bytes(8)), ck(b"NMOD", u4(1)), lform(b"NDTA", data))
+
+
+def vector(kind, v):
+    return lform(kind, lform(b"VPRM", ck(BLANK, u4(3) + u4(0)), lform(b"VPVL", ck(BLANK, f4(*v) + b"\0\0"))))
+
+
+def still(file):
+    return lform(b"STIL", ck(BLANK, s0(file)))
+
+
+def image_node(name, file, uv):
+    return node("Image", name, lform(b"IIMG", lform(b"CLIP", still(file), ck(b"FLAG", u4(0x80))))
+                + ck(b"IMAP", u4(5)) + ck(b"IAXS", u4(2)) + vector(b"ISCL", (1, 1, 1))
+                + vector(b"IPOS", (0, 0, 0)) + vector(b"IROT", (0, 0, 0)) + ck(b"IUVI", s0(uv))
+                + ck(b"IUTL", u4(1)) + ck(b"IVTL", u4(1)))
+
+
+def link(to, to_input, source, output):
+    return ck(b"INME", s0(to)) + ck(b"IINM", s0(to_input)) + ck(b"IINN", s0(source)) + ck(b"IONM", s0(output))
+
+
+def surf3(name, nodes, links):
+    return lform(b"SURF", ck(BLANK, s0(name) + s0("")), ck(b"VERS", u4(0x70D)),
+                 lform(b"NODS", ck(b"NVER", u4(1)), lform(b"NNDS", *nodes), lform(b"NCON", *links)))
+
+
+paint = surf3("Paint", [
+    node("Surface", "Surface"),
+    node("Principled BSDF", "Principled BSDF (1)", attributes(
+        entry("Color", 1.0, 1.0, 1.0), entry("Roughness", 0.25), entry("Metallic", 0.75),
+        entry("Luminous", 0.5), entry("Luminous Color", 1.0, 0.0, 1.0))),
+    image_node("Image (1)", "skin.png", "uv"),
+], [link("Surface", "Material", "Principled BSDF (1)", "Material"),
+    link("Principled BSDF (1)", "Color", "Image (1)", "Color")])
+glass = surf3("Glass", [
+    node("Surface", "Surface"),
+    node("Standard", "Standard (1)", attributes(
+        entry("Color", 0.0, 1.0, 0.0), entry("Diffuse", 0.5), entry("Transparency", 0.25))),
+], [link("Surface", "Material", "Standard (1)", "Material")])
+clip3 = lform(b"CLIP", ck(BLANK, u4(1)), still("skin.png"), ck(b"FLAG", u4(0x80)))
+case(FMT, "lwo3_node_surfaces",
+     {"cube.lwo": form(b"LWO3", [ck(b"TAGS", s0("Paint") + s0("Glass")), layr(0), pnts(CUBE_V), txuv, pols(QUADS),
+                                 ptag([0, 0, 0, 1, 1, 1]), clip3, paint, glass]),
+      "skin.png": png((40, 90, 160))},
+     {"spec": "LightWave object (LWO3 file format): two node-graph surfaces, a Principled BSDF with an image on "
+              "its color, and a Standard material with a diffuse level and transparency; and a clip form",
+      "source": SRC, **CUBE, "uvs": True, "image_count": 1, "material_count": 2,
+      "materials": [{"name": "Paint", "textured": True, "roughness": 0.25, "metallic": 0.75,
+                     "emissive": [0.5, 0.0, 0.5]},
+                    {"name": "Glass", "color": [0.0, 0.5, 0.0, 0.75], "alpha_mode": "BLEND"}],
+      "json": {"/asset/extras/source/format": "LWO3"}})
 
 
 # --- real files ---------------------------------------------------------------------------------

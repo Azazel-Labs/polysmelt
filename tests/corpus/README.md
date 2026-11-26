@@ -48,7 +48,7 @@ cases.
 | Gaussian splats (`.splat`) | 7 | 7 | none |
 | SPZ | 19 | 19 | none |
 | SOG | 29 | 28 | none |
-| MikuMikuDance (`mmd/`: PMX, PMD, VMD) | 21 | 21 | none |
+| MikuMikuDance (`mmd/`: PMX, PMD, VMD) | 22 | 22 | none |
 | DirectX (`x/`) | 48 | 42 | none |
 | MD2 | 13 | 13 | none |
 | MD3 | 15 | 15 | none |
@@ -66,10 +66,10 @@ cases.
 | Text point clouds (`xyz/`) | 21 | 21 | none |
 | E57 | 3 | 1 | none |
 | AMF | 23 | 21 | none |
-| LightWave (`lwo/`) | 18 | 15 | none |
+| LightWave (`lwo/`) | 23 | 20 | none |
 | AC3D (`ac/`) | 15 | 11 | none |
-| OGRE | 30 | 30 | none |
-| OpenFlight | 17 | 17 | none |
+| OGRE | 31 | 31 | none |
+| OpenFlight | 21 | 21 | none |
 | OpenGEX | 28 | 24 | none |
 | Irrlicht (`irr/`: IRRMesh and scenes) | 26 | 25 | none |
 | XGL (`xgl/`: XGL and ZGL) | 22 | 19 | none |
@@ -315,7 +315,8 @@ python tools/corpus/obj.py
 - **MikuMikuDance** (`mmd/`): PMX 2.0 with UTF-16 and UTF-8 text and index sizes 1, 2 and 4,
   and PMX 2.1 with every deform (BDEF1, BDEF2, BDEF4, SDEF, QDEF), additional UVs, vertex
   colors and a translucent material. Covers bones with IK and inherited rotation, vertex,
-  group and bone morphs (named targets), and PMD with its sphere maps, toon list, English
+  group and bone morphs (named targets), UV, material, flip and impulse morphs kept as data,
+  and PMD with its sphere maps, toon list, English
   names and controlled IK. VMD motions with keys out of order, straight and bent Bézier spans,
   two keys on one frame, morph and camera keys, and the old header. Errors: wrong magic,
   version, encoding and index size, huge and negative counts, and truncation.
@@ -380,7 +381,10 @@ python tools/corpus/obj.py
 - **LightWave**: LWO2 and LWOB cubes (left-handed points and clockwise polygons turned to
   glTF's), z mirrored, surfaces (diffuse, luminosity, transparency, two sides), two surfaces,
   UV maps with an image map, vertex color maps, layers with pivots and parents, lines and
-  points, concave polygons, morph maps and descriptions. Errors: other IFF files, no
+  points, concave polygons, morph maps and descriptions. Also an image sequence clip used
+  through a reference clip, cylindrical and spherical image maps, an LWOB planar texture with a
+  size and a center, and LWO3 surfaces
+  made of nodes (a Principled BSDF with an image, a Standard material). Errors: other IFF files, no
   polygons, indices past the points; three real assimp models.
 - **AC3D**: a cube of shaded quads, CRLF and a byte order mark, materials (color, emission,
   transparency), two-sided surfaces, `loc` and `rot` in nested objects, textures with `texrep`
@@ -391,7 +395,7 @@ python tools/corpus/obj.py
   type (half floats, doubles, packed colors, normalized and 10-10-10-2 integers), all six
   operations, poses and pose and morph animations, a skinned mesh with its binary skeleton, a
   skeleton alone, an XML mesh and skeleton linking to a binary one, a binary and XML twin with
-  the same expectations, and material scripts (imports, inheritance, blending, alpha
+  the same expectations, a morph animation in XML, and material scripts (imports, inheritance, blending, alpha
   rejection, normal maps, texture aliases, schemes). Poses are worked out in `ogre.py` with
   plain matrices. Errors: versions, the later v2 layout, unknown element and track types,
   buffers and offsets out of range, huge counts, broken XML and truncation.
@@ -401,8 +405,10 @@ python tools/corpus/obj.py
   multitexture layers with a UV list (a bump map as the normal texture), levels of detail, a
   switch, matrices and a long ID, instances and replication, external references with their
   own units and either file's materials, wireframes and light points, a mesh's vertex pool and
-  strips, fans, quadrilateral strips and polygons, light sources and an animated group.
-  Errors: files that aren't OpenFlight or have no geometry.
+  strips, fans, quadrilateral strips and polygons, light sources and an animated group. Also
+  subfaces, light point and indexed light point records in a light point system, a binary
+  separating plane, extension and attribute blocks skipped whole, and version 14.2's material
+  table. Errors: files that aren't OpenFlight or have no geometry.
 - **OpenGEX**: cubes Z up and Y up in other units, index arrays of each integer size with
   their own materials, triangle strips and clockwise fronts, lines and points, texture
   coordinates and colors, a textured material with a texture transform and a missing texture,

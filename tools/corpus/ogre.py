@@ -1124,6 +1124,31 @@ case(FMT, "morph_big_endian", {"grow.mesh": mesh_binary({
     ],
 })
 
+# The same morph animation in a mesh.xml: each keyframe lists a position (and here a normal) for every vertex.
+case(FMT, "morph_xml", {"grow.mesh.xml": mesh_xml({
+    "subs": [{"material": "M", "indices": QUAD_TRIS, "geometry": {"positions": QUAD, "normals": [(0, 0, 1)] * 4}}],
+    "animations": [{"name": "grow", "length": 1.0, "base": ("rest", 0.0), "tracks": [{"type": "morph", "target": 1,
+                                                                                       "keys": [
+        {"time": 0.0, "positions": QUAD},
+        {"time": 1.0, "positions": GROWN, "normals": [(0, 0, 1)] * 4},
+    ]}]}],
+})}, {
+    "spec": SPEC + ": a mesh.xml morph animation on a submesh's geometry, with its base animation: each keyframe's "
+                   "positions (and normals, when it has them) a morph target, blended key to key",
+    "source": SRC,
+    "triangles": 2,
+    "bounds": QUAD_BOUNDS,
+    "facts": {"submeshes": 1, "mesh_animations": 1, "morph_targets": 2, "missing_materials": ["M"]},
+    "document": {"morph_targets": 2, "animations": 1},
+    "json": {"/meshes/0/extras/targetNames": ["grow/0", "grow/1"],
+             "/animations/0/extras": {"length": 1.0, "baseAnimation": "rest", "baseKeyframeTime": 0.0}},
+    "poses": [
+        {"animation": 0, "time": 0.0, "bounds": QUAD_BOUNDS},
+        {"animation": 0, "time": 0.5, "bounds": {"min": [0, 0, 0], "max": [1.5, 1.5, 0]}},
+        {"animation": 0, "time": 1.0, "bounds": {"min": [0, 0, 0], "max": [2, 2, 0]}},
+    ],
+})
+
 # ---------------------------------------------------------------------------------------------------------------
 # Twins: one mesh written binary and as XML, with the same expectations.
 
