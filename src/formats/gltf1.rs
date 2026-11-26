@@ -6,6 +6,8 @@
 //! - An accessor's `byteStride` moves to a view of its own; float `JOINT`s become unsigned
 //!   shorts; a skin's `bindShapeMatrix` is baked into its inverse bind matrices; positions
 //!   without bounds get them.
+//! - `WEB3D_quantized_attributes`: an accessor with a `decodeMatrix` becomes floats, decoded.
+//!   `CESIUM_RTC`: its center is added to every root node's translation.
 //! - Semantics take 2.0's names (`JOINT` is `JOINTS_0`, `TEXCOORD` is `TEXCOORD_0`); others
 //!   take a leading underscore. A node's several meshes become one mesh of all their primitives,
 //!   and its `skeletons` and the skin's `jointNames` become the skin's joints.
@@ -56,6 +58,9 @@ pub(crate) struct Fixups {
     bind_shapes: Vec<(usize, [f32; 16])>,
     /// Position accessors without `min` and `max`.
     bounds: Vec<usize>,
+    /// Accessors of quantized values (`WEB3D_quantized_attributes`), and each one's decode
+    /// matrix: column-major, one row and column more than the accessor has components.
+    quantized: Vec<(usize, Vec<f64>)>,
 }
 
 /// One kind of 1.0 object: its entries in order, and each ID's index.
@@ -293,6 +298,24 @@ pub(crate) fn upgrade(mut v1: Map<String, Value>) -> Result<(Map<String, Value>,
             };
             o.insert("bufferView".into(), json!(view));
         }
+        if let Some(q) = a.get("extensions").and_then(|e| e.get("WEB3D_quantized_attributes")) {
+            let n = components(a.get("type").and_then(Value::as_str).unwrap_or("SCALAR"));
+            let m: Vec<f64> = q
+                .get("decodeMatrix")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_f64)
+                .collect();
+            ensure!(
+                n <= 4 && m.len() == (n + 1) * (n + 1),
+                Corrupt,
+                "glTF 1.0 accessor {id:?}: its WEB3D_quantized_attributes decodeMatrix has {} numbers, not {}",
+                m.len(),
+                (n + 1) * (n + 1)
+            );
+            fix.quantized.push((out_accessors.len(), m));
+        }
         out_accessors.push(Value::Object(o));
     }
 
@@ -460,6 +483,40 @@ pub(crate) fn upgrade(mut v1: Map<String, Value>) -> Result<(Map<String, Value>,
     } else if lights_used {
         for n in &mut out_nodes {
             n.as_object_mut().expect("a node").remove("extensions");
+        }
+    }
+    // CESIUM_RTC: positions are relative to a center, which every root node moves to.
+    if let Some(center) = root_ext.get("CESIUM_RTC").and_then(|e| e.get("center")) {
+        let c: Vec<f64> = center
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_f64)
+            .collect();
+        ensure!(
+            c.len() == 3 && c.iter().all(|x| x.is_finite()),
+            Corrupt,
+            "glTF 1.0 CESIUM_RTC center isn't three numbers"
+        );
+        let mut root = vec![true; out_nodes.len()];
+        for kids in &children {
+            for &k in kids {
+                root[k] = false;
+            }
+        }
+        for (n, _) in out_nodes.iter_mut().zip(root).filter(|(_, root)| *root) {
+            let at = |v: &Value, i: usize| v.get(i).and_then(Value::as_f64).unwrap_or(0.0);
+            if let Some(m) = n
+                .get_mut("matrix")
+                .filter(|m| m.as_array().is_some_and(|m| m.len() == 16))
+            {
+                for (k, x) in c.iter().enumerate() {
+                    m[12 + k] = json!(at(m, 12 + k) + x);
+                }
+            } else {
+                let t = n.get("translation").cloned().unwrap_or(Value::Null);
+                n["translation"] = json!([at(&t, 0) + c[0], at(&t, 1) + c[1], at(&t, 2) + c[2]]);
+            }
         }
     }
     if !root_ext.is_empty() {
@@ -644,7 +701,8 @@ fn primitive(p: &Value, accessors: &Kind, materials: &Kind, out_accessors: &mut 
         if s.starts_with("JOINTS_") && ctype == 5126 && !fix.joints.contains(&a) {
             fix.joints.push(a);
         }
-        if s.starts_with("COLOR_") && ctype != 5126 {
+        // Quantized values are decoded by their matrix, as the integers they are.
+        if s.starts_with("COLOR_") && ctype != 5126 && !fix.quantized.iter().any(|(q, _)| *q == a) {
             acc["normalized"] = json!(true);
         }
         if s == "POSITION" && (acc.get("min").is_none() || acc.get("max").is_none()) && !fix.bounds.contains(&a) {
@@ -823,6 +881,41 @@ fn light(id: &str, l: &Value) -> Option<Value> {
 
 /// Makes the changes the upgrade left for when the buffers are read.
 pub(crate) fn finish(doc: &mut Document, fix: &Fixups) -> Result<()> {
+    for (a, m) in &fix.quantized {
+        // The integers as they are, then the matrix: its last column is the offset.
+        let (n, raw) = doc.read_floats(*a)?;
+        let rows = n + 1;
+        ensure!(
+            m.len() == rows * rows,
+            Corrupt,
+            "glTF 1.0 accessor {a}: its decode matrix doesn't fit its type"
+        );
+        let mut min = vec![f32::INFINITY; n];
+        let mut max = vec![f32::NEG_INFINITY; n];
+        let mut bytes = Vec::with_capacity(raw.len() * 4);
+        for v in raw.chunks_exact(n) {
+            for r in 0..n {
+                let x: f64 = (0..n).map(|c| m[c * rows + r] * f64::from(v[c])).sum::<f64>() + m[n * rows + r];
+                let x = f32_of(x);
+                min[r] = min[r].min(x);
+                max[r] = max[r].max(x);
+                bytes.extend_from_slice(&x.to_le_bytes());
+            }
+        }
+        let view = push(doc, bytes);
+        let acc = doc.json_mut()["accessors"][*a].as_object_mut().expect("an accessor");
+        acc.insert("bufferView".into(), json!(view));
+        acc.insert("byteOffset".into(), json!(0));
+        acc.insert("componentType".into(), json!(5126));
+        acc.remove("normalized");
+        if min.iter().all(|x| x.is_finite()) {
+            acc.insert("min".into(), json!(min));
+            acc.insert("max".into(), json!(max));
+        } else {
+            acc.remove("min");
+            acc.remove("max");
+        }
+    }
     for &a in &fix.joints {
         let (floats, n) = floats(doc, a)?;
         let joints: Vec<u16> = floats
@@ -998,7 +1091,11 @@ mod tests {
             "scenes": { "s": { "nodes": ["n"] } },
             "scene": "s"
         });
-        let bytes = serde_json::to_vec(&gltf).unwrap();
+        load(&gltf)
+    }
+
+    fn load(gltf: &Value) -> Result<Document> {
+        let bytes = serde_json::to_vec(gltf).unwrap();
         crate::formats::load_bytes(
             &bytes,
             "x.gltf",
@@ -1006,6 +1103,93 @@ mod tests {
             &crate::assets::Memory::new(),
             crate::document::Keep::ALL,
         )
+    }
+
+    /// A glTF 1.0 file of one triangle with texture coordinates, both unsigned shorts over their whole range
+    /// with the decode matrices given.
+    fn quantized(position: &Value, uv: &Value) -> Result<Document> {
+        use base64::Engine as _;
+        let shorts: [u16; 15] = [0, 0, 0, 65535, 0, 0, 0, 65535, 32768, 0, 0, 65535, 0, 0, 65535];
+        let data: Vec<u8> = shorts.iter().flat_map(|s| s.to_le_bytes()).collect();
+        let uri = format!(
+            "data:application/octet-stream;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(&data)
+        );
+        let accessor = |offset: usize, kind: &str, matrix: &Value| {
+            json!({ "bufferView": "v", "byteOffset": offset, "byteStride": 0, "componentType": 5123, "count": 3,
+                "type": kind, "min": [0, 0, 0], "max": [65535, 65535, 65535],
+                "extensions": { "WEB3D_quantized_attributes": {
+                    "decodeMatrix": matrix, "decodedMin": [-1, -1, -1], "decodedMax": [1, 1, 1] } } })
+        };
+        load(&json!({
+            "asset": { "version": "1.0" },
+            "extensionsUsed": ["WEB3D_quantized_attributes"],
+            "buffers": { "b": { "byteLength": 30, "uri": uri } },
+            "bufferViews": { "v": { "buffer": "b", "byteOffset": 0, "byteLength": 30 } },
+            "accessors": { "p": accessor(0, "VEC3", position), "t": accessor(18, "VEC2", uv) },
+            "meshes": { "m": { "primitives": [{ "attributes": { "POSITION": "p", "TEXCOORD_0": "t" }, "mode": 4 }] } },
+            "nodes": { "n": { "meshes": ["m"] } },
+            "scenes": { "s": { "nodes": ["n"] } },
+            "scene": "s"
+        }))
+    }
+
+    #[test]
+    fn quantized_attributes_are_decoded_by_their_matrix() {
+        // The 16-bit range onto [-1, 1], as the extension's overview works it out: a scale down the diagonal
+        // and the minimum in the last column. Texture coordinates take a 3x3 matrix, onto [0, 2] and [1, 0].
+        let s = 2.0 / 65535.0;
+        let position = json!([s, 0, 0, 0, 0, s, 0, 0, 0, 0, s, 0, -1, -1, -1, 1]);
+        let uv = json!([s, 0, 0, 0, -1.0 / 65535.0, 0, 0, 1, 1]);
+        let doc = quantized(&position, &uv).unwrap();
+        let p = &doc.json()["accessors"][0];
+        assert_eq!(p["componentType"], 5126);
+        // The middle of the range is half a step past the middle of what it decodes to.
+        let half = 1.0 / 65535.0;
+        assert_eq!(
+            (&p["min"], &p["max"]),
+            (&json!([-1.0, -1.0, -1.0]), &json!([1.0, 1.0, half]))
+        );
+        let mesh = doc.flatten(crate::document::Pose::Rest).unwrap().unwrap();
+        let prim = &mesh.prims[0];
+        assert_eq!(prim.positions, [[-1., -1., -1.], [1., -1., -1.], [-1., 1., half]]);
+        assert_eq!(prim.uvs, [[0., 1.], [2., 1.], [0., 0.]]);
+        // A matrix of the wrong size for the accessor's type.
+        let err = quantized(&uv, &uv).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::Corrupt);
+        assert!(err.to_string().contains("decodeMatrix"), "{err}");
+    }
+
+    #[test]
+    fn positions_relative_to_a_center_move_to_it() {
+        // The center of the extension's example: a point on the equator, in meters from the Earth's center.
+        let mut gltf = json!({
+            "asset": { "version": "1.0" },
+            "extensionsUsed": ["CESIUM_RTC"],
+            "extensions": { "CESIUM_RTC": { "center": [6_378_137.0, 0.0, 0.0] } },
+            "meshes": {},
+            "nodes": {
+                "a": { "children": ["b"], "translation": [1, 2, 3] },
+                "b": { "translation": [1, 0, 0] },
+                "c": { "matrix": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 5, 0, 1] },
+                "d": {},
+            },
+            "scenes": { "s": { "nodes": ["a", "c", "d"] } },
+            "scene": "s"
+        });
+        let (out, _) = upgrade(gltf.as_object().unwrap().clone()).unwrap();
+        let nodes = &out["nodes"];
+        assert_eq!(nodes[0]["translation"], json!([6_378_138.0, 2.0, 3.0]));
+        assert_eq!(nodes[1]["translation"], json!([1, 0, 0]), "a child follows its parent");
+        assert_eq!(nodes[2]["matrix"][12], 6_378_137.0);
+        assert_eq!(nodes[2]["matrix"][13], 5.0);
+        assert_eq!(nodes[3]["translation"], json!([6_378_137.0, 0.0, 0.0]));
+        assert_eq!(
+            out["asset"]["extras"]["source"]["extensions"]["CESIUM_RTC"]["center"][0],
+            6_378_137.0
+        );
+        gltf["extensions"]["CESIUM_RTC"]["center"] = json!([0, 0]);
+        assert!(upgrade(gltf.as_object().unwrap().clone()).is_err());
     }
 
     #[test]
