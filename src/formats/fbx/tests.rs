@@ -1398,6 +1398,86 @@ fn cubic_curves_in_a_file_are_sampled_along_their_shape() {
 }
 
 #[test]
+fn a_component_without_a_curve_or_a_value_stays_at_rest() {
+    // Only X is animated, and the curve node gives no d|Y or d|Z: Y and Z hold the model's own.
+    let curve = "\tAnimationStack: 100, \"AnimStack::Take\", \"\" {\n\t}\n\tAnimationLayer: 101, \"AnimLayer::Base\", \"\" {\n\t}\n\tAnimationCurveNode: 102, \"AnimCurveNode::T\", \"\" {\n\t}\n\tAnimationCurve: 103, \"AnimCurve::\", \"\" {\n\t\tKeyTime: *2 {\n\t\t\ta: 0,46186158000\n\t\t}\n\t\tKeyValueFloat: *2 {\n\t\t\ta: 0,1\n\t\t}\n\t\tKeyAttrFlags: *1 {\n\t\t\ta: 4\n\t\t}\n\t\tKeyAttrDataFloat: *4 {\n\t\t\ta: 0,0,0,0\n\t\t}\n\t\tKeyAttrRefCount: *1 {\n\t\t\ta: 2\n\t\t}\n\t}\n";
+    let objects = model(20, "Mover", &prop("Lcl Translation", "5,6,7")) + curve;
+    let doc = read(&ascii(
+        &objects,
+        &links(
+            &[(20, 0), (101, 100), (102, 101)],
+            &[(102, 20, "Lcl Translation"), (103, 102, "d|X")],
+        ),
+    ));
+    let rest = vector(&node(&doc, "Mover")["translation"], &[0.0; 3]);
+    assert!(rest[1].abs() > 1e-3 && rest[2].abs() > 1e-3, "{rest:?}");
+    let animation = &doc.json()["animations"][0];
+    let sampler = animation["channels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["target"]["path"] == "translation")
+        .map(|c| &animation["samplers"][index(&c["sampler"])])
+        .unwrap();
+    let values = accessor(&doc, &sampler["output"]);
+    assert!(values.len() >= 6);
+    for v in values.chunks_exact(3) {
+        assert!(
+            (f64::from(v[1]) - rest[1]).abs() < 1e-6 && (f64::from(v[2]) - rest[2]).abs() < 1e-6,
+            "{v:?} {rest:?}"
+        );
+    }
+    assert!((values[0] - values[values.len() - 3]).abs() > 1e-6, "X moves");
+}
+
+#[test]
+fn transparency_is_the_factor_times_the_color() {
+    let alpha = |props: &str| number(&material(props, &[])["pbrMetallicRoughness"]["baseColorFactor"][3], 1.0);
+    let p = |name: &str, v: &str| prop(name, v);
+    // A factor of 1 over a black (or no) transparent color is opaque: the color is what is transparent.
+    assert_eq!(alpha(&p("TransparencyFactor", "1")), 1.0);
+    assert_eq!(
+        alpha(&(p("TransparencyFactor", "1") + &p("TransparentColor", "0,0,0"))),
+        1.0
+    );
+    assert_eq!(
+        alpha(&(p("TransparencyFactor", "0") + &p("TransparentColor", "1,1,1"))),
+        1.0
+    );
+    // The color scaled by the factor.
+    let a = alpha(&(p("TransparencyFactor", "1") + &p("TransparentColor", "0.25,0.25,0.25")));
+    assert!((a - 0.75).abs() < 1e-6, "{a}");
+    let a = alpha(&(p("TransparencyFactor", "0.5") + &p("TransparentColor", "1,1,1")));
+    assert!((a - 0.5).abs() < 1e-6, "{a}");
+    // A factor between the ends alone is the transparency, as the tools that write only it mean.
+    let a = alpha(&p("TransparencyFactor", "0.3"));
+    assert!((a - 0.7).abs() < 1e-6, "{a}");
+    // Opacity, where the material gives it, is the answer.
+    let a = alpha(&(p("Opacity", "0.4") + &p("TransparencyFactor", "1") + &p("TransparentColor", "1,1,1")));
+    assert!((a - 0.4).abs() < 1e-6, "{a}");
+}
+
+#[test]
+fn ascii_fbx_6_without_its_version_comment_is_refused_as_too_old() {
+    let old = ascii("", "")
+        .replace("; FBX 7.4.0 project file\n", "")
+        .replace("FBXVersion: 7400", "FBXVersion: 6100");
+    let e = crate::formats::load_bytes(old.as_bytes(), "t.fbx", "fbx", &crate::assets::Memory::new(), Keep::ALL)
+        .unwrap_err();
+    assert_eq!(e.kind(), crate::ErrorKind::Unsupported, "{e}");
+    let with = format!("; FBX 6.1.0 project file\n{old}");
+    let e = crate::formats::load_bytes(
+        with.as_bytes(),
+        "t.fbx",
+        "fbx",
+        &crate::assets::Memory::new(),
+        Keep::ALL,
+    )
+    .unwrap_err();
+    assert_eq!(e.kind(), crate::ErrorKind::Unsupported, "{e}");
+}
+
+#[test]
 fn layers_blend_by_their_weight_and_mode() {
     let steady = |v: f64| Animated {
         curves: [Some(Curve::linear(vec![0.0, 1.0], vec![v, v])), None, None],

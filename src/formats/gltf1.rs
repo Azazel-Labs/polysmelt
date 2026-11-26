@@ -346,7 +346,12 @@ pub(crate) fn upgrade(mut v1: Map<String, Value>) -> Result<(Map<String, Value>,
         if stack.is_empty() {
             stack = (0..nodes.list.len()).rev().collect();
         }
+        // Each node is looked at once: a node listed among its own descendants would go round forever.
+        let mut seen = vec![false; nodes.list.len()];
         while let Some(i) = stack.pop() {
+            if std::mem::replace(&mut seen[i], true) {
+                continue;
+            }
             if joint_name(i) == Some(name) {
                 return Some(i);
             }
@@ -1092,6 +1097,44 @@ mod tests {
             "scene": "s"
         });
         load(&gltf)
+    }
+
+    #[test]
+    fn a_node_that_is_its_own_child_ends_the_search_for_a_joint() {
+        use base64::Engine as _;
+        let floats: Vec<u8> = [0f32, 0., 0., 1., 0., 0., 0., 1., 0.]
+            .iter()
+            .flat_map(|f| f.to_le_bytes())
+            .collect();
+        let uri = format!(
+            "data:application/octet-stream;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(&floats)
+        );
+        let file = |children: Value| {
+            json!({
+                "asset": { "version": "1.0" },
+                "buffers": { "b": { "byteLength": 36, "uri": uri } },
+                "bufferViews": { "v": { "buffer": "b", "byteOffset": 0, "byteLength": 36 } },
+                "accessors": { "p": { "bufferView": "v", "byteOffset": 0, "componentType": 5126, "count": 3,
+                    "type": "VEC3", "min": [0, 0, 0], "max": [1, 1, 0] } },
+                "meshes": { "m": { "primitives": [{ "attributes": { "POSITION": "p" }, "mode": 4 }] } },
+                "skins": { "sk": { "jointNames": ["root", "missing"] } },
+                "nodes": {
+                    "n": { "meshes": ["m"], "skin": "sk", "skeletons": ["r"] },
+                    "r": { "jointName": "root", "children": children },
+                    "c": { "jointName": "leaf", "children": ["r"] }
+                },
+                "scenes": { "s": { "nodes": ["n", "r"] } },
+                "scene": "s"
+            })
+        };
+        // The joint `missing` is under no node, so the search runs through every node: it must end, with an error
+        // or without the skin.
+        for children in [json!(["r"]), json!(["c"])] {
+            if let Ok(doc) = load(&file(children)) {
+                let _ = doc.flatten(crate::document::Pose::Rest);
+            }
+        }
     }
 
     fn load(gltf: &Value) -> Result<Document> {

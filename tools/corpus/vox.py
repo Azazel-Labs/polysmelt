@@ -262,8 +262,8 @@ case(FMT, "matl_glass",
      {"m.vox": vox(size(1, 1, 1), xyzi([(0, 0, 0, 1)]), rgba(PAL),
                    matl(1, {"_type": "_glass", "_trans": "0.8", "_ior": "0.5", "_rough": "0.1"}))},
      {"spec": EXT + ": MATL _glass: _trans as KHR_materials_transmission, and _ior (the index less one) as "
-              "KHR_materials_ior",
-      "source": SRC, "materials": [{"roughness": 0.1}],
+              "KHR_materials_ior. Transmission is light let through, not coverage: the material is opaque to alpha",
+      "source": SRC, "materials": [{"roughness": 0.1, "alpha_mode": "OPAQUE", "color": lin(PAL[0])}],
       "json": {"/materials/0/extensions/KHR_materials_transmission/transmissionFactor": 0.8,
                "/materials/0/extensions/KHR_materials_ior/ior": 1.5}})
 

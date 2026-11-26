@@ -9,7 +9,6 @@ use serde_json::{Value, json};
 use super::Ctx;
 use super::material::{Attrs, IrrMaterial};
 use super::mesh::{self, Mesh};
-use crate::Result;
 use crate::assets::Assets;
 use crate::document::{Document, Keep};
 use crate::formats::graft::{self, Placed};
@@ -18,6 +17,7 @@ use crate::formats::xml::{El, Xml};
 use crate::mesh::srgb_to_linear;
 use crate::quat;
 use crate::vec3::{cross, dot, sub, unit};
+use crate::{ErrorKind, Result};
 
 /// The most keys a channel has.
 const MAX_KEYS: usize = 4096;
@@ -181,6 +181,8 @@ pub(super) fn load(text: &str, dir: &Path, limit: usize, assets: &dyn Assets, ke
                 let p = graft::graft(&mut doc, d, g.node, key.1.as_deref());
                 placed.insert(key, p);
             }
+            // A file past the limit is the scene past it: that isn't a file gone missing.
+            Err(e) if e.kind() == ErrorKind::LimitExceeded => return Err(e),
             Err(e) => missing.push(format!("{}: {e:#}", g.name)),
         }
         ensure!(
@@ -405,11 +407,19 @@ impl World<'_> {
             "irrmesh" | "xml" => {
                 let assets = self.assets;
                 let limit = self.limit;
-                let entry = self.files.entry(path.clone()).or_insert_with(|| {
-                    let bytes = assets.read(&path)?;
-                    mesh::parse(&crate::formats::xml::text(&bytes), limit).ok()
-                });
-                let Some(m) = entry.as_ref() else {
+                if !self.files.contains_key(&path) {
+                    let parsed = match assets.read(&path) {
+                        Some(bytes) => match mesh::parse(&crate::formats::xml::text(&bytes), limit) {
+                            Ok(m) => Some(m),
+                            // A mesh past the limit is the scene past it: that isn't a file gone missing.
+                            Err(e) if e.kind() == ErrorKind::LimitExceeded => return Err(e),
+                            Err(_) => None,
+                        },
+                        None => None,
+                    };
+                    self.files.insert(path.clone(), parsed);
+                }
+                let Some(m) = self.files.get(&path).and_then(Option::as_ref) else {
                     if sniffed == "xml" {
                         // Not an Irrlicht mesh: some other XML format.
                         self.grafts.push(Graft {

@@ -33,6 +33,10 @@
 //! (`Text`, `NurbsPatchSurface`): the asset's `extras.source.skipped` counts them.
 //! Colors are taken as sRGB. `UNIT length` scales the scene.
 //!
+//! A file is known by its start: `#VRML V2.0` or `#X3D V3` (or later) for the classic encoding,
+//! and an `<X3D>` root element for XML. Anything else is not this format (`UnknownFormat`), since
+//! any text at all would otherwise read as an empty scene. VRML 1.0 is refused as unsupported.
+//!
 //! The asset's `extras.source` records the encoding, the version and the length unit (meters
 //! unless `UNIT length` names another, a scene in another unit scaled to meters), +Y up as the
 //! convention, the first `WorldInfo`'s title and `info` strings (as comments), and the `META`
@@ -314,6 +318,11 @@ fn parse(bytes: &[u8]) -> Result<(Graph, Info)> {
         .unwrap_or(bytes.len());
     let bytes = &bytes[start..];
     if bytes.first() == Some(&b'<') {
+        ensure!(
+            xml_root(bytes) == Some(&b"X3D"[..]),
+            UnknownFormat,
+            "not an X3D file: its root element isn't <X3D>"
+        );
         let g = xml::parse(bytes);
         let info = Info {
             format: "X3D",
@@ -323,15 +332,22 @@ fn parse(bytes: &[u8]) -> Result<(Graph, Info)> {
         return Ok((g, info));
     }
     let line = bytes.split(|&b| b == b'\n' || b == b'\r').next().unwrap_or_default();
-    let mut words = line.split(u8::is_ascii_whitespace).filter(|w| !w.is_empty());
+    // Commas are white space in this syntax.
+    let mut words = line
+        .split(|b: &u8| b.is_ascii_whitespace() || *b == b',')
+        .filter(|w| !w.is_empty());
     let (head, version) = (words.next().unwrap_or_default(), words.next().unwrap_or_default());
     let version = String::from_utf8_lossy(version.strip_prefix(b"V").unwrap_or(version)).into_owned();
     let format = match head {
         b"#VRML" if version.starts_with('1') => bail!(Unsupported, "VRML 1.0 isn't supported, only VRML97 and X3D"),
-        b"#VRML" => "VRML97",
-        b"#X3D" => "X3D",
+        b"#VRML" if version.starts_with('2') => "VRML97",
+        b"#X3D" if version.starts_with(|c: char| c.is_ascii_digit()) => "X3D",
         _ if bytes.is_empty() => bail!(Empty, "an empty file"),
-        _ => "VRML97",
+        // Any text at all reads as a (likely empty) scene in this syntax: the header is what tells the format.
+        _ => bail!(
+            UnknownFormat,
+            "not a VRML97 or X3D file: it starts with neither `#VRML V2.0` nor `#X3D V3`"
+        ),
     };
     let mut g = classic::parse(bytes);
     if matches!(head, b"#VRML" | b"#X3D") {
@@ -388,6 +404,36 @@ pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
         roots = vec![c.push_node(json!({ "name": "RootNode", "children": roots, "scale": [u, u, u] }))];
     }
     Ok(c.finish(&roots, &info))
+}
+
+/// The name of an XML document's root element: the first tag that isn't a declaration, a processing
+/// instruction, a comment or a doctype.
+fn xml_root(mut d: &[u8]) -> Option<&[u8]> {
+    loop {
+        let at = d.iter().position(|&b| b == b'<')?;
+        d = &d[at..];
+        let skip = |d: &[u8], end: &[u8]| d.windows(end.len()).position(|w| w == end).map(|p| p + end.len());
+        if d.starts_with(b"<!--") {
+            d = &d[skip(d, b"-->")?..];
+        } else if d.starts_with(b"<?") {
+            d = &d[skip(d, b"?>")?..];
+        } else if d.starts_with(b"<!") {
+            // A doctype, which may hold declarations of its own in brackets.
+            let close = d.iter().position(|&b| b == b'>')?;
+            let end = match d[..close].iter().position(|&b| b == b'[') {
+                Some(open) => open + skip(&d[open..], b"]>")?,
+                None => close + 1,
+            };
+            d = &d[end..];
+        } else {
+            let name = &d[1..];
+            let len = name
+                .iter()
+                .position(|&b| b.is_ascii_whitespace() || b == b'>' || b == b'/')
+                .unwrap_or(name.len());
+            return Some(&name[..len]);
+        }
+    }
 }
 
 /// Walks scene graphs into a glTF document.
@@ -867,11 +913,23 @@ impl Convert<'_> {
             "DirectionalLight" => "directional",
             "PointLight" => "point",
             _ => {
-                let half = std::f64::consts::FRAC_PI_2;
-                let outer = graph.num(id, "cutOffAngle", half).clamp(1e-4, half);
-                let inner = graph
-                    .num(id, "beamWidth", std::f64::consts::FRAC_PI_4)
-                    .clamp(0.0, outer * 0.999);
+                // cutOffAngle is the cone's outer bound and beamWidth the inner cone of full intensity; a
+                // beam wider than the cut-off is the cut-off. The defaults went with the version: VRML97 and
+                // X3D up to 3.2 have a beam of pi/2 in a cut-off of pi/4 (so the whole cone is at full
+                // intensity), X3D 3.3 a beam of pi/4 in a cut-off of pi/2, and X3D 4 a beam of 3 pi/16.
+                use std::f64::consts::{FRAC_PI_2, FRAC_PI_4, PI};
+                let version = graph.version.as_str();
+                let number = |s: &str| s.parse::<u32>().ok();
+                let mut parts = version.split('.').map(number);
+                let (major, minor) = (parts.next().flatten().unwrap_or(2), parts.next().flatten().unwrap_or(0));
+                let (beam, cut_off) = match (major, minor) {
+                    (4.., _) => (PI * 3.0 / 16.0, FRAC_PI_2),
+                    (3, 3..) => (FRAC_PI_4, FRAC_PI_2),
+                    _ => (FRAC_PI_2, FRAC_PI_4),
+                };
+                let outer = graph.num(id, "cutOffAngle", cut_off).clamp(1e-4, FRAC_PI_2);
+                // glTF wants the inner angle under the outer one.
+                let inner = graph.num(id, "beamWidth", beam).clamp(0.0, outer * 0.999);
                 light["spot"] = json!({ "innerConeAngle": inner, "outerConeAngle": outer });
                 "spot"
             }

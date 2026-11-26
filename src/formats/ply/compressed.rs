@@ -22,7 +22,7 @@ use super::{Element, Format, Header, Ty, ordered, writer};
 use crate::document::Document;
 use crate::gaussian::{REST, Splats, degree_of, rotation};
 use crate::num::f32_of;
-use crate::source::SourceInfo;
+use crate::source::{Axis, Fact, Handedness, SourceInfo};
 use crate::{Context as _, ErrorKind, Result};
 
 /// The splats a chunk holds.
@@ -285,13 +285,17 @@ pub(super) fn load(data: &[u8], head: &Header, elements: &[Element], max: usize)
     if !skipped.is_empty() {
         source.insert("skipped".into(), json!(skipped));
     }
-    let info = SourceInfo {
+    // Right, down and forward by convention, which the file doesn't state: turned to glTF's.
+    let mut info = SourceInfo {
         format: Some("PLY".into()),
         version: Some(head.version.clone()).filter(|v| !v.is_empty()),
+        up_axis: Fact::Assumed(Axis::NegY),
+        handedness: Fact::Assumed(Handedness::Right),
         tool: head.comments.iter().find_map(|c| writer(c)),
         comments: head.comments.clone(),
         ..SourceInfo::default()
     };
+    info.converted.up_axis = true;
     Ok(s.document(&info, source, None, Map::new()))
 }
 
@@ -454,6 +458,8 @@ mod tests {
         assert_eq!(doc.facts["points"], 2);
         let info = doc.source_info();
         assert_eq!(info.format.as_deref(), Some("PLY"));
+        assert_eq!(info.up_axis, crate::source::Fact::Assumed(crate::source::Axis::NegY));
+        assert!(info.converted.up_axis && !info.converted.handedness);
         assert_eq!(info.tool.as_deref(), Some("SuperSplat 2.7.1"));
         let source = &doc.json()["asset"]["extras"]["source"];
         assert_eq!(source["compressed"], true);

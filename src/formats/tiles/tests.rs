@@ -518,21 +518,16 @@ fn point_colors_in_each_encoding_come_out_linear() {
         &[255, 0, 0, 255, 0, 0, 255, 255],
     );
     assert!(near(&both, &[1., 0., 0., 1., 0., 0., 1., 1.]), "{both:?}");
-    // One color for every point is the mesh's, not an attribute.
+    // One color for every point is an attribute like any other.
     let doc = load(
         &cloud(&p, &json!({ "CONSTANT_RGBA": [255, 255, 0, 51] }), &[], None, &[]),
         "t.pnts",
     )
     .unwrap();
     let mesh = &doc.json()["meshes"][0];
-    assert!(mesh["primitives"][0]["attributes"].get("COLOR_0").is_none());
-    let constant: Vec<f32> = mesh["extras"]["constant"]["COLOR_0"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|v| v.as_f64().unwrap() as f32)
-        .collect();
-    assert!(near(&constant, &[1., 1., 0., 0.2]), "{constant:?}");
+    assert!(mesh["extras"]["constant"].get("COLOR_0").is_none());
+    let (_, constant) = attribute(&doc, "COLOR_0");
+    assert!(near(&constant, &[1., 1., 0., 0.2, 1., 1., 0., 0.2]), "{constant:?}");
 }
 
 #[test]

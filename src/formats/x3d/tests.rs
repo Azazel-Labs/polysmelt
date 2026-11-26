@@ -294,6 +294,81 @@ Transform { translation 30 0 0 children Shape { geometry Cone { bottomRadius 1 h
 }
 
 #[test]
+fn a_spot_light_takes_its_versions_default_cone() {
+    use std::f64::consts::{FRAC_PI_2, FRAC_PI_4, PI};
+    let cone = |text: &str, name: &str| {
+        let doc = read(text, name);
+        let s = &doc.json()["extensions"]["KHR_lights_punctual"]["lights"][0]["spot"];
+        (
+            s["innerConeAngle"].as_f64().unwrap(),
+            s["outerConeAngle"].as_f64().unwrap(),
+        )
+    };
+    let near = |a: f64, b: f64| (a - b).abs() < 1e-3;
+    // VRML97 and X3D to 3.2: cutOffAngle pi/4, and beamWidth pi/2, which is cut to it.
+    for (text, name) in [
+        ("#VRML V2.0 utf8\nSpotLight {}\n", "a.wrl"),
+        ("#X3D V3.0 utf8\nPROFILE Interchange\nSpotLight {}\n", "a.x3dv"),
+        (
+            "<X3D profile='Interchange' version='3.2'><Scene><SpotLight/></Scene></X3D>",
+            "a.x3d",
+        ),
+    ] {
+        let (inner, outer) = cone(text, name);
+        assert!(
+            near(outer, FRAC_PI_4) && near(inner, FRAC_PI_4) && inner < outer,
+            "{name}: {inner} {outer}"
+        );
+    }
+    // X3D 3.3: beamWidth pi/4 in cutOffAngle pi/2. X3D 4: beamWidth 3 pi/16.
+    let (inner, outer) = cone("#X3D V3.3 utf8\nPROFILE Interchange\nSpotLight {}\n", "a.x3dv");
+    assert!(near(outer, FRAC_PI_2) && near(inner, FRAC_PI_4), "{inner} {outer}");
+    let (inner, outer) = cone(
+        "<X3D profile='Interchange' version='4.0'><Scene><SpotLight/></Scene></X3D>",
+        "a.x3d",
+    );
+    assert!(
+        near(outer, FRAC_PI_2) && near(inner, PI * 3.0 / 16.0),
+        "{inner} {outer}"
+    );
+    // A beam wider than the cut-off is the cut-off.
+    let (inner, outer) = cone(
+        "#VRML V2.0 utf8\nSpotLight { cutOffAngle 0.5 beamWidth 1.2 }\n",
+        "a.wrl",
+    );
+    assert!(near(outer, 0.5) && near(inner, 0.5) && inner < outer, "{inner} {outer}");
+}
+
+#[test]
+fn text_without_a_header_or_root_is_not_x3d() {
+    for (text, name) in [
+        ("just some words\n", "a.wrl"),
+        ("Shape { geometry Box {} }\n", "a.wrl"),
+        ("just some words\n", "a.x3dv"),
+        ("<html><body>hello</body></html>", "a.x3d"),
+        ("<?xml version='1.0'?>\n<!-- a note -->\n<svg/>", "a.x3d"),
+        ("#VRML\n", "a.wrl"),
+    ] {
+        let e = read_in(text.as_bytes(), name, &Memory::new(), usize::MAX).unwrap_err();
+        assert_eq!(e.kind(), crate::ErrorKind::UnknownFormat, "{name}: {text}");
+    }
+    let e = read_in(b" \n", "a.wrl", &Memory::new(), usize::MAX).unwrap_err();
+    assert_eq!(e.kind(), crate::ErrorKind::Empty);
+    // The root after a declaration, a comment and a doctype, and the headers the formats give.
+    let xml = "<?xml version='1.0'?>\n<!-- a note -->\n<!DOCTYPE X3D PUBLIC \"ISO//Web3D//DTD X3D 3.0//EN\" \
+               \"http://www.web3d.org/specifications/x3d-3.0.dtd\">\n<X3D><Scene><Shape><Box/></Shape></Scene></X3D>";
+    assert_eq!(triangles(&read(xml, "a.x3d")), 12);
+    assert_eq!(
+        triangles(&read("#VRML V2.0 utf8\nShape { geometry Box {} }\n", "a.wrl")),
+        12
+    );
+    assert_eq!(
+        triangles(&read("#X3D V3.0 utf8\nShape { geometry Box {} }\n", "a.x3dv")),
+        12
+    );
+}
+
+#[test]
 fn cameras_lights_and_materials() {
     let text = r#"#VRML V2.0 utf8
 WorldInfo { title "Room" }

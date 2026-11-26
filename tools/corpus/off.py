@@ -77,6 +77,12 @@ case(FMT, "coff_vertex_colors", {"cube.off": text([[*v, *c] for v, c in zip(CUBE
      {"spec": SPEC + ": COFF, each vertex followed by an RGBA color of 0-255 integers", "source": SRC, **CUBE,
       "colors": True, "colors_include": [lin(c[:3]) for c in COLORS[:4]]})
 
+# Only the first vertex has a color: the others are white, not white in the first one's 0-255 scale.
+case(FMT, "vertex_colors_on_some", {"tri.off": text([(0, 0, 0, 255, 0, 0), (1, 0, 0), (0, 1, 0)], [[0, 1, 2]])},
+     {"spec": SPEC + ": a color of 0-255 integers after one vertex only; a vertex without one is white",
+      "source": SRC, "triangles": 1, "vertices": 3, "colors": True,
+      "colors_include": [[1.0, 0.0, 0.0, 1.0], [1.0, 1.0, 1.0, 1.0]]})
+
 FCOL = [(0.5, 0.25, 1.0), (1.0, 1.0, 1.0), (0.0, 0.0, 0.0), (0.2, 0.4, 0.6), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)]
 case(FMT, "face_colors_float", {"cube.off": text(CUBE_V, [(q, c) for q, c in zip(QUADS, FCOL)])},
      {"spec": SPEC + ": each face followed by an RGB color of 0-1 floats", "source": SRC, **CUBE, "colors": True,

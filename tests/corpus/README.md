@@ -30,22 +30,22 @@ cases.
 | Format | Cases | Generated | Blender 5.2 exports |
 | --- | --- | --- | --- |
 | STL | 29 | 27 | 2 |
-| PLY | 46 | 41 | 4 |
+| PLY | 47 | 42 | 4 |
 | VOX | 31 | 27 | none |
 | OBJ | 64 | 55 | 9 |
 | 3DS | 56 | 49 | none |
 | 3MF | 62 | 54 | none |
-| FBX | 134 | 116 | 18 |
+| FBX | 136 | 118 | 18 |
 | USD | 141 | 121 | 20 |
 | glTF | 102 | 69 | 15 |
 | SketchUp | 31 | 7 | none |
 | BVH | 42 | 41 | none |
 | COLLADA | 90 | 77 | none |
-| OFF | 25 | 23 | none |
+| OFF | 26 | 24 | none |
 | VRM | 7 | 7 | none |
-| X3D | 53 | 53 | none |
+| X3D | 55 | 55 | none |
 | DXF | 38 | 34 | none |
-| Gaussian splats (`.splat`) | 7 | 7 | none |
+| Gaussian splats (`.splat`) | 8 | 8 | none |
 | SPZ | 19 | 19 | none |
 | SOG | 29 | 28 | none |
 | MikuMikuDance (`mmd/`: PMX, PMD, VMD) | 22 | 22 | none |
@@ -55,8 +55,8 @@ cases.
 | MD5 | 14 | 13 | none |
 | IQM | 16 | 16 | none |
 | SMD | 11 | 9 | none |
-| MilkShape 3D | 14 | 12 | none |
-| Blitz3D | 12 | 11 | none |
+| MilkShape 3D | 15 | 13 | none |
+| Blitz3D | 13 | 12 | none |
 | ASF/AMC (`asf/`) | 26 | 26 | none |
 | C3D | 29 | 26 | none |
 | TRC | 19 | 19 | none |
@@ -377,8 +377,9 @@ writes what its version writes, so `blender_export.py` can differ under another 
   block, layers turned off or frozen, paper space, `$INSUNITS`, CRLF, bare CR and a byte order
   mark, skipped entities and truncation. Errors: empty files and files that aren't DXF.
 - **Gaussian splats** (`splat/`): the 32-byte `.splat` layout, its axes flipped to glTF's
-  and its base color and opacity drawn as point colors; trailing bytes, an empty file and a
-  splat at an infinite position. Also glTF files that already use `KHR_gaussian_splatting`:
+  and its base color and opacity drawn as point colors, and a splat at an infinite position.
+  Errors: files that aren't a whole number of splats long (trailing bytes, an empty file,
+  text). Also glTF files that already use `KHR_gaussian_splatting`:
   drawn in their base spherical harmonics' color in either color space, or in a COLOR_0
   they give.
 - **SPZ**: versions 1 to 3 (half-float and fixed-point positions, three-byte and

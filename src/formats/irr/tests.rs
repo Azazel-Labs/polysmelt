@@ -221,6 +221,28 @@ fn reads_a_scene_in_utf16() {
 }
 
 #[test]
+fn a_mesh_file_past_the_limit_fails_the_scene() {
+    let scene = |file: &str| {
+        format!(
+            "<?xml version=\"1.0\"?>\n<irr_scene>\n<node type=\"mesh\"><attributes><string name=\"Name\" \
+             value=\"m\" /><string name=\"Mesh\" value=\"{file}\" /></attributes></node>\n</irr_scene>"
+        )
+    };
+    let obj = "v 0 0 0\nv 1 0 0\nv 0 1 0\nv 1 1 0\nf 1 2 3\nf 2 4 3\nf 1 3 4\n";
+    let assets = Memory::new()
+        .with("quad.irrmesh", MESH.as_bytes())
+        .with("three.obj", obj.as_bytes());
+    let keep = Keep::ALL.with_max_triangles(2);
+    for file in ["quad.irrmesh", "three.obj"] {
+        let e = load_bytes(scene(file).as_bytes(), "s.irr", "irr", &assets, keep).unwrap_err();
+        assert_eq!(e.kind(), crate::ErrorKind::LimitExceeded, "{file}: {e}");
+        // Within the limit the same scene reads.
+        let doc = load_bytes(scene(file).as_bytes(), "s.irr", "irr", &assets, Keep::ALL).unwrap();
+        assert_eq!(doc.facts["triangles"], 3, "{file}");
+    }
+}
+
+#[test]
 fn keeps_to_the_limit() {
     let assets = Memory::new();
     let keep = Keep::ALL.with_max_triangles(2);

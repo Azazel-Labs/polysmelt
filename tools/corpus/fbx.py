@@ -669,10 +669,11 @@ cube_with("uvs_direct", "UVs ByPolygonVertex, Direct",
 cube_with("uvs_by_control_point", "UVs ByControlPoint, Direct: one per corner",
           [layer_el("LayerElementUV", "ByControlPoint", "Direct", "UV", [c for v in CUBE_V for c in (v[0], v[1])])],
           {"uvs": True, "vertices": 8, "uvs_include": [[0, 1], [1, 1], [1, 0], [0, 0]]})
-cube_with("uvs_second_layer_ignored", "two UV layers: the first is the one used",
+cube_with("uvs_second_layer_kept", "two UV layers: the first is TEXCOORD_0 and the second is kept as TEXCOORD_1",
           [layer_el("LayerElementUV", "ByPolygonVertex", "IndexToDirect", "UV", uv, "UVIndex", idx),
            layer_el("LayerElementUV", "ByPolygonVertex", "IndexToDirect", "UV", [0.25] * 8, "UVIndex", idx, typed=1)],
-          {"uvs": True, "uvs_include": [[0, 1], [1, 1], [1, 0], [0, 0]]})
+          {"uvs": True, "uvs_include": [[0, 1], [1, 1], [1, 0], [0, 0]],
+           "document": {"attributes": ["TEXCOORD_0", "TEXCOORD_1"]}})
 palette = [(1, 0, 0, 1), (0, 1, 0, 1), (0, 0, 1, 1), (1, 1, 1, 0.5), (0.5, 0.5, 0.5, 1), (1, 1, 0, 1)]
 lin = [[r(srgb_to_linear(c), 4) for c in p[:3]] + [p[3]] for p in palette]
 cube_with("vertex_colors_by_polygon_vertex", "LayerElementColor ByPolygonVertex, IndexToDirect (sRGB values)",
@@ -719,6 +720,16 @@ mat_case("material_opacity", "Opacity 0.25: alpha 0.25, blended",
 mat_case("material_transparency_factor", "TransparencyFactor 0.6 without Opacity: alpha 0.4",
          [material_node(100, "Smoke", DiffuseColor=(0.5, 0.5, 0.5), TransparencyFactor=0.6)],
          {"materials": [{"name": "Smoke", "color": lin3((0.5, 0.5, 0.5)) + [0.4], "alpha_mode": "BLEND"}]})
+mat_case("material_transparency_factor_of_black", "TransparencyFactor 1 scaling a black TransparentColor, as Maya "
+         "writes an opaque material: the transparency is the color times the factor, so nothing, and it is opaque",
+         [material_node(100, "Solid", DiffuseColor=(0.5, 0.5, 0.5), TransparentColor=(0.0, 0.0, 0.0),
+                        TransparencyFactor=1.0)],
+         {"materials": [{"name": "Solid", "color": lin3((0.5, 0.5, 0.5)) + [1], "alpha_mode": "OPAQUE"}]})
+mat_case("material_transparent_color", "TransparentColor 0.25 gray with TransparencyFactor 1: the color times the "
+         "factor is the transparency, so alpha 0.75",
+         [material_node(100, "Tint", DiffuseColor=(0.5, 0.5, 0.5), TransparentColor=(0.25, 0.25, 0.25),
+                        TransparencyFactor=1.0)],
+         {"materials": [{"name": "Tint", "color": lin3((0.5, 0.5, 0.5)) + [0.75], "alpha_mode": "BLEND"}]})
 mat_case("material_emissive", "EmissiveColor scaled by EmissiveFactor",
          [material_node(100, "Lamp", DiffuseColor=(1, 1, 1), EmissiveColor=(1.0, 0.5, 0.0), EmissiveFactor=0.5)],
          {"materials": [{"name": "Lamp", "emissive": [r(0.5 * srgb_to_linear(c), 4) for c in (1.0, 0.5, 0.0)]}]})

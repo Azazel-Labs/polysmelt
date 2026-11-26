@@ -530,11 +530,15 @@ CameraObject $cam {
 }
 """ + triangle("t")
 case(FMT, "lights_and_camera", {"lights.ogex": text},
-     {"spec": SPEC + ": an infinite light, a point light and a camera", "source": SRC, "triangles": 1,
+     {"spec": SPEC + ": an infinite light, a point light and a camera; the camera's fov is its horizontal field "
+      "of view, 1 radian, which across the 16:9 frame assumed for it is 2 atan(tan(0.5) 9/16) up and down",
+      "source": SRC, "triangles": 1,
       "document": {"lights": 2, "cameras": 1, "node_names": ["Sun", "Eye"]},
       "json": {"/extensions/KHR_lights_punctual/lights/0/type": "directional",
                "/extensions/KHR_lights_punctual/lights/0/color": [1.0, 0.5, 0.25],
                "/extensions/KHR_lights_punctual/lights/1/type": "point",
+               "/cameras/0/perspective/yfov": round(2 * math.atan(math.tan(0.5) * 9 / 16), 6),
+               "/cameras/0/perspective/aspectRatio": round(16 / 9, 6),
                "/cameras/0/perspective/znear": 0.5, "/cameras/0/perspective/zfar": 50.0}})
 
 # A file of objects with no nodes: each is placed under the root by itself.

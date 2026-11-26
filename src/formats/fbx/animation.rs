@@ -745,26 +745,33 @@ impl Reader<'_, '_, '_> {
             layers: Vec::new(),
         };
         for (k, cn) in nodes {
-            let Some(mut a) = self.animated(cn, components) else {
-                continue;
-            };
-            if let Some(order) = order {
-                a.unwrap_rotation(order);
-            }
             let l = layers[k];
             let blend = match (l.additive, is_scale && l.multiply_scale) {
                 (false, _) => Blend::Override,
                 (true, true) => Blend::Multiply,
                 (true, false) => Blend::Add,
             };
+            // A component the curve node says nothing of stays as it is at rest: the rest value where the
+            // layer sets the property, and what changes nothing where it adds to it or multiplies it.
+            let unsaid = match blend {
+                Blend::Override => rest,
+                Blend::Add => [0.0; 3],
+                Blend::Multiply => [1.0; 3],
+            };
+            let Some(mut a) = self.animated(cn, components, unsaid) else {
+                continue;
+            };
+            if let Some(order) = order {
+                a.unwrap_rotation(order);
+            }
             out.layers.push((blend, l.weight, a));
         }
         (!out.layers.is_empty()).then_some(out)
     }
 
     /// A curve node's curves for its components (`d|X`, ...; "" for none), with its own values where a component
-    /// has no curve.
-    fn animated(&self, cn: i64, components: [&str; 3]) -> Option<Animated> {
+    /// has no curve, and `unsaid`'s where it gives no value either.
+    fn animated(&self, cn: i64, components: [&str; 3], unsaid: [f64; 3]) -> Option<Animated> {
         let p = self.objs.props(cn);
         let curves = components.map(|c| {
             if c.is_empty() {
@@ -776,7 +783,7 @@ impl Reader<'_, '_, '_> {
         if curves.iter().all(Option::is_none) {
             return None;
         }
-        let fixed = components.map(|c| scalar(&p, c).unwrap_or(0.0));
+        let fixed = std::array::from_fn(|k| scalar(&p, components[k]).unwrap_or(unsaid[k]));
         Some(Animated { curves, fixed })
     }
 

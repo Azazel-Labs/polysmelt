@@ -73,14 +73,18 @@ case(FMT, "colors", {"scene.splat": data},
                                                            "colorSpace": "srgb_rec709_display"},
                "/meshes/0/primitives/0/attributes/SH_DEGREE_1_COEF_0": None}})
 
+# The format has no header: a whole number of 32-byte splats, and at least one, is all that tells a file.
 case(FMT, "trailing_bytes", {"scene.splat": data + b"\x01\x02\x03\x04\x05"},
-     {"spec": SPEC + ": bytes past the last whole splat are counted and ignored", "source": SRC,
-      "triangles": 0, "points": 3, "facts": {"points": 3, "splats": 3},
-      "document": {"source": {"trailingBytes": 5}}})
+     {"spec": SPEC + ": a file that isn't a whole number of splats long isn't one", "source": SRC,
+      "error": "not a .splat file", "error_kind": "UnknownFormat"})
 
 case(FMT, "empty", {"scene.splat": b""},
-     {"spec": SPEC + ": an empty file holds no splats", "source": SRC, "no_mesh": True,
-      "facts": {"points": 0, "splats": 0}})
+     {"spec": SPEC + ": an empty file holds no splat, so nothing says it is one", "source": SRC,
+      "error": "not a .splat file", "error_kind": "UnknownFormat"})
+
+case(FMT, "not_splat", {"scene.splat": b"These are words, not gaussian splats.\n"},
+     {"spec": SPEC + ": text of a length that isn't a whole number of splats", "source": SRC,
+      "error": "not a .splat file", "error_kind": "UnknownFormat"})
 
 # A splat at an infinite position can't be drawn; the others stay.
 broken = splat([math.inf, 0, 0], [0.1, 0.1, 0.1], [1, 2, 3, 4], [255, 128, 128, 128])

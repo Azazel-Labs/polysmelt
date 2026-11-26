@@ -752,6 +752,12 @@ fn track<const N: usize>(b: &[u8]) -> Vec<Key<N>> {
         }
         #[allow(clippy::cast_possible_wrap, reason = "frames are signed in the file")]
         let frame = frame as i32;
+        // A key whose value isn't a number places nothing: it is left out, and the track runs through the
+        // keys beside it. Spline parameters that aren't numbers are the default, 0.
+        if value.iter().any(|v| !v.is_finite()) {
+            continue;
+        }
+        let tcb = tcb.map(|t| if t.is_finite() { t } else { 0.0 });
         keys.push(Key { frame, tcb, value });
     }
     keys
@@ -2352,6 +2358,46 @@ mod tests {
         got.sort_by_key(key);
         want.sort_by_key(key);
         assert!(got.iter().zip(&want).all(|(a, b)| close(*a, *b)), "{got:?} != {want:?}");
+    }
+
+    #[test]
+    fn keys_that_are_not_numbers_are_left_out() {
+        let tri = trimesh(&at([0., 0., 0.]), &[[0, 1, 2]], None);
+        let editor = object("Tri", &chunk(TRIMESH, &tri));
+        let kf = node(
+            0,
+            "Tri",
+            u16::MAX,
+            [0.; 3],
+            &[
+                track(
+                    POS_TRACK,
+                    &[
+                        (0, &[f32::NAN, 0., 0.]),
+                        (10, &[1., 2., 3.]),
+                        (20, &[4., f32::INFINITY, 6.]),
+                    ],
+                ),
+                track(ROT_TRACK, &[(0, &[f32::NAN, 0., 0., 1.])]),
+                track(SCL_TRACK, &[(0, &[f32::NAN, f32::NAN, f32::NAN]), (10, &[2., 2., 2.])]),
+            ],
+        );
+        let mut main = chunk(EDITOR, &editor);
+        main.extend(chunk(KEYFRAMER, &kf));
+        let doc = read("nan.3ds", &chunk(MAIN, &main)).unwrap();
+        // The first key that is a number is the rest pose (Z up turned Y up at the root above).
+        let node = doc.json()["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["name"] == "Tri")
+            .unwrap();
+        assert_eq!(node["translation"], json!([1.0, 2.0, 3.0]));
+        assert_eq!(node["scale"], json!([2.0, 2.0, 2.0]));
+        assert!(node.get("rotation").is_none());
+        let text = serde_json::to_string(doc.json()).unwrap();
+        assert!(!text.contains("null"), "{text}");
+        assert!(doc.flatten(Pose::Rest).unwrap().is_some());
     }
 
     #[test]

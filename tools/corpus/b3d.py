@@ -287,6 +287,29 @@ case(FMT, "skinned_keys", {
     ],
 })
 
+# The same skin on a body that is moved: the vertices are in the body's space, and the arm is under it, so
+# both stand where the body puts them.
+BODY_T = (10, 20, 30)
+placed = [mirror(tuple(a + b for a, b in zip(p, BODY_T))) for p in SK_V]
+case(FMT, "skinned_placed", {
+    "skinned_placed.b3d": b3d(
+        node("body", BODY_T, (1, 1, 1), (1, 0, 0, 0),
+             mesh(-1, vrts(SK_V), tris(-1, SK_F)),
+             node("arm", ARM_T, (1, 1, 1), (1, 0, 0, 0), bone(SK_W))),
+    ),
+}, {
+    "spec": f"{SPEC}: a skinned mesh on a node that is moved: its vertices are in that node's space, so the mesh "
+            "stands where the node does, and the bone under the node with it",
+    "source": SRC,
+    "triangles": 2,
+    "document": {"skins": 1, "joints": 2},
+    "rig": [
+        {"node": "body", "parent": None, "translation": mirror(BODY_T)},
+        {"node": "arm", "parent": "body", "translation": mirror(ARM_T)},
+    ],
+    "bounds": bounds(placed),
+})
+
 # A triangle naming a vertex past the end is dropped.
 case(FMT, "index_out_of_range", {
     "index_out_of_range.b3d": b3d(node("n", (0, 0, 0), (1, 1, 1), (1, 0, 0, 0),

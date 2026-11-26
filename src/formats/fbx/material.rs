@@ -403,6 +403,30 @@ pub(super) type TexField = fn(&mut Full) -> Option<&mut Tex>;
 /// one.
 type Read = (Full, Option<String>, Vec<(TexField, String)>);
 
+/// How transparent a material without an `Opacity` is, from 0 to 1. The FBX SDK's Lambert surface gives
+/// transparency as `TransparentColor` scaled by `TransparencyFactor` (the color is what is transparent, the
+/// factor how much of it counts), so the two are multiplied, the color as the mean of its channels: Maya
+/// writes the color with a factor of 1, 3ds Max a white color with the factor. A factor without a color is the
+/// transparency by itself, as the writers that give only it mean, except a factor of 1: the color it scales is
+/// black unless given, so that material is opaque, not invisible. This is the reading Blender's FBX importer
+/// and three.js's `FBXLoader` settle on too (a factor of exactly 1 or 0 decides nothing; the color does).
+fn transparency(p: &Props<'_>) -> f64 {
+    let factor = p.own_scalar("TransparencyFactor").map(|f| f.clamp(0.0, 1.0));
+    let color = p.own.get("TransparentColor").filter(|v| v.len() >= 3).map(|v| {
+        let sum: f64 = v[..3]
+            .iter()
+            .map(|c| num(c).filter(|x| x.is_finite()).unwrap_or(0.0).clamp(0.0, 1.0))
+            .sum();
+        sum / 3.0
+    });
+    match (factor, color) {
+        (Some(f), Some(c)) => f * c,
+        (None, Some(c)) => c,
+        (Some(f), None) if f < 1.0 => f,
+        _ => 0.0,
+    }
+}
+
 #[allow(clippy::too_many_lines, reason = "one property after another")]
 fn read_material(
     id: i64,
@@ -434,9 +458,7 @@ fn read_material(
     let d = to_linear(vec3(&p, "DiffuseColor", vec3(&p, "Diffuse", [0.8, 0.8, 0.8])));
     // Opacity and reflection are read only where the material sets them: the file's defaults for them are no
     // statement about this one.
-    let alpha = p
-        .own_scalar("Opacity")
-        .unwrap_or_else(|| 1.0 - p.own_scalar("TransparencyFactor").unwrap_or(0.0).clamp(0.0, 1.0));
+    let alpha = p.own_scalar("Opacity").unwrap_or_else(|| 1.0 - transparency(&p));
     let mut mat = Full::from(Material::plain(
         &name,
         [d[0], d[1], d[2], f32_of(alpha.clamp(0.0, 1.0))],

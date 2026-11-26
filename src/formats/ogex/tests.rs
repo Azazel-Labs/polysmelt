@@ -559,7 +559,11 @@ fn lights_and_cameras() {
     assert!(lights[0]["intensity"].as_f64().unwrap() > 3.0);
     assert_eq!(lights[1]["type"], "spot");
     let cam = &j["cameras"][0]["perspective"];
-    assert!(cam["yfov"].as_f64().unwrap() > 0.0);
+    // "fov" is the angle across: 0.97 across a 16:9 frame is 2 atan(tan(0.485) 9 / 16) up and down.
+    let (yfov, aspect) = (cam["yfov"].as_f64().unwrap(), cam["aspectRatio"].as_f64().unwrap());
+    assert!((aspect - 16.0 / 9.0).abs() < 1e-12);
+    assert!((yfov - 0.576_352_569).abs() < 1e-6, "{yfov}");
+    assert!((2.0 * ((yfov * 0.5).tan() * aspect).atan() - 0.97).abs() < 1e-6);
     assert_eq!(cam["znear"], json!(1.5));
     // A file of objects and no nodes places each under the root; one with nothing in it, or only an empty
     // geometry object, has no geometry.

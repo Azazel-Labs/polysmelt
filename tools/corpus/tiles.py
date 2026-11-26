@@ -949,15 +949,11 @@ def pnts_expect(drawn, reference):
     if reference.get("translation"):
         checks["/nodes/0/translation"] = reference["translation"]
     if drawn.colors:
-        first = drawn.colors[0]
-        if all(c == first for c in drawn.colors):
-            # A color every point has is the mesh's, not an attribute.
-            checks["/meshes/0/extras/constant/COLOR_0"] = rounded(first, 6)
-        else:
-            attributes.append("COLOR_0")
-            e["colors"] = True
-            e["colors_include"] = rounded([drawn.colors[0], drawn.colors[-1]], 6)
-            e["tolerance"] = 0.001
+        # A color is an attribute even when every point has the same one.
+        attributes.append("COLOR_0")
+        e["colors"] = True
+        e["colors_include"] = rounded([drawn.colors[0], drawn.colors[-1]], 6)
+        e["tolerance"] = 0.001
     if attributes:
         e["document"]["attributes"] = attributes
     if "batchLength" in reference:

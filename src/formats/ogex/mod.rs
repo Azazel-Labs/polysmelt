@@ -21,7 +21,9 @@
 //! specular color and power (no roughness or metalness) is read as glossy plastic, its
 //! specular color the specular extension's. Textures keep their coordinate set, addressing
 //! and transform. Lights become `KHR_lights_punctual` lights, their attenuation the spot cone
-//! and range; cameras glTF perspective cameras.
+//! and range; cameras glTF perspective cameras. A camera's `fov` (or `fovx`) is its horizontal
+//! field of view: with a `fovy` the two give the aspect ratio, and without one a 16:9 frame is
+//! assumed, the vertical angle worked out from it and the ratio written beside it.
 //!
 //! Animation tracks (of transforms and morph weights) become glTF animations, one for each
 //! clip. Tracks that map onto a node's translation, rotation or scale, with linear times, are
@@ -66,6 +68,8 @@ use math::{is_identity, place, trs};
 
 /// The structures that are nodes.
 const NODE_KINDS: [&str; 5] = ["Node", "BoneNode", "GeometryNode", "LightNode", "CameraNode"];
+/// The frame a camera is taken to have when the file gives only its horizontal field of view.
+const ASSUMED_ASPECT: f64 = 16.0 / 9.0;
 
 /// The units, directions and color space of a file.
 struct Metric {
@@ -852,9 +856,11 @@ fn camera(c: &mut Ctx<'_>, o: u32) -> Option<usize> {
                 p.insert("yfov".into(), json!(y));
             }
             (Some(x), None) => {
-                // The horizontal field of view alone: glTF wants the vertical, which needs the
-                // aspect ratio the file leaves to the viewer.
-                p.insert("yfov".into(), json!(x));
+                // The horizontal field of view alone ("fov" and "fovx" are both it): glTF wants the
+                // vertical, which needs the aspect ratio the file leaves to the viewer. A 16:9 frame
+                // is assumed and written with it, so the two together are the file's angle across.
+                p.insert("yfov".into(), json!(2.0 * ((x * 0.5).tan() / ASSUMED_ASPECT).atan()));
+                p.insert("aspectRatio".into(), json!(ASSUMED_ASPECT));
                 extras.insert("horizontalFov".into(), json!(x));
             }
             (None, None) => {

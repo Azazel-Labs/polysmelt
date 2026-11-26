@@ -4,6 +4,55 @@ Breaking changes are allowed in minor releases until 1.0.
 
 ## 0.20.0
 
+- OFF: in a text file whose colors are 0 to 255, a vertex with no color is white. It was
+  scaled as if its white were one of those colors, to near black with an alpha of 0.004.
+- PLY: a color channel of a 32-bit whole-number type (`int`, `uint`) holds 0 to 255, as the
+  writers that use the type write it, so 128 is mid-gray where it was read as full intensity.
+- PLY gaussian splats, plain and compressed, say what the reader does to them, as the other
+  splat readers do: `upAxis` `-Y` and right-handed, both assumed, and `converted` `upAxis`.
+- Point clouds (LAS, PCD, text clouds, E57, `.pnts`): a cloud whose points all have the same
+  color keeps `COLOR_0`. The color was moved to the mesh's `extras.constant`, where nothing
+  drew it.
+- LAS: `converted` lists `units` only when the cloud's unit across is known. With a vertical
+  unit alone (heights in feet under degrees, say) the heights are still made meters, but
+  `output_meters_per_unit` no longer says the whole cloud is in meters.
+- `.splat`: a file that is empty or isn't a whole number of 32-byte splats long is refused as
+  `UnknownFormat`. Any bytes at all used to load, as no splats or with `trailingBytes` counted.
+- X3D and VRML: a file must start as the formats say, with `#VRML V2.0` or `#X3D V3` (or
+  later) for the classic encoding or an `<X3D>` root element for XML; anything else is
+  `UnknownFormat`. Any text or XML used to load as an empty scene.
+- X3D and VRML: a `SpotLight` that leaves its cone to the defaults gets its version's. VRML97
+  and X3D up to 3.2 have a cut-off of Ï€/4 with a beam that fills it, X3D 3.3 a beam of Ï€/4
+  in a cut-off of Ï€/2, and X3D 4 a beam of 3Ï€/16; every version got 3.3's.
+- C3D and HTR: `converted` lists `upAxis` only when the file is turned. A file that is Y up
+  already said it too.
+- DirectX text: a value written as `nan`, `inf` or `infinity` (signed or not, `nan(ind)`
+  too) is a number, read as 0 like `1.#QNAN`. It was taken for a string, so every number
+  after it moved up one place and the mesh came out wrong. A signed infinity is 0 too.
+- glTF 1.0: looking for a skin's joint ends when a node is listed among its own descendants,
+  where it used to go round forever.
+- Blitz3D: a skinned mesh whose node is moved, turned or scaled keeps that transform: the
+  node stays where it is for the bones under it, and the mesh and skin hang from an unnamed
+  child of it. The transform was dropped, bones and all.
+- FBX: an animated component with no curve and no value on its curve node holds the node's
+  rest value (or adds nothing on an additive layer). It was animated to 0.
+- FBX: a material's transparency is `TransparentColor` scaled by `TransparencyFactor`, as
+  the FBX SDK defines it, when it gives no `Opacity`. A factor of 1 with a black or absent
+  color is opaque, where it made the material invisible; a factor below 1 without a color
+  is the transparency, as before.
+- FBX: an ASCII file older than FBX 7 that leaves out its first-line comment is `Unsupported`
+  by its header's `FBXVersion`, as with the comment; it was `Empty`.
+- 3DS: a keyframe whose value isn't a number is left out. It put `null` in the node's
+  translation, rotation or scale.
+- OpenGEX: a camera's `fov` is its horizontal field of view, as the format says. Given
+  alone it is turned into glTF's vertical one across an assumed 16:9 frame, with that
+  `aspectRatio` written beside it; it was written as `yfov` unchanged.
+- Irrlicht scenes: a mesh file the scene shows that is past `Keep::max_triangles` fails the
+  load as `LimitExceeded`. It was listed among the missing files and left out.
+- MilkShape 3D: a position key moves its joint in the joint's rest frame, turned by the rest
+  rotation before it is added to the rest position, as MilkShape plays it.
+- VOX: glass is `KHR_materials_transmission` alone, opaque to alpha. It was also blended by
+  an opacity from the same transparency, so a renderer with both thinned it twice.
 - `Document::flatten` scales a `KHR_materials_volume` thickness by the transform it bakes
   into the vertices, as the extension has a node scale it: a thickness of 2.27 under a node
   scaled by 0.25 is 0.5675 in the flat mesh, where it used to stay 2.27. The scale is the

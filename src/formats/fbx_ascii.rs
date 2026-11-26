@@ -98,6 +98,15 @@ pub(super) fn parse(data: &[u8]) -> Result<Tree<'_>> {
             Some(Attr::I32(v)) => u32::try_from(*v).ok(),
             _ => None,
         });
+    // A file older than FBX 7 that leaves the first line's comment out still says so in its header.
+    if let Some(v) = header {
+        ensure!(
+            v >= 7000,
+            Unsupported,
+            "this is FBX {}, older than FBX 7, which this reader and Blender cannot read",
+            v / 1000
+        );
+    }
     let version = header.or_else(|| match stated {
         Some((Some(major), minor)) => major
             .checked_mul(1000)?

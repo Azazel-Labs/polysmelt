@@ -428,7 +428,7 @@ fn parse(lex: &mut Lexer<'_>) -> Result<Vec<Obj>> {
                     stack[top - 1].kids.push(o);
                 }
             }
-            Tok::Word(w) if numeric(w) => word_value(&mut stack[top], w),
+            Tok::Word(w) if numeric(w) || not_finite(w) => word_value(&mut stack[top], w),
             Tok::Word(w) => {
                 // An object's header: a template name, then an optional name and GUID, then `{`.
                 let header = match lex.peek(0)? {
@@ -497,12 +497,14 @@ fn numeric(w: &[u8]) -> bool {
         .is_some_and(|&c| c.is_ascii_digit() || matches!(c, b'-' | b'+' | b'.'))
 }
 
-/// A bare word among an object's values: a number, or 0 for the forms some writers give a NaN or infinity
-/// (`-1.#IND00`, `1.#QNAN0`), or else a string.
+/// A bare word among an object's values: a number, or else a string. A value that isn't finite is a number
+/// too, read as 0 so the values after it stay in their places, in any of the forms writers give one: `nan`,
+/// `inf` and `infinity` (signed or not, in any case, `nan(ind)` too) and the older `-1.#IND00`, `1.#QNAN0` and
+/// `1.#INF00`.
 fn word_value(o: &mut Obj, w: &[u8]) {
     if numeric(w) {
         if let Some(x) = f64_from(w) {
-            o.nums.push(x);
+            o.nums.push(if x.is_finite() { x } else { 0.0 });
             return;
         }
         if w.contains(&b'#') {
@@ -510,7 +512,21 @@ fn word_value(o: &mut Obj, w: &[u8]) {
             return;
         }
     }
+    if not_finite(w) {
+        o.nums.push(0.0);
+        return;
+    }
     o.strs.push(scene::text(w));
+}
+
+/// Whether a word spells a NaN or an infinity as C and its kin print them.
+fn not_finite(w: &[u8]) -> bool {
+    let w = w.strip_prefix(b"-").or_else(|| w.strip_prefix(b"+")).unwrap_or(w);
+    let is = |s: &[u8]| w.eq_ignore_ascii_case(s);
+    is(b"nan")
+        || is(b"inf")
+        || is(b"infinity")
+        || (w.len() > 4 && w[..4].eq_ignore_ascii_case(b"nan(") && w.ends_with(b")"))
 }
 
 /// A whole number from 0 to `u32::MAX`.

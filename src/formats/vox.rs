@@ -12,7 +12,8 @@
 //! are kept, hidden with `KHR_node_visibility`. More than one transform frame is a step animation
 //! at [`FRAMES_PER_SECOND`]. Colors are sRGB (the default palette when the file has none), and
 //! `MATL` (or legacy `MATT`) metal, roughness, emission and glass carry over, glass's
-//! transparency as opacity too. The asset's `extras.source` keeps the palette, every material,
+//! transparency as `KHR_materials_transmission` alone: the material stays opaque to alpha, as the
+//! extension means it to be. The asset's `extras.source` keeps the palette, every material,
 //! the layers, render settings, cameras, notes and index map. Coordinates turn from Z-up to
 //! glTF's Y-up. The source info has Z up and right-handed, and the step animation's frame rate,
 //! all assumed; a voxel's size is unknown.
@@ -179,16 +180,11 @@ struct Matl {
     metal: f32,
     rough: Option<f32>,
     emit: f32,
+    /// Glass's or a blend's transparency (`_trans`, or the older `_alpha`). It is light let through, not
+    /// coverage: the material stays opaque to alpha, so a renderer with transmission doesn't thin it twice.
     transmission: Option<f32>,
     ior: Option<f32>,
-    /// Glass's or a blend's opacity, from the transparency it gives (`_trans`, or the older
-    /// `_alpha`), so a client without transmission still shows it see-through; never below
-    /// [`MIN_OPACITY`], so clear glass doesn't vanish there.
-    opacity: Option<f32>,
 }
-
-/// The least opacity glass is given.
-const MIN_OPACITY: f32 = 0.1;
 
 impl Matl {
     fn new(d: &Dict) -> Matl {
@@ -209,12 +205,12 @@ impl Matl {
             } else {
                 0.0
             },
-            transmission: glass.then(|| f("_trans").unwrap_or(if ty == "_glass" { 1.0 } else { 0.0 })),
+            transmission: glass.then(|| {
+                f("_trans")
+                    .or_else(|| f("_alpha"))
+                    .unwrap_or(if ty == "_glass" { 1.0 } else { 0.0 })
+            }),
             ior: (metal || glass).then(|| f("_ior")).flatten().map(|i| 1.0 + i),
-            opacity: glass
-                .then(|| f("_trans").or_else(|| f("_alpha")))
-                .flatten()
-                .map(|t| (1.0 - t.clamp(0.0, 1.0)).max(MIN_OPACITY)),
         }
     }
 
@@ -378,8 +374,7 @@ pub(crate) fn vox(data: &[u8], keep: Keep) -> Result<Document> {
             let rgba = palette[usize::from(c)];
             let [r, g, b] = [rgba[0], rgba[1], rgba[2]].map(|v| srgb_to_linear(f32::from(v) / 255.0));
             let x = matl.get(&u32::from(c));
-            let alpha = x.and_then(|x| x.opacity).unwrap_or(1.0);
-            let mut mat = Full::from(Material::plain(&format!("color_{c}"), [r, g, b, alpha]));
+            let mut mat = Full::from(Material::plain(&format!("color_{c}"), [r, g, b, 1.0]));
             if let Some(x) = x {
                 mat.metallic = x.metal;
                 if let Some(rough) = x.rough {
@@ -1634,10 +1629,10 @@ mod tests {
         d
     }
 
-    /// Glass takes its opacity from its transparency, a legacy `MATT` chunk's glass too, and a
+    /// Glass lets light through by transmission, a legacy `MATT` chunk's glass too, and a
     /// shape with a model per frame draws the first and keeps the second as a hidden child.
     #[test]
-    fn glass_opacity_and_frame_models() {
+    fn glass_transmission_and_frame_models() {
         let mut extra = chunk(b"SIZE", &[2i32, 2, 2].map(i32::to_le_bytes).concat());
         extra.extend(chunk(b"XYZI", &[2, 0, 0, 0, 0, 0, 0, 2, 1, 1, 1, 2]));
         let mut trn = 0u32.to_le_bytes().to_vec();
@@ -1672,10 +1667,18 @@ mod tests {
         assert_eq!(info.meters_per_unit, Fact::Unknown);
         assert!(info.converted.up_axis && !info.converted.units);
         let materials = doc.json()["materials"].as_array().unwrap();
-        let alpha = |m: &Value| m["pbrMetallicRoughness"]["baseColorFactor"][3].as_f64().unwrap();
-        assert!((alpha(&materials[0]) - 0.25).abs() < 1e-6, "{}", materials[0]);
-        assert_eq!(materials[0]["alphaMode"], "BLEND");
-        assert!((alpha(&materials[1]) - 0.5).abs() < 1e-6, "{}", materials[1]);
+        // Glass lets light through by transmission, and is opaque to alpha.
+        let alpha = |m: &Value| m["pbrMetallicRoughness"]["baseColorFactor"][3].as_f64().unwrap_or(1.0);
+        let through = |m: &Value| {
+            m["extensions"]["KHR_materials_transmission"]["transmissionFactor"]
+                .as_f64()
+                .unwrap()
+        };
+        for (m, t) in [(&materials[0], 0.75), (&materials[1], 0.5)] {
+            assert!((through(m) - t).abs() < 1e-6, "{m}");
+            assert!((alpha(m) - 1.0).abs() < 1e-6, "{m}");
+            assert!(m.get("alphaMode").is_none_or(|a| a == "OPAQUE"), "{m}");
+        }
         assert!(
             (materials[1]["pbrMetallicRoughness"]["roughnessFactor"]
                 .as_f64()

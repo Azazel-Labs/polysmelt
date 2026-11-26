@@ -890,7 +890,9 @@ fn read(src: &Source<'_>, h: &Header, keep: Keep) -> Result<Document> {
         georeference: Some(g),
         ..SourceInfo::default()
     };
-    info.converted.units = unit.iter().any(|&u| (u - 1.0).abs() > f64::EPSILON);
+    // Only a cloud whose unit across is known is in meters afterwards: heights alone turned to meters (under
+    // degrees, or a unit nothing names) leave the cloud's unit as unknown as it was.
+    info.converted.units = geo.horizontal.is_some() && unit.iter().any(|&u| (u - 1.0).abs() > f64::EPSILON);
     info.converted.up_axis = true;
     let Value::Object(source) = source else { unreachable!() };
     Ok(cloud.document(&info, source, Map::new()))
@@ -1376,6 +1378,21 @@ pub(crate) mod tests {
         let p = &m.prims[0].positions;
         // Single precision this far out is good to a centimeter or two.
         assert!((f64::from(p[1][0] - p[0][0]) - US_FOOT).abs() < 0.02);
+    }
+
+    #[test]
+    fn a_vertical_unit_alone_does_not_say_the_cloud_is_in_meters() {
+        // GeoTIFF keys: geographic (degrees across), heights in feet (9002).
+        let keys: Vec<u8> = [1u16, 1, 0, 2, 1024, 0, 1, 2, 4099, 0, 1, 9002]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let bytes = las(2, 0, 0, &pts(2), &[("LASF_Projection", 34735, keys)]);
+        let info = load_las(&bytes, Keep::ALL).unwrap().source_info();
+        assert_eq!(info.meters_per_unit, Fact::Unknown);
+        assert!(!info.converted.units, "degrees across aren't meters");
+        assert_eq!(info.output_meters_per_unit(), Fact::Unknown);
+        assert!((info.georeference.unwrap()["toMeters"][2].as_f64().unwrap() - 0.3048).abs() < 1e-12);
     }
 
     #[test]

@@ -221,21 +221,17 @@ impl Cloud {
             );
             attributes["NORMAL"] = json!(a);
         }
+        // A color stays an attribute even when every point has the same one: it is what draws them.
         if self.colors.len() == n {
-            let first = self.colors[0];
-            if self.colors.iter().all(|&c| c == first) {
-                constant.insert("COLOR_0".into(), json!(first.map(|c| f32::from(c) / 65535.0)));
-            } else {
-                let a = b.accessor(
-                    Part::u16(std::mem::take(&mut self.colors).into_flattened()),
-                    5123,
-                    n,
-                    "VEC4",
-                    Some(34962),
-                );
-                b.accessors[a].normalized = true;
-                attributes["COLOR_0"] = json!(a);
-            }
+            let a = b.accessor(
+                Part::u16(std::mem::take(&mut self.colors).into_flattened()),
+                5123,
+                n,
+                "VEC4",
+                Some(34962),
+            );
+            b.accessors[a].normalized = true;
+            attributes["COLOR_0"] = json!(a);
         }
         for c in std::mem::take(&mut self.columns) {
             let key = format!("_{}", c.name);
@@ -381,10 +377,17 @@ mod tests {
         let attrs = &mesh["primitives"][0]["attributes"];
         assert!(attrs.get("_INTENSITY").is_some());
         assert!(attrs.get("_CLASS").is_none());
-        assert!(attrs.get("COLOR_0").is_none());
+        // One color for every point is still the points' color.
+        assert!(attrs.get("COLOR_0").is_some());
+        assert!(mesh["extras"]["constant"].get("COLOR_0").is_none());
         assert_eq!(mesh["extras"]["constant"]["_CLASS"], 2.0);
         assert_eq!(doc.json()["nodes"][0]["translation"], json!([10.0, 0.0, 0.0]));
         let m = doc.flatten(crate::document::Pose::Rest).unwrap().unwrap();
         assert_eq!(m.prims.iter().map(|p| p.points.len()).sum::<usize>(), 2);
+        let c = m.prims[0].colors[0];
+        assert!(
+            (c[0] - 1.0 / 65535.0).abs() < 1e-7 && (c[3] - 4.0 / 65535.0).abs() < 1e-7,
+            "{c:?}"
+        );
     }
 }

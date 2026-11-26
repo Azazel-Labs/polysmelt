@@ -29,20 +29,33 @@
       "converted": [
         "upAxis"
       ]
-    }
+    },
+    "attributes": [
+      "COLOR_0"
+    ]
   },
+  "colors": true,
+  "colors_include": [
+    [
+      1.0,
+      1.0,
+      0.0,
+      0.2
+    ],
+    [
+      1.0,
+      1.0,
+      0.0,
+      0.2
+    ]
+  ],
+  "tolerance": 0.001,
   "json": {
     "/nodes/0/extras/tile": "pnts",
     "/nodes/0/translation": [
       1215012.8828876738,
       4081605.22126042,
       4736313.051199594
-    ],
-    "/meshes/0/extras/constant/COLOR_0": [
-      1.0,
-      1.0,
-      0.0,
-      0.2
     ]
   }
 }

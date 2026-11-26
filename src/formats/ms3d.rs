@@ -5,7 +5,8 @@
 //! materials (diffuse color with the transparency as alpha, emissive color, shininess as roughness, the texture as
 //! the color image), and the joints nodes posed by Euler angles in radians applied X, then Y, then Z. Each vertex
 //! moves with its joint, or with up to four joints by the weights the format's later versions add. Keyframes, in
-//! seconds, turn and move a joint from where it stands at rest. `MilkShape` is Y up and right-handed, as glTF is
+//! seconds, turn and move a joint from where it stands at rest, in its rest frame (a move is turned by the rest
+//! rotation). `MilkShape` is Y up and right-handed, as glTF is
 //! (assumed in the source info, as the format's convention); its units' length is unknown. The model's comment is
 //! the source info's `comments`; the groups', materials' and joints' comments are skipped.
 
@@ -20,7 +21,7 @@ use crate::bytes::Bin;
 use crate::document::{Document, Keep};
 use crate::images::Images;
 use crate::mesh::{Material, srgb_to_linear};
-use crate::num::u32_of;
+use crate::num::{f32_of, u32_of};
 use crate::quat;
 use crate::source::{Axis, Fact, Handedness};
 
@@ -236,7 +237,9 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         scene.add(node);
     }
 
-    // Keys: a joint's turn after its rest rotation, its move added to its rest position.
+    // Keys are in the joint's rest frame, as MilkShape's own viewer plays them: the joint's local matrix is its
+    // rest matrix times the key's (a turn, then a move). So a key's turn follows the rest rotation, and its move
+    // is turned by the rest rotation before it is added to the rest position.
     let mut channels = Vec::new();
     for (i, j) in m.joints.iter().enumerate() {
         let rest = euler(j.rotation);
@@ -257,7 +260,10 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
             let values = j
                 .moves
                 .iter()
-                .flat_map(|(_, v)| std::array::from_fn::<f32, 3, _>(|k| j.position[k] + v[k]))
+                .flat_map(|(_, v)| {
+                    let v = quat::rotate(rest, v.map(f64::from));
+                    std::array::from_fn::<f32, 3, _>(|k| f32_of(f64::from(j.position[k]) + v[k]))
+                })
                 .collect();
             channels.push(Channel {
                 node: i,
@@ -598,6 +604,11 @@ mod tests {
 
     /// A triangle bound to joint 0, a group and a material, a parent and a child joint, with keys.
     fn sample(extra_weights: bool) -> Vec<u8> {
+        sample_with(extra_weights, [0.0; 3], [0.0, 2.0, 0.0])
+    }
+
+    /// [`sample`] with the hip's rest rotation (Euler angles) and the move of its one position key.
+    fn sample_with(extra_weights: bool, hip_rest: [f32; 3], hip_move: [f32; 3]) -> Vec<u8> {
         let mut w = Writer::new();
         w.u16(3);
         for (p, j) in [([0.0, 0.0, 0.0], 0i8), ([1.0, 0.0, 0.0], 1), ([0.0, 1.0, 0.0], -1)] {
@@ -628,10 +639,10 @@ mod tests {
         w.f(&[24.0, 0.0]).i32(10);
         w.u16(2);
         w.out.push(0);
-        w.s("hip", 32).s("", 32).f(&[0.0; 3]).f(&[0.0, 1.0, 0.0]).u16(2).u16(1);
+        w.s("hip", 32).s("", 32).f(&hip_rest).f(&[0.0, 1.0, 0.0]).u16(2).u16(1);
         w.f(&[0.0, 0.0, 0.0, 0.0])
             .f(&[1.0, 0.0, 0.0, std::f32::consts::FRAC_PI_2]);
-        w.f(&[0.5, 0.0, 2.0, 0.0]);
+        w.f(&[0.5]).f(&hip_move);
         w.out.push(0);
         w.s("knee", 32)
             .s("hip", 32)
@@ -673,6 +684,31 @@ mod tests {
         assert_eq!(mesh.prims[0].positions.len(), 3);
         // Texture coordinates as they are: the file's origin is top-left.
         assert!(mesh.prims[0].uvs.iter().any(|uv| uv.iter().all(|&c| c.abs() < 1e-9)));
+    }
+
+    #[test]
+    fn a_position_key_moves_in_the_joints_rest_frame() {
+        let moved = |rest: [f32; 3], by: [f32; 3]| {
+            let doc = read(&sample_with(false, rest, by)).unwrap();
+            let rig = doc.rig().unwrap();
+            let hip = rig.find("hip").unwrap();
+            let c = rig.animations[0]
+                .channels
+                .iter()
+                .find(|c| c.node == hip && c.property == crate::rig::Property::Translation)
+                .unwrap();
+            [c.values[0], c.values[1], c.values[2]]
+        };
+        let near = |a: [f32; 3], b: [f32; 3]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-6);
+        // Unturned at rest, the move is added to the rest position (0, 1, 0) as it is.
+        assert!(near(moved([0.0; 3], [1.0, 0.0, 0.0]), [1.0, 1.0, 0.0]));
+        // Turned a quarter about Z at rest, the joint's own X is the parent's Y.
+        let quarter = std::f32::consts::FRAC_PI_2;
+        let got = moved([0.0, 0.0, quarter], [1.0, 0.0, 0.0]);
+        assert!(near(got, [0.0, 2.0, 0.0]), "{got:?}");
+        // And a quarter about X takes its Y to the parent's Z.
+        let got = moved([quarter, 0.0, 0.0], [0.0, 3.0, 0.0]);
+        assert!(near(got, [0.0, 1.0, 3.0]), "{got:?}");
     }
 
     #[test]

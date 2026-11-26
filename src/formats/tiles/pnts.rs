@@ -7,7 +7,7 @@
 //!   the node carries instead.
 //! - Colors are `RGBA`, `RGB`, `RGB565` or `CONSTANT_RGBA`, the first of them present, read as
 //!   sRGB and kept linear as the other point-cloud readers keep theirs. A color every point
-//!   shares is the mesh's `extras.constant.COLOR_0` rather than an attribute.
+//!   shares is `COLOR_0` like any other.
 //! - Normals are `NORMAL`, or `NORMAL_OCT16P` decoded, turned Y up.
 //! - `BATCH_ID` becomes the `_BATCHID` attribute, and the batch table is kept in the node's
 //!   extras with one value for each batch. Without batch ids the batch table is per point: its

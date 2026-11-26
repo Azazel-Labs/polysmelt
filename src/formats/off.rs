@@ -54,6 +54,9 @@ struct Model {
     normals: Vec<[f32; 3]>,
     /// As written, scaled to 0-1 once the whole file is read.
     colors: Vec<[f32; 4]>,
+    /// The vertices of an ASCII file that give no color while others do: they stay white whatever scale the
+    /// others' colors are in.
+    plain: Vec<usize>,
     uvs: Vec<[f32; 2]>,
     tris: Vec<[u32; 3]>,
     /// Each triangle's face color, an index into `face_colors`, when any face has one.
@@ -237,6 +240,12 @@ fn ascii(c: &mut Cursor<'_>, layout: Layout, leftover: Option<&[u8]>, limit: usi
     for col in &mut m.colors {
         *col = color(col, scale);
     }
+    // A vertex without a color isn't in the others' scale: it is white, as it was filled in.
+    for &v in &m.plain {
+        if let Some(col) = m.colors.get_mut(v) {
+            *col = [1.0; 4];
+        }
+    }
     let mut corners: Vec<u32> = Vec::new();
     let mut pts: Vec<[f32; 3]> = Vec::new();
     let mut local: Vec<[u32; 3]> = Vec::new();
@@ -324,11 +333,13 @@ fn vertex(v: &[f32], layout: Layout, m: &mut Model) {
     }
     if (layout.color && rest.len() >= 3) || (!layout.color && (rest.len() == 3 || rest.len() == 4)) {
         if m.colors.is_empty() {
+            m.plain.extend(0..m.positions.len() - 1);
             m.colors.resize(m.positions.len() - 1, [1.0; 4]);
         }
         let a = rest.get(3).copied().unwrap_or(f32::NAN);
         m.colors.push([rest[0], rest[1], rest[2], a]);
     } else if !m.colors.is_empty() {
+        m.plain.push(m.colors.len());
         m.colors.push([1.0; 4]);
     }
 }
@@ -728,6 +739,20 @@ mod tests {
         // Colors on a plain OFF's vertex lines, as floats.
         let plain = "OFF\n3 1 0\n0 0 0 1 0 0\n1 0 0 0 1 0\n0 1 0 0 0 1\n3 0 1 2\n";
         assert_eq!(mesh(plain.as_bytes()).prims[0].colors[0], [1.0, 0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn a_vertex_without_a_color_is_white_whatever_scale_the_others_use() {
+        let text = "OFF\n3 1 0\n0 0 0 255 0 0\n1 0 0\n0 1 0\n3 0 1 2\n";
+        let p = &mesh(text.as_bytes()).prims[0];
+        assert_eq!(p.colors[0], [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(p.colors[1], [1.0; 4]);
+        assert_eq!(p.colors[2], [1.0; 4]);
+        // The colored vertex last: the ones before it are filled in.
+        let text = "OFF\n3 1 0\n0 0 0\n1 0 0\n0 1 0 0 128 255 255\n3 0 1 2\n";
+        let p = &mesh(text.as_bytes()).prims[0];
+        assert_eq!(p.colors[0], [1.0; 4]);
+        assert_eq!(p.colors[2][1], srgb_to_linear(128.0 / 255.0));
     }
 
     #[test]

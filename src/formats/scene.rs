@@ -337,6 +337,10 @@ impl Scene {
     /// Turns the whole scene by unit quaternion `q`: each root node's transform and keys are turned, and what hangs
     /// from them follows. Skinned vertices follow their joints, so nothing else changes.
     pub fn rotate_roots(&mut self, q: [f32; 4]) {
+        // No turn at all (a source that is Y up already) converts nothing.
+        if q[0].abs() + q[1].abs() + q[2].abs() < 1e-6 {
+            return;
+        }
         self.info.converted.up_axis = true;
         let parents = self.parents();
         let qd = q.map(f64::from);

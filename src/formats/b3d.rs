@@ -6,7 +6,9 @@
 //! The nodes become glTF nodes, each triangle list a primitive with its brush as the material (color, alpha,
 //! shininess as roughness, the first texture as the color image, full-bright as unlit, two-sided), and the vertices'
 //! normals, colors (when the brush asks for them) and texture coordinate sets are kept. Bones make a skin over the
-//! mesh they weigh; keys, at frame numbers divided by the animation's frames per second, an animation. `Blitz3D` is Y
+//! mesh they weigh (a skinned mesh whose own node is placed hangs from an unnamed child of it, so the node keeps
+//! its transform for the bones under it); keys, at frame numbers divided by the animation's frames per second, an
+//! animation. `Blitz3D` is Y
 //! up and left-handed, so the scene is mirrored through the XY plane, and its quaternions turn row vectors, so each is
 //! read as its conjugate. In the source info the handedness is declared left (the format defines it) and converted,
 //! the up axis an assumed `+Y`, the units' length unknown; the frame rate is the `ANIM` chunk's, or an assumed 60
@@ -276,8 +278,9 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
             prims,
             ..SceneMesh::default()
         });
-        scene.nodes[ni].mesh = Some(index);
-        if !bones.is_empty() {
+        if bones.is_empty() {
+            scene.nodes[ni].mesh = Some(index);
+        } else {
             // Vertices are in the mesh node's space: each inverse bind takes them there first.
             let bind = |j: usize| -> M4 { scene::mul(&scene::invert(&world[j]), &world[ni]) };
             let mut joints = bones.clone();
@@ -289,7 +292,22 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
                 inverse_binds: joints.iter().map(|&j| bind(j)).collect(),
                 joints,
             });
-            scene.nodes[ni].skin = Some(scene.skins.len() - 1);
+            // glTF leaves a skinned mesh's own node out of where the mesh goes, and the node is written without
+            // its transform. A node that is placed must keep it for the bones under it, which are its children
+            // in this format, so its skinned mesh hangs from a node of its own below it.
+            let node = &scene.nodes[ni];
+            let r = node.rotation;
+            #[allow(clippy::float_cmp, reason = "only a node exactly at rest is left as it is")]
+            let placed = node.translation != [0.0; 3]
+                || node.scale != [1.0; 3]
+                || (r != [0.0, 0.0, 0.0, 1.0] && r != [0.0, 0.0, 0.0, -1.0]);
+            let holder = if placed {
+                scene.add(Node::named(String::new(), Some(ni)))
+            } else {
+                ni
+            };
+            scene.nodes[holder].mesh = Some(index);
+            scene.nodes[holder].skin = Some(scene.skins.len() - 1);
         }
     }
     if dropped > 0 {
@@ -680,6 +698,11 @@ mod tests {
 
     /// A triangle on a root node, weighed by a bone that turns a quarter about Y between frames 0 and 10.
     fn sample() -> Vec<u8> {
+        sample_at([0.0; 3], [0.0; 3])
+    }
+
+    /// [`sample`] with its root node and its bone moved to `root` and `bone`.
+    fn sample_at(root: [f32; 3], bone_at: [f32; 3]) -> Vec<u8> {
         let mut texs = b"skin.png\0".to_vec();
         texs.extend(i(&[1, 2]));
         texs.extend(f(&[0.0, 0.0, 1.0, 1.0, 0.0]));
@@ -714,8 +737,8 @@ mod tests {
         bone.extend(chunk(*b"KEYS", &keys));
         let mut kids = chunk(*b"MESH", &mesh);
         kids.extend(chunk(*b"ANIM", &[i(&[0, 10]), f(&[10.0])].concat()));
-        kids.extend(node_chunk("bone", [0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0], &bone));
-        let root = node_chunk("root", [0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0], &kids);
+        kids.extend(node_chunk("bone", bone_at, [1.0, 0.0, 0.0, 0.0], &bone));
+        let root = node_chunk("root", root, [1.0, 0.0, 0.0, 0.0], &kids);
         let mut body = i(&[1]);
         body.extend(chunk(*b"TEXS", &texs));
         body.extend(chunk(*b"BRUS", &brus));
@@ -725,6 +748,26 @@ mod tests {
 
     fn read(bytes: &[u8]) -> Result<Document> {
         load(super::super::Input::memory(bytes, "t.b3d"), &Memory::new(), Keep::ALL)
+    }
+
+    #[test]
+    fn a_skinned_mesh_keeps_its_nodes_place() {
+        // The vertices are in the mesh node's space, so the triangle (0,0,0) (1,0,0) (0,1,0) stands at the
+        // node's (10, 20, 30); Z is mirrored on the way in. The bone's own place moves nothing at rest.
+        let doc = read(&sample_at([10.0, 20.0, 30.0], [0.0, 2.0, 0.0])).unwrap();
+        let mesh = doc.flatten(crate::document::Pose::Rest).unwrap().unwrap();
+        let mut got = mesh.prims[0].positions.clone();
+        got.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(got, [[10.0, 20.0, -30.0], [10.0, 21.0, -30.0], [11.0, 20.0, -30.0]]);
+        let rig = doc.rig().unwrap();
+        let (root, bone) = (rig.find("root").unwrap(), rig.find("bone").unwrap());
+        assert_eq!(rig.nodes[root].rest.translation, [10.0, 20.0, -30.0]);
+        assert_eq!(rig.nodes[bone].rest.translation, [0.0, 2.0, 0.0]);
+        assert_eq!(rig.nodes[bone].parent, Some(root));
+        // A node that isn't placed still holds its skinned mesh itself.
+        let plain = read(&sample()).unwrap();
+        assert_eq!(plain.json()["nodes"].as_array().unwrap().len(), 2);
+        assert!(plain.json()["nodes"][0]["skin"].is_number());
     }
 
     #[test]

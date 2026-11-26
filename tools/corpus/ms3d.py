@@ -249,6 +249,27 @@ def skinned(t, vertices, weights):
     return out
 
 
+# A position key on a joint that is turned at rest: the joint's matrix is its rest matrix times the key's, so
+# the key's move is along the joint's own axes. Turned a quarter about Z, its X is its parent's Y.
+TURNED_ROT, TURNED_POS = [0.0, 0.0, math.pi / 2], [0.0, 1.0, 0.0]
+TURNED_PK = [(0.0, [0, 0, 0]), (1.0, [1, 0, 0])]
+turned_at_1 = (np.array(TURNED_POS) + euler(TURNED_ROT) @ np.array([1.0, 0.0, 0.0])).tolist()
+case(FMT, "position_key_in_rest_frame", {
+    "position_key_in_rest_frame.ms3d": build(
+        SKEL_V[:3], SKEL_T[:1], [("body", [0], -1)], [],
+        [("turned", "", TURNED_ROT, TURNED_POS, [], TURNED_PK)], fps=30.0, frames=31),
+}, {
+    "spec": f"{SPEC}: a position key on a joint turned a quarter about Z at rest moves it along its own X, its "
+            "parent's Y, as MilkShape plays it (the rest matrix times the key's)",
+    "source": SRC,
+    "triangles": 1,
+    "document": {"skins": 1, "joints": 1, "animations": 1, "channels": 1},
+    "rig": [
+        {"node": "turned", "parent": None, "translation": TURNED_POS, "rotation": quaternion(euler(TURNED_ROT))},
+        {"node": "turned", "time": 1.0, "translation": [r(c) for c in turned_at_1]},
+    ],
+})
+
 skel_w = [[(j, 1.0)] for _, j in SKEL_V]
 _, rr1, _ = pose(1.0)
 _, _, ar5 = pose(0.5)

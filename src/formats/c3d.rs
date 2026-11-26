@@ -719,6 +719,7 @@ mod tests {
         assert_eq!(info.meters_per_unit, Fact::Declared(1.0));
         assert_eq!(info.unit.as_deref(), Some("m"));
         assert!(!info.converted.units);
+        assert!(!info.converted.up_axis, "a file that is Y up already isn't turned");
         let rig = doc.rig().unwrap();
         assert!(near(&rig.nodes[1].rest.translation, &[100.0, 200.0, 300.0]));
         assert!(near(&rig.nodes[0].rest.rotation, &[0.0, 0.0, 0.0, 1.0]));

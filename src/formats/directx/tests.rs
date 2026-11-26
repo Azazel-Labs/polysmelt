@@ -210,6 +210,44 @@ fn reads_comments_templates_and_nan() {
 }
 
 #[test]
+fn values_that_are_not_finite_keep_their_place() {
+    // Each spelling stands where a texture coordinate goes: the ones after it must not move up.
+    for bad in [
+        "nan",
+        "-nan",
+        "NaN",
+        "inf",
+        "-inf",
+        "+Infinity",
+        "-nan(ind)",
+        "1.#QNAN",
+        "-1.#IND",
+        "1.#INF00",
+    ] {
+        let doc = read(&format!(
+            "xof 0303txt 0032\nFrame Box {{ Mesh {{ {CUBE}\n MeshTextureCoords {{ 8; {bad};0.25;, \
+             0.5;0.75;, 0;1;, 1;1;, 0;0;, 1;0;, 0;1;, 1;1;; }} }} }}"
+        ));
+        let m = mesh(&doc);
+        assert_eq!(m.triangles(), 12, "{bad}");
+        let uvs = &m.prims[0].uvs;
+        assert_eq!(uvs.len(), 8, "{bad}");
+        assert!(uvs.contains(&[0.0, 0.25]), "{bad}: {uvs:?}");
+        assert!(uvs.contains(&[0.5, 0.75]), "{bad}: {uvs:?}");
+    }
+    // Right before an object, where a word could be taken for its template's name.
+    let doc = read(&cube_file(
+        "MeshTextureCoords { 8; 0.5;0.75;, 0;1;, 1;1;, 0;0;, 1;0;, 0;1;, 1;1;, 0.25;nan;; } MeshMaterialList { 1; 1; 0;; Material Red { 1;0;0;1;; 1; 0;0;0;; inf;0;0;; } }",
+    ));
+    assert!(mesh(&doc).prims[0].uvs.contains(&[0.25, 0.0]));
+    // Among the positions too: the count that follows them is still the face count.
+    let text = "xof 0303txt 0032\nMesh { 3; nan;0;0;, 1;0;0;, 0;1;0;; 1; 3;0,1,2;; }";
+    let m = mesh(&read(text));
+    assert_eq!(m.triangles(), 1);
+    assert!(m.prims[0].positions.contains(&[0.0, 0.0, 0.0]));
+}
+
+#[test]
 fn a_number_never_starts_an_object() {
     // The face list's last index comes right before `MeshNormals {`: it's a value, not the object's template.
     let doc = read(&cube_file(

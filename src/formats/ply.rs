@@ -1,6 +1,7 @@
 //! PLY (the Stanford polygon file format), ASCII and binary in either byte order.
 //!
-//! Read: positions, normals (`nx` or `normal_x`), vertex colors (sRGB, as integers or floats),
+//! Read: positions, normals (`nx` or `normal_x`), vertex colors (sRGB, as integers or floats: an
+//! 8-bit channel is out of 255, a 16-bit one out of 65535, and a 32-bit whole number out of 255),
 //! texture coordinates under any of their usual names, polygons (triangulated in their plane) and
 //! triangle strips; `MeshLab`'s per-face texture coordinates and `comment TextureFile` (several, a
 //! face picking one by its `texnumber`, a material each); per-face colors. Elements the reader
@@ -27,7 +28,9 @@
 //! The header's comments are the source's comments, and one naming the program that wrote the
 //! file (`Created in Blender version 4.2`, `VCGLIB generated`) its tool; `obj_info` lines, the
 //! encoding and the elements skipped go in the asset's `extras.source` too. PLY names no units and
-//! no up axis, so both are unknown, and the geometry is kept as written.
+//! no up axis, so both are unknown, and the geometry is kept as written. Gaussian splats are the
+//! exception: their convention is -Y up and right-handed (assumed in the source info), and the
+//! flip is recorded as a converted up axis, as the other splat readers record theirs.
 
 use std::path::Path;
 
@@ -41,7 +44,7 @@ use crate::gaussian::{self, REST, Splats, degree_of, rotation, sigmoid};
 use crate::images::Images;
 use crate::mesh::{FastMap, Material, Mesh, Prim, quad, smooth_normals, srgb_to_linear, triangulate};
 use crate::num::{f32_of, u32_of};
-use crate::source::SourceInfo;
+use crate::source::{Axis, Fact, Handedness, SourceInfo};
 use crate::vec3;
 use crate::{Context as _, ErrorKind, Result};
 
@@ -90,12 +93,14 @@ impl Ty {
         }
     }
 
-    /// The value that means full intensity for a color channel of this type.
+    /// The value that means full intensity for a color channel of this type: the most an unsigned 8-bit or
+    /// 16-bit channel holds (a signed one read the same), and 1 for a float. A 32-bit whole number is 0 to 255
+    /// too, as the writers that give colors that type write them; more than 255 is full intensity.
     fn color_scale(self) -> f64 {
         match self {
-            Ty::U8 | Ty::I8 => 255.0,
+            Ty::U8 | Ty::I8 | Ty::I32 | Ty::U32 => 255.0,
             Ty::U16 | Ty::I16 => 65535.0,
-            _ => 1.0,
+            Ty::F32 | Ty::F64 => 1.0,
         }
     }
 }
@@ -830,6 +835,17 @@ pub(crate) fn ply(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<D
             }
             let n = splats.len();
             if let Some(mut prim) = splats.primitive(&mut b) {
+                // Right, down and forward by convention, which the file doesn't state: turned to glTF's.
+                let mut turned = SourceInfo {
+                    up_axis: Fact::Assumed(Axis::NegY),
+                    handedness: Fact::Assumed(Handedness::Right),
+                    ..SourceInfo::default()
+                };
+                turned.converted.up_axis = true;
+                if let Some(Value::Object(source)) = json.get_mut("asset").and_then(|a| a.pointer_mut("/extras/source"))
+                {
+                    turned.write(source);
+                }
                 let has_normals = v.nrm.iter().any(|&c| !is_zero(c));
                 others(&mut b, &mut prim["attributes"], v, n, has_normals, &names, "COLOR_1");
                 shared = Some(json!({ "POSITION": prim["attributes"]["POSITION"] }));
@@ -1674,6 +1690,43 @@ mod tests {
     }
 
     #[test]
+    fn whole_number_colors_scale_by_their_type() {
+        let file = |ty: &str, v: [u32; 3]| {
+            format!(
+                "ply\nformat ascii 1.0\nelement vertex 3\nproperty float x\nproperty float y\nproperty float z\n\
+                 property {ty} red\nproperty {ty} green\nproperty {ty} blue\nelement face 1\n\
+                 property list uchar int vertex_indices\nend_header\n0 0 0 {} {} {}\n1 0 0 {} {} {}\n\
+                 0 1 0 {} {} {}\n3 0 1 2\n",
+                v[0], v[1], v[2], v[0], v[1], v[2], v[0], v[1], v[2]
+            )
+        };
+        let half = srgb_to_linear(128.0 / 255.0);
+        // A 32-bit channel holds 0 to 255, as the writers that use one give it.
+        for ty in ["int", "uint", "int32", "uint32", "uchar", "short", "char"] {
+            let c = mesh(&file(ty, [128, 0, 255])).prims[0].colors[0];
+            let want = if ty == "short" {
+                srgb_to_linear(128.0 / 65535.0)
+            } else {
+                half
+            };
+            assert!((c[0] - want).abs() < 1e-6, "{ty}: {c:?}");
+            if ty != "short" {
+                assert!(
+                    c[1].abs() < 1e-9 && (c[2] - 1.0).abs() < 1e-9 && (c[3] - 1.0).abs() < 1e-9,
+                    "{ty}: {c:?}"
+                );
+            }
+        }
+        let c = mesh(&file("ushort", [65535, 0, 32768])).prims[0].colors[0];
+        assert!(
+            (c[0] - 1.0).abs() < 1e-9 && (c[2] - srgb_to_linear(32768.0 / 65535.0)).abs() < 1e-6,
+            "{c:?}"
+        );
+        // Past 255 a 32-bit channel is full.
+        assert_eq!(mesh(&file("int", [70000, 0, 0])).prims[0].colors[0][0], 1.0);
+    }
+
+    #[test]
     fn header_comments_and_the_writer_are_the_source_info() {
         let doc = read(
             "ply
@@ -1977,6 +2030,14 @@ end_header
         let names = attributes(&doc);
         assert!(!names.iter().any(|n| n == "NORMAL" || n.starts_with('_')), "{names:?}");
         assert!(names.iter().any(|n| n.ends_with("SH_DEGREE_3_COEF_6")), "{names:?}");
+        // Turned from the convention's Y down, as the other splat readers say they turn theirs.
+        let info = doc.source_info();
+        assert_eq!(info.up_axis, crate::source::Fact::Assumed(crate::source::Axis::NegY));
+        assert_eq!(
+            info.handedness,
+            crate::source::Fact::Assumed(crate::source::Handedness::Right)
+        );
+        assert!(info.converted.up_axis && !info.converted.handedness && !info.converted.units);
         // Right, down, forward to right, up, back.
         assert_eq!(floats(&doc, "POSITION")[3..6], [1.0, -2.0, -3.0]);
         let scale = floats(&doc, "KHR_gaussian_splatting:SCALE");

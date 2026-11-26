@@ -176,8 +176,13 @@ case(FMT, "wrl_viewpoint_lights",
      {"scene.wrl": wrl(shape(ifs()) + "\nViewpoint { position 0 0 10 fieldOfView 0.785398 description \"Front\" }\n"
                        "PointLight { location 0 5 0 color 1 1 1 intensity 1 }\n"
                        "DirectionalLight { direction 0 -1 0 }\nSpotLight { location 0 5 0 direction 0 -1 0 }")},
-     {"spec": VRML + ": a Viewpoint becomes a camera, the lights KHR_lights_punctual lights", "source": SRC, **CUBE,
-      "document": {"cameras": 1, "lights": 3}})
+     {"spec": VRML + ": a Viewpoint becomes a camera, the lights KHR_lights_punctual lights. The SpotLight has "
+      "the defaults: cutOffAngle 0.785398, the cone's outer angle, and beamWidth 1.570796, which is cut to it",
+      "source": SRC, **CUBE,
+      "document": {"cameras": 1, "lights": 3},
+      "json": {"/extensions/KHR_lights_punctual/lights/2/type": "spot",
+               "/extensions/KHR_lights_punctual/lights/2/spot/outerConeAngle": 0.785398,
+               "/extensions/KHR_lights_punctual/lights/2/spot/innerConeAngle": 0.784613}})
 
 case(FMT, "wrl_gzipped_as_wrz", {"cube.wrz": gzip.compress(wrl(shape(ifs())).encode(), mtime=0)},
      {"spec": VRML + ": a gzipped file (.wrz)", "source": SRC, **CUBE, "document": {"source": {"gzip": True}}})
@@ -437,6 +442,12 @@ case(FMT, "vrml1_refused", {"old.wrl": "#VRML V1.0 ascii\nSeparator { Cube {} }\
      {"spec": "VRML 1.0 (1995): not VRML97, refused", "source": SRC, "error": "VRML 1.0", "error_kind": "Unsupported"})
 case(FMT, "empty", {"empty.wrl": ""}, {"spec": VRML + ": an empty file", "source": SRC, "error": "empty",
                                        "error_kind": "Empty"})
+case(FMT, "wrl_without_header", {"words.wrl": "Shape { geometry Box {} }\n"},
+     {"spec": VRML + ": a file shall start with the header line #VRML V2.0 utf8; without it, it isn't one",
+      "source": SRC, "error": "not a VRML97 or X3D file", "error_kind": "UnknownFormat"})
+case(FMT, "x3d_other_xml", {"page.x3d": "<?xml version=\"1.0\"?>\n<html><body><Shape><Box/></Shape></body></html>\n"},
+     {"spec": XML + ": XML whose root element isn't X3D", "source": SRC, "error": "not an X3D file",
+      "error_kind": "UnknownFormat"})
 case(FMT, "broken_gzip", {"cut.wrz": gzip.compress(wrl(shape(ifs())).encode(), mtime=0)[:12]},
      {"spec": VRML + ": a gzipped file cut short", "source": SRC, "error": "gzip", "error_kind": "UnknownFormat"})
 case(FMT, "nothing_drawn", {"lights.x3d": x3d("<PointLight/><Viewpoint/>")},

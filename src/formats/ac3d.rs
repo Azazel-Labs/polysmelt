@@ -680,7 +680,6 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
     let mut b = Builder::default();
     let mut meshes: Vec<Value> = Vec::new();
     let mut mesh_of: Vec<Option<usize>> = vec![None; m.objs.len()];
-    let mut lines_or_points = false;
     let bad_surfs: usize = m.objs.iter().map(|o| o.bad_surfs).sum();
 
     // First, in order, each object's materials, the triangles it will make and the ear clipping it may spend.
@@ -762,7 +761,6 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         let o = &m.objs[*oi];
         let mut primitives = Vec::new();
         for prim in prims {
-            lines_or_points |= !prim.lines.is_empty() || !prim.points.is_empty();
             triangles += prim.indices.len() / 3;
             let material = prim.material;
             for mut j in b.primitives(prim) {
@@ -899,11 +897,9 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
     json.insert("nodes".into(), Value::Array(nodes));
     json.insert("meshes".into(), Value::Array(meshes));
     b.materials(&materials, images.list, &mut json);
-    let mut doc = b.finish(json, facts);
-    if lines_or_points {
-        doc.set_lines_and_points(true);
-    }
-    Ok(doc)
+    // Whether lines and points are drawn is the caller's choice (`Keep::lines_and_points`), which the load
+    // records on the document after this.
+    Ok(b.finish(json, facts))
 }
 
 #[cfg(test)]
@@ -1072,6 +1068,15 @@ mod tests {
             assert!(u[0] * v[1] - u[1] * v[0] > 0.0, "{c:?}");
         }
         assert_eq!(doc.json()["meshes"][1]["name"], "dots");
+        // Lines and points are drawn or not as the caller asks, whatever the file holds.
+        for on in [true, false] {
+            let keep = Keep::ALL.with_lines_and_points(on);
+            let doc = crate::formats::load_bytes(text.as_bytes(), "t.ac", "ac", &Memory::new(), keep).unwrap();
+            assert_eq!(doc.lines_and_points(), on);
+            let m = flat(&doc);
+            assert_eq!(m.prims.iter().any(|p| !p.lines.is_empty() || !p.points.is_empty()), on);
+            assert_eq!(m.triangles(), 2);
+        }
     }
 
     #[test]

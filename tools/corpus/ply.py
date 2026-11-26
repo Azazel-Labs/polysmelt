@@ -174,6 +174,14 @@ case(FMT, "vertex_colors_uchar",
       "colors_include": [[1, 0, 0, 1], [0, 1, 0, 1], [lin(128 / 255)] * 3 + [1]],
       "materials": [{"color": [1, 1, 1, 1]}]})
 
+RGB_I32 = [("int", "red"), ("int", "green"), ("int", "blue")]
+case(FMT, "vertex_colors_int",
+     {"tri.ply": ply("ascii", [("vertex", XYZ + RGB_I32, [TRI_V[0] + [255, 0, 0], TRI_V[1] + [0, 255, 0], TRI_V[2] + [128, 128, 128]]), TRI_F])},
+     {"spec": SPEC + ": red green blue as int, holding 0 to 255 as the writers that give colors that type "
+      "write them (sRGB)", "source": SRC, "triangles": 1, "colors": True,
+      "tolerance": 1e-3,
+      "colors_include": [[1, 0, 0, 1], [0, 1, 0, 1], [lin(128 / 255)] * 3 + [1]]})
+
 case(FMT, "vertex_colors_float_alpha",
      {"tri.ply": ply("binary_little_endian", [
          ("vertex", XYZ + [("float", "red"), ("float", "green"), ("float", "blue"), ("float", "alpha")],
