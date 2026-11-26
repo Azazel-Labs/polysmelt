@@ -145,7 +145,13 @@ draco-core = { version = "2.3", default-features = false, features = ["decoder",
 # The FBX reader's tests check its tree against this independent reader, and write FBX with it.
 fbxcel = { version = "0.9", features = ["tree", "writer"] }
 tempfile = "3"
-image = { version = "0.25", default-features = false, features = ["png"] }
+# PNG to read back what's written; the other formats, `psd` and `image_dds` as independent decoders the texture
+# decoders are compared with.
+image = { version = "0.25", default-features = false, features = ["png", "tga", "bmp", "gif", "tiff"] }
+psd = "0.3"
+image_dds = { version = "0.7", default-features = false, features = ["ddsfile"] }
+# The LZW encoder `image` writes GIF and TIFF with, for the files those comparisons decode.
+weezl = "0.1"
 # The glTF reader downstream tools render with: decompressed and decoded output must load in it
 # (`extras` for custom `_ATTRIBUTES`, as Farthing reads them).
 gltf = { version = "1.4", default-features = false, features = ["allow_empty_texture", "extras", "utils"] }

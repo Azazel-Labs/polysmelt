@@ -31,6 +31,9 @@ Breaking changes are allowed in minor releases until 1.0.
   `CESIUM_RTC`'s center is added to the root nodes. Both drew in the wrong place before.
 - The glTF corpus gains 18 Khronos sample models: Draco, quantized and meshopt variants are
   checked triangle for triangle against their uncompressed ones.
+- DDS textures: a BC3 alpha, BC4 or BC5 value between a block's two ends is the nearest
+  value, as Direct3D defines it, where it was rounded down. Such texels come out up to
+  1/255 brighter.
 
 ## 0.18.4
 

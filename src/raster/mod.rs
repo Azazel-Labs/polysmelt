@@ -216,6 +216,17 @@ fn masked(v: u32, mask: u32) -> u8 {
     scale((v & mask) >> mask.trailing_zeros(), mask.count_ones())
 }
 
+#[cfg(all(
+    test,
+    feature = "tga",
+    feature = "bmp",
+    feature = "gif",
+    feature = "tiff",
+    feature = "psd",
+    feature = "dds"
+))]
+mod against;
+
 #[cfg(test)]
 mod tests {
     use super::*;
