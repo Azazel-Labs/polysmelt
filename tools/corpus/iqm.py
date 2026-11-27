@@ -130,8 +130,8 @@ COLORS_SRGB = [(255, 128, 0, 255)] * 4
 HALF_COLORS = [(0.25, 0.5, 0.75)] * 4
 
 
-def skinned_rig(wave_rate):
-    """The skinned quad and its two animations, "wave" at `wave_rate` frames a second and "hold" at 0."""
+def skinned_rig(wave_rate, anims=None):
+    """The skinned quad and its two animations, "wave" at `wave_rate` frames a second and "hold" at 0, or `anims`."""
     text = Text()
     quad_name, skin_name = text("quad"), text("skin")
     return build(
@@ -153,7 +153,7 @@ def skinned_rig(wave_rate):
             (1 << 7, [0, 0, 0, 0, 0, 0, 1, 1, 1, 1], [0] * 7 + [0.5, 0, 0]),
             (1 << 1 | 1 << 5 | 1 << 6, [0, 1, 0, 0, 0, 0, 0, 1, 1, 1], [0, 1, 0, 0, 0, 1 / U16, 1 / U16, 0, 0, 0]),
         ],
-        anims=[("wave", 0, 3, wave_rate, 1), ("hold", 2, 1, 0.0, 0)],
+        anims=anims or [("wave", 0, 3, wave_rate, 1), ("hold", 2, 1, 0.0, 0)],
         frames=[[f] + arm_frame(f) for f in range(3)],
     )
 
@@ -203,7 +203,8 @@ case(FMT, "skinned_animated", {
         "/animations/0/name": "wave",
         "/animations/0/extras": {"loop": True},
         "/animations/1/name": "hold",
-        "/animations/1/extras": {"frameRate": 30.0},
+        # Its framerate is 0: the shared 30, assumed, said as the source info says it.
+        "/animations/1/extras": {"frameRate": 30.0, "assumed": ["frameRate"]},
         "/asset/extras/source/frameRate": 10.0,
         "/meshes/0/primitives/0/attributes/TANGENT": None,
     },
@@ -234,8 +235,8 @@ case(FMT, "skinned_animated", {
 })
 
 # The same rig with every animation's framerate 0: the specification's iqmanim gives a framerate and no default,
-# so frames are at the readers' shared 30 a second, assumed (frame 1 is a thirtieth of a second in), and the
-# animations, all at one rate, carry none of their own.
+# so frames are at the readers' shared 30 a second, assumed (frame 1 is a thirtieth of a second in). The animations,
+# all at one rate, carry none of their own: the source info's, marked assumed, is theirs.
 case(FMT, "animated_no_rate", {"rig.iqm": skinned_rig(0.0)}, {
     "spec": SPEC + ": animations whose framerate is 0, at the shared 30 frames a second",
     "source": SRC,
@@ -244,6 +245,7 @@ case(FMT, "animated_no_rate", {"rig.iqm": skinned_rig(0.0)}, {
     "json": {
         "/animations/0/extras": {"loop": True},
         "/animations/0/extras/frameRate": None,
+        "/animations/0/extras/assumed": None,
         "/animations/1/extras": None,
         "/asset/extras/source/frameRate": 30.0,
         "/asset/extras/source/assumed": ["frameRate"],
@@ -253,6 +255,27 @@ case(FMT, "animated_no_rate", {"rig.iqm": skinned_rig(0.0)}, {
         {"node": "arm", "time": 1 / 30, "translation": [0, 2, 0], "rotation": turned(90)},
     ],
 })
+
+# The first animation's framerate 0 and the second's 12: the file's rate is the first that is one, declared, and as
+# the rates differ each animation gives its own, the first the shared 30, marked assumed as the source info marks one.
+case(FMT, "one_rate_given_one_not",
+     {"rig.iqm": skinned_rig(None, anims=[("wave", 0, 3, 0.0, 0), ("hold", 2, 1, 12.0, 0)])}, {
+         "spec": SPEC + ": two animations, the first with a framerate of 0 (the shared 30, assumed) and the second "
+                        "at 12 frames a second",
+         "source": SRC,
+         "triangles": 2,
+         "document": {"animations": 2},
+         "json": {
+             "/animations/0/extras": {"frameRate": 30.0, "assumed": ["frameRate"]},
+             "/animations/1/extras": {"frameRate": 12.0},
+             "/asset/extras/source/frameRate": 12.0,
+             "/asset/extras/source/assumed": None,
+         },
+         "rig": [
+             {"node": "root", "keys": {"scale": [0, 1 / 30, 2 / 30]}},
+             {"node": "arm", "time": 1 / 30, "translation": [0, 2, 0], "rotation": turned(90)},
+         ],
+     })
 
 # No skeleton: two meshes over one set of arrays, positions as doubles, texture coordinates as 16-bit fractions,
 # 8-bit sRGB colors, a custom array skipped, a mesh with no triangles left out, and an unnamed mesh and material.

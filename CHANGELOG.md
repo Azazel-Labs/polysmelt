@@ -2,6 +2,22 @@
 
 Breaking changes are allowed in minor releases until 1.0.
 
+## Unreleased
+
+- OpenFlight animated groups play as the group record says. The last frame duration was taken as
+  the last frame's whole length; it is how much longer than the others the last frame of the last
+  loop is shown, and only when the loop count is finite. The loop count was ignored: a finite one
+  is now played out, every loop in the animation, and a loop count of 0 (forever) is played once.
+  A swing loop's frames now share its loop duration (2N - 1 frames in the first loop, 2N - 2 after,
+  not N), a swing repeating forever is one pass there and back, and a backward group shows its
+  last child at rest, where it starts. A group's node says in `extras.openflight.loopsPlayed` how
+  many loops its animation holds.
+- IQM: an animation whose `framerate` is 0, in a file whose animations' rates differ, says its
+  `extras.frameRate` of 30 is assumed (`extras.assumed: ["frameRate"]`), as the source info does.
+  This is the convention for any animation's own assumed rate (see docs/consistency.md).
+- USD conformance cases for the frame-rate rule (`timeCodesPerSecond`, then `framesPerSecond`,
+  then 24): each alone, both, a `timeCodesPerSecond` of 0, and neither.
+
 ## 0.22.0
 
 - A flattened `mesh::Prim` keeps up to 16 joints and weights a vertex, as documents do, instead

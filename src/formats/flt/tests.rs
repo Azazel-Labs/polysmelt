@@ -69,6 +69,16 @@ impl W {
         })
     }
 
+    /// An animated group with its record's `flags`, loop `count`, loop `duration` and `last` frame duration.
+    fn animated(&mut self, name: &str, flags: u32, count: i32, duration: f32, last: f32) -> &mut W {
+        self.node(2, 40, name, |r| {
+            put(r, 16, &flags.to_be_bytes());
+            put(r, 32, &count.to_be_bytes());
+            put(r, 36, &duration.to_be_bytes());
+            put(r, 40, &last.to_be_bytes());
+        })
+    }
+
     fn object(&mut self, name: &str, transparency: u16) -> &mut W {
         self.node(4, 24, name, |r| put(r, 18, &transparency.to_be_bytes()))
     }
@@ -795,4 +805,135 @@ fn a_face_with_a_corner_that_isnt_there_is_dropped_whole() {
     let doc = read(&w.bytes(), &Memory::new()).unwrap();
     assert_eq!(flat(&doc).triangles(), 2);
     assert_eq!(doc.json()["asset"]["extras"]["source"]["droppedGeometry"], 1);
+}
+
+/// Group flags: forward animation, swing, backward animation.
+const FORWARD: u32 = 0x8000_0000 >> 1;
+const SWING: u32 = 0x8000_0000 >> 2;
+const BACKWARD: u32 = 0x8000_0000 >> 6;
+
+/// A file of one animated group of `n` squares, child k `k + 1` wide, with the group record's values.
+fn sequence_file(n: usize, flags: u32, count: i32, duration: f32, last: f32) -> Vec<u8> {
+    let mut w = W::new(1640, 0);
+    let mut squares = Vec::new();
+    for k in 0..n {
+        #[allow(clippy::cast_precision_loss, reason = "a few squares")]
+        let s = (k + 1) as f64;
+        squares.extend(SQUARE.iter().map(|&(p, uv, nrm)| (p.map(|c| c * s), uv, nrm)));
+    }
+    let v = w.vertices(&squares);
+    w.push().animated("seq", flags, count, duration, last).push();
+    for k in 0..n {
+        let name = format!("c{k}");
+        w.group(&name).push().face(&name, &v[4 * k..4 * k + 4], |_| {}).pop();
+    }
+    w.pop().pop();
+    w.bytes()
+}
+
+/// The order of the children shown in animation 0, at each of its keys, and the key times.
+fn shown_in_turn(doc: &Document) -> (Vec<usize>, Vec<f32>) {
+    let rig = doc.rig().unwrap();
+    let a = &rig.animations[0];
+    let times = a.channels[0].times.clone();
+    let frames: Vec<usize> = (0..).map_while(|k| rig.find(&format!("frame{k}"))).collect();
+    let order = times
+        .iter()
+        .map(|&t| {
+            let pose = rig.pose(Some(0), t);
+            frames.iter().position(|&f| pose[f].scale[0] > 0.5).unwrap()
+        })
+        .collect();
+    (order, times)
+}
+
+fn close_times(got: &[f32], want: &[f32]) -> bool {
+    got.len() == want.len() && got.iter().zip(want).all(|(a, b)| (a - b).abs() < 1e-5)
+}
+
+#[test]
+fn animated_groups_play_their_loops_as_the_record_says() {
+    let read_one = |b: &[u8]| read(b, &Memory::new()).unwrap();
+    let loops_played = |doc: &Document| {
+        let nodes = doc.json()["nodes"].as_array().unwrap();
+        let seq = nodes.iter().find(|n| n["name"] == "seq").unwrap();
+        seq["extras"]["openflight"]["loopsPlayed"].as_u64()
+    };
+
+    // Two loops of three, a second a frame, the last of the last loop 1.5 seconds longer.
+    let doc = read_one(&sequence_file(3, FORWARD, 2, 3.0, 1.5));
+    let (order, times) = shown_in_turn(&doc);
+    assert_eq!(order, [0, 1, 2, 0, 1, 2, 2]);
+    assert!(close_times(&times, &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 7.5]), "{times:?}");
+    assert_eq!(loops_played(&doc), Some(2));
+    assert_eq!(doc.source_info().frame_rate, Fact::Unknown);
+
+    // Forever: one loop, the last frame duration not applicable.
+    let doc = read_one(&sequence_file(3, FORWARD, 0, 3.0, 2.0));
+    let (order, times) = shown_in_turn(&doc);
+    assert_eq!(order, [0, 1, 2, 2]);
+    assert!(close_times(&times, &[0.0, 1.0, 2.0, 3.0]), "{times:?}");
+    assert_eq!(loops_played(&doc), Some(1));
+    assert_eq!(
+        doc.json()["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["name"] == "seq")
+            .unwrap()["extras"]["openflight"]["loopCount"],
+        0
+    );
+
+    // A forward swing twice: 2N - 1 frames sharing the first loop's 4 seconds, then 2N - 2 sharing the second's.
+    let doc = read_one(&sequence_file(3, FORWARD | SWING, 2, 4.0, 0.0));
+    let (order, times) = shown_in_turn(&doc);
+    assert_eq!(order, [0, 1, 2, 1, 0, 1, 2, 1, 0, 0]);
+    assert!(
+        close_times(&times, &[0.0, 0.8, 1.6, 2.4, 3.2, 4.0, 5.0, 6.0, 7.0, 8.0]),
+        "{times:?}"
+    );
+
+    // A backward swing forever: the last child first, and at rest.
+    let doc = read_one(&sequence_file(3, BACKWARD | SWING, 0, 5.0, 0.0));
+    let (order, _) = shown_in_turn(&doc);
+    assert_eq!(order, [2, 1, 0, 1, 2, 2]);
+    let rest = flat(&doc);
+    assert!(
+        corners(&rest).iter().any(|&p| close(p, [3.0, 0.0, -3.0])),
+        "{:?}",
+        corners(&rest)
+    );
+
+    // Backward alone, and forward with backward, which is undefined: forward.
+    let (order, _) = shown_in_turn(&read_one(&sequence_file(3, BACKWARD, 1, 3.0, 0.0)));
+    assert_eq!(order, [2, 1, 0, 0]);
+    let (order, _) = shown_in_turn(&read_one(&sequence_file(3, FORWARD | BACKWARD, 1, 3.0, 0.0)));
+    assert_eq!(order, [0, 1, 2, 2]);
+
+    // As fast as possible: the shared 30 frames a second, assumed; the last frame half a second longer.
+    let doc = read_one(&sequence_file(2, FORWARD, 2, 0.0, 0.5));
+    let (_, times) = shown_in_turn(&doc);
+    assert!(
+        close_times(&times, &[0.0, 1.0 / 30.0, 2.0 / 30.0, 3.0 / 30.0, 4.0 / 30.0 + 0.5]),
+        "{times:?}"
+    );
+    assert_eq!(doc.source_info().frame_rate, Fact::Assumed(30.0));
+
+    // A loop count past what's kept plays as many loops as fit, and says so; the last frame isn't held longer, its
+    // loop not reached.
+    let doc = read_one(&sequence_file(2, FORWARD, i32::MAX, 2.0, 5.0));
+    let played = loops_played(&doc).unwrap();
+    assert!((2..u64::from(u32::MAX)).contains(&played), "{played}");
+    let (_, times) = shown_in_turn(&doc);
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_precision_loss,
+        reason = "a whole number of seconds"
+    )]
+    let end = (2 * played) as f32;
+    assert!(
+        (times[times.len() - 1] - end).abs() < 1e-3 * end,
+        "{} {end}",
+        times[times.len() - 1]
+    );
 }

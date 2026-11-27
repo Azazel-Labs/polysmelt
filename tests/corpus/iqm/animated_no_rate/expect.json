@@ -10,6 +10,7 @@
       "loop": true
     },
     "/animations/0/extras/frameRate": null,
+    "/animations/0/extras/assumed": null,
     "/animations/1/extras": null,
     "/asset/extras/source/frameRate": 30.0,
     "/asset/extras/source/assumed": [

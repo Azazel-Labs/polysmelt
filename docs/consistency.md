@@ -82,7 +82,12 @@ The document is in glTF's frame: +Y up, right-handed, meters.
   still assumed, and its reader cites where it comes from: MD2 10 (Quake II's game tick), MD5
   24 (Doom 3's starting value), Blitz3D 60 (its specification), DirectX 4800 ticks (a
   convention: Microsoft documents no default), AMC 120 (the CMU database's capture rate) and
-  USD 24 time codes (its specification).
+  USD 24 time codes (its specification). Where a format gives each animation a rate of its own
+  (IQM), and the rates differ, each animation's is its `extras.frameRate`, and one that was
+  assumed is listed in its `extras.assumed` (`["frameRate"]`), as the source info lists it.
+- **One pass.** A glTF animation plays once. A sequence the file plays a set number of times is
+  played out in full; one it repeats forever is played once, and what the file says about
+  repeating stays in `extras` (IQM's `loop`, OpenFlight's `loopCount`, beside `loopsPlayed`).
 - **Names are the file's.** An animation keeps the name the file gives it. A one-clip file
   (BVH, AMC, C3D, TRC, HTR, VMD, `.md5anim`, SMD) is named after the file. Nothing gets a
   made-up name like `motion`.

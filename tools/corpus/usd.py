@@ -779,6 +779,75 @@ write("transform_time_sampled", layer(prim("Xform", "Root", prim("Xform", "Movin
                                                                     cube("Cube"))),
                                       meta=["startTimeCode = 1", "endTimeCode = 24"]),
       "a time-sampled translate: the stage's start time", {"faces_outward": True}, corners=True, time=1)
+
+
+# --- time codes and frame rates ---------------------------------------------------------------
+#
+# UsdStage::GetTimeCodesPerSecond (https://openusd.org/release/api/class_usd_stage.html#GetTimeCodesPerSecond)
+# "scales the time ordinate for the samples contained in the stage to seconds", and "uses a dynamic fallback to
+# framesPerSecond": timeCodesPerSecond (session layer, then root layer), else framesPerSecond, else 24. A rate that
+# isn't above 0 can time nothing, so the reader passes over it to the next (pxr reports an authored 0 as it is).
+# framesPerSecond "makes an advisory statement about how the contained data can be most usefully consumed and
+# presented": it is the frame rate when authored, and the time codes' rate stands in when it isn't. A rate the stage
+# authors is declared; USD's 24 assumed.
+
+
+def time_rates(path):
+    """(time codes a second, frame rate, whether each was authored) of the stage at `path`, by the rule above."""
+    stage = Usd.Stage.Open(path)
+    root = stage.GetRootLayer()
+    fps = root.framesPerSecond if root.HasFramesPerSecond() and root.framesPerSecond > 0 else None
+    tcps = stage.GetTimeCodesPerSecond()
+    if root.HasTimeCodesPerSecond() and root.timeCodesPerSecond > 0:
+        timing = (tcps, True)
+    elif fps:
+        timing = (fps, True)
+    else:
+        timing = (24.0, False)
+    rate = (fps, True) if fps else timing
+    return timing, rate
+
+
+def time_rate_case(name, meta, what):
+    """A cube under a translate keyed at time codes 0 and 48, under stage metadata `meta`: the key times are the
+    time codes over the time codes a second, and pxr gives the translate three quarters of the way."""
+    text = layer(prim("Xform", "Moving", "double3 xformOp:translate.timeSamples = {\n    0: (0, 0, 0),\n"
+                                         "    48: (4, 0, 0),\n}",
+                      'uniform token[] xformOpOrder = ["xformOp:translate"]', cube("Cube")), meta=meta)
+    src = os.path.join(case_dir(name), name + ".usda")
+    with open(src, "w", encoding="utf-8", newline="\n") as f:
+        f.write(text)
+    (tcps, _), (rate, rate_given) = time_rates(src)
+    stage = Usd.Stage.Open(src)
+    fps_authored = stage.GetRootLayer().HasFramesPerSecond()
+    moving = UsdGeom.Xformable(stage.GetPrimAtPath("/Moving"))
+    at = moving.ComputeLocalToWorldTransform(Usd.TimeCode(36)).ExtractTranslation()
+    os.remove(src)
+    write(name, text, what, {
+        "document": {"animations": 1},
+        "json": {
+            "/asset/extras/source/frameRate": rate,
+            "/asset/extras/source/assumed": None if rate_given else ["frameRate"],
+            # The time codes' rate beside a frame rate that isn't it.
+            "/asset/extras/source/timeCodesPerSecond": tcps if fps_authored else None,
+        },
+        "animation_spans": [[0, r(48 / tcps)]],
+        "rig": [{"node": "Moving", "keys": {"translation": [0, r(48 / tcps)]}},
+                {"node": "Moving", "time": r(36 / tcps), "translation": [r(c) for c in at]}],
+    }, time=0)
+
+
+time_rate_case("time_codes_per_second", ["timeCodesPerSecond = 48"],
+               "timeCodesPerSecond only: the time codes' rate and the frame rate, declared")
+time_rate_case("frames_per_second", ["framesPerSecond = 12"],
+               "framesPerSecond only: time codes count at it, and it is the frame rate, declared")
+time_rate_case("time_codes_and_frames_per_second", ["timeCodesPerSecond = 48", "framesPerSecond = 30"],
+               "timeCodesPerSecond and framesPerSecond: time codes count at the first, the frame rate is the second")
+time_rate_case("time_codes_per_second_zero", ["timeCodesPerSecond = 0", "framesPerSecond = 16"],
+               "timeCodesPerSecond 0, passed over, and framesPerSecond: time codes count at framesPerSecond")
+time_rate_case("no_time_rates", [],
+               "neither timeCodesPerSecond nor framesPerSecond: USD's 24 time codes a second, assumed")
+
 write("skinned_mesh", layer(prim("SkelRoot", "Root", prim("Skeleton", "Skel", 'uniform token[] joints = ["hips"]',
                                                           "uniform matrix4d[] bindTransforms = [( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )]",
                                                           "uniform matrix4d[] restTransforms = [( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )]"),

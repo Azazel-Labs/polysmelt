@@ -20,7 +20,11 @@
 //! units and, as the reference's flags say, their own or the parent's palettes. Of the levels
 //! of detail sharing a center the most detailed is kept, the ranges in `extras`; a switch keeps
 //! the children its current mask shows; an animated group shows its children in turn, each
-//! scaled to nothing when it's not its turn. Light sources become `KHR_lights_punctual` lights.
+//! scaled to nothing when it's not its turn, as its record's flags (forward, backward, swing), loop count, loop
+//! duration and last frame duration say: a finite loop count is played out, its last frame held the last frame
+//! duration longer, and a loop repeating forever is played once. The group's node keeps the
+//! record's values in `extras`, with `loopsPlayed`, the loops the animation holds. Light sources become
+//! `KHR_lights_punctual` lights.
 //!
 //! `OpenFlight` is Z up, counterclockwise from the front, in the header's units: the document's
 //! `RootNode`, over the header's node, turns it Y up and scales it to meters. What has no glTF slot (the header's placement on the
@@ -71,6 +75,9 @@ const CLIP_BUDGET: u64 = 1 << 31;
 const FAR: f64 = 65536.0;
 /// The most frames an animated group is animated with.
 const MAX_FRAMES: usize = 1024;
+/// The most keys, in all, that animated groups' loops after their first may take: a finite sequence's loops are all
+/// played while they fit, and as many as fit once they don't.
+const REPEAT_KEYS: usize = 1 << 22;
 /// Face flag: no color (white).
 const F_NO_COLOR: u32 = 0x8000_0000 >> 1;
 /// Texture layer effect: a bump map.
@@ -237,8 +244,8 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
 struct Scene {
     nodes: Vec<Value>,
     kids: Vec<Vec<usize>>,
-    /// Animated groups: their playback and their frame nodes in order.
-    sequences: Vec<(parse::Sequence, Vec<usize>)>,
+    /// Animated groups: their playback, their node and their frame nodes in order.
+    sequences: Vec<(parse::Sequence, usize, Vec<usize>)>,
 }
 
 /// A node of a file to place in the scene.
@@ -439,6 +446,8 @@ fn expand(c: &mut Ctx<'_>) -> Result<Scene> {
                     c.stats.switched_off += before - kids.len();
                 }
                 let sequence = kind.sequence().filter(|_| kids.len() > 1);
+                // At rest, the child a loop starts with: the last of a backward one.
+                let rest = sequence.map_or(0, |seq| if seq.backward { kids.len() - 1 } else { 0 });
                 let mut frames = Vec::new();
                 for (k, &kid) in kids.iter().enumerate().rev() {
                     if s.nodes.len() + stack.len() >= MAX_NODES {
@@ -450,7 +459,7 @@ fn expand(c: &mut Ctx<'_>) -> Result<Scene> {
                         // A frame node, shown in its turn.
                         let f = s.nodes.len();
                         let mut j = json!({ "name": format!("frame{k}") });
-                        if k > 0 {
+                        if k != rest {
                             j["scale"] = json!([0.0, 0.0, 0.0]);
                         }
                         s.nodes.push(j);
@@ -469,7 +478,7 @@ fn expand(c: &mut Ctx<'_>) -> Result<Scene> {
                 if let Some(seq) = sequence {
                     frames.reverse();
                     s.kids[out].extend(&frames);
-                    s.sequences.push((seq, frames));
+                    s.sequences.push((seq, out, frames));
                 }
             }
         }
@@ -1317,44 +1326,83 @@ fn key_layer(layers: u32, mask: u8, l: usize) -> bool {
     layers != u32::MAX && mask & (1 << l) != 0
 }
 
-/// Animated groups as an animation: each frame node scaled to full size in its turn and to
-/// nothing otherwise, stepping.
-fn animation(sequences: &[(parse::Sequence, Vec<usize>)]) -> (Vec<Track>, bool) {
+/// Animated groups as an animation: each frame node scaled to full size in its turn and to nothing otherwise,
+/// stepping. Also whether a rate was assumed, and how many loops each animated group's animation holds.
+///
+/// The playback follows the group record (`OpenFlight` 16.0, OGC 19-065, and OGC 16-009r4, `OpenFlight` in CDB,
+/// <https://docs.ogc.org/bp/16-009r4/16-009r4.html>, Group Record). A loop plays the N children forward or backward;
+/// a swing loop plays them and back again without repeating the turning frame, its first loop 2N - 1 frames and
+/// the ones after 2N - 2 (each starts one past the frame the one before ended on). A loop lasts the loop duration,
+/// its frames sharing it evenly; a duration of 0 "indicates that the loop is to play as fast as possible", a rate
+/// the display sets, so frames take the readers' shared assumed rate. A positive loop count plays that many loops,
+/// and the last frame of the last is shown the last frame duration longer than the others. A loop count of 0
+/// "indicates that the loop is to repeat forever", which an animation, one pass, can't hold: it plays its first loop
+/// once (a swing's there and back), the last frame as long as the others ("Last Frame Duration not applicable").
+fn animation(sequences: &[(parse::Sequence, usize, Vec<usize>)]) -> (Vec<Track>, bool, Vec<(usize, u32)>) {
     let mut tracks = Vec::new();
     let mut assumed = false;
-    for (seq, frames) in sequences {
+    let mut played = Vec::new();
+    let mut budget = REPEAT_KEYS;
+    for (seq, group, frames) in sequences {
         let n = frames.len();
         if !(2..=MAX_FRAMES).contains(&n) {
             continue;
         }
-        let mut order: Vec<usize> = (0..n).collect();
-        if seq.swing {
-            order.extend((1..n - 1).rev());
-        }
-        if seq.backward {
-            order.reverse();
-        }
-        let steps = order.len();
-        let count = f32_of(f64::from(u32_of(n)));
-        let frame = if seq.loop_duration > 0.0 {
-            seq.loop_duration / count
+        // The first loop's children, and the later loops': a swing's start one frame in.
+        let along: Vec<usize> = if seq.backward {
+            (0..n).rev().collect()
         } else {
-            // No duration: a file before 15.8, which has none, or a loop duration of 0, which "indicates that
-            // the loop is to play as fast as possible" (OGC 16-009r4, OpenFlight in CDB, Group Record,
-            // <https://docs.ogc.org/bp/16-009r4/16-009r4.html>), a rate the display sets. Either way the
-            // readers' shared assumed frame rate.
-            assumed = true;
-            f32_of(1.0 / keys::ASSUMED_FRAME_RATE)
+            (0..n).collect()
         };
-        let mut times: Vec<f32> = (0..u32_of(steps)).map(|s| f32_of(f64::from(s)) * frame).collect();
-        let last = if seq.last_frame > 0.0 { seq.last_frame } else { frame };
-        times.push(times[steps - 1] + last);
+        let (first, again): (Vec<usize>, Vec<usize>) = if seq.swing {
+            let back = along.iter().rev().skip(1);
+            (
+                along.iter().chain(back.clone()).copied().collect(),
+                along[1..].iter().chain(back).copied().collect(),
+            )
+        } else {
+            (along.clone(), along)
+        };
+        let finite = u32::try_from(seq.loop_count).ok().filter(|&c| c > 0);
+        let per_loop = n * again.len();
+        let affordable = u32::try_from(budget / per_loop).unwrap_or(u32::MAX).saturating_add(1);
+        let loops = finite.unwrap_or(1).min(affordable);
+        budget -= (loops as usize - 1) * per_loop;
+        let duration = Some(f64::from(seq.loop_duration)).filter(|d| *d > 0.0 && d.is_finite());
+
+        let mut order = Vec::new();
+        let mut at = Vec::new();
+        let mut start = 0.0f64;
+        for l in 0..loops {
+            let this = if l == 0 { &first } else { &again };
+            let count = f64::from(u32_of(this.len()));
+            let (frame, length) = match duration {
+                Some(d) => (d / count, d),
+                None => (1.0 / keys::ASSUMED_FRAME_RATE, count / keys::ASSUMED_FRAME_RATE),
+            };
+            for (i, &k) in this.iter().enumerate() {
+                at.push(start + f64::from(u32_of(i)) * frame);
+                order.push(k);
+            }
+            start += length;
+        }
+        // The last frame shows until the end, the last frame duration longer once every loop of a finite sequence
+        // is played.
+        let last = f64::from(seq.last_frame);
+        if finite == Some(loops) && last > 0.0 && last.is_finite() {
+            start += last;
+        }
+        at.push(start);
+        let times: Vec<f32> = at.into_iter().map(f32_of).collect();
         if times.windows(2).any(|w| w[1] <= w[0] || !w[1].is_finite()) {
             continue;
         }
+        assumed |= duration.is_none();
+        played.push((*group, loops));
+        let end = order[order.len() - 1];
         for (k, &node) in frames.iter().enumerate() {
-            let mut v = Vec::with_capacity((steps + 1) * 3);
-            for &shown in order.iter().chain(std::iter::once(&order[0])) {
+            let mut v = Vec::with_capacity(times.len() * 3);
+            for &shown in order.iter().chain(std::iter::once(&end)) {
                 let s = if shown == k { 1.0 } else { 0.0 };
                 v.extend_from_slice(&[s, s, s]);
             }
@@ -1364,7 +1412,7 @@ fn animation(sequences: &[(parse::Sequence, Vec<usize>)]) -> (Vec<Track>, bool) 
             });
         }
     }
-    (tracks, assumed)
+    (tracks, assumed, played)
 }
 
 /// A date as the header writes it, C's `ctime` form (`"Tue Mar 05 14:30:00 2024"`), in ISO 8601.
@@ -1535,10 +1583,19 @@ fn finish(mut c: Ctx<'_>, mut s: Scene) -> Document {
     facts.insert("materials".into(), json!(c.materials.len()));
 
     if c.keep.animations {
-        let (tracks, assumed) = animation(&s.sequences);
+        let (tracks, assumed, played) = animation(&s.sequences);
         let mut writer = keys::Writer::new(c.keep.extras);
         let written = writer.animation(&mut c.b, None, None, tracks).is_some();
         writer.finish(&mut c.b);
+        // Beside the record's loop count, how many loops the animation holds.
+        for (group, loops) in played.into_iter().filter(|_| written) {
+            if let Some(e) = s.nodes[group]
+                .pointer_mut("/extras/openflight")
+                .and_then(Value::as_object_mut)
+            {
+                e.insert("loopsPlayed".into(), json!(loops));
+            }
+        }
         if written && assumed {
             // A sequence that gives no duration plays at the readers' shared assumed rate.
             let mut info = SourceInfo::from_json(&source);

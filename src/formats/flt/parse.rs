@@ -303,13 +303,14 @@ impl Kind {
         }
     }
 
-    /// Whether this group plays its children in turn.
+    /// Whether this group plays its children in turn. Forward and backward both set is undefined ("must be either
+    /// forward or backward (not both)"): it plays forward. Swing alone, with neither, swings forward.
     pub fn sequence(&self) -> Option<Sequence> {
         let Kind::Group {
             flags,
+            loop_count,
             loop_duration,
             last_frame,
-            ..
         } = *self
         else {
             return None;
@@ -317,18 +318,25 @@ impl Kind {
         (flags & (G_FORWARD | G_SWING | G_BACKWARD) != 0).then_some(Sequence {
             swing: flags & G_SWING != 0,
             backward: flags & G_BACKWARD != 0 && flags & G_FORWARD == 0,
+            loop_count,
             loop_duration,
             last_frame,
         })
     }
 }
 
-/// An animated group's playback.
+/// An animated group's playback, as its group record gives it.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Sequence {
+    /// Each loop plays its children and then back again, the turning frame not repeated.
     pub swing: bool,
+    /// Each loop plays its children from the last to the first.
     pub backward: bool,
+    /// The loops played: 0 repeats forever.
+    pub loop_count: i32,
+    /// The seconds one loop lasts: 0 plays it as fast as possible.
     pub loop_duration: f32,
+    /// The seconds the last frame of a finite sequence's last loop lasts longer than the others.
     pub last_frame: f32,
 }
 

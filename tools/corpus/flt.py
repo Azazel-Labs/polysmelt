@@ -17,6 +17,15 @@ two sided, 2 and 3 wireframe (closed and open), 8 and up light points. Of levels
 a center, the most detailed is drawn; a switch draws the children its current mask shows; an
 animated group shows its children in turn over its loop duration. A replicated node is drawn once
 in place and once more for each replication, its matrix applied again each time.
+
+An animated group's playback is its group record's (OpenFlight 16.0, OGC 19-065, Group Record; the same text is in
+OGC 16-009r4, OpenFlight in CDB): a loop of N children plays them forward, or backward from the last; a swing loop
+plays them and back again, the turning frame not repeated, so its first loop is 2N - 1 frames and the loops after it
+2N - 2 (each starting one past where the one before ended). One loop lasts the loop duration; a loop duration of 0
+"indicates that the loop is to play as fast as possible". A loop count of 0 "indicates that the loop is to repeat
+forever"; a positive one plays that many loops, and then the last frame of the last loop is "displayed T seconds
+longer than any other frame", T the last frame duration ("not applicable" to a loop that repeats forever). A glTF
+animation is one pass, so a sequence that repeats forever is expected as its first loop, played once.
 """
 
 import math
@@ -556,16 +565,40 @@ case(FMT, "light_sources", {"lights.flt": w.bytes()},
                "/extensions/KHR_lights_punctual/lights/1/type": "directional"},
       "document": {"lights": 2, "node_names": ["lamp", "sun"], "source": {"disabledLights": 1}}})
 
-# An animated group (forward, a `loop` second loop) of three squares of sizes 1, 2 and 3, each shown
-# for a third of it; the ones not shown are scaled to nothing at the origin.
-def animated_group(loop):
+# Group flags, from the left: forward animation (bit 1), swing animation (2) and backward animation (6).
+FORWARD, SWING, BACKWARD = 0x80000000 >> 1, 0x80000000 >> 2, 0x80000000 >> 6
+
+
+# An animated group (by default forward, a `loop` second loop repeated forever) of three squares of sizes 1, 2 and 3;
+# the ones not shown are scaled to nothing at the origin.
+def animated_group(loop, flags=FORWARD, count=0, last=0.0, child="frame"):
     w = Flt()
     off = w.vertices(quad_at(0) + quad_at(0, size=2.0) + quad_at(0, size=3.0))
-    w.push().group("seq", [(16, struct.pack(">I", 0x40000000)), (36, struct.pack(">f", loop))]).push()
+    fields = [(16, struct.pack(">I", flags)), (36, struct.pack(">f", loop))]
+    if count:
+        fields.append((32, struct.pack(">i", count)))
+    if last:
+        fields.append((40, struct.pack(">f", last)))
+    w.push().group("seq", fields).push()
     for k in range(3):
-        w.group(f"frame{k}").push().face(f"f{k}", off[4 * k:4 * k + 4]).pop()
+        w.group(f"{child}{k}").push().face(f"f{k}", off[4 * k:4 * k + 4]).pop()
     w.pop().pop()
     return w.bytes()
+
+
+def shown(size):
+    """The bounds of square `size` (1, 2 or 3): what's drawn while child `size` is shown."""
+    return square_bounds([(0, 0, size)])
+
+
+def plays(frames):
+    """`poses` for frames given as (start, end, size): each child's square drawn in the middle of its turn."""
+    return [{"animation": 0, "time": (a + b) / 2, "bounds": shown(size)} for a, b, size in frames]
+
+
+def turns(sizes, frame, start=0.0):
+    """Frames (start, end, size) of `frame` seconds each for children `sizes`, from `start`."""
+    return [(start + i * frame, start + (i + 1) * frame, s) for i, s in enumerate(sizes)]
 
 
 case(FMT, "animated_group", {"anim.flt": animated_group(3.0)},
@@ -587,6 +620,72 @@ case(FMT, "animated_group_no_duration", {"anim.flt": animated_group(0.0)},
       "poses": [{"animation": 0, "time": 0.5 / 30, "bounds": square_bounds([(0, 0, 1)])},
                 {"animation": 0, "time": 1.5 / 30, "bounds": square_bounds([(0, 0, 2)])},
                 {"animation": 0, "time": 2.5 / 30, "bounds": square_bounds([(0, 0, 3)])}]})
+
+# Two loops of 3 seconds, then a last frame duration of 1.5: "N loops are played. Last frame of last (Nth) loop
+# displayed T2 seconds longer than any other frame". Frames of a second each, 1, 2, 3, 1, 2, 3, the last 2.5 seconds.
+frames = turns([1, 2, 3, 1, 2, 3], 1.0)
+case(FMT, "animated_group_loops_then_last_frame", {"anim.flt": animated_group(3.0, count=2, last=1.5, child="c")},
+     {"spec": SPEC + ": an animated group with a loop count of 2 and a last frame duration, the last frame of the "
+      "last loop shown that much longer than the others", "source": SRC, "triangles": 6, "bounds": shown(1),
+      "document": {"animations": 1, "channels": 3},
+      "json": {"/asset/extras/source/frameRate": None},
+      "animation_spans": [[0, 7.5]],
+      "rig": [{"node": "frame0", "keys": {"scale": [0, 1, 2, 3, 4, 5, 7.5]}}],
+      "poses": plays(frames) + [{"animation": 0, "time": 6.5, "bounds": shown(3)},
+                                {"animation": 0, "time": 7.4, "bounds": shown(3)}]})
+
+# A loop count of 0 repeats forever: "Last Frame Duration not applicable", so the 2 seconds given change nothing, and
+# the one pass an animation can hold is the first loop, its last frame as long as the others.
+case(FMT, "animated_group_forever", {"anim.flt": animated_group(3.0, count=0, last=2.0, child="c")},
+     {"spec": SPEC + ": an animated group repeating forever (loop count 0), its last frame duration not applicable, "
+      "played as one loop", "source": SRC, "triangles": 6, "bounds": shown(1),
+      "document": {"animations": 1, "channels": 3},
+      "animation_spans": [[0, 3]],
+      "rig": [{"node": "frame0", "keys": {"scale": [0, 1, 2, 3]}}],
+      "poses": plays(turns([1, 2, 3], 1.0))})
+
+# A forward swing repeating forever: the first loop is 2N - 1 = 5 frames, 1, 2, 3, 2, 1, over the 5 second loop.
+case(FMT, "animated_group_swing", {"anim.flt": animated_group(5.0, flags=FORWARD | SWING, child="c")},
+     {"spec": SPEC + ": a forward swing animated group repeating forever, played as its first loop, there and back "
+      "(2N - 1 frames)", "source": SRC, "triangles": 6, "bounds": shown(1),
+      "document": {"animations": 1, "channels": 3},
+      "animation_spans": [[0, 5]],
+      "rig": [{"node": "frame0", "keys": {"scale": [0, 1, 2, 3, 4, 5]}}],
+      "poses": plays(turns([1, 2, 3, 2, 1], 1.0))})
+
+# A backward swing: N, N-1 ... 1, 2 ... N. It starts on the last child, so that one shows at rest.
+case(FMT, "animated_group_backward_swing", {"anim.flt": animated_group(5.0, flags=BACKWARD | SWING, child="c")},
+     {"spec": SPEC + ": a backward swing animated group repeating forever, played as its first loop, last child "
+      "first", "source": SRC, "triangles": 6, "bounds": shown(3),
+      "document": {"animations": 1, "channels": 3},
+      "animation_spans": [[0, 5]],
+      "poses": plays(turns([3, 2, 1, 2, 3], 1.0))})
+
+# A forward swing played twice, 4 seconds a loop, then 0.5 longer: the first loop 5 frames (1, 2, 3, 2, 1) of 0.8
+# seconds, the second, starting one past where the first ended, 2N - 2 = 4 frames (2, 3, 2, 1) of a second, the last
+# 1.5 seconds.
+frames = turns([1, 2, 3, 2, 1], 0.8) + turns([2, 3, 2, 1], 1.0, 4.0)
+case(FMT, "animated_group_swing_twice",
+     {"anim.flt": animated_group(4.0, flags=FORWARD | SWING, count=2, last=0.5, child="c")},
+     {"spec": SPEC + ": a forward swing animated group played twice (2N - 1 frames, then 2N - 2) with a last frame "
+      "duration", "source": SRC, "triangles": 6, "bounds": shown(1),
+      "document": {"animations": 1, "channels": 3},
+      "animation_spans": [[0, 8.5]],
+      "rig": [{"node": "frame0", "keys": {"scale": [0, 0.8, 1.6, 2.4, 3.2, 4, 5, 6, 7, 8.5]}}],
+      "poses": plays(frames) + [{"animation": 0, "time": 8.4, "bounds": shown(1)}]})
+
+# A loop duration of 0 with a loop count of 2 and a last frame duration of 0.5: "Each loop plays as fast as
+# possible. N loops are played. Last frame of last (Nth) loop displayed T seconds longer than any other frame."
+# As fast as possible is the display's rate: the readers' shared 30 frames a second, assumed.
+frames = turns([1, 2, 3, 1, 2, 3], 1 / 30)
+case(FMT, "animated_group_no_duration_loops",
+     {"anim.flt": animated_group(0.0, count=2, last=0.5, child="c")},
+     {"spec": SPEC + ": an animated group with a loop duration of 0 (as fast as possible) and a loop count of 2, its "
+      "last frame shown longer, at 30 frames a second", "source": SRC, "triangles": 6, "bounds": shown(1),
+      "document": {"animations": 1, "channels": 3},
+      "json": {"/asset/extras/source/frameRate": 30, "/asset/extras/source/assumed": ["frameRate"]},
+      "animation_spans": [[0, 6 / 30 + 0.5]],
+      "poses": plays(frames) + [{"animation": 0, "time": 6 / 30 + 0.4, "bounds": shown(3)}]})
 
 # A subface: a face drawn on the face before it, between push-subface and pop-subface records. The
 # face after the pop is the object's again.

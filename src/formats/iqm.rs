@@ -27,7 +27,8 @@
 //! rate (an assumed 30 when it isn't a positive number; one with no name has none): a linear animation with translation, rotation and scale channels for
 //! each joint, leaving out those that hold the joint's rest value in every frame. Looping animations say so in their
 //! extras (`loop`). The source info's `frameRate` is the first animation's rate that is a positive number (assumed 30
-//! when none is); when the animations' rates differ, each gives its own in its extras (`frameRate`).
+//! when none is); when the animations' rates differ, each gives its own in its extras (`frameRate`), and one that
+//! is the assumed 30 says so as the source info does (`"assumed": ["frameRate"]`).
 //!
 //! The format is Z up and right-handed, so the scene stays as the file has it under the document's `RootNode`, which turns it for glTF's Y up (the source info's
 //! `upAxis` is a declared `+Z`, converted); units are kept unscaled, and their length unknown.
@@ -703,13 +704,8 @@ fn finish_anims(mut scene: Scene, f: &File, keep: bool) -> Result<Scene> {
         "IQM file has {} poses for {n} joints",
         f.poses.len()
     );
-    let rate_of = |a: &Anim| {
-        if a.rate > 0.0 && a.rate.is_finite() {
-            a.rate
-        } else {
-            DEFAULT_RATE
-        }
-    };
+    let stated = |a: &Anim| a.rate > 0.0 && a.rate.is_finite();
+    let rate_of = |a: &Anim| if stated(a) { a.rate } else { DEFAULT_RATE };
     // When animations differ in rate, each says its own in its extras.
     let rates_differ = f
         .anims
@@ -761,6 +757,9 @@ fn finish_anims(mut scene: Scene, f: &File, keep: bool) -> Result<Scene> {
                 }
                 if rates_differ {
                     m.insert("frameRate".into(), json!(rate));
+                    if !stated(a) {
+                        m.insert("assumed".into(), json!(["frameRate"]));
+                    }
                 }
                 Value::Object(m)
             }),
@@ -845,7 +844,9 @@ mod tests {
         // "wave" at 10 frames a second, "hold" with none (the shared 30): the first that has one, and each its own.
         assert_eq!(info.frame_rate, Fact::Declared(10.0));
         assert_eq!(doc.json()["animations"][0]["extras"]["frameRate"], 10.0);
+        assert!(doc.json()["animations"][0]["extras"].get("assumed").is_none());
         assert_eq!(doc.json()["animations"][1]["extras"]["frameRate"], 30.0);
+        assert_eq!(doc.json()["animations"][1]["extras"]["assumed"], json!(["frameRate"]));
         assert_eq!(info.up_axis, Fact::Declared(Axis::PosZ));
         assert_eq!(info.meters_per_unit, Fact::Unknown);
         assert!(info.converted.up_axis);
