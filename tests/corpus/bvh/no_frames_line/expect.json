@@ -26,7 +26,7 @@
     "/asset/extras/source/assumed": [
       "upAxis"
     ],
-    "/animations/0/name": "motion",
+    "/animations/0/name": "no_frames_line",
     "/animations/0/samplers/0/interpolation": "LINEAR",
     "/asset/extras/source/frames": null
   },

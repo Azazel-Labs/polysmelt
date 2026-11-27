@@ -304,7 +304,7 @@ impl World<'_> {
         }
 
         if let Some(a) = el.children().find(|c| c.is("animators")) {
-            self.animate(index, &name, rest, kind == "camera", a);
+            self.animate(index, rest, kind == "camera", a);
         }
         for c in el.children().filter(|c| c.is("node")) {
             self.node(c, Some(index))?;
@@ -588,7 +588,7 @@ impl World<'_> {
         clippy::cast_precision_loss,
         reason = "key counts clamped to MAX_KEYS, and glTF's times are f32"
     )]
-    fn animate(&mut self, node: usize, name: &str, rest: [f64; 3], camera: bool, el: El<'_, '_>) {
+    fn animate(&mut self, node: usize, rest: [f64; 3], camera: bool, el: El<'_, '_>) {
         let mut rate = [0.0f64; 3];
         let mut mover: Option<Mover> = None;
         for a in el.children().filter(|c| c.is("attributes")) {
@@ -661,8 +661,9 @@ impl World<'_> {
             }
         }
         if !channels.is_empty() {
+            // An animator has no name in the file, so its animation has none.
             self.ctx.scene.animations.push(Animation {
-                name: name.to_owned(),
+                name: String::new(),
                 channels,
                 extras: None,
             });

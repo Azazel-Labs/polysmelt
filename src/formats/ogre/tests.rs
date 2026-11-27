@@ -172,7 +172,7 @@ fn operations_become_lists() {
 }
 
 #[test]
-fn influences_keep_the_four_heaviest() {
+fn influences_are_every_assignment_to_a_known_bone() {
     let bones = Bones {
         nodes: (0..6).collect(),
         by_handle: (0..6u16).map(|h| (h + 10, usize::from(h))).collect(),
@@ -198,14 +198,9 @@ fn influences_keep_the_four_heaviest() {
     let mut unknown = 0;
     let out = influences(&assigns, 2, &bones, &mut unknown);
     assert_eq!(unknown, 2);
-    let mut v0: Vec<(u32, f32)> = out[0].to_vec();
-    v0.sort_by(|a, b| b.1.total_cmp(&a.1));
-    assert_eq!(v0.iter().map(|s| s.0).collect::<Vec<_>>(), [1, 3, 4, 2]);
-    assert!((v0[0].1 - 5.0 / 14.0).abs() < 1e-6);
-    assert!((out[0].iter().map(|s| s.1).sum::<f32>() - 1.0).abs() < 1e-6);
-    let v1: Vec<(u32, f32)> = out[1].iter().copied().filter(|s| s.1 > 0.0).collect();
-    assert_eq!(v1.len(), 2);
-    assert!(v1.iter().all(|s| (s.1 - 0.5).abs() < 1e-6));
+    // Every assignment, as listed: the shared writer merges, sorts and scales them.
+    assert_eq!(out[0], [(0, 1.0), (1, 5.0), (2, 2.0), (3, 4.0), (4, 3.0)]);
+    assert_eq!(out[1], [(5, 1.0), (5, 1.0), (0, 2.0)]);
 }
 
 #[test]

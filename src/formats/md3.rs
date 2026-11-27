@@ -15,10 +15,10 @@
 //! is turned around for glTF. A surface with no triangles is left out.
 //!
 //! Each tag is a root node named after it, at its place in the first frame (its axes are the columns of its
-//! rotation). With more than one frame, the frames become one linear animation, named after the file: a weights
+//! rotation). With more than one frame, the frames become one linear animation, with no name as the file gives it none: a weights
 //! channel per surface with a key per frame that turns that frame's target fully on (the first frame's key turns
 //! them all off), and translation and rotation channels per tag. The format has no frame rate; frames are taken at
-//! 10 a second (a model's frame rates are in the game's animation scripts).
+//! 30 a second, the readers' shared assumption (a model's frame rates are in the game's animation scripts).
 //!
 //! A surface's first shader name is its material's texture, looked for as written and, when it has no extension,
 //! as a `.tga` (the assets find the same name in other image formats, and by file name in other folders); its
@@ -54,8 +54,10 @@ use crate::num::{f32_of, u32_of};
 use crate::quat;
 use crate::source::{Axis, Fact, Handedness};
 
-/// Frames a second, as the format stores none.
-const RATE: f32 = 10.0;
+/// Frames a second, as the format stores none (the game gives each animation its rate in an `animation.cfg`
+/// beside the model): the readers' shared assumption.
+#[allow(clippy::cast_possible_truncation, reason = "a small whole number")]
+const RATE: f32 = super::keys::ASSUMED_FRAME_RATE as f32;
 
 /// The most frames read; the engine holds 1024.
 const MAX_FRAMES: usize = 1024;
@@ -180,7 +182,7 @@ pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
     }
     if !channels.is_empty() {
         scene.animations.push(Animation {
-            name: stem,
+            name: String::new(),
             channels,
             extras: None,
         });
@@ -224,14 +226,7 @@ fn target_names(frames: &[String]) -> Vec<String> {
 /// The texture a shader or skin names, by the engine's conventions: as written, then as a `.tga` when it has no
 /// extension.
 fn find_texture(name: &str, input: &Input<'_>, assets: &dyn Assets, images: &mut Images) -> Option<usize> {
-    if name.is_empty() {
-        return None;
-    }
-    let mut tries = vec![name.to_owned()];
-    if std::path::Path::new(name).extension().is_none() {
-        tries.push(format!("{name}.tga"));
-    }
-    images.find(assets, &tries, &[input.dir()])
+    images.find_bare(assets, name, &[".tga"], input.dir())
 }
 
 /// The textures `<stem>_default.skin` beside the model gives its surfaces, by lowercase surface name; empty when
@@ -594,7 +589,7 @@ mod tests {
     }
 
     #[test]
-    fn source_info_is_game_units_z_up_at_ten_frames_a_second() {
+    fn source_info_is_game_units_z_up_at_the_assumed_frame_rate() {
         let bytes = include_bytes!("../../tests/corpus/md3/surfaces_tag_and_skin/thing.md3");
         let doc = load(
             Input::memory(bytes, "thing.md3"),
@@ -607,7 +602,7 @@ mod tests {
         assert_eq!(info.version.as_deref(), Some("15"));
         assert_eq!(info.meters_per_unit, Fact::Unknown);
         assert_eq!(info.up_axis, Fact::Declared(Axis::PosZ));
-        assert_eq!(info.frame_rate, Fact::Assumed(10.0));
+        assert_eq!(info.frame_rate, Fact::Assumed(30.0));
         assert!(info.converted.up_axis && !info.converted.units);
         assert_eq!(
             doc.json()["asset"]["extras"]["source"]["name"],

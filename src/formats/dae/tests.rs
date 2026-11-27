@@ -206,8 +206,18 @@ fn skins_keep_up_to_sixteen_influences() {
         r##"{BONES}<node><instance_controller url="#c"><skeleton>#root</skeleton></instance_controller></node>"##
     );
     let d = read(&doc("", &format!("{QUAD}{SKIN}"), &scene));
-    assert_eq!(d.json()["skins"][0]["joints"].as_array().unwrap().len(), 5);
+    // The five joints the file has, and the node the controller is instanced on: the last point is weighted to
+    // joint -1, the bind shape itself, so no joint moves it and it stays with that node.
+    let joints = d.json()["skins"][0]["joints"].as_array().unwrap();
+    assert_eq!(joints.len(), 6);
+    let instance = usize::try_from(joints[5].as_u64().unwrap()).unwrap();
+    assert!(d.json()["nodes"][instance].get("mesh").is_none());
     let attrs = &d.json()["meshes"][0]["primitives"][0]["attributes"];
+    let j0 = d
+        .read_floats(usize::try_from(attrs["JOINTS_0"].as_u64().unwrap()).unwrap())
+        .unwrap()
+        .1;
+    assert_eq!(&j0[12..16], &[5.0, 0.0, 0.0, 0.0]);
     let weights = |k: usize| {
         d.read_floats(usize::try_from(attrs[format!("WEIGHTS_{k}")].as_u64().unwrap()).unwrap())
             .unwrap()

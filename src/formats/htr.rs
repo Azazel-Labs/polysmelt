@@ -47,7 +47,7 @@ use crate::source::{Axis, Fact, meters_in};
 /// Segments a file may have: far past any capture rig.
 const MAX_SEGMENTS: usize = 32_768;
 /// Frames per second when the file doesn't say.
-const DEFAULT_RATE: f64 = 30.0;
+const DEFAULT_RATE: f64 = super::keys::ASSUMED_FRAME_RATE;
 
 /// A segment and its rows.
 struct Segment {
@@ -374,7 +374,7 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document> {
     let frames = segments.iter().map(|s| s.frames.len()).max().unwrap_or(0);
     if keep.animations && !channels.is_empty() {
         scene.animations.push(Animation {
-            name: "motion".into(),
+            name: super::keys::clip_name(input.path).unwrap_or_default(),
             channels,
             extras: None,
         });

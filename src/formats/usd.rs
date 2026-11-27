@@ -52,11 +52,12 @@ use openusd_schemas::shade::{self, MaterialBindingAPI};
 use serde_json::{Map, Value, json};
 
 use super::Input;
+use super::keys;
 use super::xform::{
     IDENTITY, M4, Trs, decompose, from_column_major, inverse, mul, rotation, scale, set_transform, translate,
 };
 use crate::assets::{Assets, memory_key};
-use crate::document::{self, Animation, Builder, Document, Keep, Part, Sampler};
+use crate::document::{Builder, Document, Keep, Part};
 use crate::images::{Images, Location, gray};
 use crate::material::{self, Alpha, Clearcoat, Factor, Full, Specular, Tex, UvTransform};
 use crate::mesh::{GRAY, Material, Prim, triangulate};
@@ -215,6 +216,7 @@ fn load_capped(input: Input<'_>, assets: &dyn Assets, keep: Keep, max_nodes: usi
         pending: Vec::new(),
         morphed: Vec::new(),
         skinned_roots: Vec::new(),
+        unbound_meshes: std::collections::HashSet::new(),
         drawn: 0,
         curve_points: 0,
         limit: input.limit,
@@ -230,11 +232,9 @@ fn load_capped(input: Input<'_>, assets: &dyn Assets, keep: Keep, max_nodes: usi
             "this USD stage has nothing to draw: no meshes, curves, points, cameras or lights"
         );
     }
-    let animations = if keep.animations {
-        r.animations(tcps)
-    } else {
-        Vec::new()
-    };
+    if keep.animations {
+        r.animations(tcps);
+    }
 
     let mut basis = if z_up {
         [[1., 0., 0., 0.], [0., 0., 1., 0.], [0., -1., 0., 0.], [0., 0., 0., 1.]]
@@ -283,6 +283,7 @@ fn load_capped(input: Input<'_>, assets: &dyn Assets, keep: Keep, max_nodes: usi
     json.insert("asset".into(), asset);
     json.insert("scene".into(), json!(0));
     json.insert("scenes".into(), json!([{ "nodes": scene_nodes }]));
+    crate::skin::set_skeletons(&r.nodes, &mut r.skins);
     json.insert("nodes".into(), Value::Array(std::mem::take(&mut r.nodes)));
     if !r.meshes.is_empty() {
         json.insert("meshes".into(), Value::Array(std::mem::take(&mut r.meshes)));
@@ -302,7 +303,6 @@ fn load_capped(input: Input<'_>, assets: &dyn Assets, keep: Keep, max_nodes: usi
     }
     let (materials, images) = (std::mem::take(&mut r.materials), std::mem::take(&mut r.images));
     let mut b = r.b;
-    b.animations = animations;
     b.materials(&materials, images.list, &mut json);
     Ok(b.finish(json, Map::new()))
 }
@@ -505,6 +505,8 @@ struct Reader<'a> {
     morphed: Vec<(usize, usd::Prim)>,
     /// Nodes for skinned meshes, at the scene's root: glTF places a skinned mesh by its joints alone.
     skinned_roots: Vec<usize>,
+    /// The skinned meshes with a point no joint moves: their skins take the surface's own node as a joint.
+    unbound_meshes: std::collections::HashSet<usize>,
     /// Triangles drawn, every instance counted.
     drawn: usize,
     /// Points sampled on curves, up to [`MAX_CURVE_POINTS`].
@@ -1148,12 +1150,17 @@ impl Reader<'_> {
                 // Mesh space to skeleton space at bind time, then to the joint's: row vectors, whose layout is
                 // glTF's column-major one for column vectors.
                 let ibm = geom_bind * skel.binds[j].inverse().unwrap_or(gf::Matrix4d::IDENTITY);
-                ibms.extend(ibm.0.map(f32_of));
+                ibms.extend(crate::skin::inverse_bind(ibm.0));
+            }
+            // A point no joint moves stays with the surface's own prim: its node is a joint too, after the
+            // skeleton's, and the point keeps its place in the prim's own space.
+            if self.unbound_meshes.contains(&p.mesh) {
+                joints.push(p.node);
+                ibms.extend(crate::skin::inverse_bind(gf::Matrix4d::IDENTITY.0));
             }
             let acc = self.b.floats(ibms, "MAT4", false);
             let name = self.nodes[p.node]["name"].clone();
-            self.skins
-                .push(json!({ "joints": joints, "inverseBindMatrices": acc, "skeleton": skel.nodes[0] }));
+            self.skins.push(json!({ "joints": joints, "inverseBindMatrices": acc }));
             let Some(n) = self.push_node(json!({ "name": name, "skin": self.skins.len() - 1 })) else {
                 continue;
             };
@@ -1200,8 +1207,9 @@ impl Reader<'_> {
         )
     }
 
-    /// One animation: animated transforms, skeletal animations and blend shape weights.
-    fn animations(&mut self, tcps: f64) -> Vec<Animation> {
+    /// One animation: animated transforms, skeletal animations and blend shape weights. It has no name, as a stage
+    /// has none for it, and starts at time 0 ([`keys::Writer`]).
+    fn animations(&mut self, tcps: f64) {
         let mut channels = Vec::new();
         for (node, prim) in std::mem::take(&mut self.animated) {
             self.transform_channels(node, &prim, &mut channels);
@@ -1234,12 +1242,7 @@ impl Reader<'_> {
                 let mut r: Vec<[f64; 4]> = Vec::with_capacity(times.len());
                 let mut s = Vec::with_capacity(times.len() * 3);
                 for sample in &samples {
-                    let (tv, mut rv, sv) = sample.trs(k, &rest);
-                    if let Some(prev) = r.last()
-                        && (0..4).map(|c| prev[c] * rv[c]).sum::<f64>() < 0.0
-                    {
-                        rv = rv.map(|c| -c);
-                    }
+                    let (tv, rv, sv) = sample.trs(k, &rest);
                     t.extend(tv);
                     r.push(rv);
                     s.extend(sv);
@@ -1266,45 +1269,25 @@ impl Reader<'_> {
         for (node, prim) in self.morphed.clone() {
             self.weight_channel(node, &prim, &mut channels);
         }
-        if channels.is_empty() {
-            return Vec::new();
-        }
-        let shift = channels.iter().map(|c| c.times[0]).fold(0.0, f64::min);
-        let mut inputs: HashMap<Vec<u64>, usize> = HashMap::new();
-        let (mut samplers, mut out) = (Vec::new(), Vec::new());
-        for c in channels {
-            let key: Vec<u64> = c.times.iter().map(|t| t.to_bits()).collect();
-            let input = if let Some(&i) = inputs.get(&key) {
-                i
-            } else {
-                let secs = c.times.iter().map(|&t| f32_of((t - shift) / tcps)).collect();
-                let i = self.b.floats(secs, "SCALAR", true);
-                inputs.insert(key, i);
-                i
-            };
-            let kind = match c.path {
-                "translation" | "scale" => "VEC3",
-                "rotation" => "VEC4",
-                _ => "SCALAR",
-            };
-            let output = self.b.floats(c.values.into_iter().map(f32_of).collect(), kind, false);
-            samplers.push(Sampler {
-                input,
-                output,
-                interpolation: "LINEAR",
-            });
-            out.push(document::Channel {
-                sampler: samplers.len() - 1,
-                node: c.node,
-                path: c.path,
-            });
-        }
-        vec![Animation {
-            channels: out,
-            samplers,
-            name: None,
-            extras: None,
-        }]
+        let tracks = channels
+            .into_iter()
+            .filter_map(|c| {
+                let path = keys::Path::of(c.path)?;
+                let width = c.values.len().checked_div(c.times.len())?;
+                Some(keys::Track {
+                    width,
+                    ..keys::Track::linear(
+                        c.node,
+                        path,
+                        c.times.iter().map(|t| t / tcps).collect::<Vec<f64>>(),
+                        c.values.into_iter().map(f32_of).collect(),
+                    )
+                })
+            })
+            .collect();
+        let mut writer = keys::Writer::new(true);
+        writer.animation(&mut self.b, None, None, tracks);
+        writer.finish(&mut self.b);
     }
 
     /// Translation, rotation and scale channels for a node whose prim's transform is animated: its local transform
@@ -2361,9 +2344,7 @@ impl Reader<'_> {
         }
 
         let influences = joints.and_then(|j| self.influences(prim, points.len(), j));
-        let joint_sets = influences.as_ref().map_or(0, |inf| {
-            inf.iter().map(|v| v.len().div_ceil(4)).max().unwrap_or(0).min(4)
-        });
+        let mut unbound = false;
         let targets = if self.keep.morph_targets {
             self.blend_shapes(prim, points.len(), shape.normals.is_some())
         } else {
@@ -2377,22 +2358,13 @@ impl Reader<'_> {
             drawn += p.indices.len() / 3;
             let Some(mut json) = self.b.primitive(p) else { continue };
             json["material"] = json!(material);
-            if let Some(inf) = &influences {
-                for set in 0..joint_sets {
-                    let mut js = Vec::with_capacity(points.len() * 4);
-                    let mut ws = Vec::with_capacity(points.len() * 4);
-                    for &pt in &points {
-                        for k in set * 4..set * 4 + 4 {
-                            let (j, w) = inf[pt].get(k).copied().unwrap_or((0, 0.0));
-                            js.push(j);
-                            ws.push(w);
-                        }
-                    }
-                    let n = points.len();
-                    let j = self.b.accessor(Part::u16(js), 5123, n, "VEC4", Some(34962));
-                    let w = self.b.accessor(Part::f32(ws), 5126, n, "VEC4", Some(34962));
-                    json["attributes"][format!("JOINTS_{set}")] = json!(j);
-                    json["attributes"][format!("WEIGHTS_{set}")] = json!(w);
+            if let (Some(inf), Some(count)) = (&influences, joints) {
+                let sets = crate::skin::sets(points.len(), count, crate::num::u32_of(count), |i, list| {
+                    list.extend_from_slice(&inf[points[i]]);
+                });
+                unbound |= sets.unbound;
+                for (key, a) in sets.write(&mut self.b, count + 1) {
+                    json["attributes"][key] = json!(a);
                 }
             }
             if !targets.is_empty() {
@@ -2427,12 +2399,15 @@ impl Reader<'_> {
         }
         self.meshes.push(mesh);
         self.mesh_triangles.push(drawn);
+        if unbound {
+            self.unbound_meshes.insert(self.meshes.len() - 1);
+        }
         Ok(Some(self.meshes.len() - 1))
     }
 
-    /// A skinned surface's joint influences per point: (joint, weight), heaviest first, up to 16, summing to one.
-    /// A point no joint weighs follows the first joint.
-    fn influences(&self, prim: &usd::Prim, points: usize, joints: usize) -> Option<Vec<Vec<(u16, f32)>>> {
+    /// A skinned surface's joint influences per point, (joint, weight) as the surface lists them: the shared
+    /// writer keeps the strongest and makes them sum to one ([`crate::skin`]).
+    fn influences(&self, prim: &usd::Prim, points: usize, joints: usize) -> Option<Vec<Vec<(u32, f32)>>> {
         let ji = prim.attribute("primvars:skel:jointIndices");
         let index = ints(self.value(&ji));
         let weight = floats(self.value(&prim.attribute("primvars:skel:jointWeights"))?)?;
@@ -2450,23 +2425,13 @@ impl Reader<'_> {
         let mut out = Vec::with_capacity(points);
         for p in 0..points {
             let base = if constant { 0 } else { p * size };
-            let mut inf: Vec<(u16, f32)> = (base..base + size)
+            let inf: Vec<(u32, f32)> = (base..base + size)
                 .filter_map(|k| {
                     let j = usize::try_from(*index.get(k)?).ok().filter(|&j| j < joints)?;
                     let w = *weight.get(k)?;
-                    (w > 0.0 && w.is_finite()).then(|| Some((u16::try_from(j).ok()?, w)))?
+                    (w > 0.0 && w.is_finite()).then(|| Some((u32::try_from(j).ok()?, w)))?
                 })
                 .collect();
-            inf.sort_by(|a, b| b.1.total_cmp(&a.1));
-            inf.truncate(16);
-            let sum: f32 = inf.iter().map(|x| x.1).sum();
-            if sum > 0.0 {
-                for x in &mut inf {
-                    x.1 /= sum;
-                }
-            } else {
-                inf = vec![(0, 1.0)];
-            }
             out.push(inf);
         }
         Some(out)

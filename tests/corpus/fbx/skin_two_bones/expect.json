@@ -18,7 +18,7 @@
   "vertices": 24,
   "document": {
     "skins": 1,
-    "joints": 3,
+    "joints": 2,
     "animations": 1,
     "node_names": [
       "Root",

@@ -102,6 +102,10 @@ pub struct Document {
     pub facts: Map<String, Value>,
     /// The images named but not read, by image index (see [`Document::images`]).
     pub(crate) refs: Refs,
+    /// The textures the reader looked for and didn't get, as written into the source, and whether the count
+    /// there is this one: a document pruned of its textures stops reporting them, as one read without them
+    /// never looked.
+    pub(crate) missed: Option<Box<(crate::images::Missed, bool)>>,
     /// The most triangles [`Document::flatten`] draws (see [`Document::set_max_triangles`]).
     pub(crate) max_triangles: usize,
     /// Whether [`Document::flatten`] draws points and lines (see
@@ -602,6 +606,7 @@ impl Document {
             buffers,
             facts,
             refs,
+            missed: None,
             max_triangles: MAX_TRIANGLES,
             lines_and_points: true,
             max_points: MAX_POINTS,
@@ -1265,41 +1270,19 @@ impl<'s> Rigging<'s> {
         let ibm = b.accessor(Part::f32(ibm), 5126, n, "MAT4", None);
         json.insert(
             "skins".into(),
-            json!([{ "joints": (first..first + n).collect::<Vec<_>>(), "inverseBindMatrices": ibm }]),
+            json!([{ "joints": (first..first + n).collect::<Vec<_>>(), "inverseBindMatrices": ibm, "skeleton": first }]),
         );
         roots
     }
 }
 
-/// A skinned primitive's `JOINTS_0` and `WEIGHTS_0`, flattened: each bone index moved up by
-/// `offset` (past the root a skin may have first), weights summing to 1 in single precision,
-/// and a vertex no bone moves bound to the root, joint 0. A slot with no weight names joint 0,
-/// as glTF's validator wants.
-fn skin_attributes(joints: &[[u32; 4]], weights: &[[f32; 4]], offset: u32, count: usize) -> (Vec<u32>, Vec<f32>) {
-    let mut js = Vec::with_capacity(joints.len() * 4);
-    let mut ws = Vec::with_capacity(weights.len() * 4);
-    let last = u32::try_from(count.saturating_sub(1)).unwrap_or(u32::MAX);
-    for (j, w) in joints.iter().zip(weights) {
-        let mut w = w.map(|x| if x > 0.0 && x.is_finite() { x } else { 0.0 });
-        let mut j = j.map(|x| x.saturating_add(offset).min(last));
-        let sum: f32 = w.iter().sum();
-        if sum > 0.0 {
-            w = w.map(|x| x / sum);
-            // What rounding left over goes to the strongest.
-            let top = (0..4).fold(0, |a, k| if w[k] > w[a] { k } else { a });
-            w[top] += 1.0 - w.iter().sum::<f32>();
-        } else {
-            (j, w) = ([0; 4], [1.0, 0.0, 0.0, 0.0]);
-        }
-        for k in 0..4 {
-            if w[k] == 0.0 {
-                j[k] = 0;
-            }
-        }
-        js.extend_from_slice(&j);
-        ws.extend_from_slice(&w);
-    }
-    (js, ws)
+/// A skinned primitive's joints and weights as every reader's are written ([`crate::skin::sets`]): each bone
+/// index moved up by `offset` (past the root a skin may have first), weights summing to 1, and a vertex no bone
+/// moves bound to the root, joint 0. A slot with no weight names joint 0, as glTF's validator wants.
+fn skin_attributes(joints: &[[u32; 4]], weights: &[[f32; 4]], offset: u32, count: usize) -> crate::skin::Sets {
+    crate::skin::sets(joints.len().min(weights.len()), count, 0, |v, list| {
+        list.extend((0..4).map(|k| (joints[v][k].saturating_add(offset), weights[v][k])));
+    })
 }
 
 /// Makes the materials of primitives whose `COLOR_0` is one of `translucent` (accessors holding an alpha under
@@ -1353,6 +1336,8 @@ pub(crate) struct Builder {
     pub animations: Vec<Animation>,
     /// The images named but not read, by image index.
     pub refs: Refs,
+    /// The textures the model names that the document doesn't have, written into its source when it is finished.
+    pub missed: crate::images::Missed,
     /// While writing skinned primitives: what's added to a bone's index for its joint, and how
     /// many joints the skin has.
     pub joints: Option<(u32, usize)>,
@@ -1380,6 +1365,7 @@ impl Builder {
     /// leave the caller's angle out.
     pub(crate) fn new(crease: f32) -> Self {
         Self {
+            missed: crate::images::Missed::default(),
             parts: Parts::default(),
             views: Vec::new(),
             accessors: Vec::new(),
@@ -1513,17 +1499,10 @@ impl Builder {
             && p.skin_joints.len() == n
             && p.skin_weights.len() == n
         {
-            let (joints, weights) = skin_attributes(&p.skin_joints, &p.skin_weights, offset, count);
-            let j = if count <= 256 {
-                let b: Vec<u8> = joints.iter().map(|&j| u8::try_from(j).unwrap_or(0)).collect();
-                self.accessor(Part::bytes(b), 5121, n, "VEC4", Some(34962))
-            } else {
-                let b = joints.iter().map(|&j| u16::try_from(j).unwrap_or(0)).collect();
-                self.accessor(Part::u16(b), 5123, n, "VEC4", Some(34962))
-            };
-            let w = self.accessor(Part::f32(weights), 5126, n, "VEC4", Some(34962));
-            attributes["JOINTS_0"] = json!(j);
-            attributes["WEIGHTS_0"] = json!(w);
+            let sets = skin_attributes(&p.skin_joints, &p.skin_weights, offset, count);
+            for (key, a) in sets.write(self, count) {
+                attributes[key] = json!(a);
+            }
         }
         let mut out = Vec::new();
         for (mode, indices) in draws {
@@ -1602,14 +1581,7 @@ impl Builder {
 
     /// A float accessor of `kind` (`SCALAR`, `VEC3`, `VEC4`, `MAT4`) with no target, for skins
     /// and animations; `bounds` adds the `min` and `max` an animation's times need.
-    #[cfg(any(
-        feature = "fbx",
-        feature = "usd",
-        feature = "vox",
-        feature = "3ds",
-        feature = "bvh",
-        feature = "dae"
-    ))]
+    #[cfg(any(feature = "fbx", feature = "usd", feature = "dae"))]
     pub(crate) fn floats(&mut self, v: Vec<f32>, kind: &'static str, bounds: bool) -> usize {
         let width = match kind {
             "VEC2" => 2,
@@ -1644,9 +1616,11 @@ impl Builder {
     pub(crate) fn materials<M: Into<Full>>(
         &mut self,
         materials: impl IntoIterator<Item = M>,
-        images: Vec<Source>,
+        images: impl Into<crate::images::List>,
         json: &mut Map<String, Value>,
     ) {
+        let (images, missed) = images.into().parts();
+        self.missed.add(missed);
         // A WebP image a flattened glTF kept is re-encoded as PNG now; one that doesn't decode is
         // left out, with the textures that use it.
         let images: Vec<Option<Source>> = images
@@ -1706,12 +1680,25 @@ impl Builder {
 
     /// The document: `json` (scenes, nodes, meshes and the rest) with the asset, the accessors,
     /// the views and the one buffer they're on.
-    pub(crate) fn finish(self, mut json: Map<String, Value>, facts: Map<String, Value>) -> Document {
+    pub(crate) fn finish(mut self, mut json: Map<String, Value>, facts: Map<String, Value>) -> Document {
         if !self.keep_alpha_modes {
             blend_vertex_alpha(&mut json, &self.translucent);
         }
         let asset = json.entry("asset").or_insert_with(|| json!({}));
         asset["version"] = json!("2.0");
+        // The one place a reader's missing textures are reported.
+        let mut missed = None;
+        if !self.missed.is_empty() {
+            let source = &mut asset["extras"]["source"];
+            if !source.is_object() {
+                *source = json!({});
+            }
+            if let Some(source) = source.as_object_mut() {
+                let counted = !source.contains_key("droppedTextures");
+                self.missed.write(source);
+                missed = Some(Box::new((std::mem::take(&mut self.missed), counted)));
+            }
+        }
         if asset.get("generator").is_none() {
             asset["generator"] = json!("polysmelt");
         }
@@ -1740,6 +1727,7 @@ impl Builder {
         }
         let mut doc = Document::new(json, buffers, facts, self.refs);
         doc.tables = tables;
+        doc.missed = missed;
         if cut > 0 {
             // The reader counted what it drew before the bad ones were dropped here: counted again, as drawn.
             let c = doc.counts();

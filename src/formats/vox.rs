@@ -24,7 +24,8 @@ use std::collections::HashMap;
 
 use serde_json::{Map, Value, json};
 
-use crate::document::{Animation, Builder, Channel, Document, Keep, Sampler};
+use super::keys::{self, Interp, Path, Track};
+use crate::document::{Builder, Document, Keep};
 use crate::material::{Factor, Full};
 use crate::mesh::{Material, Prim, srgb_to_linear};
 use crate::source::{Axis, Fact, Handedness, SourceInfo};
@@ -248,8 +249,10 @@ impl Matl {
     }
 }
 
-/// `.vox` has no frame rate; animation frames are this many to a second.
-const FRAMES_PER_SECOND: f32 = 10.0;
+/// `.vox` has no frame rate, and its editor documents none: animation frames are this many to a second, the
+/// readers' shared assumption.
+#[allow(clippy::cast_possible_truncation, reason = "a small whole number")]
+const FRAMES_PER_SECOND: f32 = keys::ASSUMED_FRAME_RATE as f32;
 
 /// The most glTF nodes a scene graph may unfold into (a group listed twice is walked twice).
 const MAX_NODES: usize = 1 << 16;
@@ -364,8 +367,9 @@ pub(crate) fn vox(data: &[u8], keep: Keep) -> Result<Document> {
         json.insert("extensionsUsed".into(), json!(["KHR_node_visibility"]));
     }
     if keep.animations && !animated.is_empty() {
-        let a = animation(&mut b, &animated);
-        b.animations.push(a);
+        let mut writer = keys::Writer::new(keep.extras);
+        writer.animation(&mut b, None, None, animation(&animated));
+        writer.finish(&mut b);
     }
 
     let palette = v.palette.unwrap_or_else(default_palette);
@@ -869,50 +873,34 @@ fn quaternion(r: &[[i32; 3]; 3]) -> [f32; 4] {
     q.map(|c| if c.abs() < 1e-6 { 0.0 } else { c })
 }
 
-/// One animation stepping each animated node through its frames.
+/// The tracks of the one animation stepping each animated node through its frames. The file gives it no name, so
+/// it has none.
 #[allow(clippy::float_cmp, reason = "exact: a scale is -1 or 1")]
-fn animation(b: &mut Builder, animated: &[(usize, &[Frame])]) -> Animation {
-    let (mut channels, mut samplers) = (Vec::new(), Vec::new());
+fn animation(animated: &[(usize, &[Frame])]) -> Vec<Track> {
+    let mut tracks = Vec::new();
     for &(node, frames) in animated {
         let mut frames: Vec<&Frame> = frames.iter().collect();
         frames.sort_by_key(|f| f.number);
         frames.dedup_by_key(|f| f.number);
         #[allow(clippy::cast_precision_loss, reason = "frame numbers are small")]
         let times: Vec<f32> = frames.iter().map(|f| f.number as f32 / FRAMES_PER_SECOND).collect();
-        let input = b.floats(times, "SCALAR", true);
         let trs: Vec<_> = frames.iter().map(|f| gltf_trs(&f.xform)).collect();
         let mirrors = trs.iter().any(|(.., s)| *s != [1.0; 3]);
         let mut paths = vec![
-            (
-                "translation",
-                trs.iter().flat_map(|(t, ..)| *t).collect::<Vec<_>>(),
-                "VEC3",
-            ),
-            ("rotation", trs.iter().flat_map(|(_, q, _)| *q).collect(), "VEC4"),
+            (Path::Translation, trs.iter().flat_map(|(t, ..)| *t).collect::<Vec<_>>()),
+            (Path::Rotation, trs.iter().flat_map(|(_, q, _)| *q).collect()),
         ];
         if mirrors {
-            paths.push(("scale", trs.iter().flat_map(|(.., s)| *s).collect(), "VEC3"));
+            paths.push((Path::Scale, trs.iter().flat_map(|(.., s)| *s).collect()));
         }
-        for (path, values, kind) in paths {
-            let output = b.floats(values, kind, false);
-            channels.push(Channel {
-                sampler: samplers.len(),
-                node,
-                path,
-            });
-            samplers.push(Sampler {
-                input,
-                output,
-                interpolation: "STEP",
+        for (path, values) in paths {
+            tracks.push(Track {
+                interp: Interp::Step,
+                ..Track::linear(node, path, times.clone(), values)
             });
         }
     }
-    Animation {
-        channels,
-        samplers,
-        name: Some("frames".into()),
-        extras: None,
-    }
+    tracks
 }
 
 /// Each face direction as the axis it faces along, whether it faces the positive way, and the

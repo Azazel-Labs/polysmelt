@@ -26,7 +26,7 @@
     "/asset/extras/source/assumed": [
       "upAxis"
     ],
-    "/animations/0/name": "motion",
+    "/animations/0/name": "scale_channels",
     "/animations/0/samplers/0/interpolation": "LINEAR",
     "/animations/0/channels/2/target/path": "scale",
     "/animations/0/channels/4/target/path": "scale"

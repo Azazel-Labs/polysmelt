@@ -32,8 +32,9 @@ impl Writer<'_> {
 
     /// By node index, the joint a skinned node's mesh is folded onto, with the geometric transform it takes there.
     ///
-    /// This crate's reader keeps a skinned mesh's model as the skin's last joint (for vertices no cluster weights)
-    /// and draws the mesh from a root node of the same name, as glTF asks. Writing the two as one model again
+    /// This crate's reader draws a skinned mesh from a root node of its model's name, as glTF asks, and keeps the
+    /// model where it was: as the skin's last joint when some vertex has no cluster weighting it, and otherwise
+    /// as a node that holds nothing. Writing the two as one model again
     /// writes the file they came from, where two models would read back as three nodes. It's done only when that
     /// loses nothing: the node holds just its mesh and skin, with no children, extras or animated transform; the
     /// joint holds nothing; every vertex on the joint is on it alone; and its inverse bind matrix is a plain
@@ -89,46 +90,56 @@ impl Writer<'_> {
                 .get("joints")
                 .and_then(Value::as_array)
                 .map_or(&[][..], Vec::as_slice);
-            let Some(j) = joints
+            if !plain || !keep[i] || moved[i] {
+                continue;
+            }
+            let fits = |j: usize| {
+                j != i
+                    && j < nodes.len()
+                    && keep[j]
+                    && !taken[j]
+                    && !holds(&nodes[j])
+                    && hidden(node) == hidden_under(j)
+            };
+            // The skin's last joint, when it is the mesh's model standing for vertices no cluster weights.
+            let last = joints
                 .last()
                 .and_then(Value::as_u64)
                 .and_then(|j| usize::try_from(j).ok())
-            else {
-                continue;
-            };
-            if !plain
-                || !keep[i]
-                || moved[i]
-                || j == i
-                || j >= nodes.len()
-                || !keep[j]
-                || taken[j]
-                || holds(&nodes[j])
-                || !(name(i).is_empty() || name(i) == name(j))
-                || hidden(node) != hidden_under(j)
-            {
+                .filter(|&j| fits(j) && (name(i).is_empty() || name(i) == name(j)));
+            if let Some(j) = last {
+                let ibm = self
+                    .inverse_binds(skin)?
+                    .get(joints.len() - 1)
+                    .copied()
+                    .unwrap_or(IDENTITY);
+                let d = decompose(&ibm);
+                let g = (d.t, d.r, d.s);
+                let back = trs_matrix(g);
+                let tol = 1e-6 * (1.0 + ibm.iter().flatten().fold(0.0_f64, |a, x| a.max(x.abs())));
+                let plain_transform = d.exact
+                    && ibm
+                        .iter()
+                        .flatten()
+                        .zip(back.iter().flatten())
+                        .all(|(a, b)| (a - b).abs() <= tol);
+                if plain_transform && self.alone_on(mesh, joints.len() - 1)? {
+                    taken[j] = true;
+                    out[i] = Some((j, g));
+                    continue;
+                }
+            }
+            // With every vertex weighted the model is no joint: it is the one other node of the mesh's name, a
+            // node that holds nothing, where the reader left it when it drew the mesh from a root of its own.
+            if name(i).is_empty() || parents.get(i).copied().flatten().is_some() {
                 continue;
             }
-            let ibm = self
-                .inverse_binds(skin)?
-                .get(joints.len() - 1)
-                .copied()
-                .unwrap_or(IDENTITY);
-            let d = decompose(&ibm);
-            let g = (d.t, d.r, d.s);
-            let back = trs_matrix(g);
-            let tol = 1e-6 * (1.0 + ibm.iter().flatten().fold(0.0_f64, |a, x| a.max(x.abs())));
-            let plain_transform = d.exact
-                && ibm
-                    .iter()
-                    .flatten()
-                    .zip(back.iter().flatten())
-                    .all(|(a, b)| (a - b).abs() <= tol);
-            if !plain_transform || !self.alone_on(mesh, joints.len() - 1)? {
-                continue;
+            let is_joint = |j: usize| joints.iter().any(|v| v.as_u64() == Some(j as u64));
+            let mut models = (0..nodes.len()).filter(|&j| fits(j) && name(j) == name(i) && !is_joint(j));
+            if let (Some(j), None) = (models.next(), models.next()) {
+                taken[j] = true;
+                out[i] = Some((j, ([0.0; 3], [0.0, 0.0, 0.0, 1.0], [1.0; 3])));
             }
-            taken[j] = true;
-            out[i] = Some((j, g));
         }
         Ok(out)
     }

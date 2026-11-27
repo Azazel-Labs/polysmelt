@@ -36,9 +36,10 @@
 use serde_json::{Map, Value, json};
 
 use super::Input;
+use super::keys::{self, Path};
 use super::stream::{self, f32_from, f64_from, trim};
 use crate::Result;
-use crate::document::{self, Animation, Builder, Document, Keep, Sampler};
+use crate::document::{Builder, Document, Keep};
 use crate::num::{f32_of, usize_of};
 use crate::quat;
 use crate::source::{Axis, Fact, SourceInfo};
@@ -599,7 +600,7 @@ pub(super) fn load(input: Input<'_>, keep: Keep) -> Result<Document> {
         && !m.kept.is_empty()
         && h.columns > 0
     {
-        let input = b.floats(key_times(&m.kept, frame_time), "SCALAR", true);
+        let times = key_times(&m.kept, frame_time);
         let frames = m.kept.len();
         // The rows are read once, in order, for every track.
         let mut tracks = Vec::new();
@@ -645,33 +646,21 @@ pub(super) fn load(input: Input<'_>, keep: Keep) -> Result<Document> {
                 track.out.extend(q.map(f32_of));
             }
         }
-        let (mut channels, mut samplers) = (Vec::new(), Vec::new());
-        for track in tracks {
-            let (path, kind) = match track.kind {
-                Kind::Position => ("translation", "VEC3"),
-                Kind::Rotation => ("rotation", "VEC4"),
-                Kind::Scale => ("scale", "VEC3"),
-            };
-            let output = b.floats(track.out, kind, false);
-            channels.push(document::Channel {
-                sampler: samplers.len(),
-                node: track.node,
-                path,
-            });
-            samplers.push(Sampler {
-                input,
-                output,
-                interpolation: "LINEAR",
-            });
-        }
-        if !channels.is_empty() {
-            b.animations.push(Animation {
-                channels,
-                samplers,
-                name: Some("motion".into()),
-                extras: None,
-            });
-        }
+        // The keys go through the readers' one finisher: a motion whose first rows were dropped still starts at 0.
+        let tracks = tracks
+            .into_iter()
+            .map(|track| {
+                let path = match track.kind {
+                    Kind::Position => Path::Translation,
+                    Kind::Rotation => Path::Rotation,
+                    Kind::Scale => Path::Scale,
+                };
+                keys::Track::linear(track.node, path, times.clone(), track.out)
+            })
+            .collect();
+        let mut writer = keys::Writer::new(keep.extras);
+        writer.animation(&mut b, keys::clip_name(input.path), None, tracks);
+        writer.finish(&mut b);
     }
 
     let mut facts = Map::new();

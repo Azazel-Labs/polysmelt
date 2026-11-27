@@ -54,9 +54,10 @@ impl Reader<'_, '_, '_> {
     }
 
     /// The skin deformer's clusters on geometry `g`: how many there are, and by control point, (cluster number,
-    /// weight), heaviest first and summing to one. Clusters whose bone isn't a model are left out.
-    pub(super) fn influences(&self, g: i64) -> (usize, Vec<Vec<(usize, f32)>>) {
-        let mut out: Vec<Vec<(usize, f32)>> = Vec::new();
+    /// weight) as the clusters list them. Clusters whose bone isn't a model are left out. The shared writer keeps
+    /// the strongest and makes them sum to one ([`crate::skin`]).
+    pub(super) fn influences(&self, g: i64) -> (usize, Vec<Vec<(u32, f32)>>) {
+        let mut out: Vec<Vec<(u32, f32)>> = Vec::new();
         let Some(skin) = self
             .objs
             .children_of(g)
@@ -92,28 +93,8 @@ impl Reader<'_, '_, '_> {
                     if out.len() <= cp {
                         out.resize_with(cp + 1, Vec::new);
                     }
-                    out[cp].push((j, f32_of(w)));
+                    out[cp].push((crate::num::u32_of(j), f32_of(w)));
                 }
-            }
-        }
-        for inf in &mut out {
-            inf.sort_by(|a, b| b.1.total_cmp(&a.1));
-            inf.truncate(16);
-            let sum: f32 = inf.iter().map(|x| x.1).sum();
-            if !sum.is_finite() {
-                // Weights too large to add up: kept in proportion to the largest.
-                let top = inf.first().map_or(1.0, |x| x.1);
-                for x in inf.iter_mut() {
-                    x.1 /= top;
-                }
-                let sum: f32 = inf.iter().map(|x| x.1).sum();
-                for x in inf.iter_mut() {
-                    x.1 /= sum;
-                }
-                continue;
-            }
-            for x in inf.iter_mut() {
-                x.1 /= sum;
             }
         }
         (clusters.len(), out)
@@ -128,9 +109,9 @@ impl Reader<'_, '_, '_> {
             .collect()
     }
 
-    /// The skin for deformer `skin` on model `m`: a joint per cluster, and the model's own node last, for
-    /// vertices no cluster weights.
-    pub(super) fn skin(&mut self, skin: i64, m: i64, geometric: &M4) -> usize {
+    /// The skin for deformer `skin` on model `m`: a joint per cluster, and when `unbound` (some vertex has no
+    /// cluster weighting it) the model's own node last, which those vertices stay with.
+    pub(super) fn skin(&mut self, skin: i64, m: i64, geometric: &M4, unbound: bool) -> usize {
         if let Some(&s) = self.skin_of.get(&(skin, m)) {
             return s;
         }
@@ -158,13 +139,15 @@ impl Reader<'_, '_, '_> {
                 mul(&inverse(&link), &self.world_of(m))
             });
             // The vertex goes geometry → model → bone space.
-            ibms.extend(to_column_major(&mul(&transform, geometric)).map(f32_of));
+            ibms.extend(crate::skin::inverse_bind(to_column_major(&mul(&transform, geometric))));
             joints.push(self.node_of[&bone]);
         }
         // The model's own node: at bind time it's where `Transform` says, so its inverse bind matrix is the
         // geometric transform.
-        joints.push(self.node_of[&m]);
-        ibms.extend(to_column_major(geometric).map(f32_of));
+        if unbound || joints.is_empty() {
+            joints.push(self.node_of[&m]);
+            ibms.extend(crate::skin::inverse_bind(to_column_major(geometric)));
+        }
         let acc = self.b.floats(ibms, "MAT4", false);
         let mut out = json!({ "joints": joints, "inverseBindMatrices": acc });
         // glTF skins blend linearly; a skin meant to blend otherwise (dual quaternion, or a mix) says so.

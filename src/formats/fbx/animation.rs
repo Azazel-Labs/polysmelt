@@ -9,8 +9,8 @@ use serde_json::{Value, json};
 use super::deform::split_weight;
 use super::walker::{Local, rotate};
 use super::{Props, Reader, child_attr, choice, flag, floats, ints, name_of, scalar};
-use crate::document::{self, Sampler};
 use crate::formats::fbx_tree::NodeHandle;
+use crate::formats::keys::{self, Path, Track};
 use crate::formats::xform::{IDENTITY, M4, MAX_STEP_DEGREES, Trs, decompose};
 use crate::num::f32_of;
 
@@ -579,7 +579,10 @@ pub(super) fn timeline(mut times: Vec<f64>) -> Vec<f64> {
 
 impl Reader<'_, '_, '_> {
     /// Every animation stack as a glTF animation, its curves sampled at their keys and blended through its layers.
-    pub(super) fn animations(&mut self) -> Vec<document::Animation> {
+    ///
+    /// Every key goes through the readers' one finisher ([`keys::Writer`]): a stack starts at time 0 as a whole,
+    /// its earliest key's time taken off every node's keys alike.
+    pub(super) fn animations(&mut self) {
         let stacks: Vec<i64> = self
             .objs
             .order
@@ -587,7 +590,7 @@ impl Reader<'_, '_, '_> {
             .copied()
             .filter(|s| self.objs.is("AnimationStack", *s))
             .collect();
-        let mut out = Vec::new();
+        let mut writer = keys::Writer::new(true);
         for stack in stacks {
             let layers = self.layers(stack);
             // Each curve node of the stack, by the layer it's on.
@@ -603,8 +606,7 @@ impl Reader<'_, '_, '_> {
                 continue;
             }
             let stack_of = (layers.as_slice(), &layer_of);
-            let mut channels = Vec::new();
-            let mut samplers = Vec::new();
+            let mut out: Vec<Track> = Vec::new();
             let mut models: Vec<(i64, usize)> = self.node_of.iter().map(|(&m, &n)| (m, n)).collect();
             models.sort_by_key(|(_, n)| *n);
             for (m, node) in models {
@@ -641,7 +643,7 @@ impl Reader<'_, '_, '_> {
                 };
                 if tracks.iter().any(Option::is_some) || parent.is_some() {
                     let under = (parent.as_ref(), parent_rest);
-                    self.transform_channels(node, &local, &tracks, under, &mut channels, &mut samplers);
+                    self.transform_channels(node, &local, &tracks, under, &mut out);
                 }
             }
             // Morph weights: every channel of a mesh at once, per node drawing it.
@@ -669,27 +671,25 @@ impl Reader<'_, '_, '_> {
             let mut weight_nodes: Vec<_> = weight_nodes.into_iter().collect();
             weight_nodes.sort_by_key(|(n, _)| *n);
             for (node, tracks) in weight_nodes {
-                self.weight_channel(node, &tracks, &mut channels, &mut samplers);
+                self.weight_channel(node, &tracks, &mut out);
             }
-            if channels.is_empty() {
+            let name = self.objs.node(stack).and_then(name_of).map(Into::into);
+            let Some(offset) = writer.animation(&mut self.b, name, None, out) else {
                 continue;
-            }
-            let mut anim = document::Animation {
-                channels,
-                samplers,
-                name: self.objs.node(stack).and_then(name_of).map(Into::into),
-                extras: None,
             };
-            // The stack's own span, which may be wider or narrower than its keys.
+            // The stack's own span, which may be wider or narrower than its keys: in the animation's time, as
+            // its keys are.
             let p = self.objs.props(stack);
             if let (Some(start), Some(stop)) = (scalar(&p, "LocalStart"), scalar(&p, "LocalStop"))
                 && stop > start
+                && let Some(anim) = self.b.animations.last_mut()
             {
-                anim.extras = Some(json!({ "start": start / KTIME, "stop": stop / KTIME }));
+                let e = anim.extras.get_or_insert_with(|| json!({}));
+                e["start"] = json!(start / KTIME - offset);
+                e["stop"] = json!(stop / KTIME - offset);
             }
-            out.push(anim);
         }
-        out
+        writer.finish(&mut self.b);
     }
 
     /// A stack's animation layers that play, bottom first: muted ones are left out, and when any is soloed, all but
@@ -796,8 +796,7 @@ impl Reader<'_, '_, '_> {
         local: &Local,
         tracks: &[Option<Layered>; 3],
         (parent, parent_rest): (Option<&Layered>, [f64; 3]),
-        channels: &mut Vec<document::Channel>,
-        samplers: &mut Vec<Sampler>,
+        out: &mut Vec<Track>,
     ) {
         let mut times = Vec::new();
         for t in tracks.iter().flatten().chain(parent) {
@@ -828,33 +827,25 @@ impl Reader<'_, '_, '_> {
         if times.is_empty() {
             return;
         }
-        let shift = times[0].min(0.0);
         let finite = |m: M4| m.iter().flatten().all(|c| c.is_finite()).then_some(m);
         let rest_m = finite(local.at(None, None, None, parent_rest)).unwrap_or(IDENTITY);
         let at = |k: usize, t: f64| tracks[k].as_ref().map(|a| a.at(t));
-        let mut trs: Vec<Trs> = times
+        let trs: Vec<Trs> = times
             .iter()
             .map(|&t| {
                 let under = parent.map_or(parent_rest, |p| p.at(t));
                 decompose(&finite(local.at(at(0, t), at(1, t), at(2, t), under)).unwrap_or(rest_m))
             })
             .collect();
-        // Keep each quaternion on the same side as the last, so slerp takes the short way.
-        for i in 1..trs.len() {
-            let prev = trs[i - 1].r;
-            let q = &mut trs[i].r;
-            if (0..4).map(|k| prev[k] * q[k]).sum::<f64>() < 0.0 {
-                *q = q.map(|c| -c);
-            }
-        }
-        let input = self
-            .b
-            .floats(times.iter().map(|&t| f32_of(t - shift)).collect(), "SCALAR", true);
         let rest = decompose(&rest_m);
-        let paths: [(&str, Vec<f64>, Vec<f64>); 3] = [
-            ("translation", trs.iter().flat_map(|x| x.t).collect(), rest.t.to_vec()),
-            ("rotation", trs.iter().flat_map(|x| x.r).collect(), rest.r.to_vec()),
-            ("scale", trs.iter().flat_map(|x| x.s).collect(), rest.s.to_vec()),
+        let paths: [(Path, Vec<f64>, Vec<f64>); 3] = [
+            (
+                Path::Translation,
+                trs.iter().flat_map(|x| x.t).collect(),
+                rest.t.to_vec(),
+            ),
+            (Path::Rotation, trs.iter().flat_map(|x| x.r).collect(), rest.r.to_vec()),
+            (Path::Scale, trs.iter().flat_map(|x| x.s).collect(), rest.s.to_vec()),
         ];
         for (path, values, rest) in paths {
             let width = rest.len();
@@ -864,21 +855,12 @@ impl Reader<'_, '_, '_> {
             if still {
                 continue;
             }
-            let output = self.b.floats(
-                values.into_iter().map(f32_of).collect(),
-                if width == 4 { "VEC4" } else { "VEC3" },
-                false,
-            );
-            samplers.push(Sampler {
-                input,
-                output,
-                interpolation: "LINEAR",
-            });
-            channels.push(document::Channel {
-                sampler: samplers.len() - 1,
+            out.push(Track::linear(
                 node,
                 path,
-            });
+                times.clone(),
+                values.into_iter().map(f32_of).collect(),
+            ));
         }
         // An animated node holds TRS, never a matrix.
         if self.nodes[node]
@@ -898,13 +880,7 @@ impl Reader<'_, '_, '_> {
 
     /// A weights channel for a node whose mesh's blend shape channels are animated: per channel, its first target,
     /// the weights its targets are reached at, and its weight in percent.
-    fn weight_channel(
-        &mut self,
-        node: usize,
-        tracks: &[(usize, Vec<f64>, Layered)],
-        channels: &mut Vec<document::Channel>,
-        samplers: &mut Vec<Sampler>,
-    ) {
+    fn weight_channel(&mut self, node: usize, tracks: &[(usize, Vec<f64>, Layered)], out: &mut Vec<Track>) {
         let Some(mesh) = self.nodes[node]["mesh"].as_u64().and_then(|m| usize::try_from(m).ok()) else {
             return;
         };
@@ -920,7 +896,6 @@ impl Reader<'_, '_, '_> {
         if times.is_empty() || rest.is_empty() {
             return;
         }
-        let shift = times[0].min(0.0);
         let mut values = Vec::with_capacity(times.len() * rest.len());
         let mut w = rest.clone();
         for &t in &times {
@@ -932,19 +907,9 @@ impl Reader<'_, '_, '_> {
             }
             values.extend(w.iter().copied().map(f32_of));
         }
-        let input = self
-            .b
-            .floats(times.iter().map(|&t| f32_of(t - shift)).collect(), "SCALAR", true);
-        let output = self.b.floats(values, "SCALAR", false);
-        samplers.push(Sampler {
-            input,
-            output,
-            interpolation: "LINEAR",
-        });
-        channels.push(document::Channel {
-            sampler: samplers.len() - 1,
-            node,
-            path: "weights",
+        out.push(Track {
+            width: rest.len(),
+            ..Track::linear(node, Path::Weights, times, values)
         });
     }
 }

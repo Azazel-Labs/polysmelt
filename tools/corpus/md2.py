@@ -126,7 +126,7 @@ case(FMT, "morph_frame_groups", {
     ],
 })
 
-# No skins and no texture coordinates; names that are all digits or empty fall into one run called "frames".
+# No skins and no texture coordinates; names that are all digits or empty fall into one run with no name.
 plain = [frame(f, n) for f, n in enumerate(["", "1", "2"])]
 case(FMT, "unnamed_frames_no_skin", {
     "plain.md2": build((0, 0), [], [], [((0, 3, 2), (0, 0, 0)), ((0, 2, 1), (0, 0, 0))], plain),
@@ -138,7 +138,7 @@ case(FMT, "unnamed_frames_no_skin", {
     "uvs": False,
     "facts": {"frames": 3, "skins": 0},
     "document": {"animations": 1, "morph_targets": 2},
-    "json": {"/animations/0/name": "frames"},
+    "json": {"/animations/0/name": None},
     "winding_matches_normals": True,
     "poses": [pose(0, 0.0, 1, 0), pose(0, 0.2, 3, 2)],
 })

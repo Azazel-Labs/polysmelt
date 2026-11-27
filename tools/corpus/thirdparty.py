@@ -326,18 +326,23 @@ def measure_assimp(c, path, expect, files):
             rate = anim.ticks_per_second or c["ticks_per_second"]
             times = np.concatenate([np.asarray(t, dtype=np.float64) for ch in anim.channels for t in (
                 ch.position_key_times, ch.rotation_key_times, ch.scaling_key_times)])
-            spans.append(rounded([times.min() / rate, times.max() / rate], 5))
+            # Every reader but glTF's has an animation start at 0: the time of its earliest key (or the clip's
+            # own start, where the case gives the clips' `starts`) is taken off every key.
+            start = 0.0 if c["fmt"] == "gltf" else times.min() / rate
+            if c.get("starts"):
+                start = c["starts"][k]
+            spans.append(rounded([times.min() / rate - start, times.max() / rate - start], 5))
             # Posed at a key in the middle of the animation.
             keys = np.unique(times)
             ticks = float(c.get("pose_tick", keys[len(keys) // 2]))
             local = a.posed(k, ticks)
             world = a.world(local)
             for name in c.get("posed", []) if c.get("posed") != "all" else bones:
-                rig.append({"node": called.get(name, name), "animation": k, "time": round(ticks / rate, 6),
+                rig.append({"node": called.get(name, name), "animation": k, "time": round(ticks / rate - start, 6),
                             "world": rounded(m @ world[a.index[name]][:3, 3], 5)})
             if c.get("pose_bounds", False):
                 expect.setdefault("poses", []).append({
-                    "animation": k, "time": round(ticks / rate, 6),
+                    "animation": k, "time": round(ticks / rate - start, 6),
                     "bounds": bounds_of(a.drawn(local), axes, scale)})
         if c.get("spans", True):
             expect["animation_spans"] = spans
@@ -618,7 +623,7 @@ CASES = [
     assimp("dae", "box_nested_animation", "Collada/box_nested_animation.dae", "a skinned box with animations nested in one another",
            bones="all", posed="all", pose_bounds=True),
     assimp("dae", "library_animation_clips", "Collada/library_animation_clips.dae", "a skinned mesh with two animation clips",
-           bones="all", posed="all", spans=False,
+           bones="all", posed="all", spans=False, starts=[0.041666666666666664, 0.0],
            note="assimp 6.0.5 loses the first vertex's weight (the file binds it wholly to the first joint), so the skinned "
                 "mesh isn't compared in a pose, only where the joints are. It also keeps the keys before a clip's start, "
                 "which COLLADA leaves out of the clip, so the animations' spans aren't compared"),

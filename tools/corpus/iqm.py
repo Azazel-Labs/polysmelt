@@ -196,7 +196,7 @@ case(FMT, "skinned_animated", {
         "/animations/0/name": "wave",
         "/animations/0/extras": {"loop": True},
         "/animations/1/name": "hold",
-        "/animations/1/extras": {"frameRate": 24.0},
+        "/animations/1/extras": {"frameRate": 30.0},
         "/asset/extras/source/frameRate": 10.0,
         "/meshes/0/primitives/0/attributes/TANGENT": None,
     },

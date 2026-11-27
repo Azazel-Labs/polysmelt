@@ -120,7 +120,13 @@ Early. What exists today:
   animated), OGRE `.mesh` and `.skeleton` (binary in either byte order and XML, with poses and
   morphs as morph targets and `.material` scripts as materials), and motion capture: Acclaim `.asf` skeletons with `.amc` motions, HTR, and C3D
   and TRC marker tracks (each marker an animated node). Left-handed and Z-up sources are turned
-  to glTF's axes, and keys are kept as the file gives them.
+  to glTF's axes. Every animation starts at time 0 (what was taken off its keys is its
+  `extras.timeOffset`), with keys that are finite and in order and rotations that turn the
+  short way. Keys are the file's own where glTF can hold the curve: stepped, linear, and for
+  3DS and OpenGEX cubic splines. Curves glTF can't hold are sampled into linear keys: FBX
+  (Bezier and TCB curves, Euler rotations, pivots and layers), COLLADA (Bezier, Hermite,
+  B-spline and cardinal curves, and stacks of transforms), USD (transform stacks and time
+  samples), MikuMikuDance motions (Bezier eases) and Irrlicht animators.
   `open` reads a file and `read` a model already in memory; both go by the extension (or else
   the first bytes) and return a `Document`. `Format` names each format and its extensions.
 - **`document`**: the common form, a glTF 2.0 document (its JSON and its buffers' bytes).

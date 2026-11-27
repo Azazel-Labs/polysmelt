@@ -67,7 +67,8 @@ use crate::{Context, ErrorKind, Result};
 
 /// How deep data objects may nest.
 const MAX_DEPTH: usize = 256;
-/// Ticks per second when the file doesn't say.
+/// Ticks per second when the file doesn't say: Direct3D's own default, which its animation controller takes for
+/// a file with no `AnimTicksPerSecond` (D3DX documents 4800). So that, not the readers' shared assumption.
 const DEFAULT_TICKS: f64 = 4800.0;
 use super::scene::MAX_UV_SETS;
 
@@ -894,7 +895,7 @@ impl<'a> Build<'a> {
         for (p, src) in mesh.prims.iter_mut().zip(&sources) {
             let influences = src.iter().map(|&v| lists[v as usize].len()).max().unwrap_or(0).max(1);
             p.influences = influences;
-            p.rest_joint = rest;
+            p.rest_joint = Some(rest);
             p.joints = vec![0; src.len() * influences];
             p.weights = vec![0.0; src.len() * influences];
             for (i, &v) in src.iter().enumerate() {

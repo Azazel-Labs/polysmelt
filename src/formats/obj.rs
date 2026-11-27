@@ -3081,7 +3081,10 @@ pub(crate) fn obj(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<D
                 return None;
             }
             let reference = reference?;
-            let found = assets.find(&reference.file, dir)?;
+            let Some(found) = assets.find(&reference.file, dir) else {
+                images.miss(&reference.file);
+                return None;
+            };
             let image = match make {
                 Make::File => images.file(assets, found, &reference.file)?,
                 // An image already read shows whether it's gray; one only named is read to see.

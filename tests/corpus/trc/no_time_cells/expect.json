@@ -23,7 +23,7 @@
     ],
     "/asset/extras/source/frameRate": 10.0,
     "/asset/extras/source/metersPerUnit": 0.001,
-    "/animations/0/name": "motion",
+    "/animations/0/name": "no_time_cells",
     "/animations/0/samplers/0/interpolation": "LINEAR",
     "/asset/extras/source/startTime": 0.0
   },

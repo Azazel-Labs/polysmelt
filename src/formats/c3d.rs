@@ -48,7 +48,7 @@ use crate::quat;
 use crate::source::{Axis, Fact, meters_in};
 
 /// Frames per second when neither the header nor `POINT:RATE` gives one.
-const DEFAULT_RATE: f64 = 30.0;
+const DEFAULT_RATE: f64 = super::keys::ASSUMED_FRAME_RATE;
 /// A C3D block's size in bytes.
 const BLOCK: usize = 512;
 
@@ -463,7 +463,7 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document> {
     }
     if keep.animations && !channels.is_empty() {
         scene.animations.push(Animation {
-            name: "motion".into(),
+            name: super::keys::clip_name(input.path).unwrap_or_default(),
             channels,
             extras: None,
         });

@@ -52,12 +52,12 @@ use zip::ZipArchive;
 use super::Input;
 use super::xform::{IDENTITY, M4, inverse, mul, scale, set_transform, to_column_major, translate};
 use crate::assets::Assets;
-use crate::document::{Builder, Document, Keep, Part};
+use crate::document::{Builder, Document, Keep};
 use crate::gltf::percent_decode;
 use crate::images::Images;
 use crate::legacy_material;
 use crate::material::Full;
-use crate::num::{f32_of, u32_of};
+use crate::num::u32_of;
 use crate::source::{Axis, Fact, Handedness, SourceInfo};
 use crate::vec3::{self, cross, dot, sub};
 use crate::{Context as _, ErrorKind, Result};
@@ -182,6 +182,7 @@ pub(super) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
         pending: Vec::new(),
         morphs: Vec::new(),
         weighted: HashMap::new(),
+        unbound: std::collections::HashSet::new(),
         skinned_roots: Vec::new(),
         drawn: 0,
         limit: input.limit,
@@ -244,7 +245,9 @@ pub(super) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
             "this COLLADA document has nothing in its scene",
         ));
     }
-    let animations = if keep.animations { r.animations() } else { Vec::new() };
+    if keep.animations {
+        r.animations();
+    }
 
     let basis = basis(meters, &up);
     let mut scene_nodes = roots;
@@ -274,15 +277,13 @@ pub(super) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
         scene_json["name"] = json!(name);
     }
     json.insert("scenes".into(), json!([scene_json]));
+    crate::skin::set_skeletons(&r.nodes, &mut r.skins);
     json.insert("nodes".into(), Value::Array(std::mem::take(&mut r.nodes)));
     if !r.meshes.is_empty() {
         json.insert("meshes".into(), Value::Array(std::mem::take(&mut r.meshes)));
     }
     if !r.skins.is_empty() {
         json.insert("skins".into(), Value::Array(std::mem::take(&mut r.skins)));
-    }
-    if !animations.is_empty() {
-        json.insert("animations".into(), Value::Array(animations));
     }
     if !r.cameras.is_empty() {
         json.insert("cameras".into(), Value::Array(std::mem::take(&mut r.cameras)));
@@ -616,6 +617,8 @@ pub(super) struct Reader<'a> {
     morphs: Vec<(usize, usize)>,
     /// The skinned meshes that have their joints and weights, by the `<skin>` they're from.
     weighted: HashMap<usize, usize>,
+    /// The skinned meshes with a point no joint moves: their skins take the instancing node as a joint.
+    unbound: std::collections::HashSet<usize>,
     skinned_roots: Vec<usize>,
     drawn: usize,
     limit: usize,
@@ -1061,7 +1064,7 @@ impl Reader<'_> {
     /// Skins for the skinned meshes, now that every node is made.
     fn skin_meshes(&mut self) {
         for p in std::mem::take(&mut self.pending) {
-            let Some((joints, count)) = self.joints(p.skin, &p.roots) else {
+            let Some((mut joints, count)) = self.joints(p.skin, &p.roots) else {
                 // The joints aren't in the scene: the mesh goes unskinned where it is.
                 let mut children = Vec::new();
                 let holder = self.holder(p.node, "mesh", &mut children);
@@ -1073,13 +1076,24 @@ impl Reader<'_> {
                 self.weigh(p.mesh, p.skin, count);
                 self.weighted.insert(p.mesh, p.skin);
             }
-            let ibms = self.inverse_binds(p.skin, count);
-            let acc = self.b.floats(ibms, "MAT4", false);
-            let mut skin = json!({ "joints": joints, "inverseBindMatrices": acc });
-            if let Some(s) = self.common_ancestor(&joints) {
-                skin["skeleton"] = json!(s);
+            let mut ibms = self.inverse_binds(p.skin, count);
+            // A vertex no joint moves stays with the node the controller is instanced on: that node is a joint
+            // too, after the file's (a node under it when it is one of them already), and the vertex keeps its
+            // place in the node's own space.
+            if self.unbound.contains(&p.mesh) {
+                let rest = if joints.contains(&p.node) {
+                    let n = self.push_node(json!({}), Some(p.node));
+                    self.adopt(p.node, &[n]);
+                    n
+                } else {
+                    p.node
+                };
+                joints.push(rest);
+                ibms.extend(crate::skin::inverse_bind(to_column_major(&IDENTITY)));
             }
-            self.skins.push(skin);
+            let acc = self.b.floats(ibms, "MAT4", false);
+            // `skeleton` is set once every node has its place ([`crate::skin::set_skeletons`]).
+            self.skins.push(json!({ "joints": joints, "inverseBindMatrices": acc }));
             let mut node = json!({ "mesh": p.mesh, "skin": self.skins.len() - 1 });
             if let Some(name) = p.name {
                 node["name"] = json!(name);
@@ -1159,32 +1173,6 @@ impl Reader<'_> {
         Some((joints, count))
     }
 
-    /// The deepest node every one of `nodes` is under (or is).
-    fn common_ancestor(&self, nodes: &[usize]) -> Option<usize> {
-        let chain = |mut n: usize| {
-            let mut c = vec![n];
-            while let Some(p) = self.parents[n] {
-                c.push(p);
-                n = p;
-                if c.len() > MAX_NODES {
-                    break;
-                }
-            }
-            c.reverse();
-            c
-        };
-        let mut common = chain(*nodes.first()?);
-        for &n in &nodes[1..] {
-            let other = chain(n);
-            let same = common.iter().zip(&other).take_while(|(a, b)| a == b).count();
-            common.truncate(same);
-            if common.is_empty() {
-                return None;
-            }
-        }
-        common.last().copied()
-    }
-
     /// Writes the joints and weights of a skinned mesh's primitives.
     fn weigh(&mut self, mesh: usize, skin: usize, count: usize) {
         let dom = self.dom;
@@ -1192,60 +1180,36 @@ impl Reader<'_> {
         let Some(points) = self.points_of.get(&mesh) else {
             return;
         };
-        let last = u32_of(count.saturating_sub(1));
-        // Four influences to a set of joints and weights, as many sets as the most-influenced point needs.
-        let width = influences.most.div_ceil(4).max(1) * 4;
+        // Through the readers' one writer of joints and weights ([`crate::skin::sets`]): a point no joint moves
+        // goes to the rest joint, which comes after the file's.
         let mut written = Vec::new();
+        let mut unbound = false;
         for pts in points {
-            let n = pts.len();
-            let mut js = Vec::with_capacity(n * width);
-            let mut ws = Vec::with_capacity(n * width);
-            let (mut j, mut w) = (vec![0u32; width], vec![0f32; width]);
-            for &p in pts {
-                j.fill(0);
-                w.fill(0.0);
-                for (k, &(jj, ww)) in influences.of(p as usize).iter().enumerate() {
-                    j[k] = jj;
-                    w[k] = ww;
-                }
-                settle(&mut j, &mut w, last);
-                js.extend_from_slice(&j);
-                ws.extend_from_slice(&w);
-            }
-            let mut sets = Vec::new();
-            for set in 0..width / 4 {
-                let set_js = quad(&js, width, set);
-                let set_ws = quad(&ws, width, set);
-                let j = if count <= 256 {
-                    let b: Vec<u8> = set_js.iter().map(|&j| u8::try_from(j).unwrap_or(0)).collect();
-                    self.b.accessor(Part::bytes(b), 5121, n, "VEC4", Some(34962))
-                } else {
-                    let b = set_js.iter().map(|&j| u16::try_from(j).unwrap_or(0)).collect();
-                    self.b.accessor(Part::u16(b), 5123, n, "VEC4", Some(34962))
-                };
-                let w = self.b.accessor(Part::f32(set_ws), 5126, n, "VEC4", Some(34962));
-                sets.push((j, w));
-            }
-            written.push(sets);
+            let sets = crate::skin::sets(pts.len(), count, u32_of(count), |i, list| {
+                list.extend_from_slice(influences.of(pts[i] as usize));
+            });
+            unbound |= sets.unbound;
+            written.push(sets.write(&mut self.b, count + 1));
+        }
+        if unbound {
+            self.unbound.insert(mesh);
         }
         let _ = dom;
         if let Some(prims) = self.meshes[mesh]["primitives"].as_array_mut() {
             for (prim, sets) in prims.iter_mut().zip(written) {
-                for (k, (j, w)) in sets.into_iter().enumerate() {
-                    prim["attributes"][format!("JOINTS_{k}")] = json!(j);
-                    prim["attributes"][format!("WEIGHTS_{k}")] = json!(w);
+                for (key, a) in sets {
+                    prim["attributes"][key] = json!(a);
                 }
             }
         }
     }
 
-    /// Each point's strongest joints (up to sixteen) and their weights, from a skin's `<vertex_weights>`.
+    /// Each point's joints and their weights, from a skin's `<vertex_weights>`.
     fn influences(&self, skin: usize) -> Influences {
         let dom = self.dom;
         let mut out = Influences {
             starts: vec![0],
             pairs: Vec::new(),
-            most: 0,
         };
         let Some(vw) = dom.child(skin, "vertex_weights") else {
             return out;
@@ -1296,9 +1260,10 @@ impl Reader<'_> {
             if at > v.len() {
                 at = v.len();
             }
-            all.sort_by(|a, b| b.1.total_cmp(&a.1));
-            all.truncate(MAX_INFLUENCES);
-            out.most = out.most.max(all.len());
+            // A file may list a point's influences without end: no more are kept than can matter.
+            if all.len() > MAX_INFLUENCES {
+                crate::skin::strongest(&mut all);
+            }
             out.pairs.extend_from_slice(&all);
             out.starts.push(u32_of(out.pairs.len()));
         }
@@ -1319,9 +1284,7 @@ impl Reader<'_> {
         let mut out = Vec::with_capacity(count * 16);
         for k in 0..count {
             let m = ibm.as_ref().and_then(|a| a.get(u32_of(k))).map_or(IDENTITY, matrix_of);
-            let mut m = mul(&m, &bind_shape);
-            m[3] = [0.0, 0.0, 0.0, 1.0];
-            out.extend(to_column_major(&m).map(f32_of));
+            out.extend(crate::skin::inverse_bind(to_column_major(&mul(&m, &bind_shape))));
         }
         out
     }
@@ -1684,50 +1647,11 @@ fn extra_json(dom: &Dom<'_>, e: usize, depth: usize, budget: &mut usize) -> Valu
     Value::Object(out)
 }
 
-/// A vertex's joints and weights as glTF wants them: joints in range, weights summing to 1, a vertex no joint moves
-/// bound to joint 0, and a slot with no weight naming joint 0.
-fn settle(j: &mut [u32], w: &mut [f32], last: u32) {
-    for x in w.iter_mut() {
-        if !(*x > 0.0 && x.is_finite()) {
-            *x = 0.0;
-        }
-    }
-    for x in j.iter_mut() {
-        *x = (*x).min(last);
-    }
-    let sum: f32 = w.iter().sum();
-    if sum > 0.0 {
-        for x in w.iter_mut() {
-            *x /= sum;
-        }
-        let top = (0..w.len()).fold(0, |a, k| if w[k] > w[a] { k } else { a });
-        w[top] += 1.0 - w.iter().sum::<f32>();
-    } else {
-        j.fill(0);
-        w.fill(0.0);
-        w[0] = 1.0;
-    }
-    for (x, &v) in j.iter_mut().zip(w.iter()) {
-        if v == 0.0 {
-            *x = 0;
-        }
-    }
-}
-
-/// The `set`th four of each `width` numbers.
-fn quad<T: Copy>(v: &[T], width: usize, set: usize) -> Vec<T> {
-    v.chunks_exact(width)
-        .flat_map(|c| c[set * 4..set * 4 + 4].iter().copied())
-        .collect()
-}
-
-/// Each point's influences, strongest first.
+/// Each point's influences, as the file lists them.
 struct Influences {
     /// Where each point's influences start in `pairs`, and where the last one's end.
     starts: Vec<u32>,
     pairs: Vec<(u32, f32)>,
-    /// The most influences a point has.
-    most: usize,
 }
 
 impl Influences {

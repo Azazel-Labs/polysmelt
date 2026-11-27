@@ -34,7 +34,8 @@ use crate::source::{Axis, Fact, Handedness};
 
 /// How deep nodes may nest.
 const MAX_DEPTH: usize = 256;
-/// The frame rate when the file gives none.
+/// The frame rate when the file gives none: the format's own default (its specification lists an `ANIM` chunk's
+/// `fps` as `default=60`). So that, not the readers' shared assumption.
 const DEFAULT_FPS: f32 = 60.0;
 
 /// A texture: its file.
@@ -105,11 +106,6 @@ struct B3d {
 pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document> {
     let bytes = input.read()?;
     let f = parse(&bytes)?;
-    let stem = input
-        .path
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_default();
     let mut scene = Scene::default();
     let mut facts = serde_json::Map::new();
 
@@ -279,7 +275,7 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
                     .unwrap_or(0)
                     .clamp(1, scene::MAX_INFLUENCES);
                 p.influences = width;
-                p.rest_joint = rest;
+                p.rest_joint = Some(rest);
                 for &v in &used {
                     unbound |= links[v].is_empty();
                     let mut l = links[v].clone();
@@ -378,7 +374,7 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
     }
     if !channels.is_empty() {
         scene.animations.push(Animation {
-            name: stem,
+            name: String::new(),
             channels,
             extras: None,
         });

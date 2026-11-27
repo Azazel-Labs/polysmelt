@@ -384,18 +384,8 @@ impl super::Reader<'_> {
                 assets.image(b, Path::new(&file))
             });
         }
-        let decoded = crate::gltf::percent_decode(uri).replace('\\', "/");
-        let path = if let Some(rest) = decoded.strip_prefix("file:///") {
-            if rest.as_bytes().get(1) == Some(&b':') {
-                rest.to_owned()
-            } else {
-                format!("/{rest}")
-            }
-        } else if let Some(rest) = decoded.strip_prefix("file://") {
-            rest.strip_prefix("localhost").unwrap_or(rest).to_owned()
-        } else {
-            decoded
-        };
+        // The path the URI names, as every reader takes a reference ([`crate::assets::local_path`]).
+        let path = crate::assets::local_path(uri);
         let path = path.trim_start_matches("./").to_owned();
         if path.is_empty() {
             return None;
@@ -413,14 +403,21 @@ impl super::Reader<'_> {
             }
         }
         let relative = !path.starts_with('/') && path.as_bytes().get(1) != Some(&b':');
-        let found = assets.find(&path, self.dir).or_else(|| {
-            let base = self.base.as_deref()?;
-            let base = base.strip_prefix("file:///").unwrap_or(base);
-            let dir = base.rsplit_once('/').map_or("", |(d, _)| d);
-            relative
-                .then(|| assets.find(&format!("{dir}/{path}"), self.dir))
-                .flatten()
-        })?;
+        let found = assets
+            .find(uri, self.dir)
+            .or_else(|| assets.find(&path, self.dir))
+            .or_else(|| {
+                let base = self.base.as_deref()?;
+                let base = base.strip_prefix("file:///").unwrap_or(base);
+                let dir = base.rsplit_once('/').map_or("", |(d, _)| d);
+                relative
+                    .then(|| assets.find(&format!("{dir}/{path}"), self.dir))
+                    .flatten()
+            });
+        let Some(found) = found else {
+            self.images.miss(uri);
+            return None;
+        };
         self.images.file(assets, found, &path)
     }
 

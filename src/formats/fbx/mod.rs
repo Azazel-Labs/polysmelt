@@ -279,6 +279,7 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         unit,
         skinned_roots: Vec::new(),
         skinned_meshes: std::collections::HashSet::new(),
+        unbound_meshes: std::collections::HashSet::new(),
         hidden: std::collections::HashSet::new(),
         color_uv: HashMap::new(),
         material_uvs: HashMap::new(),
@@ -358,7 +359,9 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
     if !skipped.is_empty() {
         details.insert("skipped".into(), json!(skipped));
     }
-    let animations = if keep.animations { r.animations() } else { Vec::new() };
+    if keep.animations {
+        r.animations();
+    }
     let mut scene_nodes = roots;
     if basis != IDENTITY {
         let mut root = json!({ "name": "RootNode", "children": scene_nodes });
@@ -388,6 +391,7 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
     json.insert("asset".into(), json!({ "extras": { "source": details } }));
     json.insert("scene".into(), json!(0));
     json.insert("scenes".into(), json!([{ "nodes": scene_nodes }]));
+    crate::skin::set_skeletons(&r.nodes, &mut r.skins);
     json.insert("nodes".into(), Value::Array(std::mem::take(&mut r.nodes)));
     if !r.meshes.is_empty() {
         json.insert("meshes".into(), Value::Array(std::mem::take(&mut r.meshes)));
@@ -414,7 +418,6 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
     }
     let (materials, images) = (std::mem::take(&mut r.materials), std::mem::take(&mut r.images));
     let mut b = r.b;
-    b.animations = animations;
     b.materials(&materials, images.list, &mut json);
     Ok(b.finish(json, Map::new()))
 }
@@ -584,6 +587,8 @@ struct Reader<'o, 'a, 'x> {
     skinned_roots: Vec<usize>,
     /// Meshes carrying joints and weights.
     skinned_meshes: std::collections::HashSet<usize>,
+    /// The skinned meshes with a vertex no cluster weights: their skins take the model's node as a joint.
+    unbound_meshes: std::collections::HashSet<usize>,
     /// Models hidden, by their own visibility or as a level of detail not shown.
     hidden: std::collections::HashSet<i64>,
     /// Material → the UV set its color texture reads, by name.

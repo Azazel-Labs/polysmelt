@@ -1218,8 +1218,9 @@ for cid, bone, verts, link, transform in [(41, 11, [0, 1, 4, 5], IDENT, IDENT),
         Node("Transform", AD(transform)), Node("TransformLink", AD(link))]), ("OO", cid, 40), ("OO", bone, cid))
 anim_stack(s)
 anim_curves(s, 12, "Lcl Translation", 70, {"d|X": ([0, 1], [0, 100], False)}, defaults={"d|Y": 50})
+# Every corner has a bone, so the skin's joints are the two bones and no more.
 write("skin_two_bones", s, "a cube skinned to two bones; the top bone's translation is animated",
-      {"vertices": 24, "document": {"skins": 1, "joints": 3, "animations": 1, "node_names": ["Root", "Tip"]},
+      {"vertices": 24, "document": {"skins": 1, "joints": 2, "animations": 1, "node_names": ["Root", "Tip"]},
        "poses": [{"animation": 0, "time": 1, "bounds": box((0, 0, 0), (2, 1, 1))}]})
 
 # Two corners of the cube's top on the second bone, the other two on no bone: those stay with the mesh's own model,

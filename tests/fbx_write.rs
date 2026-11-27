@@ -990,13 +990,13 @@ fn skins_bind_poses_and_clips_come_back() {
     assert!(d.is_empty(), "differs in {d:?}");
     let rig = back.rig().unwrap();
     assert_eq!(rig.skins.len(), 1);
-    // A joint per cluster, then the reader's own joint for the mesh's node, standing for unweighted vertices.
+    // A joint per cluster and no more: every vertex has a cluster, so the mesh's node isn't needed as one.
     let joints: Vec<_> = rig.skins[0]
         .joints
         .iter()
         .map(|&j| rig.nodes[j].name.as_deref())
         .collect();
-    assert_eq!(joints, [Some("Hips"), Some("Spine"), Some("Arm"), Some("Body")]);
+    assert_eq!(joints, [Some("Hips"), Some("Spine"), Some("Arm")]);
     let names: Vec<_> = rig
         .animations
         .iter()

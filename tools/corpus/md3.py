@@ -11,7 +11,8 @@ coordinates (two floats per vertex) and vertices frame by frame (x, y, z as 16-b
 latitude in the high byte and longitude in the low byte, each in 256ths of a turn).
 
 The document has a node and mesh per surface, its first frame the geometry and every later frame that moves it a
-morph target, with one linear animation, ten frames a second, of the surfaces' weights and the tags' places. Tags
+morph target, with one linear animation, thirty frames a second (the format has no rate: the readers' shared
+assumption), of the surfaces' weights and the tags' places. Tags
 are nodes. A surface's shader names its texture; one with no shader takes it from `<model>_default.skin`
 ("surface,texture" lines) beside the model; a texture with no extension is a `.tga`. Triangles wind clockwise seen
 from the front, so the reader turns them around; texture coordinates run down the image, as glTF's do. Quake is Z
@@ -136,6 +137,10 @@ def tag_frame(f):
     return ("tag_weapon", (1.0, 2.0, float(f)), axes), q
 
 
+# Seconds a frame: the format has no rate, so the readers' assumed 30 a second.
+FRAME = 1 / 30
+
+
 def pose(time, f_width, f_height):
     # The body at the frame, with the head standing still at Z-up y 2..3.
     return {"animation": 0, "time": time,
@@ -164,25 +169,25 @@ case(FMT, "surfaces_tag_and_skin", {
     "document": {"animations": 1, "morph_targets": 2, "channels": 3,
                  "node_names": ["body", "head", "tag_weapon"]},
     "json": {
-        "/animations/0/name": "thing",
+        "/animations/0/name": None,
         "/meshes/0/extras/targetNames": ["frame1", "frame2"],
         "/meshes/1/primitives/0/targets": None,
         "/asset/extras/source/format": "MD3",
         "/asset/extras/source/version": "15",
         "/asset/extras/source/upAxis": "+Z",
-        "/asset/extras/source/frameRate": 10,
+        "/asset/extras/source/frameRate": 30,
         "/asset/extras/source/name": "models/thing/thing.md3",
     },
     "uvs_include": QUAD_ST,
     "normals_in": [[0, 1, 0]],
     "winding_matches_normals": True,
     "materials": [{"textured": True, "pixel": [220, 20, 20]}, {"textured": True, "pixel": [20, 20, 220]}],
-    "poses": [pose(0.0, 1, 0), pose(0.05, 1.5, 0.5), pose(0.1, 2, 1), pose(0.2, 3, 2)],
+    "poses": [pose(0.0, 1, 0), pose(r(FRAME / 2), 1.5, 0.5), pose(r(FRAME), 2, 1), pose(r(2 * FRAME), 3, 2)],
     "rig": [
         {"node": "tag_weapon", "parent": None, "translation": yup([1, 2, 0]), "rotation": rot(0),
          "keys": {"translation": 3, "rotation": 3, "scale": None}},
-        {"node": "tag_weapon", "time": 0.1, "translation": yup([1, 2, 1]), "rotation": rot(1)},
-        {"node": "tag_weapon", "time": 0.2, "translation": yup([1, 2, 2]), "rotation": rot(2)},
+        {"node": "tag_weapon", "time": r(FRAME), "translation": yup([1, 2, 1]), "rotation": rot(1)},
+        {"node": "tag_weapon", "time": r(2 * FRAME), "translation": yup([1, 2, 2]), "rotation": rot(2)},
     ],
 })
 
@@ -220,7 +225,7 @@ case(FMT, "tags_only", {
     "document": {"animations": 1, "channels": 2},
     "rig": [
         {"node": "tag_head", "translation": yup([0, 0, 1]), "rotation": Z_UP},
-        {"node": "tag_head", "time": 0.1, "translation": yup([0, 0, 2]),
+        {"node": "tag_head", "time": r(FRAME), "translation": yup([0, 0, 2]),
          "rotation": [r(c) for c in qmul(Z_UP, about_z(90)[1])]},
     ],
 })

@@ -141,6 +141,11 @@ mod num;
 )]
 mod quat;
 pub mod rig;
+#[cfg_attr(
+    not(feature = "default"),
+    allow(dead_code, reason = "each reader uses the parts it needs")
+)]
+mod skin;
 pub mod source;
 
 #[cfg(any(feature = "dae", feature = "skp"))]

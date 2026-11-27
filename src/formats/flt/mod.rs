@@ -40,11 +40,12 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value, json};
 
+use super::keys::{self, Interp, Track};
 use super::xform::col::{self, IDENTITY, mul, scaling, translation};
 use super::xform::set_trs;
 use crate::Result;
 use crate::assets::Assets;
-use crate::document::{Animation, Builder, Channel, Document, Keep, Limits, Part, Sampler};
+use crate::document::{Builder, Document, Keep};
 use crate::images::{Images, Location};
 use crate::legacy_material::{self, Phong, Rgb, Transparency};
 use crate::material::{Alpha, Full, Tex};
@@ -1309,34 +1310,11 @@ fn key_layer(layers: u32, mask: u8, l: usize) -> bool {
     layers != u32::MAX && mask & (1 << l) != 0
 }
 
-/// A float accessor of `kind` with no target, for animations; `bounds` adds `min` and `max`.
-fn floats(b: &mut Builder, v: Vec<f32>, kind: &'static str, bounds: bool) -> usize {
-    let width = if kind == "VEC3" { 3 } else { 1 };
-    let count = v.len() / width;
-    let range = bounds.then(|| {
-        let mut min = vec![f32::MAX; width];
-        let mut max = vec![f32::MIN; width];
-        for e in v.chunks_exact(width) {
-            for k in 0..width {
-                min[k] = min[k].min(e[k]);
-                max[k] = max[k].max(e[k]);
-            }
-        }
-        (min, max)
-    });
-    let a = b.accessor(Part::f32(v), 5126, count, kind, None);
-    if let Some((min, max)) = range {
-        b.accessors[a].min = Some(Limits::floats(&min));
-        b.accessors[a].max = Some(Limits::floats(&max));
-    }
-    a
-}
-
 /// Animated groups as an animation: each frame node scaled to full size in its turn and to
 /// nothing otherwise, stepping.
-fn animation(b: &mut Builder, sequences: &[(parse::Sequence, Vec<usize>)]) -> Option<Animation> {
-    let mut channels = Vec::new();
-    let mut samplers = Vec::new();
+fn animation(sequences: &[(parse::Sequence, Vec<usize>)]) -> (Vec<Track>, bool) {
+    let mut tracks = Vec::new();
+    let mut assumed = false;
     for (seq, frames) in sequences {
         let n = frames.len();
         if !(2..=MAX_FRAMES).contains(&n) {
@@ -1354,7 +1332,9 @@ fn animation(b: &mut Builder, sequences: &[(parse::Sequence, Vec<usize>)]) -> Op
         let frame = if seq.loop_duration > 0.0 {
             seq.loop_duration / count
         } else {
-            0.1
+            // No duration given: the readers' shared assumed frame rate.
+            assumed = true;
+            f32_of(1.0 / keys::ASSUMED_FRAME_RATE)
         };
         let mut times: Vec<f32> = (0..u32_of(steps)).map(|s| f32_of(f64::from(s)) * frame).collect();
         let last = if seq.last_frame > 0.0 { seq.last_frame } else { frame };
@@ -1362,32 +1342,19 @@ fn animation(b: &mut Builder, sequences: &[(parse::Sequence, Vec<usize>)]) -> Op
         if times.windows(2).any(|w| w[1] <= w[0] || !w[1].is_finite()) {
             continue;
         }
-        let input = floats(b, times, "SCALAR", true);
         for (k, &node) in frames.iter().enumerate() {
             let mut v = Vec::with_capacity((steps + 1) * 3);
             for &shown in order.iter().chain(std::iter::once(&order[0])) {
                 let s = if shown == k { 1.0 } else { 0.0 };
                 v.extend_from_slice(&[s, s, s]);
             }
-            let output = floats(b, v, "VEC3", false);
-            samplers.push(Sampler {
-                input,
-                output,
-                interpolation: "STEP",
-            });
-            channels.push(Channel {
-                sampler: samplers.len() - 1,
-                node,
-                path: "scale",
+            tracks.push(Track {
+                interp: Interp::Step,
+                ..Track::linear(node, keys::Path::Scale, times.clone(), v)
             });
         }
     }
-    (!channels.is_empty()).then(|| Animation {
-        channels,
-        samplers,
-        name: Some("sequences".into()),
-        extras: None,
-    })
+    (tracks, assumed)
 }
 
 /// A date as the header writes it, C's `ctime` form (`"Tue Mar 05 14:30:00 2024"`), in ISO 8601.
@@ -1558,15 +1525,23 @@ fn finish(mut c: Ctx<'_>, mut s: Scene) -> Document {
     facts.insert("nodes".into(), json!(s.nodes.len()));
     facts.insert("materials".into(), json!(c.materials.len()));
 
+    if c.keep.animations {
+        let (tracks, assumed) = animation(&s.sequences);
+        let mut writer = keys::Writer::new(c.keep.extras);
+        let written = writer.animation(&mut c.b, None, None, tracks).is_some();
+        writer.finish(&mut c.b);
+        if written && assumed {
+            // A sequence that gives no duration plays at the readers' shared assumed rate.
+            let mut info = SourceInfo::from_json(&source);
+            info.frame_rate = Fact::Assumed(keys::ASSUMED_FRAME_RATE);
+            info.write(&mut source);
+        }
+    }
+
     let mut json = Map::new();
     json.insert("asset".into(), json!({ "extras": { "source": source } }));
     json.insert("scene".into(), json!(0));
     json.insert("scenes".into(), json!([{ "nodes": [0] }]));
-    if c.keep.animations
-        && let Some(a) = animation(&mut c.b, &s.sequences)
-    {
-        c.b.animations.push(a);
-    }
     json.insert("nodes".into(), Value::Array(s.nodes));
     if !c.meshes.is_empty() {
         json.insert("meshes".into(), Value::Array(std::mem::take(&mut c.meshes)));

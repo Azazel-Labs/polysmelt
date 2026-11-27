@@ -437,7 +437,6 @@ struct Ctx<'a> {
     light_of: FastMap<u32, Option<usize>>,
     cameras: Vec<Value>,
     camera_of: FastMap<u32, Option<usize>>,
-    animations: Vec<Value>,
     /// The triangles drawn, each placement of a mesh counted.
     triangles: usize,
     /// The triangles built, each mesh counted once; bounded by the limit.
@@ -535,7 +534,6 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         light_of: FastMap::default(),
         cameras: Vec::new(),
         camera_of: FastMap::default(),
-        animations: Vec::new(),
         triangles: 0,
         built_triangles: 0,
         lines_or_points: false,
@@ -1024,9 +1022,7 @@ fn finish(mut c: Ctx<'_>) -> Document {
     json.insert("asset".into(), json!({ "extras": { "source": source } }));
     json.insert("scene".into(), json!(0));
     json.insert("scenes".into(), json!([{ "nodes": [0] }]));
-    if !c.animations.is_empty() {
-        json.insert("animations".into(), Value::Array(std::mem::take(&mut c.animations)));
-    }
+    crate::skin::set_skeletons(&nodes, &mut c.skins);
     json.insert("nodes".into(), Value::Array(nodes));
     if !c.meshes.is_empty() {
         json.insert("meshes".into(), Value::Array(std::mem::take(&mut c.meshes)));

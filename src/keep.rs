@@ -479,8 +479,29 @@ impl Document {
         {
             return;
         }
+        let missed = if keep.textures && keep.materials {
+            None
+        } else {
+            self.missed.take()
+        };
         let mut before = BTreeSet::new();
         let mut root = Value::Object(std::mem::take(self.json_mut()));
+        // Without its textures a document misses none: what the reader looked for and didn't find goes, as a read
+        // without textures wouldn't have looked.
+        if let Some(missed) = missed
+            && let Some(source) = root.pointer_mut("/asset/extras/source").and_then(Value::as_object_mut)
+        {
+            let (missed, counted) = *missed;
+            if counted {
+                source.remove("droppedTextures");
+            }
+            if let Some(Value::Array(files)) = source.get_mut("missingFiles") {
+                files.retain(|f| !f.as_str().is_some_and(|f| missed.files.iter().any(|m| m == f)));
+                if files.is_empty() {
+                    source.remove("missingFiles");
+                }
+            }
+        }
         extensions_present(&root, &mut before);
         let Value::Object(json) = &mut root else { unreachable!() };
         // Animation pointers (`KHR_animation_pointer`) into what goes, go with it.

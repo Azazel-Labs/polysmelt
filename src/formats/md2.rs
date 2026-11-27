@@ -47,7 +47,9 @@ use crate::mesh::{FastMap, Material};
 use crate::num::{f32_of, u32_of};
 use crate::source::{Axis, Fact, Handedness};
 
-/// Frames a second: the rate the engine's game logic runs at, as the format stores none.
+/// Frames a second, as the format stores none: the rate of the engine the format belongs to, whose game logic
+/// steps a model's frame every 100 ms (`FRAMETIME` 0.1 in id Software's released Quake II source). So that, not
+/// the readers' shared assumption.
 const RATE: f32 = 10.0;
 
 /// The most frames read; the engine holds 512.
@@ -141,6 +143,10 @@ pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
         None if textured => super::color_texture(input.path, assets, &mut images),
         None => None,
     };
+    // A skin the model names that isn't there, with nothing found in its place, is a texture it doesn't have.
+    if let (None, Some(s), true) = (material.color_image, skin, keep.textures) {
+        images.miss(s);
+    }
     scene.materials.push(material);
     scene.images = images.list;
 
@@ -416,12 +422,11 @@ fn target(prim: &mut Primitive, verts: &[(u16, u16)], pos: &[[f32; 3]], nrm: &[[
 }
 
 /// The runs of frames that make each animation: consecutive frames whose names match once trailing digits are
-/// taken off, named that way (`frames` when nothing is left; a name used again gets a number).
+/// taken off, named that way (with no name when nothing is left; a name used again gets a number).
 fn groups(names: &[String]) -> Vec<(String, Range<usize>)> {
     let mut out: Vec<(String, Range<usize>)> = Vec::new();
     for (i, n) in names.iter().enumerate() {
         let p = n.trim_end_matches(|c: char| c.is_ascii_digit());
-        let p = if p.is_empty() { "frames" } else { p };
         match out.last_mut() {
             Some((q, r)) if q == p => r.end = i + 1,
             _ => out.push((p.to_owned(), i..i + 1)),
@@ -431,7 +436,7 @@ fn groups(names: &[String]) -> Vec<(String, Range<usize>)> {
     for (name, _) in &mut out {
         let n = seen.entry(name.clone()).or_insert(0);
         *n += 1;
-        if *n > 1 {
+        if *n > 1 && !name.is_empty() {
             *name = format!("{name}_{n}");
         }
     }
@@ -450,10 +455,7 @@ mod tests {
             .collect();
         let g = groups(&names);
         let got: Vec<(&str, Range<usize>)> = g.iter().map(|(n, r)| (n.as_str(), r.clone())).collect();
-        assert_eq!(
-            got,
-            vec![("stand", 0..2), ("run", 2..5), ("frames", 5..6), ("stand_2", 6..7)]
-        );
+        assert_eq!(got, vec![("stand", 0..2), ("run", 2..5), ("", 5..6), ("stand_2", 6..7)]);
     }
 
     #[test]

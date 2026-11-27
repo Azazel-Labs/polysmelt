@@ -20,7 +20,7 @@
     ]
   },
   "json": {
-    "/animations/0/name": "thing",
+    "/animations/0/name": null,
     "/meshes/0/extras/targetNames": [
       "frame1",
       "frame2"
@@ -29,7 +29,7 @@
     "/asset/extras/source/format": "MD3",
     "/asset/extras/source/version": "15",
     "/asset/extras/source/upAxis": "+Z",
-    "/asset/extras/source/frameRate": 10,
+    "/asset/extras/source/frameRate": 30,
     "/asset/extras/source/name": "models/thing/thing.md3"
   },
   "uvs_include": [
@@ -95,7 +95,7 @@
     },
     {
       "animation": 0,
-      "time": 0.05,
+      "time": 0.016667,
       "bounds": {
         "min": [
           0,
@@ -111,7 +111,7 @@
     },
     {
       "animation": 0,
-      "time": 0.1,
+      "time": 0.033333,
       "bounds": {
         "min": [
           0,
@@ -127,7 +127,7 @@
     },
     {
       "animation": 0,
-      "time": 0.2,
+      "time": 0.066667,
       "bounds": {
         "min": [
           0,
@@ -165,7 +165,7 @@
     },
     {
       "node": "tag_weapon",
-      "time": 0.1,
+      "time": 0.033333,
       "translation": [
         1,
         1,
@@ -180,7 +180,7 @@
     },
     {
       "node": "tag_weapon",
-      "time": 0.2,
+      "time": 0.066667,
       "translation": [
         1,
         2,

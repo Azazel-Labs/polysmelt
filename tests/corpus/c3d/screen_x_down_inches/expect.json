@@ -23,7 +23,7 @@
     "/scenes/0/nodes": [
       0
     ],
-    "/animations/0/name": "motion",
+    "/animations/0/name": "screen_x_down_inches",
     "/animations/0/samplers/0/interpolation": "LINEAR",
     "/asset/extras/source/upAxis": "-X",
     "/asset/extras/source/xScreen": "+Z",

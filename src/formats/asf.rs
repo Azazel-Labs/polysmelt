@@ -62,7 +62,9 @@ use crate::source::{Axis, Fact};
 const MAX_BONES: usize = 32_768;
 /// Dofs one bone (or the root's `order`) may list. The format defines seven.
 const MAX_DOFS: usize = 64;
-/// Frames per second when the motion doesn't say.
+/// Frames per second when the motion doesn't say. The format has no rate of its own; nearly every ASF/AMC file
+/// is from, or made to go with, the CMU Graphics Lab Motion Capture Database, which documents its motions as
+/// captured at 120 Hz. So that, not the readers' shared assumption, is the default here.
 const DEFAULT_RATE: f64 = 120.0;
 /// Meters in an inch, the unit ASF lengths are in once divided by `length`.
 const INCH: f64 = 0.0254;
@@ -732,7 +734,7 @@ fn parse_amc(text: &str, sk: &Skeleton, rig: &Rig, scene: &Scene) -> (Option<Ani
         }
     }
     let animation = (!channels.is_empty()).then(|| Animation {
-        name: "motion".into(),
+        name: String::new(),
         channels,
         extras: None,
     });
@@ -868,8 +870,10 @@ pub(crate) fn load(input: Input<'_>, ext: &str, assets: &dyn Assets, keep: Keep)
         };
         source.insert("frames".into(), json!(motion.frames));
         if keep.animations
-            && let Some(a) = animation
+            && let Some(mut a) = animation
         {
+            // A motion file is one clip, named as its file is.
+            a.name = super::keys::clip_name(input.path).unwrap_or_default();
             scene.animations.push(a);
         }
     }

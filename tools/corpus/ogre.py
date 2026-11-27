@@ -1265,9 +1265,11 @@ case(FMT, "materials", {
                    "texture that isn't there; unknown properties kept as extras",
     "source": SRC,
     "material_count": 7,
-    "facts": {"submeshes": 7, "missing_materials": ["Nowhere"], "missing_textures": ["gone.png"]},
+    "facts": {"submeshes": 7, "missing_materials": ["Nowhere"]},
     "document": {"source": ogre_source("MeshSerializer_v1.100", materialScripts=["mats.material", "base.material"])},
     "json": {
+        "/asset/extras/source/droppedTextures": 1,
+        "/asset/extras/source/missingFiles": ["gone.png"],
         "/materials/0/alphaMode": "BLEND",
         "/materials/0/extras/ogre/properties/depth_write": "off",
         "/materials/0/extras/ogre/properties/diffuse": None,

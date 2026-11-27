@@ -43,7 +43,7 @@
     "/nodes/1/rotation": null,
     "/asset/extras/source/upAxis": "+Y",
     "/asset/extras/source/frames": 3,
-    "/animations/0/name": "motion",
+    "/animations/0/name": "basic_two_joint",
     "/scenes/0/nodes": [
       0
     ],

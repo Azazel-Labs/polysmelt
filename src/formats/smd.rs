@@ -26,8 +26,9 @@ use crate::num::{f32_of, u32_of};
 use crate::quat;
 use crate::source::{Axis, Fact, Handedness};
 
-/// Frames a second: the compilers' default.
-const FPS: f64 = 30.0;
+/// Frames a second: the compilers' default (studiomdl plays a `$sequence` at 30 unless its `fps` option says
+/// otherwise), which is the readers' shared assumption too.
+const FPS: f64 = super::keys::ASSUMED_FRAME_RATE;
 
 /// The most morph target values (targets times points) a `.vta` file may make, against a file whose frames and
 /// points multiply past what memory holds.
@@ -331,10 +332,10 @@ fn influence(v: &Vertex, ids: &HashMap<i64, usize>, out: &mut Vec<(u32, f32)>) {
     scene::strongest(out);
 }
 
-/// The bones' keys, frame by frame from the first frame's time: a bone a frame leaves out holds its last pose.
+/// The bones' keys, frame by frame at the frames' own times (the shared writer has the animation start at 0, and
+/// notes what it took off): a bone a frame leaves out holds its last pose.
 fn animation(frames: &[Frame], bones: usize) -> Vec<Channel> {
-    let start = frames.first().map_or(0.0, |f| f.time);
-    let time = |f: &Frame| f32_of((f.time - start) / FPS);
+    let time = |f: &Frame| f32_of(f.time / FPS);
     let mut keys: Vec<Vec<(usize, Pose)>> = (0..bones).map(|_| Vec::new()).collect();
     for (k, f) in frames.iter().enumerate() {
         for &(bone, pose) in &f.poses {
@@ -1044,7 +1045,8 @@ end
         assert!(
             doc.json()["skins"][0]["joints"]
                 .as_array()
-                .is_some_and(|j| j.len() == 3)
+                // The three bones, and the mesh's own node for the vertex whose parent bone doesn't exist.
+                .is_some_and(|j| j.len() == 4)
         );
     }
 

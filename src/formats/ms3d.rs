@@ -208,7 +208,7 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
             // A vertex no joint moves stays where it is: bound to a joint of its own, after the file's.
             let width = links.iter().map(Vec::len).max().unwrap_or(0).max(1);
             p.influences = width;
-            p.rest_joint = u32_of(joints);
+            p.rest_joint = Some(u32_of(joints));
             for l in &links {
                 for k in 0..width {
                     let (j, w) = l.get(k).copied().unwrap_or((0, 0.0));
@@ -288,8 +288,9 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         }
     }
     if !channels.is_empty() {
+        // The file gives its one animation no name, so it has none.
         scene.animations.push(Animation {
-            name: stem,
+            name: String::new(),
             channels,
             extras: None,
         });

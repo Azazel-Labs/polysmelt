@@ -1871,7 +1871,7 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         None
     };
     // Relative to the object, or to the content folder above the object's folder.
-    let dirs = [dir, dir.parent().unwrap_or(dir)];
+    let dirs = [dir];
     let mut image_for = |name: &str| -> Option<usize> {
         if !textures {
             return None;

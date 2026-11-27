@@ -598,7 +598,8 @@ impl<'m> Writer<'m> {
                 .collect();
             doc["images"] = json!(self.images);
             doc["textures"] = json!(textures);
-            doc["samplers"] = json!([{ "wrapS": 10497, "wrapT": 10497 }]);
+            // The readers' one default sampler: repeating, linear, and linear between linear mipmaps.
+            doc["samplers"] = json!([{ "wrapS": 10497, "wrapT": 10497, "magFilter": 9729, "minFilter": 9987 }]);
         }
         if self.hidden_nodes {
             doc["extensionsUsed"] = json!(["KHR_node_visibility"]);

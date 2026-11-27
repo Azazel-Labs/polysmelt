@@ -85,6 +85,62 @@ mod inflate;
 mod iqm;
 #[cfg(feature = "irr")]
 mod irr;
+#[cfg(any(
+    feature = "mmd",
+    feature = "directx",
+    feature = "md2",
+    feature = "md3",
+    feature = "md5",
+    feature = "iqm",
+    feature = "smd",
+    feature = "ms3d",
+    feature = "b3d",
+    feature = "asf",
+    feature = "c3d",
+    feature = "trc",
+    feature = "htr",
+    feature = "ogre",
+    feature = "irr",
+    feature = "xgl",
+    feature = "fbx",
+    feature = "usd",
+    feature = "vox",
+    feature = "3ds",
+    feature = "bvh",
+    feature = "dae",
+    feature = "flt",
+    feature = "ogex"
+))]
+#[cfg_attr(
+    not(all(
+        feature = "mmd",
+        feature = "directx",
+        feature = "md2",
+        feature = "md3",
+        feature = "md5",
+        feature = "iqm",
+        feature = "smd",
+        feature = "ms3d",
+        feature = "b3d",
+        feature = "asf",
+        feature = "c3d",
+        feature = "trc",
+        feature = "htr",
+        feature = "ogre",
+        feature = "irr",
+        feature = "xgl",
+        feature = "fbx",
+        feature = "usd",
+        feature = "vox",
+        feature = "3ds",
+        feature = "bvh",
+        feature = "dae",
+        feature = "flt",
+        feature = "ogex"
+    )),
+    allow(dead_code, reason = "each reader uses the parts its format needs")
+)]
+mod keys;
 #[cfg(feature = "las")]
 mod las;
 mod loader;

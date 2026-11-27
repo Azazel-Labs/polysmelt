@@ -34,6 +34,7 @@ use std::path::Path;
 
 use serde_json::{Map, Value, json};
 
+use super::keys::{self, Interp, Track};
 use super::xform::{self, IDENTITY, M4};
 use crate::Result;
 use crate::assets::Assets;
@@ -1302,7 +1303,7 @@ fn seconds(frame: i32) -> f32 {
 }
 
 /// A vector track as a cubic spline channel: each key's arriving tangent, value and leaving tangent, per second.
-fn spline(b: &mut Builder, keys: &[Key<3>]) -> (usize, usize) {
+fn spline(keys: &[Key<3>]) -> (Vec<f32>, Vec<f32>) {
     let keys: Vec<&Key<3>> = rising(keys.iter().map(|k| (k.frame, k)));
     let tangents = tcb_tangents(&keys);
     let times: Vec<f32> = keys.iter().map(|k| seconds(k.frame)).collect();
@@ -1314,7 +1315,7 @@ fn spline(b: &mut Builder, keys: &[Key<3>]) -> (usize, usize) {
         out.extend(k.value);
         out.extend(leave.map(|v| if after > 0.0 { v / after } else { 0.0 }));
     }
-    (b.floats(times, "SCALAR", true), b.floats(out, "VEC3", false))
+    (times, out)
 }
 
 /// Each object's mesh, by the placement its vertices are moved by.
@@ -1845,17 +1846,20 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         }
     }
 
-    let mut animations = Vec::new();
     if keep.animations {
-        let (mut channels, mut samplers) = (Vec::new(), Vec::new());
+        // The keyframer's tracks as one animation, with no name (the file gives it none), starting at time 0 even
+        // when its first key is at a negative frame or a late one.
+        let mut tracks: Vec<Track> = Vec::new();
         for (i, n) in kf.nodes.iter().enumerate() {
             let node = first + i;
-            let mut add = |path: &str, (input, output): (usize, usize), interpolation: &str| {
-                channels.push(json!({ "sampler": samplers.len(), "target": { "node": node, "path": path } }));
-                samplers.push(json!({ "input": input, "output": output, "interpolation": interpolation }));
+            let mut add = |path: keys::Path, (times, values): (Vec<f32>, Vec<f32>), interp: Interp| {
+                tracks.push(Track {
+                    interp,
+                    ..Track::linear(node, path, times, values)
+                });
             };
             if n.pos.len() > 1 {
-                add("translation", spline(&mut b, &n.pos), "CUBICSPLINE");
+                add(keys::Path::Translation, spline(&n.pos), Interp::Cubic);
             }
             if n.rot.len() > 1 {
                 let turns = rotations(&n.rot);
@@ -1873,8 +1877,7 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
                     values.extend(q.map(|c| c as f32));
                 }
                 let times = keys.iter().map(|&(t, _)| t).collect();
-                let io = (b.floats(times, "SCALAR", true), b.floats(values, "VEC4", false));
-                add("rotation", io, "LINEAR");
+                add(keys::Path::Rotation, (times, values), Interp::Linear);
             }
             if let Some(aim) = aims[i] {
                 // A camera or spotlight turns as it, its target or its roll moves: its rotation on each frame of
@@ -1914,17 +1917,16 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
                         values.extend(q.map(|c| c as f32));
                     }
                     let times = frames.iter().map(|&f| seconds(f)).collect();
-                    let io = (b.floats(times, "SCALAR", true), b.floats(values, "VEC4", false));
-                    add("rotation", io, "LINEAR");
+                    add(keys::Path::Rotation, (times, values), Interp::Linear);
                 }
             }
             if n.scl.len() > 1 {
-                add("scale", spline(&mut b, &n.scl), "CUBICSPLINE");
+                add(keys::Path::Scale, spline(&n.scl), Interp::Cubic);
             }
         }
-        if !channels.is_empty() {
-            animations.push(json!({ "name": "keyframer", "channels": channels, "samplers": samplers }));
-        }
+        let mut writer = keys::Writer::new(keep.extras);
+        writer.animation(&mut b, None, None, tracks);
+        writer.finish(&mut b);
     }
     let animated = !kf.nodes.is_empty() || kf.revision.is_some();
     if animated {
@@ -1967,9 +1969,6 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
     json.insert("scenes".into(), json!([{ "nodes": [nodes.len() - 1] }]));
     json.insert("nodes".into(), Value::Array(nodes));
     json.insert("meshes".into(), Value::Array(meshes.list));
-    if !animations.is_empty() {
-        json.insert("animations".into(), Value::Array(animations));
-    }
     if !cameras.is_empty() {
         json.insert("cameras".into(), Value::Array(cameras));
     }

@@ -273,9 +273,9 @@ impl Reader<'_, '_, '_> {
             let target = if skinned && let Some(skin) = skin {
                 // A skinned mesh's node transform is ignored, its joints place it (the geometric transform
                 // goes into the inverse bind matrices), so it gets a root node of its own, as glTF asks; the
-                // model's node stays where it is, a joint for vertices no bone weights. Out of its model's
-                // tree, it's hidden when that is.
-                let s = self.skin(skin, m, &geometric);
+                // model's node stays where it is, a joint for vertices no bone weights when there are any. Out
+                // of its model's tree, it's hidden when that is.
+                let s = self.skin(skin, m, &geometric, self.unbound_meshes.contains(&built));
                 let mut host = json!({ "skin": s });
                 if let Some(name) = self.nodes[node].get("name") {
                     host["name"] = name.clone();

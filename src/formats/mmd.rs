@@ -1117,10 +1117,11 @@ fn build(m: Model, input: &Input<'_>, stem: &str, assets: &dyn Assets, keep: Kee
             if let Alpha::Mask(c) = transparency.mode() {
                 out.alpha_cutoff = Some(c);
             }
-            if keep.textures
-                && let Some(path) = assets.find(t, dir_)
-            {
-                out.color_image = images.file(assets, path, t);
+            if keep.textures {
+                match assets.find(t, dir_) {
+                    Some(path) => out.color_image = images.file(assets, path, t),
+                    None => images.miss(t),
+                }
             }
         }
         scene.materials.push(out);
@@ -1221,7 +1222,7 @@ fn build(m: Model, input: &Input<'_>, stem: &str, assets: &dyn Assets, keep: Kee
             .unwrap_or(1);
         if nb > 0 {
             p.influences = width;
-            p.rest_joint = u32_of(nb);
+            p.rest_joint = Some(u32_of(nb));
         }
         for &v in &used {
             let vx = &m.vertices[v as usize];
@@ -1685,11 +1686,8 @@ fn motion(data: &[u8], stem: &str, keep: Keep) -> Result<Document> {
     facts.insert("bones".into(), json!(scene.nodes.len() - 1));
     if !channels.is_empty() {
         scene.animations.push(Animation {
-            name: if stem.is_empty() {
-                "motion".into()
-            } else {
-                stem.to_owned()
-            },
+            // A motion file is one clip, named as its file is.
+            name: stem.to_owned(),
             channels,
             extras: None,
         });

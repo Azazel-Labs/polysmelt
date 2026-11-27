@@ -12,13 +12,10 @@
 //! quaternion keys on one side, and every skin's joints under one root. A node can't be its own ancestor: a parent
 //! link that would close a loop is cut.
 
-use std::collections::HashMap;
-
 use serde_json::{Map, Value, json};
 
 use crate::Result;
-use crate::document::{self, Accessor, Builder, Document, Keep, Limits, Part, Sampler, Sparse};
-use crate::images::Source;
+use crate::document::{Accessor, Builder, Document, Keep, Limits, Part, Sparse};
 use crate::legacy_material::{self, Transparency};
 use crate::material::{Alpha, Full};
 use crate::mesh::Material;
@@ -26,7 +23,11 @@ use crate::num::{f32_of, u32_of};
 use crate::quat::{self, normalize};
 use crate::source::SourceInfo;
 
-pub(crate) use crate::mesh::MAX_INFLUENCES;
+use super::keys;
+pub(crate) use super::keys::{Interp, Path};
+use crate::skin::{self, Sets};
+#[allow(unused_imports, reason = "each reader uses the parts its format needs")]
+pub(crate) use crate::skin::{MAX_INFLUENCES, strongest};
 
 /// The most texture coordinate sets a mesh keeps, as `TEXCOORD_0` to `TEXCOORD_7`: past what any real model has,
 /// and a bound on what a file that declares hundreds costs.
@@ -102,8 +103,9 @@ pub(crate) struct Primitive {
     pub joints: Vec<u32>,
     pub weights: Vec<f32>,
     pub influences: usize,
-    /// The joint a vertex no joint moves is bound to.
-    pub rest_joint: u32,
+    /// The joint a vertex no joint moves is bound to, when the reader has one for it; with `None`, the node that
+    /// draws the mesh becomes that joint if any vertex needs it ([`crate::skin`]).
+    pub rest_joint: Option<u32>,
     /// Triangles, three indices each (or points, one each, when `points` is set, or line segments, two each,
     /// when `lines` is set).
     pub indices: Vec<u32>,
@@ -134,21 +136,6 @@ pub(crate) struct Skin {
     pub inverse_binds: Vec<M4>,
 }
 
-/// What an animation channel sets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Path {
-    Translation,
-    Rotation,
-    Scale,
-    Weights,
-}
-
-/// How values between keys are found.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Interp {
-    Linear,
-}
-
 /// One animated property of one node.
 #[derive(Debug, Clone)]
 pub(crate) struct Channel {
@@ -177,7 +164,7 @@ pub(crate) struct Scene {
     pub materials: Vec<Material>,
     /// Materials (indices) blended by their color texture's alpha, their own color being opaque.
     pub blend: Vec<usize>,
-    pub images: Vec<Source>,
+    pub images: crate::images::List,
     pub skins: Vec<Skin>,
     pub animations: Vec<Animation>,
     /// The format's own details, written as `asset.extras.source` with [`Scene::info`].
@@ -390,6 +377,44 @@ impl Scene {
             .sum()
     }
 
+    /// Gives every skinned primitive with a vertex no joint moves, and no rest joint of its reader's choosing, the
+    /// node drawing its mesh as one: added to the skin after its other joints, with the inverse bind matrix that
+    /// keeps the vertex where it is (a skinned node's own transform isn't written, so the node stands where its
+    /// parent does).
+    fn rest_joints(&mut self, parents: &[Option<usize>]) {
+        let mut world = None;
+        for ni in 0..self.nodes.len() {
+            let (Some(m), Some(si)) = (self.nodes[ni].mesh, self.nodes[ni].skin) else {
+                continue;
+            };
+            let (Some(mesh), Some(skin)) = (self.meshes.get(m), self.skins.get(si)) else {
+                continue;
+            };
+            let count = skin.joints.len();
+            if count == 0
+                || !mesh
+                    .prims
+                    .iter()
+                    .any(|p| p.rest_joint.is_none() && has_unbound(p, count))
+            {
+                continue;
+            }
+            let at = match parents[ni] {
+                Some(p) => world.get_or_insert_with(|| self.world())[p],
+                None => IDENTITY,
+            };
+            let skin = &mut self.skins[si];
+            skin.inverse_binds.resize(count, IDENTITY);
+            skin.joints.push(ni);
+            skin.inverse_binds.push(invert(&at));
+            for p in &mut self.meshes[m].prims {
+                if p.rest_joint.is_none() {
+                    p.rest_joint = Some(u32_of(count));
+                }
+            }
+        }
+    }
+
     /// Writes the scene as a glTF document, keeping what `keep` says; more triangles than it allows is an error.
     pub fn finish(mut self, keep: Keep) -> Result<Document> {
         let limit = keep.triangles();
@@ -427,6 +452,12 @@ impl Scene {
             {
                 blend.push(m);
             }
+        }
+
+        // A vertex no joint moves stays with the node that draws its mesh: where a reader appointed no rest joint,
+        // that node joins the skin as one, after the file's joints, bound where it stands.
+        if keep.skins {
+            self.rest_joints(&parents);
         }
 
         // Every skin's joints under one root: the tops of their trees gathered under a new node when there are
@@ -491,7 +522,7 @@ impl Scene {
         let mut mesh_index = vec![None; self.meshes.len()];
         // Joints and weights are written after every mesh's other data, so a read without skins numbers the
         // rest as a full read does.
-        let mut skinning: Vec<(usize, usize, Skinning)> = Vec::new();
+        let mut skinning: Vec<(usize, usize, Sets, usize)> = Vec::new();
         // Morph targets too, before the joints and weights, so a read without them numbers every mesh's own data
         // as a full read does.
         let mut morphing: Vec<(usize, usize, usize, Vec<Target>)> = Vec::new();
@@ -509,8 +540,8 @@ impl Scene {
                 };
                 let n = p.positions.len();
                 if let Some((v, skin)) = write_prim(&mut b, p, joints, material_count) {
-                    if let Some(skin) = skin {
-                        skinning.push((meshes_json.len(), prims.len(), skin));
+                    if let (Some(skin), Some(count)) = (skin, joints) {
+                        skinning.push((meshes_json.len(), prims.len(), skin, count));
                     }
                     if !targets.is_empty() {
                         morphing.push((meshes_json.len(), prims.len(), n, targets));
@@ -562,9 +593,9 @@ impl Scene {
                 .collect();
             meshes_json[mi]["primitives"][pi]["targets"] = json!(targets);
         }
-        for (mi, pi, skin) in skinning {
+        for (mi, pi, skin, count) in skinning {
             let attributes = &mut meshes_json[mi]["primitives"][pi]["attributes"];
-            for (key, a) in skin.write(&mut b) {
+            for (key, a) in skin.write(&mut b, count) {
                 attributes[key] = json!(a);
             }
         }
@@ -579,6 +610,13 @@ impl Scene {
             .collect();
 
         // Skins.
+        let mut parents_written: Vec<Option<usize>> = parents.clone();
+        if let Some((r, tops)) = &extra_root {
+            for &t in tops {
+                parents_written[t] = Some(*r);
+            }
+            parents_written.push(None);
+        }
         let mut skins_json = Vec::new();
         let mut skin_index = vec![None; self.skins.len()];
         if keep.skins {
@@ -600,6 +638,9 @@ impl Scene {
                 }
                 let a = b.accessor(Part::f32(ibm), 5126, s.joints.len(), "MAT4", None);
                 let mut sj = json!({ "joints": s.joints, "inverseBindMatrices": a });
+                if let Some(root) = skin::common_root(&parents_written, &s.joints) {
+                    sj["skeleton"] = json!(root);
+                }
                 if !s.name.is_empty() {
                     sj["name"] = json!(s.name);
                 }
@@ -656,7 +697,11 @@ impl Scene {
 
         // Materials and images, before the animations, so a read without animations numbers the images' views as
         // a full read does.
-        let images = if keep.textures { self.images } else { Vec::new() };
+        let images = if keep.textures {
+            self.images
+        } else {
+            crate::images::List::default()
+        };
         let mut materials = self.materials;
         if !keep.textures {
             for m in &mut materials {
@@ -682,27 +727,9 @@ impl Scene {
 
         // Animations.
         if keep.animations {
-            // Each distinct set of times is written once, by a hash of their bits: channels usually share theirs.
-            let mut inputs: HashMap<u64, Vec<(Vec<f32>, usize)>> = HashMap::new();
-            // Every key is written to one buffer view, each accessor at its offset into it: one part and one view,
-            // where a view per accessor would cost far more than the keys of a short channel.
-            let mut data: Vec<f32> = Vec::new();
-            let mut placed: Vec<usize> = Vec::new();
-            let mut place = |b: &mut Builder, v: &[f32], count: usize, kind: &'static str| {
-                b.accessors.push(Accessor {
-                    byte_offset: Some(data.len() as u64 * 4),
-                    component_type: 5126,
-                    count,
-                    kind,
-                    ..Accessor::default()
-                });
-                data.extend_from_slice(v);
-                placed.push(b.accessors.len() - 1);
-                b.accessors.len() - 1
-            };
+            let mut writer = keys::Writer::new(keep.extras);
             for a in std::mem::take(&mut self.animations) {
-                let mut channels = Vec::new();
-                let mut samplers = Vec::new();
+                let mut tracks = Vec::with_capacity(a.channels.len());
                 for c in a.channels {
                     let width = match c.path {
                         Path::Translation | Path::Scale => 3,
@@ -720,69 +747,19 @@ impl Scene {
                     if c.node >= n {
                         continue;
                     }
-                    let (node, cpath, cinterp) = (c.node, c.path, c.interp);
-                    let Some((times, values)) = clean_keys(c, width) else {
-                        continue;
-                    };
-                    let count = times.len();
-                    let hash = times.iter().fold(times.len() as u64, |h, t| {
-                        (h.rotate_left(5) ^ u64::from(t.to_bits())).wrapping_mul(0x9e37_79b9_7f4a_7c15)
-                    });
-                    let list = inputs.entry(hash).or_default();
-                    let found = list
-                        .iter()
-                        .find(|(t, _)| t.iter().map(|x| x.to_bits()).eq(times.iter().map(|x| x.to_bits())));
-                    let input = if let Some(&(_, i)) = found {
-                        i
-                    } else {
-                        let i = place(&mut b, &times, count, "SCALAR");
-                        // Strictly increasing, so the first and last are the bounds.
-                        b.accessors[i].min = Some(Limits::floats(&times[..1]));
-                        b.accessors[i].max = Some(Limits::floats(&times[count - 1..]));
-                        list.push((times, i));
-                        i
-                    };
-                    let (path, kind) = match cpath {
-                        Path::Translation => ("translation", "VEC3"),
-                        Path::Rotation => ("rotation", "VEC4"),
-                        Path::Scale => ("scale", "VEC3"),
-                        Path::Weights => ("weights", "SCALAR"),
-                    };
-                    let output = if cpath == Path::Weights {
-                        place(&mut b, &values, count * width, "SCALAR")
-                    } else {
-                        place(&mut b, &values, count, kind)
-                    };
-                    let interp = match cinterp {
-                        Interp::Linear => "LINEAR",
-                    };
-                    channels.push(document::Channel {
-                        sampler: samplers.len(),
-                        node,
-                        path,
-                    });
-                    samplers.push(Sampler {
-                        input,
-                        output,
-                        interpolation: interp,
+                    tracks.push(keys::Track {
+                        node: c.node,
+                        also: Vec::new(),
+                        path: c.path,
+                        interp: c.interp,
+                        times: c.times.into(),
+                        values: c.values,
+                        width,
                     });
                 }
-                if channels.is_empty() {
-                    continue;
-                }
-                b.animations.push(document::Animation {
-                    channels,
-                    samplers,
-                    name: (!a.name.is_empty()).then_some(a.name),
-                    extras: a.extras.filter(|_| keep.extras),
-                });
+                writer.animation(&mut b, Some(a.name), a.extras, tracks);
             }
-            if !data.is_empty() {
-                let view = b.view(Part::f32(data), None);
-                for a in placed {
-                    b.accessors[a].buffer_view = Some(view);
-                }
-            }
+            writer.finish(&mut b);
         }
 
         self.info.write(&mut self.source);
@@ -805,101 +782,6 @@ impl Scene {
         let mut facts = self.facts;
         facts.entry("triangles").or_insert(json!(tris));
         Ok(b.finish(json, facts))
-    }
-}
-
-/// A channel's keys as glTF wants them: finite, times strictly increasing (a key at or before the last moves just
-/// after it), rotations unit length and each on the same side as the last. `None` when no key is left. Keys that
-/// are already in order are cleaned where they are.
-fn clean_keys(c: Channel, width: usize) -> Option<(Vec<f32>, Vec<f32>)> {
-    let Channel {
-        mut times,
-        mut values,
-        path,
-        ..
-    } = c;
-    let width = width.max(1);
-    let keys = times.len().min(values.len() / width);
-    times.truncate(keys);
-    values.truncate(keys * width);
-    let tidy = times.iter().all(|t| t.is_finite())
-        && times.windows(2).all(|w| w[0] < w[1])
-        && values.iter().all(|x| x.is_finite());
-    if !tidy {
-        let mut kept: Vec<f32> = Vec::with_capacity(keys);
-        let mut out = Vec::with_capacity(keys * width);
-        for (&t, v) in times.iter().zip(values.chunks_exact(width)) {
-            if !t.is_finite() || v.iter().any(|x| !x.is_finite()) {
-                continue;
-            }
-            kept.push(match kept.last() {
-                Some(&p) if t <= p => p.next_up(),
-                _ => t,
-            });
-            out.extend_from_slice(v);
-        }
-        times = kept;
-        values = out;
-    }
-    if path == Path::Rotation {
-        let mut last = [0.0f64, 0.0, 0.0, 1.0];
-        for v in values.chunks_exact_mut(4) {
-            let mut q: [f64; 4] = std::array::from_fn(|i| f64::from(v[i]));
-            // Already unit length to within half a float's step: normalizing wouldn't change it.
-            let unit = (q.iter().map(|c| c * c).sum::<f64>() - 1.0).abs() <= 1e-7;
-            if !unit {
-                q = normalize(q).map(f64::from);
-            }
-            let dot: f64 = (0..4).map(|i| q[i] * last[i]).sum();
-            if dot < 0.0 {
-                q = q.map(|x| -x);
-            }
-            last = q;
-            if !unit || dot < 0.0 {
-                for (o, x) in v.iter_mut().zip(q) {
-                    *o = f32_of(x);
-                }
-            }
-        }
-    }
-    (!times.is_empty()).then_some((times, values))
-}
-
-/// A primitive's joints and weights, to be written after the meshes.
-struct Skinning {
-    joints: Vec<u32>,
-    weights: Vec<f32>,
-    sets: usize,
-    vertices: usize,
-    count: usize,
-}
-
-impl Skinning {
-    /// Writes the accessors, returning the attributes they make.
-    fn write(self, b: &mut Builder) -> Vec<(String, usize)> {
-        let (n, count) = (self.vertices, self.count);
-        let per = n * 4;
-        let mut out = Vec::new();
-        for s in 0..self.sets {
-            let jpart = &self.joints[s * per..(s + 1) * per];
-            let j = if count <= 256 {
-                let v: Vec<u8> = jpart.iter().map(|&j| u8::try_from(j).unwrap_or(0)).collect();
-                b.accessor(Part::bytes(v), 5121, n, "VEC4", Some(34962))
-            } else {
-                let v = jpart.iter().map(|&j| u16::try_from(j).unwrap_or(0)).collect();
-                b.accessor(Part::u16(v), 5123, n, "VEC4", Some(34962))
-            };
-            let w = b.accessor(
-                Part::f32(self.weights[s * per..(s + 1) * per].to_vec()),
-                5126,
-                n,
-                "VEC4",
-                Some(34962),
-            );
-            out.push((format!("JOINTS_{s}"), j));
-            out.push((format!("WEIGHTS_{s}"), w));
-        }
-        out
     }
 }
 
@@ -959,7 +841,7 @@ fn write_prim(
     mut p: Primitive,
     joints: Option<usize>,
     materials: usize,
-) -> Option<(Value, Option<Skinning>)> {
+) -> Option<(Value, Option<Sets>)> {
     let n = p.positions.len();
     if n == 0 || p.indices.is_empty() {
         return None;
@@ -1049,14 +931,7 @@ fn write_prim(
         && p.joints.len() == n * p.influences
         && p.weights.len() == n * p.influences
     {
-        let (joints, weights, sets) = skin_sets(&p, count);
-        skinning = Some(Skinning {
-            joints,
-            weights,
-            sets,
-            vertices: n,
-            count,
-        });
+        skinning = Some(skin_sets(&p, count));
     }
     let count = p.indices.len();
     let narrow = (n < usize::from(u16::MAX))
@@ -1201,69 +1076,32 @@ fn survey(v: &[[f32; 3]]) -> (usize, [f32; 3], [f32; 3]) {
     (moved, min, max)
 }
 
-/// Merges a vertex's repeated joints (adding their weights in the order they come) and keeps the
-/// [`MAX_INFLUENCES`] strongest, strongest first and the lower joint first between equals. The writer settles every
-/// skinned vertex this way; a reader that must bound its lists first calls it too, so the writer keeps what it kept.
-pub(crate) fn strongest(list: &mut Vec<(u32, f32)>) {
-    list.sort_by_key(|e| e.0);
-    list.dedup_by(|later, kept| {
-        let same = later.0 == kept.0;
-        if same {
-            kept.1 += later.1;
-        }
-        same
-    });
-    list.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
-    list.truncate(MAX_INFLUENCES);
+/// Each vertex's joints and weights in sets of four, as glTF wants them ([`skin::sets`]): a vertex with none is
+/// bound wholly to the primitive's rest joint.
+fn skin_sets(p: &Primitive, count: usize) -> Sets {
+    let w = p.influences;
+    let n = p.positions.len().max(p.joints.len() / w.max(1));
+    let rest = p.rest_joint.filter(|&r| (r as usize) < count).unwrap_or(0);
+    skin::sets(n, count, rest, |v, list| {
+        list.extend((0..w).map(|k| (p.joints[v * w + k], p.weights[v * w + k])));
+    })
 }
 
-/// Each vertex's joints and weights in sets of four, as glTF wants them: joints in range and merged where
-/// repeated, the strongest first, at most [`MAX_INFLUENCES`], summing to 1, and a vertex with none bound wholly to
-/// the primitive's rest joint. Returns the joints and weights set after set, and the number of sets.
-fn skin_sets(p: &Primitive, count: usize) -> (Vec<u32>, Vec<f32>, usize) {
-    let n = p.positions.len().max(p.joints.len() / p.influences.max(1));
+/// Whether some vertex of `p` has no joint among `count` to move it.
+fn has_unbound(p: &Primitive, count: usize) -> bool {
     let w = p.influences;
-    // Every vertex's list, end to end, and where each ends: no list of its own for each vertex.
-    let mut flat: Vec<(u32, f32)> = Vec::with_capacity(n * w.clamp(1, 4));
-    let mut ends: Vec<usize> = Vec::with_capacity(n);
-    let mut list: Vec<(u32, f32)> = Vec::with_capacity(w);
-    let mut most = 1;
-    let rest = if (p.rest_joint as usize) < count {
-        p.rest_joint
-    } else {
-        0
-    };
-    for v in 0..n {
-        list.clear();
-        for k in 0..w {
-            let (j, wt) = (p.joints[v * w + k], p.weights[v * w + k]);
-            if !(wt > 0.0 && wt.is_finite()) || j as usize >= count {
-                continue;
-            }
-            list.push((j, wt));
-        }
-        strongest(&mut list);
-        let sum: f32 = list.iter().map(|e| e.1).sum();
-        if list.is_empty() || sum <= 0.0 || !sum.is_finite() {
-            flat.push((rest, 1.0));
-        } else {
-            flat.extend(list.iter().map(|&(j, wt)| (j, wt / sum)));
-        }
-        most = most.max(flat.len() - ends.last().copied().unwrap_or(0));
-        ends.push(flat.len());
+    if w == 0 || p.joints.len() != p.positions.len() * w || p.weights.len() != p.joints.len() {
+        return false;
     }
-    let sets = most.div_ceil(4);
-    let mut js = vec![0u32; sets * n * 4];
-    let mut ws = vec![0f32; sets * n * 4];
-    let starts = std::iter::once(0).chain(ends.iter().copied());
-    for (v, (start, end)) in starts.zip(ends.iter().copied()).enumerate() {
-        for (k, &(j, wt)) in flat[start..end].iter().enumerate() {
-            let at = (k / 4) * n * 4 + v * 4 + k % 4;
-            js[at] = j;
-            ws[at] = wt;
-        }
-    }
-    (js, ws, sets)
+    p.joints.chunks_exact(w).zip(p.weights.chunks_exact(w)).any(|(j, wt)| {
+        let sum: f32 = j
+            .iter()
+            .zip(wt)
+            .filter(|&(&j, &wt)| wt > 0.0 && wt.is_finite() && (j as usize) < count)
+            .map(|(_, &wt)| wt)
+            .sum();
+        sum.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater)
+    })
 }
 
 // Math, in double precision.
@@ -1553,10 +1391,15 @@ mod tests {
             joints: vec![1, 1, 2, 7, 0, 0, 0, 0],
             weights: vec![0.25, 0.25, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0],
             influences: 4,
-            rest_joint: 2,
+            rest_joint: Some(2),
             ..Primitive::default()
         };
-        let (j, w, sets) = skin_sets(&p, 3);
+        let Sets {
+            joints: j,
+            weights: w,
+            groups: sets,
+            ..
+        } = skin_sets(&p, 3);
         assert_eq!(sets, 1);
         assert_eq!(&j[..4], &[2, 1, 0, 0]);
         assert!((w[0] - 2.0 / 3.0).abs() < 1e-6 && (w[1] - 1.0 / 3.0).abs() < 1e-6);

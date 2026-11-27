@@ -152,7 +152,9 @@ impl Folder {
 #[cfg(feature = "fs")]
 impl Assets for Folder {
     fn find(&self, reference: &str, model_dir: &Path) -> Option<PathBuf> {
-        find_texture(reference, model_dir, &self.root, || self.files_under(&self.root))
+        forms(reference)
+            .iter()
+            .find_map(|r| find_texture(r, model_dir, &self.root, || self.files_under(&self.root)))
     }
 
     fn image_shared(&self, bytes: crate::Bytes, name: &Path) -> Option<Image> {
@@ -248,21 +250,9 @@ impl Memory {
         self.files.keys().map(String::as_str)
     }
 
-    fn images(&self) -> impl Iterator<Item = PathBuf> + '_ {
-        self.files
-            .keys()
-            .map(Path::new)
-            .filter(|p| image_stem(p).is_some())
-            .map(Path::to_path_buf)
-    }
-}
-
-impl Assets for Memory {
-    fn find(&self, reference: &str, model_dir: &Path) -> Option<PathBuf> {
-        let cleaned = cleaned(reference);
-        if cleaned.is_empty() {
-            return None;
-        }
+    /// The file one form of a reference names (see [`forms`]): relative to the model, then by file name, then the
+    /// same name in another image format.
+    fn find_form(&self, cleaned: &str, model_dir: &Path) -> Option<PathBuf> {
         if !cleaned.starts_with('/') && !cleaned.contains(':') {
             let rel = memory_key(&format!("{}/{cleaned}", model_dir.to_string_lossy()));
             if self.files.contains_key(&rel) {
@@ -285,6 +275,20 @@ impl Assets for Memory {
             let files = files.iter().map(|(p, n)| (*p, n.as_str()));
             same_name_other_format(&name, model_dir, files)
         })
+    }
+
+    fn images(&self) -> impl Iterator<Item = PathBuf> + '_ {
+        self.files
+            .keys()
+            .map(Path::new)
+            .filter(|p| image_stem(p).is_some())
+            .map(Path::to_path_buf)
+    }
+}
+
+impl Assets for Memory {
+    fn find(&self, reference: &str, model_dir: &Path) -> Option<PathBuf> {
+        forms(reference).iter().find_map(|r| self.find_form(r, model_dir))
     }
 
     fn read(&self, path: &Path) -> Option<Cow<'_, [u8]>> {
@@ -330,14 +334,57 @@ impl Assets for Memory {
 }
 
 /// A model's reference to a file, trimmed, out of the quotes some writers put around a path with spaces, with `/`
-/// between its parts.
+/// between its parts, and a `file:` URI as the path it names (`file:///C:/Old%20Path/tex.png` is
+/// `C:/Old Path/tex.png`).
 fn cleaned(reference: &str) -> String {
     let r = reference.trim();
     let r = ['"', '\'']
         .iter()
         .find_map(|&q| r.strip_prefix(q)?.strip_suffix(q))
         .map_or(r, str::trim);
-    r.replace('\\', "/")
+    let r = r.replace('\\', "/");
+    let Some(rest) = r.get(..5).filter(|p| p.eq_ignore_ascii_case("file:")).map(|_| &r[5..]) else {
+        return r;
+    };
+    // A URI is percent-encoded. After `file:` come two slashes and a host (none, or `localhost`, for this
+    // machine), then the path; some writers leave the slashes out.
+    let rest = crate::gltf::percent_decode(rest);
+    let path = match rest.strip_prefix("//") {
+        Some(after) => after.split_once('/').map_or("", |(_host, path)| path),
+        None => rest.trim_start_matches('/'),
+    };
+    // `C:/...` is a path as it stands, and so is one that was relative; anything else was a path from the root.
+    if path.as_bytes().get(1) == Some(&b':') || !rest.starts_with('/') {
+        path.to_owned()
+    } else {
+        format!("/{path}")
+    }
+}
+
+/// The path a model's reference names, as every reader takes it: [`cleaned`], and percent-decoded, for the
+/// formats whose references are URIs (COLLADA, glTF, X3D).
+#[cfg_attr(
+    not(feature = "dae"),
+    allow(dead_code, reason = "only the COLLADA reader needs the path itself")
+)]
+pub(crate) fn local_path(uri: &str) -> String {
+    let c = cleaned(uri);
+    if uri.trim().get(..5).is_some_and(|p| p.eq_ignore_ascii_case("file:")) {
+        return c;
+    }
+    crate::gltf::percent_decode(&c)
+}
+
+/// The forms a reference is looked for in, in turn: as the model wrote it ([`cleaned`]), then percent-decoded
+/// when that differs (`my%20tex.png` is `my tex.png` to a format that writes URIs, and a file's own name to one
+/// that writes paths: the file that exists says which).
+fn forms(reference: &str) -> Vec<String> {
+    let c = cleaned(reference);
+    if c.is_empty() {
+        return Vec::new();
+    }
+    let decoded = crate::gltf::percent_decode(&c);
+    if decoded == c { vec![c] } else { vec![c, decoded] }
 }
 
 /// A path as a [`Memory`] keys it: `/`-separated, without empty or `.` parts, and `..` stepping
@@ -580,23 +627,19 @@ fn tidy(path: &Path) -> PathBuf {
     out
 }
 
-/// Find a texture a model refers to: relative to it (`../Textures/rock.png` too, inside `root`),
+/// Find a texture a model refers to, in one of the [`forms`] its reference takes: relative to it (`../Textures/rock.png` too, inside `root`),
 /// or under `root` by file name, the one nearest the model (artists' absolute paths like
 /// `C:\Users\me\tex\rock.tga` survive only as names). Failing that, an image with the same name
 /// in another format.
 #[cfg(feature = "fs")]
 fn find_texture<'a>(
-    reference: &str,
+    cleaned: &str,
     model_dir: &Path,
     root: &Path,
     files: impl FnOnce() -> Cow<'a, [(PathBuf, String)]>,
 ) -> Option<PathBuf> {
-    let cleaned = cleaned(reference);
-    if cleaned.is_empty() {
-        return None;
-    }
     if !cleaned.starts_with('/') && !cleaned.contains(':') {
-        let rel = model_dir.join(&cleaned);
+        let rel = model_dir.join(cleaned);
         let up = cleaned.split('/').any(|c| c == "..");
         let inside = !up || tidy(&rel).starts_with(tidy(root));
         if inside && rel.is_file() {
@@ -636,6 +679,33 @@ mod tests {
         let folder = Folder::new(dir.path());
         assert!(folder.find("\"my tex.png\"", dir.path()).is_some());
         assert_eq!(cleaned("\""), "\"");
+    }
+
+    #[test]
+    fn file_uris_and_percent_escapes_name_the_file_they_name() {
+        assert_eq!(cleaned("file:///C:/Old%20Path/tex.png"), "C:/Old Path/tex.png");
+        assert_eq!(cleaned("FILE://localhost/home/me/a%20b.png"), "/home/me/a b.png");
+        assert_eq!(cleaned("file:///home/me/tex.png"), "/home/me/tex.png");
+        assert_eq!(cleaned("file:tex.png"), "tex.png");
+        assert_eq!(local_path("textures/my%20tex.png"), "textures/my tex.png");
+        // A plain reference is tried as written, then decoded: a file may be named with a percent sign.
+        assert_eq!(forms("my%20tex.png"), ["my%20tex.png", "my tex.png"]);
+        assert_eq!(forms("tex.png"), ["tex.png"]);
+        let m = Memory::new()
+            .with("Models/my tex.png", "a")
+            .with("Models/100%25.png", "b");
+        let found = |r: &str| m.find(r, Path::new("Models")).map(|p| p.to_string_lossy().into_owned());
+        assert_eq!(found("my%20tex.png").as_deref(), Some("Models/my tex.png"));
+        assert_eq!(found("100%25.png").as_deref(), Some("Models/100%25.png"));
+        assert_eq!(
+            found("file:///C:/Old%20Path/MY%20TEX.PNG").as_deref(),
+            Some("Models/my tex.png")
+        );
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("my tex.png"), "png").unwrap();
+        let folder = Folder::new(dir.path());
+        assert!(folder.find("file:///D:/art/my%20tex.png", dir.path()).is_some());
+        assert!(folder.find("my%20tex.png", dir.path()).is_some());
     }
 
     #[test]

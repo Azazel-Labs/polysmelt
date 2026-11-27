@@ -138,6 +138,92 @@ impl From<Image> for Source {
     }
 }
 
+/// The textures a model names that its document doesn't have, as every reader reports them: the one path from
+/// a reader's lookups to `droppedTextures` and `missingFiles` in `asset.extras.source` (see [`crate::source`]).
+/// [`Images`] counts them as it looks textures up, they travel with its [`List`], and the document's builder
+/// writes them.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub(crate) struct Missed {
+    /// How many textures the model names and the document doesn't have: not found, or found and not an image
+    /// that can be embedded. Each texture once, however many materials name it.
+    pub dropped: usize,
+    /// The names, as the model wrote them, of those that weren't found.
+    pub files: Vec<String>,
+}
+
+impl Missed {
+    /// Whether nothing was missed.
+    pub fn is_empty(&self) -> bool {
+        self.dropped == 0 && self.files.is_empty()
+    }
+
+    /// Takes in what another list of images missed.
+    pub fn add(&mut self, other: Missed) {
+        self.dropped += other.dropped;
+        for f in other.files {
+            if !self.files.contains(&f) {
+                self.files.push(f);
+            }
+        }
+    }
+
+    /// Writes what was missed into a document's `asset.extras.source`: `droppedTextures`, unless the reader
+    /// counted its own there, and the names added to `missingFiles`.
+    pub fn write(&self, source: &mut serde_json::Map<String, serde_json::Value>) {
+        use serde_json::{Value, json};
+        if self.dropped > 0 && !source.contains_key("droppedTextures") {
+            source.insert("droppedTextures".into(), json!(self.dropped));
+        }
+        if !self.files.is_empty() {
+            let list = source.entry("missingFiles").or_insert_with(|| json!([]));
+            if let Some(list) = list.as_array_mut() {
+                for f in &self.files {
+                    if !list.iter().any(|v| v.as_str() == Some(f)) {
+                        list.push(Value::from(f.as_str()));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A reader's images in order, with what it looked for and didn't get.
+#[derive(Debug, Default)]
+pub(crate) struct List {
+    items: Vec<Source>,
+    pub missed: Missed,
+}
+
+impl std::ops::Deref for List {
+    type Target = Vec<Source>;
+
+    fn deref(&self) -> &Vec<Source> {
+        &self.items
+    }
+}
+
+impl std::ops::DerefMut for List {
+    fn deref_mut(&mut self) -> &mut Vec<Source> {
+        &mut self.items
+    }
+}
+
+impl From<Vec<Source>> for List {
+    fn from(items: Vec<Source>) -> Self {
+        List {
+            items,
+            missed: Missed::default(),
+        }
+    }
+}
+
+impl List {
+    /// The images, and what was missed.
+    pub fn parts(self) -> (Vec<Source>, Missed) {
+        (self.items, self.missed)
+    }
+}
+
 /// The images a reader collects: read and decoded, or with `lazy`, references.
 #[cfg_attr(
     not(any(
@@ -154,7 +240,7 @@ impl From<Image> for Source {
 )]
 #[derive(Debug, Default)]
 pub(crate) struct Images {
-    pub list: Vec<Source>,
+    pub list: List,
     lazy: bool,
     /// The model's folder, which URIs of files are made relative to.
     #[cfg_attr(
@@ -194,7 +280,7 @@ impl Images {
     /// Collects references when `lazy`; `dir` is the model's folder.
     pub fn new(lazy: bool, dir: &Path) -> Self {
         Self {
-            list: Vec::new(),
+            list: List::default(),
             lazy,
             dir: dir.to_path_buf(),
             files: std::collections::HashMap::new(),
@@ -226,6 +312,10 @@ impl Images {
             return i;
         }
         let i = self.read_file(assets, path.clone(), reference);
+        if i.is_none() {
+            // Found, and not an image that can be embedded.
+            self.list.missed.dropped += 1;
+        }
         self.files.insert(path, i);
         i
     }
@@ -249,9 +339,47 @@ impl Images {
             let n = n.as_ref();
             Some((dirs.iter().find_map(|d| assets.find(n, d))?, n))
         });
+        if path.is_none()
+            && let Some(first) = names.first()
+        {
+            self.miss(first.as_ref());
+        }
         let i = path.and_then(|(p, n)| self.file(assets, p, n));
         self.found.insert(key, i);
         i
+    }
+
+    /// Notes a texture the model names as `reference` that wasn't found: for a reader that looks its textures up
+    /// itself. Named twice, it is missed once.
+    pub fn miss(&mut self, reference: &str) {
+        let name = reference.trim();
+        if !name.is_empty() && !self.list.missed.files.iter().any(|f| f == name) {
+            self.list.missed.files.push(name.to_owned());
+            self.list.missed.dropped += 1;
+        }
+    }
+
+    #[cfg_attr(
+        not(any(feature = "md3", feature = "md5", feature = "iqm")),
+        allow(
+            dead_code,
+            reason = "only readers of formats that name textures without extensions use it"
+        )
+    )]
+    /// The texture a material or shader names when the name may be a file's without its extension, as game
+    /// formats write them (`models/imp/imp`): as written (the assets find a file of that name in any image
+    /// format), then with each of `endings` added (`.tga`, `_d.tga`: the format's own conventions). A name with
+    /// an extension is only looked for as written.
+    pub fn find_bare(&mut self, assets: &dyn Assets, name: &str, endings: &[&str], dir: &Path) -> Option<usize> {
+        if name.is_empty() {
+            return None;
+        }
+        let mut tries = vec![name.to_owned()];
+        // An extension is short: a dot further back is part of the name.
+        if Path::new(name).extension().is_none_or(|e| e.len() > 4) {
+            tries.extend(endings.iter().map(|e| format!("{name}{e}")));
+        }
+        self.find(assets, &tries, &[dir])
     }
 
     #[cfg_attr(

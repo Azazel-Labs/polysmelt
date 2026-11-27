@@ -27,7 +27,7 @@
     "/asset/extras/source/assumed": [
       "upAxis"
     ],
-    "/animations/0/name": "motion",
+    "/animations/0/name": "names_with_spaces",
     "/animations/0/samplers/0/interpolation": "LINEAR"
   },
   "rig": [

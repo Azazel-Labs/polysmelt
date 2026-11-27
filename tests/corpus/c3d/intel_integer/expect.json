@@ -25,7 +25,7 @@
     "/scenes/0/nodes": [
       0
     ],
-    "/animations/0/name": "motion",
+    "/animations/0/name": "intel_integer",
     "/animations/0/samplers/0/interpolation": "LINEAR",
     "/asset/extras/source/processor": "Intel",
     "/asset/extras/source/storage": "integer",

@@ -59,7 +59,7 @@
     {
       "node": "Bone",
       "animation": 0,
-      "time": 0.291667,
+      "time": 0.25,
       "world": [
         0.0,
         1.10704,
@@ -69,7 +69,7 @@
     {
       "node": "Bone.001",
       "animation": 0,
-      "time": 0.291667,
+      "time": 0.25,
       "world": [
         0.0,
         3.10704,
@@ -79,7 +79,7 @@
     {
       "node": "Bone.002",
       "animation": 0,
-      "time": 0.291667,
+      "time": 0.25,
       "world": [
         0.43363,
         5.05947,
@@ -89,7 +89,7 @@
     {
       "node": "Bone.003",
       "animation": 0,
-      "time": 0.291667,
+      "time": 0.25,
       "world": [
         1.89174,
         6.42368,

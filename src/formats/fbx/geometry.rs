@@ -7,7 +7,6 @@ use serde_json::{Value, json};
 
 use super::deform::{Channel, Target, split_weight};
 use super::{Reader, child_attr, floats, ints, name_of, num, string};
-use crate::document::Part;
 use crate::formats::fbx_tree::{Attr as A, NodeHandle};
 use crate::mesh::{FastMap, Prim, srgb_to_linear, triangulate};
 use crate::num::f32_of;
@@ -160,7 +159,8 @@ impl Reader<'_, '_, '_> {
         // Offsets to normals only for a geometry with normals of its own, and only when some aren't zero.
         let shape_normals = geom.children_by_name("LayerElementNormal").next().is_some()
             && shapes.iter().any(|t| t.normals.values().flatten().any(|c| *c != 0.0));
-        let joint_sets = influences.iter().map(|v| v.len().div_ceil(4)).max().unwrap_or(0).min(4);
+        let skinned = influences.iter().any(|v| !v.is_empty());
+        let mut unbound = false;
         let mut primitives = Vec::new();
         for (slot, prim, cps, color_set) in prims {
             let material = match mats.get(slot) {
@@ -176,35 +176,15 @@ impl Reader<'_, '_, '_> {
                 continue;
             };
             json["material"] = json!(material);
-            if joint_sets > 0 {
-                let unweighted = clusters; // stands for the model itself, after the clusters; see `skin`
-                for set in 0..joint_sets {
-                    let mut joints = Vec::with_capacity(cps.len() * 4);
-                    let mut weights = Vec::with_capacity(cps.len() * 4);
-                    for cp in &cps {
-                        let inf = influences.get(*cp).map_or(&[][..], Vec::as_slice);
-                        for k in set * 4..set * 4 + 4 {
-                            match inf.get(k) {
-                                Some(&(j, w)) => {
-                                    joints.push(u16::try_from(j).unwrap_or(0));
-                                    weights.push(w);
-                                }
-                                None if k == 0 => {
-                                    joints.push(u16::try_from(unweighted).unwrap_or(0));
-                                    weights.push(1.0);
-                                }
-                                None => {
-                                    joints.push(0);
-                                    weights.push(0.0);
-                                }
-                            }
-                        }
-                    }
-                    let n = cps.len();
-                    let j = self.b.accessor(Part::u16(joints), 5123, n, "VEC4", Some(34962));
-                    let w = self.b.accessor(Part::f32(weights), 5126, n, "VEC4", Some(34962));
-                    json["attributes"][format!("JOINTS_{set}")] = json!(j);
-                    json["attributes"][format!("WEIGHTS_{set}")] = json!(w);
+            if skinned {
+                // A control point no cluster weights goes to the model itself, a joint after the clusters; see
+                // `skin`.
+                let sets = crate::skin::sets(cps.len(), clusters, crate::num::u32_of(clusters), |i, list| {
+                    list.extend(influences.get(cps[i]).into_iter().flatten().copied());
+                });
+                unbound |= sets.unbound;
+                for (key, a) in sets.write(&mut self.b, clusters + 1) {
+                    json["attributes"][key] = json!(a);
                 }
             }
             if !shapes.is_empty() {
@@ -250,8 +230,11 @@ impl Reader<'_, '_, '_> {
         }
         self.meshes.push(mesh);
         let i = self.meshes.len() - 1;
-        if joint_sets > 0 {
+        if skinned {
             self.skinned_meshes.insert(i);
+        }
+        if unbound {
+            self.unbound_meshes.insert(i);
         }
         self.mesh_of.insert((g, mats), i);
         Ok(i)

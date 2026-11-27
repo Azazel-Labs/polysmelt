@@ -19,7 +19,7 @@
   "poses": [
     {
       "animation": 0,
-      "time": 0.875,
+      "time": 0.833333,
       "bounds": {
         "min": [
           1.10355,
@@ -36,8 +36,8 @@
   ],
   "animation_spans": [
     [
-      0.04167,
-      1.66667
+      0.0,
+      1.625
     ]
   ],
   "document": {
@@ -56,7 +56,7 @@
     {
       "node": "Bone",
       "animation": 0,
-      "time": 0.875,
+      "time": 0.833333,
       "world": [
         2.0,
         0.0,

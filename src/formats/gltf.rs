@@ -7,7 +7,10 @@
 //!   path); for a model in memory they come from [`Assets::read_shared`]. A meshopt fallback
 //!   buffer that isn't there holds nothing: views on it decode from their compressed data.
 //! - Images named by URI (a data URI, or a file found as buffers are) move into a buffer, so the
-//!   document stands on its own. One that isn't found keeps its URI.
+//!   document stands on its own. A file that isn't where its URI says is looked for as every other format's
+//!   textures are ([`Assets::find`]): by file name beside the model or in the pack, in any case, or in another
+//!   image format, so another machine's absolute path or a `file:` URI finds its file. One that isn't found
+//!   keeps its URI.
 //! - A texture whose images are all in a format Polysmelt doesn't decode (KTX2, AVIF) isn't
 //!   drawn: `asset.extras.source.droppedTextures` counts them.
 //! - `asset.extras.source` gets what every reader writes there: the format and version, and glTF's
@@ -220,7 +223,7 @@ fn embed_images(doc: &mut Document, input: Input<'_>, assets: &dyn Assets) {
                 .and_then(|(named, bytes)| Some((typed(&bytes, named.as_deref())?, Blob::Bytes(bytes.into()))))
         } else {
             let named = container::mime_from_name(&container::percent_decode(uri));
-            read_external(input, assets, uri)
+            read_image(input, assets, uri)
                 .ok()
                 .and_then(|bytes| Some((typed(&bytes, named)?, Blob::Bytes(bytes))))
         };
@@ -257,7 +260,11 @@ fn reference_images(doc: &mut Document, input: Input<'_>, assets: &dyn Assets) {
         let later = input.bytes().is_none();
         #[cfg(not(feature = "fs"))]
         let later = false;
-        let found = path.filter(|p| later || assets.read(p).is_some());
+        // What isn't where the URI says (or isn't a plain relative path: another machine's absolute path, a
+        // `file:` URI) is looked for as every reader's textures are.
+        let found = path
+            .filter(|p| later || assets.read(p).is_some())
+            .or_else(|| assets.find(uri, input.dir()));
         let location = found.map_or(Location::Missing, Location::File);
         let r = Reference {
             found: (later && matches!(location, Location::File(_))).then(std::sync::OnceLock::new),
@@ -300,6 +307,25 @@ fn read_external(input: Input<'_>, assets: &dyn Assets, uri: &str) -> Result<Byt
     assets
         .read_shared(&p)
         .ok_or_else(|| crate::Error::missing(format!("glTF file {rel:?} isn't among the assets")).at(&p))
+}
+
+/// An external image the model names by URI: the file the URI names, or else the one the shared resolver finds
+/// for it ([`Assets::find`]), as for every other format's textures: by file name beside the model or in the
+/// pack, whatever the case, or in another image format; another machine's absolute path and a `file:` URI are
+/// found by their file names.
+fn read_image(input: Input<'_>, assets: &dyn Assets, uri: &str) -> Result<Bytes> {
+    let exact = match read_external(input, assets, uri) {
+        Ok(bytes) => return Ok(bytes),
+        Err(e) => e,
+    };
+    let Some(p) = assets.find(uri, input.dir()) else {
+        return Err(exact);
+    };
+    #[cfg(feature = "fs")]
+    if input.bytes().is_none() {
+        return read_file(&p, Some(uri));
+    }
+    assets.read_shared(&p).ok_or(exact)
 }
 
 /// The file at `path`, whole, in one read into memory reserved for it (failing, rather than

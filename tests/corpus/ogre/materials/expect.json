@@ -6,9 +6,6 @@
     "submeshes": 7,
     "missing_materials": [
       "Nowhere"
-    ],
-    "missing_textures": [
-      "gone.png"
     ]
   },
   "document": {
@@ -22,6 +19,10 @@
     }
   },
   "json": {
+    "/asset/extras/source/droppedTextures": 1,
+    "/asset/extras/source/missingFiles": [
+      "gone.png"
+    ],
     "/materials/0/alphaMode": "BLEND",
     "/materials/0/extras/ogre/properties/depth_write": "off",
     "/materials/0/extras/ogre/properties/diffuse": null,

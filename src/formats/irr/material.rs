@@ -124,6 +124,8 @@ pub(super) struct IrrMaterial {
     pub wrap: [[u32; 2]; 4],
     /// Each texture's bilinear and trilinear filtering.
     pub filter: [[bool; 2]; 4],
+    /// Whether the file states either: a texture it says nothing of takes the readers' one default sampler.
+    pub filter_given: [bool; 4],
     pub lighting: bool,
     pub backface_culling: bool,
     pub wireframe: bool,
@@ -142,6 +144,7 @@ impl Default for IrrMaterial {
             textures: Default::default(),
             wrap: [[REPEAT; 2]; 4],
             filter: [[true, false]; 4],
+            filter_given: [false; 4],
             lighting: true,
             backface_culling: true,
             wireframe: false,
@@ -189,9 +192,11 @@ impl IrrMaterial {
                 (t, Some(s)) if t.starts_with("texturewrap") => m.wrap[s] = [wrap(value); 2],
                 (t, Some(s)) if t.starts_with("bilinearfilter") => {
                     m.filter[s][0] = value.trim().eq_ignore_ascii_case("true");
+                    m.filter_given[s] = true;
                 }
                 (t, Some(s)) if t.starts_with("trilinearfilter") => {
                     m.filter[s][1] = value.trim().eq_ignore_ascii_case("true");
+                    m.filter_given[s] = true;
                 }
                 _ => {}
             }
@@ -285,7 +290,7 @@ pub(super) fn convert(
         let [bi, tri] = m.filter[s];
         crate::mesh::Sampling {
             wrap: m.wrap[s],
-            filter: if tri {
+            filter: if tri || !m.filter_given[s] {
                 [Some(LINEAR), Some(LINEAR_MIPMAP_LINEAR)]
             } else if bi {
                 [Some(LINEAR), Some(LINEAR_MIPMAP_NEAREST)]

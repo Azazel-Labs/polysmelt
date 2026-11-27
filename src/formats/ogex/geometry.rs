@@ -9,6 +9,7 @@ use crate::document::{Builder, Part};
 use crate::formats::xform::col::{IDENTITY, M4, mul};
 use crate::mesh::{FastMap, Prim};
 use crate::num::{f32_of, u32_of};
+use crate::skin::{self, Sets};
 use crate::vec3::{cross, dot, unit};
 
 /// The most morph targets a mesh keeps.
@@ -106,7 +107,7 @@ pub(super) fn meshes(c: &mut Ctx<'_>) -> Result<()> {
     }
     for (n, holder, g, mats) in uses {
         if !c.geoms.contains_key(&g) {
-            let geom = build(c, g, need.get(&g).copied().unwrap_or(0))?;
+            let geom = build(c, g, need.get(&g).copied().unwrap_or(0), holder)?;
             c.geoms.insert(g, geom);
         }
         let Some(Some(geom)) = c.geoms.get(&g) else {
@@ -458,7 +459,7 @@ fn index_accessor(b: &mut Builder, idx: Vec<u32>, n: usize) -> usize {
 
 /// Writes geometry object `g` (padding its texture coordinate sets to `need_uv`).
 #[allow(clippy::too_many_lines, reason = "one pass over a mesh's arrays")]
-fn build(c: &mut Ctx<'_>, g: u32, need_uv: usize) -> Result<Option<Geom>> {
+fn build(c: &mut Ctx<'_>, g: u32, need_uv: usize, holder: usize) -> Result<Option<Geom>> {
     let t = c.t;
     let meshes: Vec<u32> = t.kids(g).filter(|&k| t.ident(k) == "Mesh").collect();
     let Some(&mesh) = meshes.iter().min_by_key(|&&m| t.prop_num(m, "lod").map_or(0, index_of)) else {
@@ -628,7 +629,7 @@ fn build(c: &mut Ctx<'_>, g: u32, need_uv: usize) -> Result<Option<Geom>> {
         c.lines_or_points = true;
     }
 
-    let skin = if c.keep.skins { skin(c, mesh, n, &mut p) } else { None };
+    let skin = if c.keep.skins { skin(c, mesh, n, holder) } else { None };
 
     let has_normals = !p.normals.is_empty();
     // The primitives: the first index array's written with the vertex arrays, the others on
@@ -665,15 +666,17 @@ fn build(c: &mut Ctx<'_>, g: u32, need_uv: usize) -> Result<Option<Geom>> {
     p.indices = first.triangles;
     p.lines = first.lines;
     p.points = first.points;
-    if let Some((s, _)) = &skin {
-        let count = c.skins[*s]["joints"].as_array().map_or(0, Vec::len);
-        c.b.joints = Some((0, count));
-    }
-    let written = c.b.primitives(p);
-    c.b.joints = None;
+    let mut written = c.b.primitives(p);
     // What only a skin or morph targets use is written after what's always written, so a read
     // that skips them makes the same mesh.
-    let skin = skin.map(|(s, ibms)| {
+    let skin = skin.map(|(s, ibms, mut sets)| {
+        sets.follow(&added);
+        let count = c.skins[s]["joints"].as_array().map_or(0, Vec::len);
+        for (key, a) in sets.write(&mut c.b, count) {
+            for w in &mut written {
+                w["attributes"][&key] = json!(a);
+            }
+        }
         c.skins[s]["inverseBindMatrices"] = json!(super::floats(&mut c.b, ibms, "MAT4", false));
         s
     });
@@ -786,22 +789,20 @@ fn build(c: &mut Ctx<'_>, g: u32, need_uv: usize) -> Result<Option<Geom>> {
     }))
 }
 
-/// A mesh's skin as a glTF skin, its bone influences put on `p`: its index, and its inverse
-/// bind matrices for the caller to write. `None` when it has none, or it can't be read
-/// (counted).
-fn skin(c: &mut Ctx<'_>, mesh: u32, n: usize, p: &mut Prim) -> Option<(usize, Vec<f32>)> {
+/// A mesh's skin as a glTF skin: its index, and its inverse bind matrices and its vertices' joints and weights
+/// for the caller to write. `None` when it has none, or it can't be read (counted). `holder` is the node drawing
+/// the mesh, which a vertex no bone moves stays with ([`crate::skin`]).
+fn skin(c: &mut Ctx<'_>, mesh: u32, n: usize, holder: usize) -> Option<(usize, Vec<f32>, Sets)> {
     let t = c.t;
     let s = t.kid(mesh, "Skin")?;
-    let got = read_skin(c, s, n, p);
+    let got = read_skin(c, s, n, holder);
     if got.is_none() {
         c.stats.bad_skins += 1;
-        p.skin_joints = Vec::new();
-        p.skin_weights = Vec::new();
     }
     got
 }
 
-fn read_skin(c: &mut Ctx<'_>, s: u32, n: usize, p: &mut Prim) -> Option<(usize, Vec<f32>)> {
+fn read_skin(c: &mut Ctx<'_>, s: u32, n: usize, holder: usize) -> Option<(usize, Vec<f32>, Sets)> {
     let t = c.t;
     let bind = match t.kid(s, "Transform") {
         Some(k) => {
@@ -854,44 +855,42 @@ fn read_skin(c: &mut Ctx<'_>, s: u32, n: usize, p: &mut Prim) -> Option<(usize, 
     if total > MAX_INFLUENCE_TOTAL || indices.len() != total || weights.len() != total {
         return None;
     }
-    p.skin_joints = Vec::with_capacity(n);
-    p.skin_weights = Vec::with_capacity(n);
+    // Where each vertex's influences start.
+    let mut starts = Vec::with_capacity(n);
     let mut at = 0;
-    let mut dropped = 0;
     for &k in counts {
+        starts.push(at);
         // Checked above to be a whole number in range.
-        let k = vertex(k, MAX_INFLUENCE_TOTAL).map_or(0, |k| k as usize);
-        // The four strongest influences, strongest first.
-        let mut top = [(0u32, 0.0f64); 4];
-        for i in at..at + k {
-            let w = weights[i];
+        at += vertex(k, MAX_INFLUENCE_TOTAL).map_or(0, |k| k as usize);
+    }
+    let mut dropped = 0;
+    let file_joints = joints.len();
+    let sets = skin::sets(n, file_joints, u32_of(file_joints), |v, list| {
+        let end = starts.get(v + 1).copied().unwrap_or(total);
+        for i in starts[v]..end {
             let Some(b) = vertex(indices[i], bones) else {
                 dropped += 1;
                 continue;
             };
-            if !(w > 0.0 && w.is_finite()) {
-                continue;
-            }
-            let j = slot[b as usize];
-            // Two influences of one joint add up.
-            if let Some(e) = top.iter_mut().find(|e| e.1 > 0.0 && e.0 == j) {
-                e.1 += w;
-            } else if w > top[3].1 {
-                if top[3].1 > 0.0 {
-                    dropped += 1;
-                }
-                top[3] = (j, w);
-            } else {
-                dropped += 1;
-                continue;
-            }
-            top.sort_by(|a, b| b.1.total_cmp(&a.1));
+            list.push((slot[b as usize], f32_of(weights[i])));
         }
-        at += k;
-        p.skin_joints.push(top.map(|e| e.0));
-        p.skin_weights.push(top.map(|e| f32_of(e.1)));
-    }
+        // What the shared writer keeps of a vertex's list, counted here as it leaves the rest out.
+        let mut kept: Vec<u32> = list
+            .iter()
+            .filter(|e| e.1 > 0.0 && e.1.is_finite())
+            .map(|e| e.0)
+            .collect();
+        kept.sort_unstable();
+        kept.dedup();
+        dropped += kept.len().saturating_sub(skin::MAX_INFLUENCES);
+    });
     c.stats.dropped_influences += dropped;
+    // A vertex no bone moves stays with the node that draws the mesh: that node is a joint too, after the
+    // file's, and the vertex keeps its place in the node's own space.
+    if sets.unbound {
+        joints.push(holder);
+        ibms.extend(IDENTITY.map(f32_of));
+    }
     c.skins.push(json!({ "joints": joints }));
-    Some((c.skins.len() - 1, ibms))
+    Some((c.skins.len() - 1, ibms, sets))
 }

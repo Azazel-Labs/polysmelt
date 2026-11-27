@@ -35,8 +35,19 @@ def fresh(fmt, keep_prefix=None):
     return d
 
 
+# In an expectation's "json", stands for the model file's name without its extension: what a file that is one
+# clip (BVH, AMC, C3D, TRC, HTR, an .md5anim, SMD) names its animation, as the file itself gives it none.
+CLIP = "\0the model file's stem"
+
+
 def case(fmt, name, files, expect):
-    """Writes one case: `files` maps file names to bytes or str; `expect` is expect.json."""
+    """Writes one case: `files` maps file names to bytes or str (the model first); `expect` is expect.json."""
+    stem = os.path.splitext(os.path.basename(next(iter(files))))[0] if files else name
+    checks = expect.get("json")
+    if isinstance(checks, dict):
+        for key, value in checks.items():
+            if value == CLIP:
+                checks[key] = stem
     d = os.path.join(ROOT, fmt, name)
     os.makedirs(d, exist_ok=True)
     for fname, data in files.items():

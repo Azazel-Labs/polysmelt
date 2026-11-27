@@ -31,7 +31,7 @@ use crate::num::f32_of;
 use crate::source::{Axis, Fact, meters_in};
 
 /// Frames per second when the header doesn't give one.
-const DEFAULT_RATE: f64 = 60.0;
+const DEFAULT_RATE: f64 = super::keys::ASSUMED_FRAME_RATE;
 
 /// Up to 40 characters of `s`, for an error message.
 fn show(s: &str) -> String {
@@ -155,7 +155,8 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document> {
             channels.push(Channel {
                 node: i,
                 path: Path::Translation,
-                times: times.iter().map(|t| f32_of(t - start)).collect(),
+                // The file's own times: the shared writer has the animation start at 0, and notes what it took off.
+                times: times.iter().map(|&t| f32_of(t)).collect(),
                 values,
                 interp: Interp::Linear,
             });
@@ -163,7 +164,7 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document> {
     }
     if keep.animations && !channels.is_empty() {
         scene.animations.push(Animation {
-            name: "motion".into(),
+            name: super::keys::clip_name(input.path).unwrap_or_default(),
             channels,
             extras: None,
         });

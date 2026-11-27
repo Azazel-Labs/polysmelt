@@ -27,7 +27,7 @@
       "upAxis",
       "frameRate"
     ],
-    "/animations/0/name": "motion",
+    "/animations/0/name": "no_frame_time_line",
     "/animations/0/samplers/0/interpolation": "LINEAR"
   },
   "rig": [

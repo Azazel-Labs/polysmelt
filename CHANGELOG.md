@@ -254,6 +254,67 @@ Breaking changes are allowed in minor releases until 1.0.
   COLLADA) had `"name": ""`. Names a reader makes up for things a format numbers are the kind
   and the number together, in every reader: `material3`, `object1`, `frame2`, `model0` (they
   were `material 3`, `material_3`, `object_1`, `frame 2`, `model_0` by format).
+- Animations are written one way by every reader but glTF's (a glTF, glTF 1.0, VRM or 3D Tiles
+  file's are kept as the file has them). FBX, COLLADA, USD, 3DS, OpenGEX, BVH, MagicaVoxel and
+  OpenFlight wrote their own until now, each a little differently:
+  - **An animation starts at time 0.** The time of its earliest key is taken off every key of
+    every channel, the same amount for all of them, and kept as `timeOffset` (seconds) in the
+    animation's `extras`: a time in the file is the animation's time plus `timeOffset`. FBX
+    moved a negative start to 0 one node at a time, so two nodes keyed from different times
+    came out of step; it also left a take that starts late where it was, as USD, COLLADA
+    (clips too) and BVH did, and 3DS kept negative times, which glTF doesn't allow. SMD and
+    TRC already started at 0 and now say what they took off. An FBX stack's `start` and
+    `stop` in `extras` are in the animation's time too. A COLLADA clip has keys at its
+    `start` and `end`, whether or not the curves have keys there.
+  - **Keys are finite, their times strictly increasing, and rotations unit quaternions on one
+    side**, by one piece of code (`formats::keys`): OpenGEX left out a track whose times
+    repeated, COLLADA dropped the later key.
+  - **Names.** An animation the file names keeps its name; one it doesn't name has none. The
+    made-up `motion` (BVH, AMC, C3D, TRC, HTR), `keyframer` (3DS), `frames` (MagicaVoxel, and
+    MD2 frames with no name), `sequences` (OpenFlight), `anim0` (IQM) and the model's or
+    node's name on a MilkShape 3D, Blitz3D, MD3 or Irrlicht animation are gone. A file that
+    is one clip (BVH, AMC, C3D, TRC, HTR, VMD, `.md5anim`, SMD) names it as its file is named,
+    without the extension: `walk.bvh` holds `walk`.
+  - **Frame rates.** Where a file gives no rate and its format's own tools document no
+    default, the rate is one assumed 30 a second: TRC took 60, IQM 24, MD3 and MagicaVoxel 10,
+    an OpenFlight sequence with no duration a tenth of a second a frame (it now reports the
+    assumed `frameRate`). Formats with a documented default keep it, still as assumed: MD2's
+    10 (the engine's 100 ms step), MD5's 24 (the engine's), Blitz3D's 60 (its specification),
+    DirectX's 4800 ticks (D3DX), AMC's 120 (the CMU database's capture rate), USD's 24.
+  - All of a document's keys are in one buffer view, and channels with the same times share
+    them, as the game formats' already were and did.
+- Skins are written one way by every reader but glTF's:
+  - **Up to sixteen joints move a vertex** everywhere: OpenGEX and OGRE kept four. A joint
+    listed twice is one, the strongest are kept, strongest first, and the weights sum to 1.
+  - **A vertex no joint moves stays with the node that draws its mesh**, in every format: that
+    node joins the skin as a joint after the file's, bound where it stands, and only in a
+    skin with such a vertex. COLLADA, USD, MD5, IQM, SMD, OGRE and OpenGEX bound such a vertex
+    to the skin's first joint, so it followed that joint's animation. FBX added its model
+    node to every skin, needed or not: an FBX skin now has one joint fewer unless a vertex
+    needs it.
+  - **`skin.skeleton` is always the joints' common root** (the nearest node every joint is or
+    is under). Only COLLADA and USD set it; USD set the skeleton's first joint.
+  - Joints are bytes whenever the skin has no more than 256 of them (FBX and USD always
+    wrote shorts).
+- Textures a model names are found one way by every reader:
+  - **glTF** images named by URI go through the same search as every other format's when
+    the file isn't where the URI says: by file name beside the model or in the pack, in any
+    case, or in another image format. Another machine's absolute path
+    (`C:\Old\Path\Tex.PNG`) or a `file:` URI was refused before.
+  - **`file:` URIs and percent-escapes** (`file:///C:/Old%20Path/tex.png`, `my%20tex.png`) are
+    read in every format, where only COLLADA did; a name is tried as written first.
+  - **LightWave** no longer looks in the folder above the model's, outside what the caller
+    gave it; what the assets hold is still found by name.
+  - IQM, MD3 and MD5 find a texture named without an extension the same way: as written (a
+    file of that name in any image format), then by the format's own ending.
+  - **A texture that isn't there is reported by every reader**: `droppedTextures` counts the
+    textures a model names that its document doesn't have, and `missingFiles` lists the
+    names of those not found. OBJ, 3DS, FBX, COLLADA, USD, X3D, PLY, MikuMikuDance, DirectX,
+    MD2, MD3, MD5, IQM, SMD, MilkShape 3D, Blitz3D and Irrlicht said nothing; OGRE's
+    `missing_textures` fact is `missingFiles` now.
+  - **One default sampler**: repeating, linear, and linear between linear mipmaps, unless the
+    file says otherwise. SketchUp wrote no filters, and an Irrlicht material that states
+    none took `LINEAR_MIPMAP_NEAREST`.
 
 ## 0.20.0
 

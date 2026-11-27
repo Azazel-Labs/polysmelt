@@ -13,6 +13,7 @@ use serde_json::{Map, Value, json};
 
 use super::math::trs;
 use super::{Comp, Ctx, Kind, Morphs, Placed, Rot, Xf, matrix, rotation};
+use crate::formats::keys;
 use crate::formats::xform::col::mul;
 use crate::formats::xform::set_trs;
 use crate::mesh::FastMap;
@@ -719,6 +720,7 @@ pub(super) fn animations(c: &mut Ctx<'_>) {
     }
     c.placed = placed;
     let mut floats = 0usize;
+    let mut writer = keys::Writer::new(c.keep.extras);
     for (index, clip) in clips {
         let info = t
             .kids(super::ROOT)
@@ -739,14 +741,10 @@ pub(super) fn animations(c: &mut Ctx<'_>) {
         if let Some(e) = clip.end {
             extras.insert("end".into(), json!(e));
         }
-        if let Some(a) = write(c, clip.outs, &mut floats, &mut extras) {
-            let mut a = json!({ "name": name, "channels": a.0, "samplers": a.1 });
-            if c.keep.extras {
-                a["extras"] = Value::Object(extras);
-            }
-            c.animations.push(a);
-        }
+        let tracks = tracks(c, clip.outs, &mut floats);
+        writer.animation(&mut c.b, Some(name), Some(Value::Object(extras)), tracks);
     }
+    writer.finish(&mut c.b);
 }
 
 /// The animation channels of node `p`, added to their clips.
@@ -871,58 +869,33 @@ fn node_animations(c: &mut Ctx<'_>, p: &Placed, clips: &mut BTreeMap<u32, Clip>)
     }
 }
 
-/// A clip's channels and samplers; `None` when none is left. Times start at 0 (the clip's
-/// earliest key moved there, noted in `extras`), and a channel whose times don't stay
-/// strictly increasing in single precision, or that goes past the float budget, is left out.
-fn write(
-    c: &mut Ctx<'_>,
-    mut outs: Vec<Out>,
-    floats: &mut usize,
-    extras: &mut Map<String, Value>,
-) -> Option<(Vec<Value>, Vec<Value>)> {
-    let first = outs
-        .iter()
-        .filter_map(|o| o.times.first().copied())
-        .fold(f64::INFINITY, f64::min);
-    if first.is_finite() && first < 0.0 {
-        for o in &mut outs {
-            for t in &mut o.times {
-                *t -= first;
-            }
-        }
-        extras.insert("timeOffset".into(), json!(first));
-    }
-    let mut inputs: FastMap<Vec<u32>, usize> = FastMap::default();
-    let mut channels = Vec::new();
-    let mut samplers = Vec::new();
+/// A clip's channels as the tracks the readers' one finisher writes ([`keys::Writer`]: times start at 0, the
+/// clip's earliest key moved there and noted in `extras`). A channel with no key, or that goes past the float
+/// budget, is left out.
+fn tracks(c: &mut Ctx<'_>, outs: Vec<Out>, floats: &mut usize) -> Vec<keys::Track> {
+    let mut tracks = Vec::with_capacity(outs.len());
     for o in outs {
-        let times: Vec<f32> = o.times.iter().map(|&t| f32_of(t)).collect();
         let values: Vec<f32> = o.values.iter().map(|&v| f32_of(v)).collect();
-        let ok = !times.is_empty()
-            && times.windows(2).all(|w| w[1] > w[0])
-            && times.iter().chain(&values).all(|v| v.is_finite());
-        let size = times.len() + values.len();
-        if !ok || *floats + size > MAX_FLOATS {
+        let ok = !o.times.is_empty() && o.times.iter().all(|v| v.is_finite()) && values.iter().all(|v| v.is_finite());
+        let size = o.times.len() + values.len();
+        let (Some(path), true) = (keys::Path::of(o.path), ok && *floats + size <= MAX_FLOATS) else {
             c.stats.bad_tracks += 1;
             continue;
-        }
+        };
         *floats += size;
-        let bits: Vec<u32> = times.iter().map(|t| t.to_bits()).collect();
-        let input = if let Some(&a) = inputs.get(&bits) {
-            a
-        } else {
-            let a = super::floats(&mut c.b, times, "SCALAR", true);
-            inputs.insert(bits, a);
-            a
-        };
-        let kind = match (o.path, o.width) {
-            ("weights", _) => "SCALAR",
-            (_, 4) => "VEC4",
-            _ => "VEC3",
-        };
-        let output = super::floats(&mut c.b, values, kind, false);
-        channels.push(json!({ "sampler": samplers.len(), "target": { "node": o.node, "path": o.path } }));
-        samplers.push(json!({ "input": input, "output": output, "interpolation": o.interpolation }));
+        tracks.push(keys::Track {
+            node: o.node,
+            also: Vec::new(),
+            path,
+            interp: match o.interpolation {
+                "STEP" => keys::Interp::Step,
+                "CUBICSPLINE" => keys::Interp::Cubic,
+                _ => keys::Interp::Linear,
+            },
+            times: o.times.into(),
+            values,
+            width: o.width,
+        });
     }
-    (!channels.is_empty()).then_some((channels, samplers))
+    tracks
 }

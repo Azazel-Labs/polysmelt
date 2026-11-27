@@ -24,7 +24,7 @@
 //! joint's place in the model. Poses (one per joint) say how frames move them: each of a joint's ten channels
 //! (translation X, Y, Z, rotation X, Y, Z, W, scale X, Y, Z) is its offset, plus, when its bit is set in the mask,
 //! the next 16-bit number of the frame times its scale. Each animation is a range of frames with a name and a frame
-//! rate (24 when it isn't a positive number): a linear animation with translation, rotation and scale channels for
+//! rate (an assumed 30 when it isn't a positive number; one with no name has none): a linear animation with translation, rotation and scale channels for
 //! each joint, leaving out those that hold the joint's rest value in every frame. Looping animations say so in their
 //! extras (`loop`). The source info's `frameRate` is the first animation's rate that is a positive number (assumed 24
 //! when none is); when the animations' rates differ, each gives its own in its extras (`frameRate`).
@@ -55,8 +55,10 @@ use crate::num::{f32_of, u32_of};
 use crate::quat;
 use crate::source::{Axis, Fact, Handedness};
 
-/// The frame rate taken when an animation gives none that's usable.
-const DEFAULT_RATE: f32 = 24.0;
+/// The frame rate taken when an animation gives none that's usable: the readers' shared assumption, as the
+/// format documents no default.
+#[allow(clippy::cast_possible_truncation, reason = "a small whole number")]
+const DEFAULT_RATE: f32 = super::keys::ASSUMED_FRAME_RATE as f32;
 
 /// The most pose values (frames times joints) decoded.
 const MAX_POSE_FRAMES: usize = 1 << 22;
@@ -484,14 +486,7 @@ fn parse(data: &[u8], frames: bool) -> Result<File> {
 
 /// The texture a material name gives: as written, then as a `.png` when it has no extension.
 fn texture(name: &str, input: &Input<'_>, assets: &dyn Assets, images: &mut Images) -> Option<usize> {
-    if name.is_empty() {
-        return None;
-    }
-    let mut tries = vec![name.to_owned()];
-    if std::path::Path::new(name).extension().is_none() {
-        tries.push(format!("{name}.png"));
-    }
-    images.find(assets, &tries, &[input.dir()])
+    images.find_bare(assets, name, &[".png"], input.dir())
 }
 
 fn build(f: &File, stem: &str, input: &Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Scene> {
@@ -753,13 +748,9 @@ fn finish_anims(mut scene: Scene, f: &File, keep: bool) -> Result<Scene> {
                 channels.push(channel(j, Path::Scale, &times, s));
             }
         }
-        let name = if a.name.is_empty() {
-            format!("anim{ai}")
-        } else {
-            a.name.clone()
-        };
+        // An animation the file gives no name has none.
         scene.animations.push(Animation {
-            name,
+            name: a.name.clone(),
             channels,
             extras: (a.looping || rates_differ).then(|| {
                 let mut m = serde_json::Map::new();
@@ -849,10 +840,10 @@ mod tests {
         let info = doc.source_info();
         assert_eq!(info.format.as_deref(), Some("IQM"));
         assert_eq!(info.comments, ["made by hand", "exported"]);
-        // "wave" at 10 frames a second, "hold" with none (24): the first that has one, and each its own.
+        // "wave" at 10 frames a second, "hold" with none (the shared 30): the first that has one, and each its own.
         assert_eq!(info.frame_rate, Fact::Declared(10.0));
         assert_eq!(doc.json()["animations"][0]["extras"]["frameRate"], 10.0);
-        assert_eq!(doc.json()["animations"][1]["extras"]["frameRate"], 24.0);
+        assert_eq!(doc.json()["animations"][1]["extras"]["frameRate"], 30.0);
         assert_eq!(info.up_axis, Fact::Declared(Axis::PosZ));
         assert_eq!(info.meters_per_unit, Fact::Unknown);
         assert!(info.converted.up_axis);

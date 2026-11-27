@@ -62,7 +62,9 @@ use crate::num::{f32_of, u32_of};
 use crate::quat;
 use crate::source::{Axis, Fact, Handedness};
 
-/// The frame rate taken when a file gives none that's usable: the engine's.
+/// The frame rate taken when a file gives none that's usable: the engine's, whose `idMD5Anim` starts at a
+/// `frameRate` of 24 before it reads the file's (id Software's released Doom 3 source). So that, not the readers'
+/// shared assumption.
 const DEFAULT_RATE: f32 = 24.0;
 
 /// Reads an `.md5mesh` or `.md5anim` model.
@@ -81,7 +83,11 @@ pub(crate) fn load(input: Input<'_>, ext: &str, assets: &dyn Assets, keep: Keep)
         (false, false) => bail!(Empty, "MD5 file has no joints, meshes or hierarchy"),
     };
     let mut scene = if anim {
-        build_anim(&file.anim.unwrap_or_default(), &stem)?
+        // An animation file is one clip, named as its file is.
+        build_anim(
+            &file.anim.unwrap_or_default(),
+            &super::keys::clip_name(input.path).unwrap_or_default(),
+        )?
     } else {
         build_mesh(&file.mesh.unwrap_or_default(), &stem, &input, assets, keep)?
     };
@@ -533,18 +539,7 @@ fn mesh_block(lex: &mut Lex<'_>) -> Result<MeshBlock> {
 
 /// The texture a shader names, found by the engine's conventions.
 fn texture(shader: &str, input: &Input<'_>, assets: &dyn Assets, images: &mut Images) -> Option<usize> {
-    if shader.is_empty() {
-        return None;
-    }
-    let dir = input.dir();
-    let has_ext = std::path::Path::new(shader).extension().is_some_and(|e| e.len() <= 4);
-    let mut tries = Vec::new();
-    if has_ext {
-        tries.push(shader.to_owned());
-    }
-    tries.push(format!("{shader}.tga"));
-    tries.push(format!("{shader}_d.tga"));
-    images.find(assets, &tries, &[dir])
+    images.find_bare(assets, shader, &[".tga", "_d.tga"], input.dir())
 }
 
 fn build_mesh(m: &MeshFile, stem: &str, input: &Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Scene> {
