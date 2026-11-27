@@ -28,15 +28,14 @@
     <path d="M7.5 13h17l-1.6 9.5a3 3 0 0 1-3 2.5h-7.8a3 3 0 0 1-3-2.5z" fill="url(#pour)"/>
   </g>
   <text x="176.8" y="250.0" class="word" font-size="104" fill="#ecebf0">poly<tspan fill="url(#melt)">smelt</tspan></text>
-  <text x="72" y="324.9" class="text" font-size="36" font-weight="600" fill="#ecebf0">60+ 3D formats in. Clean glTF out.</text>
+  <text x="72" y="324.9" class="text" font-size="34" font-weight="600" fill="#ecebf0">60+ 3D formats in. Clean glTF out.</text>
   <text x="72" y="377.1" class="text" font-size="24" fill="#9d9aab">Pure Rust, in your browser: azazel-labs.github.io/polysmelt</text>
   <rect x="72.0" y="452" width="71.8" height="36.1" rx="18.1" fill="#1b1b23" fill-opacity="0.85" stroke="#3a3440"/><text x="107.9" y="475.8" text-anchor="middle" class="mono" font-size="19" fill="#d9d5e0">.fbx</text>
-  <rect x="152.4" y="452" width="71.8" height="36.1" rx="18.1" fill="#1b1b23" fill-opacity="0.85" stroke="#3a3440"/><text x="188.3" y="475.8" text-anchor="middle" class="mono" font-size="19" fill="#d9d5e0">.obj</text>
-  <rect x="232.7" y="452" width="71.8" height="36.1" rx="18.1" fill="#1b1b23" fill-opacity="0.85" stroke="#3a3440"/><text x="268.6" y="475.8" text-anchor="middle" class="mono" font-size="19" fill="#d9d5e0">.dae</text>
-  <rect x="313.1" y="452" width="71.8" height="36.1" rx="18.1" fill="#1b1b23" fill-opacity="0.85" stroke="#3a3440"/><text x="349.0" y="475.8" text-anchor="middle" class="mono" font-size="19" fill="#d9d5e0">.stl</text>
-  <rect x="393.5" y="452" width="71.8" height="36.1" rx="18.1" fill="#1b1b23" fill-opacity="0.85" stroke="#3a3440"/><text x="429.4" y="475.8" text-anchor="middle" class="mono" font-size="19" fill="#d9d5e0">.bvh</text>
-  <rect x="473.9" y="452" width="71.8" height="36.1" rx="18.1" fill="#1b1b23" fill-opacity="0.85" stroke="#3a3440"/><text x="509.8" y="475.8" text-anchor="middle" class="mono" font-size="19" fill="#d9d5e0">.las</text>
-  <rect x="554.2" y="452" width="71.8" height="36.1" rx="18.1" fill="#1b1b23" fill-opacity="0.85" stroke="#3a3440"/><text x="590.1" y="475.8" text-anchor="middle" class="mono" font-size="19" fill="#d9d5e0">.md2</text>
-  <path d="M640.3 470.1h24.7m-11.4 -10.5 11.4 10.5 -11.4 10.5" fill="none" stroke="#ff8a3d" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/>
-  <rect x="684.9" y="452" width="71.8" height="36.1" rx="18.1" fill="url(#melt)"/><text x="720.9" y="475.8" text-anchor="middle" class="mono" font-size="19" font-weight="700" fill="#1a0d05">.glb</text>
+  <rect x="152.4" y="452" width="71.8" height="36.1" rx="18.1" fill="#1b1b23" fill-opacity="0.85" stroke="#3a3440"/><text x="188.3" y="475.8" text-anchor="middle" class="mono" font-size="19" fill="#d9d5e0">.usd</text>
+  <rect x="232.8" y="452" width="71.8" height="36.1" rx="18.1" fill="#1b1b23" fill-opacity="0.85" stroke="#3a3440"/><text x="268.7" y="475.8" text-anchor="middle" class="mono" font-size="19" fill="#d9d5e0">.obj</text>
+  <rect x="313.2" y="452" width="71.8" height="36.1" rx="18.1" fill="#1b1b23" fill-opacity="0.85" stroke="#3a3440"/><text x="349.1" y="475.8" text-anchor="middle" class="mono" font-size="19" fill="#d9d5e0">.vox</text>
+  <rect x="393.6" y="452" width="71.8" height="36.1" rx="18.1" fill="#1b1b23" fill-opacity="0.85" stroke="#3a3440"/><text x="429.5" y="475.8" text-anchor="middle" class="mono" font-size="19" fill="#d9d5e0">.vtk</text>
+  <rect x="474.0" y="452" width="71.8" height="36.1" rx="18.1" fill="#1b1b23" fill-opacity="0.85" stroke="#3a3440"/><text x="509.9" y="475.8" text-anchor="middle" class="mono" font-size="19" fill="#d9d5e0">.pcd</text>
+  <path d="M560.4 470.1h24.7m-11.4 -10.5 11.4 10.5 -11.4 10.5" fill="none" stroke="#ff8a3d" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="606.1" y="452" width="71.8" height="36.1" rx="18.1" fill="url(#melt)"/><text x="642.0" y="475.8" text-anchor="middle" class="mono" font-size="19" font-weight="700" fill="#1a0d05">.glb</text>
 </svg>

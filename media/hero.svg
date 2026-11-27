@@ -29,16 +29,14 @@
   </g>
   <text x="196.9" y="214.0" class="word" font-size="112" fill="#ecebf0">poly<tspan fill="url(#melt)">smelt</tspan></text>
   <text x="84" y="294.6" class="text" font-size="38" font-weight="600" fill="#ecebf0">60+ 3D formats in. Clean glTF out.</text>
-  <text x="84" y="349.7" class="text" font-size="25" fill="#9d9aab">Read what other tools write. A Rust crate, live in WebAssembly.</text>
+  <text x="84" y="349.7" class="text" font-size="25" fill="#9d9aab">Pure Rust, no C. Runs natively or in the browser.</text>
   <rect x="84.0" y="388" width="75.6" height="38.0" rx="19.0" fill="#1b1b23" fill-opacity="0.85" stroke="#3a3440"/><text x="121.8" y="413.1" text-anchor="middle" class="mono" font-size="20" fill="#d9d5e0">.fbx</text>
-  <rect x="168.6" y="388" width="75.6" height="38.0" rx="19.0" fill="#1b1b23" fill-opacity="0.85" stroke="#3a3440"/><text x="206.4" y="413.1" text-anchor="middle" class="mono" font-size="20" fill="#d9d5e0">.obj</text>
-  <rect x="253.2" y="388" width="75.6" height="38.0" rx="19.0" fill="#1b1b23" fill-opacity="0.85" stroke="#3a3440"/><text x="291.0" y="413.1" text-anchor="middle" class="mono" font-size="20" fill="#d9d5e0">.dae</text>
-  <rect x="337.8" y="388" width="75.6" height="38.0" rx="19.0" fill="#1b1b23" fill-opacity="0.85" stroke="#3a3440"/><text x="375.6" y="413.1" text-anchor="middle" class="mono" font-size="20" fill="#d9d5e0">.stl</text>
-  <rect x="422.4" y="388" width="75.6" height="38.0" rx="19.0" fill="#1b1b23" fill-opacity="0.85" stroke="#3a3440"/><text x="460.2" y="413.1" text-anchor="middle" class="mono" font-size="20" fill="#d9d5e0">.ply</text>
-  <rect x="507.0" y="388" width="75.6" height="38.0" rx="19.0" fill="#1b1b23" fill-opacity="0.85" stroke="#3a3440"/><text x="544.8" y="413.1" text-anchor="middle" class="mono" font-size="20" fill="#d9d5e0">.3ds</text>
-  <rect x="591.6" y="388" width="75.6" height="38.0" rx="19.0" fill="#1b1b23" fill-opacity="0.85" stroke="#3a3440"/><text x="629.4" y="413.1" text-anchor="middle" class="mono" font-size="20" fill="#d9d5e0">.bvh</text>
-  <rect x="676.2" y="388" width="75.6" height="38.0" rx="19.0" fill="#1b1b23" fill-opacity="0.85" stroke="#3a3440"/><text x="714.0" y="413.1" text-anchor="middle" class="mono" font-size="20" fill="#d9d5e0">.las</text>
-  <rect x="760.8" y="388" width="75.6" height="38.0" rx="19.0" fill="#1b1b23" fill-opacity="0.85" stroke="#3a3440"/><text x="798.6" y="413.1" text-anchor="middle" class="mono" font-size="20" fill="#d9d5e0">.md2</text>
-  <path d="M851.4 407.0h26.0m-12.0 -11.0 12.0 11.0 -12.0 11.0" fill="none" stroke="#ff8a3d" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/>
-  <rect x="898.4" y="388" width="75.6" height="38.0" rx="19.0" fill="url(#melt)"/><text x="936.2" y="413.1" text-anchor="middle" class="mono" font-size="20" font-weight="700" fill="#1a0d05">.glb</text>
+  <rect x="168.6" y="388" width="75.6" height="38.0" rx="19.0" fill="#1b1b23" fill-opacity="0.85" stroke="#3a3440"/><text x="206.4" y="413.1" text-anchor="middle" class="mono" font-size="20" fill="#d9d5e0">.usd</text>
+  <rect x="253.2" y="388" width="75.6" height="38.0" rx="19.0" fill="#1b1b23" fill-opacity="0.85" stroke="#3a3440"/><text x="291.0" y="413.1" text-anchor="middle" class="mono" font-size="20" fill="#d9d5e0">.obj</text>
+  <rect x="337.8" y="388" width="75.6" height="38.0" rx="19.0" fill="#1b1b23" fill-opacity="0.85" stroke="#3a3440"/><text x="375.6" y="413.1" text-anchor="middle" class="mono" font-size="20" fill="#d9d5e0">.vox</text>
+  <rect x="422.4" y="388" width="75.6" height="38.0" rx="19.0" fill="#1b1b23" fill-opacity="0.85" stroke="#3a3440"/><text x="460.2" y="413.1" text-anchor="middle" class="mono" font-size="20" fill="#d9d5e0">.vtk</text>
+  <rect x="507.0" y="388" width="75.6" height="38.0" rx="19.0" fill="#1b1b23" fill-opacity="0.85" stroke="#3a3440"/><text x="544.8" y="413.1" text-anchor="middle" class="mono" font-size="20" fill="#d9d5e0">.pcd</text>
+  <rect x="591.6" y="388" width="75.6" height="38.0" rx="19.0" fill="#1b1b23" fill-opacity="0.85" stroke="#3a3440"/><text x="629.4" y="413.1" text-anchor="middle" class="mono" font-size="20" fill="#d9d5e0">.b3d</text>
+  <path d="M682.2 407.0h26m-12.0 -11.0 12.0 11.0 -12.0 11.0" fill="none" stroke="#ff8a3d" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="729.2" y="388" width="75.6" height="38.0" rx="19.0" fill="url(#melt)"/><text x="767.0" y="413.1" text-anchor="middle" class="mono" font-size="20" font-weight="700" fill="#1a0d05">.glb</text>
 </svg>
