@@ -193,9 +193,15 @@ fn pmx_is_mirrored_and_scaled() {
     let doc = read(&pmx_sample(true, 2), "m.pmx").unwrap();
     let rig = doc.rig().unwrap();
     let arm = rig.find("腕").unwrap();
-    // (0, 5, 5) from its parent, mirrored and in meters.
+    // (0, 5, 5) from its parent, mirrored, in the file's units: the root node scales them to meters.
     let t = rig.nodes[arm].rest.translation;
-    assert!((t[1] - 0.4).abs() < 1e-6 && (t[2] + 0.4).abs() < 1e-6, "{t:?}");
+    assert!((t[1] - 5.0).abs() < 1e-6 && (t[2] + 5.0).abs() < 1e-6, "{t:?}");
+    let top = usize::try_from(doc.json()["scenes"][0]["nodes"][0].as_u64().unwrap()).unwrap();
+    assert_eq!(doc.json()["nodes"][top]["name"], "RootNode");
+    assert_eq!(doc.json()["nodes"][top]["scale"], serde_json::json!([0.08, 0.08, 0.08]));
+    let at = rig.world(&rig.pose(None, 0.0))[arm];
+    let parent = rig.world(&rig.pose(None, 0.0))[rig.nodes[arm].parent.unwrap()];
+    assert!((at[13] - parent[13] - 0.4).abs() < 1e-6 && (at[14] - parent[14] + 0.4).abs() < 1e-6);
     let mesh = doc.flatten(crate::document::Pose::Rest).unwrap().unwrap();
     let p = &mesh.prims[0];
     // Faces wind counter-clockwise about their normals once mirrored: the normal now faces +Z.

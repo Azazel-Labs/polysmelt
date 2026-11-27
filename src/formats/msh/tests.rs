@@ -429,8 +429,11 @@ fn physical_groups_are_meshes_with_their_tags() {
         serde_json::json!({ "physical": 3, "dimension": 2 })
     );
     let nodes = doc.json()["nodes"].as_array().unwrap().clone();
-    assert_eq!(nodes.len(), 2);
+    assert_eq!(nodes.len(), 3);
     assert!(nodes.iter().any(|n| n["name"] == "body"));
+    // Each group's node is under the one root node.
+    assert_eq!(nodes[2]["name"], "RootNode");
+    assert_eq!(doc.json()["scenes"][0]["nodes"], serde_json::json!([2]));
     // A version 2.0 name gives no dimension, and elements with no group are a mesh with no name.
     let text = String::from_utf8(v2(false, false)).unwrap();
     let old = text

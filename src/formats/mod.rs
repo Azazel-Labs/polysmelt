@@ -71,6 +71,7 @@ pub(crate) mod fbx_write;
 #[cfg(feature = "flt")]
 mod flt;
 mod format;
+pub(crate) mod frame;
 #[cfg(feature = "gltf")]
 pub(crate) mod gltf;
 #[cfg(feature = "gltf")]
@@ -741,6 +742,34 @@ pub(crate) fn read_input(input: Input<'_>, ext: &str, assets: &dyn Assets, keep:
         let e = crate::Error::nothing_to_convert("the file is well formed but has nothing to convert");
         return Err(named(same_kind(e, input, ext)));
     }
+    // Every scene hangs from one root node, whatever read it; sampled data and glTF itself are as they are.
+    if !doc.framed {
+        if matches!(
+            ext,
+            "gltf"
+                | "glb"
+                | "b3dm"
+                | "i3dm"
+                | "pnts"
+                | "cmpt"
+                | "vox"
+                | "splat"
+                | "spz"
+                | "sog"
+                | "las"
+                | "laz"
+                | "pcd"
+                | "xyz"
+                | "pts"
+                | "ptx"
+                | "asc"
+                | "e57"
+        ) {
+            frame::flat(&mut doc);
+        } else {
+            frame::root(&mut doc, frame::Frame::IDENTITY);
+        }
+    }
     doc.prune(keep);
     // What the document draws is counted the same way whatever read it.
     let c = doc.counts();
@@ -760,10 +789,25 @@ pub(crate) fn read_input(input: Input<'_>, ext: &str, assets: &dyn Assets, keep:
 /// [`Empty`](crate::ErrorKind::Empty) whatever read it.
 fn has_scene(doc: &Document) -> bool {
     let nodes = doc.base.get("nodes").and_then(serde_json::Value::as_array);
-    nodes.into_iter().flatten().any(|n| {
+    // The root node a reader put over the scene is the reader's, not the file's.
+    let tops: Vec<u64> = doc
+        .base
+        .get("scenes")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|s| s.get("nodes").and_then(serde_json::Value::as_array))
+        .flatten()
+        .filter_map(serde_json::Value::as_u64)
+        .collect();
+    nodes.into_iter().flatten().zip(0u64..).any(|(n, i)| {
+        let root = tops.contains(&i) && n.get("name").and_then(serde_json::Value::as_str) == Some(frame::ROOT);
         n.as_object().is_some_and(|n| {
-            n.keys()
-                .any(|k| !matches!(k.as_str(), "mesh" | "translation" | "rotation" | "scale" | "matrix"))
+            n.keys().any(|k| match k.as_str() {
+                "mesh" | "translation" | "rotation" | "scale" | "matrix" => false,
+                "name" | "children" => !root,
+                _ => true,
+            })
         })
     })
 }

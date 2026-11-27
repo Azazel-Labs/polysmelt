@@ -9,7 +9,7 @@
   "rig": [
     {
       "node": "body",
-      "parent": null,
+      "parent": "RootNode",
       "translation": [
         10.0,
         20.0,

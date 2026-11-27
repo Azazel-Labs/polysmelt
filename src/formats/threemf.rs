@@ -7,7 +7,7 @@
 //! filaments painted onto triangles, and which parts and volumes aren't printed but change how the rest prints
 //! (modifiers, negative volumes, support blockers and enforcers).
 //!
-//! The build is a node per item and component, each with its 3MF transform, under a root node that
+//! The build is a node per item and component, each with its 3MF transform, under the `RootNode` (the one top-level node every reader makes) that
 //! turns the model's Z-up millimeters (or its unit) into glTF's Y-up meters; an object's triangles
 //! are a mesh in its own space, shared wherever it's placed in the same filament, its corners
 //! sharing vertices as the object's triangles do. A part or volume that isn't printed is a hidden
@@ -27,6 +27,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{BufReader, Read};
 
+use super::frame::{self, Frame};
 use super::stream::{self, f32_from};
 use super::xml::{attr_string as attr, each_attr, hex_digit, push_reference, unescape_lossy};
 use crate::document::{Builder, Document, Keep};
@@ -538,26 +539,24 @@ pub(crate) fn load(input: super::Input<'_>, keep: Keep) -> Result<Document> {
     let Emit {
         mut b,
         meshes,
-        mut nodes,
+        nodes,
         hidden,
         ..
     } = out;
-    // Z-up to Y-up (a quarter turn about X), and the unit to meters.
-    let h = std::f32::consts::FRAC_1_SQRT_2;
-    nodes.push(
-        json!({ "name": "RootNode", "children": items, "rotation": [-h, 0.0, 0.0, h], "scale": [scale, scale, scale] }),
-    );
     let mut json = Map::new();
     json.insert("asset".into(), json!({ "extras": { "source": source } }));
     json.insert("scene".into(), json!(0));
-    json.insert("scenes".into(), json!([{ "nodes": [nodes.len() - 1] }]));
+    json.insert("scenes".into(), json!([{ "nodes": items }]));
     json.insert("nodes".into(), Value::Array(nodes));
     json.insert("meshes".into(), Value::Array(meshes));
     if hidden {
         json.insert("extensionsUsed".into(), json!(["KHR_node_visibility"]));
     }
     b.materials(&materials, images.list, &mut json);
-    Ok(b.finish(json, facts))
+    let mut doc = b.finish(json, facts);
+    // Z-up to Y-up (a quarter turn about X), and the unit to meters.
+    frame::root(&mut doc, Frame::z_up().scaled(scale));
+    Ok(doc)
 }
 
 /// How a triangle looks, which decides its primitive.

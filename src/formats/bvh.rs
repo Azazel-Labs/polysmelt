@@ -1041,7 +1041,8 @@ Frame Time: 0.5
         text.push_str("MOTION\nFrames: 1\nFrame Time: 1\n45\n");
         let assets = Memory::new();
         let doc = crate::formats::load_bytes(text.as_bytes(), "t.bvh", "bvh", &assets, Keep::ALL).unwrap();
-        assert_eq!(doc.json()["nodes"].as_array().unwrap().len(), MAX_NODES);
+        // The file's nodes, and the root node over them.
+        assert_eq!(doc.json()["nodes"].as_array().unwrap().len(), MAX_NODES + 1);
         assert_eq!(doc.facts["joints"], json!(depth));
         // One more joint is too many.
         let text = text.replacen("JOINT j\n", "JOINT k\n{\n}\nJOINT j\n", 1);

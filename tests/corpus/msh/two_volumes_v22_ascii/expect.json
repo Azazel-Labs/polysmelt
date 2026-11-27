@@ -19,7 +19,7 @@
     "triangles": 48
   },
   "document": {
-    "nodes": 2,
+    "nodes": 3,
     "node_names": [
       "steel",
       "copper"

@@ -2,18 +2,20 @@
 //! transforms, meshes with any number of texture coordinate, color and joint sets, morph targets, skins and
 //! animations.
 //!
-//! A reader builds the scene in its format's own coordinates, then converts it whole: [`Scene::mirror_z`] for a
-//! left-handed source (positions, normals, transforms, inverse bind matrices and keys mirrored, and triangles wound
-//! the other way), [`Scene::rotate_roots`] for a source that isn't Y up (only the root nodes and their keys turn,
-//! so skins and morph targets stay as they are), and [`Scene::scale`] for a source in other units.
+//! A reader builds the scene in its format's own coordinates and units and leaves it so. [`Scene::mirror_z`]
+//! mirrors a left-handed source (positions, normals, transforms, inverse bind matrices and keys, with triangles
+//! wound the other way). [`Scene::turn`] and [`Scene::unit`] say what brings the scene to glTF's Y up and meters,
+//! and change nothing in it: [`Scene::finish`] puts every root under the one root node that carries them (see
+//! [`frame`]), as every reader does.
 //!
 //! [`Scene::finish`] writes what glTF requires and the validator checks: unit normals and rotations, positions'
 //! bounds, joints and weights merged, sorted, cut to sixteen and summing to 1, key times strictly increasing,
-//! quaternion keys on one side, and every skin's joints under one root. A node can't be its own ancestor: a parent
+//! quaternion keys on one side, and every skin's joints under one root (the root node). A node can't be its own ancestor: a parent
 //! link that would close a loop is cut.
 
 use serde_json::{Map, Value, json};
 
+use super::frame::{self, Frame};
 use crate::Result;
 use crate::document::{Accessor, Builder, Document, Keep, Limits, Part, Sparse};
 use crate::legacy_material::{self, Transparency};
@@ -170,12 +172,15 @@ pub(crate) struct Scene {
     /// The format's own details, written as `asset.extras.source` with [`Scene::info`].
     pub source: Map<String, Value>,
     /// What the file says about itself (its units, up axis, author...), written into `asset.extras.source`. What
-    /// [`Scene::scale`], [`Scene::rotate_roots`] and [`Scene::mirror_z`] convert is marked converted.
+    /// [`Scene::mirror_z`] converts is marked converted there, and what the root node converts when it is made.
     pub info: SourceInfo,
     pub facts: Map<String, Value>,
     /// The triangles the reader left out for naming a vertex that isn't there, counted with those dropped as
     /// the scene is written (see [`crate::geometry`]).
     pub dropped: usize,
+    /// The turn and scale that bring the scene to glTF's axes and meters ([`Scene::turn`],
+    /// [`Scene::unit`]): the root node [`Scene::finish`] puts every root under carries them.
+    pub frame: Frame,
 }
 
 /// 4×4 matrices, column-major.
@@ -294,77 +299,15 @@ impl Scene {
         }
     }
 
-    /// Scales lengths by `s`: positions, morph offsets, translations, keys and inverse bind matrices.
-    pub fn scale(&mut self, s: f32) {
-        if (s - 1.0).abs() > f32::EPSILON {
-            self.info.converted.units = true;
-        }
-        let v = |p: &mut [f32; 3]| *p = p.map(|c| c * s);
-        for m in &mut self.meshes {
-            for p in &mut m.prims {
-                p.positions.iter_mut().for_each(v);
-                for t in &mut p.targets {
-                    t.positions.iter_mut().for_each(v);
-                }
-            }
-        }
-        for n in &mut self.nodes {
-            v(&mut n.translation);
-        }
-        let sd = f64::from(s);
-        for sk in &mut self.skins {
-            for m in &mut sk.inverse_binds {
-                m[12] *= sd;
-                m[13] *= sd;
-                m[14] *= sd;
-            }
-        }
-        for a in &mut self.animations {
-            for c in &mut a.channels {
-                if c.path == Path::Translation {
-                    c.values.iter_mut().for_each(|x| *x *= s);
-                }
-            }
-        }
+    /// Says the scene's unit is `meters` long: the root node scales it to meters, and nothing in the scene changes.
+    pub fn unit(&mut self, meters: f64) {
+        self.frame = self.frame.scaled(meters);
     }
 
-    /// Turns the whole scene by unit quaternion `q`: each root node's transform and keys are turned, and what hangs
-    /// from them follows. Skinned vertices follow their joints, so nothing else changes.
-    pub fn rotate_roots(&mut self, q: [f32; 4]) {
-        // No turn at all (a source that is Y up already) converts nothing.
-        if q[0].abs() + q[1].abs() + q[2].abs() < 1e-6 {
-            return;
-        }
-        self.info.converted.up_axis = true;
-        let parents = self.parents();
-        let qd = q.map(f64::from);
-        let roots: Vec<bool> = parents.iter().map(Option::is_none).collect();
-        for (n, &root) in self.nodes.iter_mut().zip(&roots) {
-            // A skinned mesh's node doesn't place it, so it stays as it is.
-            if !root || n.skin.is_some() {
-                continue;
-            }
-            n.translation = quat::rotate(qd, n.translation.map(f64::from)).map(f32_of);
-            n.rotation = normalize(quat::mul(qd, n.rotation.map(f64::from)));
-        }
-        for a in &mut self.animations {
-            for c in &mut a.channels {
-                if c.node >= roots.len() || !roots[c.node] || self.nodes[c.node].skin.is_some() {
-                    continue;
-                }
-                match c.path {
-                    Path::Translation => c.values.chunks_exact_mut(3).for_each(|k| {
-                        let r = quat::rotate(qd, [k[0], k[1], k[2]].map(f64::from)).map(f32_of);
-                        k.copy_from_slice(&r);
-                    }),
-                    Path::Rotation => c.values.chunks_exact_mut(4).for_each(|k| {
-                        let r = normalize(quat::mul(qd, [k[0], k[1], k[2], k[3]].map(f64::from)));
-                        k.copy_from_slice(&r);
-                    }),
-                    Path::Scale | Path::Weights => {}
-                }
-            }
-        }
+    /// Says unit quaternion `q` turns the scene to glTF's axes: the root node turns, and nothing in the scene
+    /// changes.
+    pub fn turn(&mut self, q: [f32; 4]) {
+        self.frame = self.frame.turned(q.map(f64::from));
     }
 
     /// The triangles the scene draws.
@@ -460,54 +403,15 @@ impl Scene {
             self.rest_joints(&parents);
         }
 
-        // Every skin's joints under one root: the tops of their trees gathered under a new node when there are
-        // several.
-        let mut extra_root = None;
-        if keep.skins {
-            let mut tops = Vec::new();
-            for s in &self.skins {
-                let mut mine: Vec<usize> = Vec::new();
-                for &j in &s.joints {
-                    let mut at = j;
-                    let mut steps = 0;
-                    while let Some(p) = parents.get(at).copied().flatten() {
-                        at = p;
-                        steps += 1;
-                        if steps > parents.len() {
-                            break;
-                        }
-                    }
-                    if !mine.contains(&at) {
-                        mine.push(at);
-                    }
-                }
-                if mine.len() > 1 {
-                    for t in mine {
-                        if !tops.contains(&t) {
-                            tops.push(t);
-                        }
-                    }
-                }
-            }
-            if !tops.is_empty() {
-                extra_root = Some((self.nodes.len(), tops));
-            }
-        }
-
+        // Every root goes under the root node, so every skin's joints have one root whatever trees they are in.
         let n = self.nodes.len();
-        let mut children: Vec<Vec<usize>> = vec![Vec::new(); n + 1];
+        let mut children: Vec<Vec<usize>> = vec![Vec::new(); n];
         let mut roots = Vec::new();
         for (i, p) in parents.iter().enumerate() {
             match p {
                 Some(p) => children[*p].push(i),
-                None => match &extra_root {
-                    Some((r, tops)) if tops.contains(&i) => children[*r].push(i),
-                    _ => roots.push(i),
-                },
+                None => roots.push(i),
             }
-        }
-        if let Some((r, _)) = &extra_root {
-            roots.push(*r);
         }
 
         // Meshes.
@@ -610,13 +514,6 @@ impl Scene {
             .collect();
 
         // Skins.
-        let mut parents_written: Vec<Option<usize>> = parents.clone();
-        if let Some((r, tops)) = &extra_root {
-            for &t in tops {
-                parents_written[t] = Some(*r);
-            }
-            parents_written.push(None);
-        }
         let mut skins_json = Vec::new();
         let mut skin_index = vec![None; self.skins.len()];
         if keep.skins {
@@ -638,7 +535,7 @@ impl Scene {
                 }
                 let a = b.accessor(Part::f32(ibm), 5126, s.joints.len(), "MAT4", None);
                 let mut sj = json!({ "joints": s.joints, "inverseBindMatrices": a });
-                if let Some(root) = skin::common_root(&parents_written, &s.joints) {
+                if let Some(root) = skin::common_root(&parents, &s.joints) {
                     sj["skeleton"] = json!(root);
                 }
                 if !s.name.is_empty() {
@@ -650,7 +547,7 @@ impl Scene {
         }
 
         // Nodes.
-        let mut nodes_json = Vec::with_capacity(n + 1);
+        let mut nodes_json = Vec::with_capacity(n);
         for (i, node) in self.nodes.iter().enumerate() {
             let mut nj = json!({});
             if !node.name.is_empty() {
@@ -690,9 +587,6 @@ impl Scene {
                 nj["extras"] = e.clone();
             }
             nodes_json.push(nj);
-        }
-        if let Some((r, _)) = &extra_root {
-            nodes_json.push(json!({ "name": "Skeleton", "children": children[*r] }));
         }
 
         // Materials and images, before the animations, so a read without animations numbers the images' views as
@@ -781,7 +675,9 @@ impl Scene {
         }
         let mut facts = self.facts;
         facts.entry("triangles").or_insert(json!(tris));
-        Ok(b.finish(json, facts))
+        let mut doc = b.finish(json, facts);
+        frame::root(&mut doc, self.frame);
+        Ok(doc)
     }
 }
 
@@ -1501,12 +1397,12 @@ mod tests {
     fn an_awkward_scene_writes_and_flattens() {
         let mut s = awkward();
         s.mirror_z();
-        s.rotate_roots(Z_UP_TO_Y_UP);
-        s.scale(0.5);
+        s.turn(Z_UP_TO_Y_UP);
+        s.unit(0.5);
         let doc = s.finish(Keep::ALL).unwrap();
         let skins = doc.json()["skins"].as_array().unwrap();
         assert_eq!(skins.len(), 1);
-        // The two skeleton roots are gathered under one.
+        // The three nodes, and the root node the two skeleton roots are under.
         assert_eq!(doc.json()["nodes"].as_array().unwrap().len(), 4);
         let prim = &doc.json()["meshes"][0]["primitives"][0];
         assert!(prim["attributes"].get("TEXCOORD_1").is_none());

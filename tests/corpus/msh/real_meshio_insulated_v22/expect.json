@@ -20,7 +20,7 @@
     "triangles": 111
   },
   "document": {
-    "nodes": 3,
+    "nodes": 4,
     "node_names": [
       "convection",
       "wire",

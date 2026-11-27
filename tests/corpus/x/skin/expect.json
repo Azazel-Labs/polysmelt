@@ -62,7 +62,7 @@
   "rig": [
     {
       "node": "Lower",
-      "parent": null,
+      "parent": "RootNode",
       "translation": [
         0,
         0,

@@ -4,7 +4,7 @@
 //! asks), materials' metadata and the colors of composite materials mixed by their proportions, 2D
 //! textures (gray channels combined into one image) with each triangle's texture coordinates, and
 //! constellations, placed as nodes wherever an instance puts them. The model's Z-up unit (millimeters
-//! when unsaid) turns into glTF's Y-up meters at a root node. The source's units are declared when the
+//! when unsaid) turns into glTF's Y-up meters at the document's `RootNode`, the one top-level node every reader makes. The source's units are declared when the
 //! `unit` attribute names one the format knows, and millimeters assumed otherwise (a name the format doesn't
 //! know is kept as `unitAsWritten`); its up axis is +Z, the build direction the format fixes (declared). The model's metadata of the kinds the standard names (`name`,
 //! `description`, `author`, `cad`) and the common others (`copyright`, `license`, creation and
@@ -23,6 +23,7 @@ use std::io::{BufRead, BufReader, Read};
 use quick_xml::events::{BytesStart, Event};
 use serde_json::{Map, Value, json};
 
+use super::frame::{self, Frame};
 use super::{stream, xml};
 use crate::document::{Builder, Document};
 use crate::images::Source;
@@ -1060,7 +1061,7 @@ fn build(a: &Amf, zipped: bool, crease: f32) -> Result<Document> {
             roots.extend(place.constellation(i, None));
         }
     }
-    let Place { mut nodes, dropped, .. } = place;
+    let Place { nodes, dropped, .. } = place;
 
     let mut info = SourceInfo {
         format: Some("AMF".into()),
@@ -1111,19 +1112,17 @@ fn build(a: &Amf, zipped: bool, crease: f32) -> Result<Document> {
     facts.insert("triangles".into(), json!(in_scene));
     facts.insert("objects".into(), json!(a.objects.len()));
 
-    // Z-up to Y-up (a quarter turn about X), and the unit to meters.
-    let h = std::f32::consts::FRAC_1_SQRT_2;
-    nodes.push(
-        json!({ "name": "RootNode", "children": roots, "rotation": [-h, 0.0, 0.0, h], "scale": [scale, scale, scale] }),
-    );
     let mut json = Map::new();
     json.insert("asset".into(), json!({ "extras": { "source": source } }));
     json.insert("scene".into(), json!(0));
-    json.insert("scenes".into(), json!([{ "nodes": [nodes.len() - 1] }]));
+    json.insert("scenes".into(), json!([{ "nodes": roots }]));
     json.insert("nodes".into(), Value::Array(nodes));
     json.insert("meshes".into(), Value::Array(meshes));
     b.materials(&materials, tex.images, &mut json);
-    Ok(b.finish(json, facts))
+    let mut doc = b.finish(json, facts);
+    // Z-up to Y-up (a quarter turn about X), and the unit to meters.
+    frame::root(&mut doc, Frame::z_up().scaled(scale));
+    Ok(doc)
 }
 
 /// A look's glTF material.

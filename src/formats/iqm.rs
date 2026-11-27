@@ -29,7 +29,7 @@
 //! extras (`loop`). The source info's `frameRate` is the first animation's rate that is a positive number (assumed 24
 //! when none is); when the animations' rates differ, each gives its own in its extras (`frameRate`).
 //!
-//! The format is Z up and right-handed, so the scene's roots are turned for glTF's Y up (the source info's
+//! The format is Z up and right-handed, so the scene stays as the file has it under the document's `RootNode`, which turns it for glTF's Y up (the source info's
 //! `upAxis` is a declared `+Z`, converted); units are kept unscaled, and their length unknown.
 //!
 //! A file cut short, a list past its end, a name outside the text block, an unknown number format, vertex arrays
@@ -98,7 +98,7 @@ pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
     } else if !file.anims.is_empty() {
         scene.info.frame_rate = Fact::Assumed(f64::from(DEFAULT_RATE));
     }
-    scene.rotate_roots(Z_UP_TO_Y_UP);
+    scene.turn(Z_UP_TO_Y_UP);
     scene.finish(keep)
 }
 

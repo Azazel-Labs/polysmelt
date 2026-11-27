@@ -2,8 +2,12 @@
 //! pre- and post-rotation, rotation order; geometric transforms on a child node), meshes in their own space and shared
 //! between instances, materials and their textures (embedded or found in the pack), skins from skin clusters, morph
 //! targets from blend shapes, animation stacks sampled into translation, rotation, scale and weights channels,
-//! cameras, lights, and user properties as node extras. The file's axis system and unit become a root node that
-//! carries them to glTF's Y-up meters, and are recorded in `asset.extras.source` (see [`crate::source`]), with its
+//! cameras, lights, and user properties as node extras. The scene stays in the file's axes and unit under the document's one
+//! top-level node, `RootNode`, which is always there and carries the turn to glTF's Y up and the scale to meters
+//! (no transform when the file needs none); skinned meshes are under it with everything else. A left-handed axis
+//! system is mirrored as the file is read, through the axis that leaves the least turn: vertices, normals, tangents,
+//! morph targets, node transforms, inverse bind matrices and keys, with triangles wound the other way, so no node
+//! has a negative scale for it. The axis system and unit are recorded in `asset.extras.source` (see [`crate::source`]), with its
 //! frame rate (`TimeMode`), the applications that made and last saved it, `SceneInfo`'s title, author, subject,
 //! keywords and comment, and when it was made (`CreationTimeStamp`) and last saved. `coordAxis` (the file's right
 //! axis), `creator` (the SDK that wrote it, when an application is named), `revision`, `originalApplication` and
@@ -33,7 +37,8 @@ use std::path::Path;
 use serde_json::{Map, Value, json};
 
 use super::fbx_tree::{Attr as A, NodeHandle};
-use super::xform::{IDENTITY, set_transform};
+use super::frame::{self, Frame};
+use super::xform::M4;
 use crate::assets::Assets;
 use crate::document::{Builder, Document, Keep};
 use crate::images::Images;
@@ -250,6 +255,9 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
     }
 
     let (basis, unit, info, mut details) = settings::read(rootnode, version, &creator);
+    // The axis system and unit are the root node's turn and scale. A left-handed one mirrors too, which no node
+    // is left to do: the scene is mirrored through one axis as it is written (see `Reader::seen`).
+    let (frame, mirror) = Frame::of(&basis);
 
     let mut r = Reader {
         objs: &objs,
@@ -277,6 +285,7 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         morphs: HashMap::new(),
         channel_full: HashMap::new(),
         unit,
+        mirror,
         skinned_roots: Vec::new(),
         skinned_meshes: std::collections::HashSet::new(),
         unbound_meshes: std::collections::HashSet::new(),
@@ -362,13 +371,8 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
     if keep.animations {
         r.animations();
     }
+    // Skinned meshes go under the root node with everything else.
     let mut scene_nodes = roots;
-    if basis != IDENTITY {
-        let mut root = json!({ "name": "RootNode", "children": scene_nodes });
-        set_transform(&mut root, &basis);
-        r.nodes.push(root);
-        scene_nodes = vec![r.nodes.len() - 1];
-    }
     scene_nodes.append(&mut r.skinned_roots);
     ensure!(!r.nodes.is_empty(), Empty, "FBX has no mesh geometry");
 
@@ -419,7 +423,47 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
     let (materials, images) = (std::mem::take(&mut r.materials), std::mem::take(&mut r.images));
     let mut b = r.b;
     b.materials(&materials, images.list, &mut json);
-    Ok(b.finish(json, Map::new()))
+    let mut doc = b.finish(json, Map::new());
+    frame::root(&mut doc, frame);
+    Ok(doc)
+}
+
+/// `m` mirrored through `axis` on both sides: the transform that does to the mirrored scene what `m` does to the
+/// file's.
+fn mirrored(m: &M4, axis: usize) -> M4 {
+    let mut out = *m;
+    for (i, row) in out.iter_mut().enumerate().take(3) {
+        for (j, v) in row.iter_mut().enumerate() {
+            if (i == axis) != (j == axis) {
+                *v = -*v;
+            }
+        }
+    }
+    out
+}
+
+/// The turn that does to a scene mirrored through `axis` what unit quaternion `q` does to the scene: its other two
+/// parts negated.
+fn mirrored_turn(q: [f64; 4], axis: usize) -> [f64; 4] {
+    std::array::from_fn(|k| if k == axis || k == 3 { q[k] } else { -q[k] })
+}
+
+/// A primitive mirrored through `axis`: its positions, normals and tangents, with each triangle wound the other
+/// way so its faces keep facing out.
+fn mirror_prim(p: &mut crate::mesh::Prim, axis: usize) {
+    for v in &mut p.positions {
+        v[axis] = -v[axis];
+    }
+    for n in &mut p.normals {
+        n[axis] = -n[axis];
+    }
+    for t in &mut p.tangents {
+        t[axis] = -t[axis];
+        t[3] = -t[3];
+    }
+    for t in p.indices.chunks_exact_mut(3) {
+        t.swap(1, 2);
+    }
 }
 
 /// Object id → (node, class), and how objects connect.
@@ -583,6 +627,9 @@ struct Reader<'o, 'a, 'x> {
     channel_full: HashMap<i64, Vec<f64>>,
     /// Meters per file unit.
     unit: f64,
+    /// The axis everything written is mirrored through when the file is left-handed, so the document is
+    /// right-handed with no node left to mirror it.
+    mirror: Option<usize>,
     /// Nodes holding skinned meshes, which go at the scene's root, outside the axis and unit conversion.
     skinned_roots: Vec<usize>,
     /// Meshes carrying joints and weights.

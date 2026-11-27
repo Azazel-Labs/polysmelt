@@ -143,7 +143,11 @@ fn faces_turn_y_up_in_meters() {
     assert_eq!(info.up_axis, Fact::Declared(Axis::PosZ));
     assert_eq!(info.handedness, Fact::Declared(Handedness::Right));
     assert!(info.converted.units && info.converted.up_axis);
-    assert_eq!(doc.json()["nodes"][0]["name"], "RootNode");
+    // Model space's faces are a node under the root node, which turns and scales them.
+    assert_eq!(doc.json()["nodes"][0], json!({ "mesh": 0 }));
+    assert_eq!(doc.json()["nodes"][1]["name"], "RootNode");
+    assert_eq!(doc.json()["nodes"][1]["children"], json!([0]));
+    assert_eq!(doc.json()["nodes"][1]["scale"], json!([0.001, 0.001, 0.001]));
     let m = mesh(&doc);
     assert_eq!(m.triangles(), 12);
     let (lo, hi) = bounds(&m);

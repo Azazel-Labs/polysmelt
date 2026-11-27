@@ -162,7 +162,11 @@ impl Reader<'_, '_, '_> {
         let skinned = influences.iter().any(|v| !v.is_empty());
         let mut unbound = false;
         let mut primitives = Vec::new();
-        for (slot, prim, cps, color_set) in prims {
+        let mirror = self.mirror;
+        for (slot, mut prim, cps, color_set) in prims {
+            if let Some(axis) = mirror {
+                super::mirror_prim(&mut prim, axis);
+            }
             let material = match mats.get(slot) {
                 Some(&i) => i,
                 None => self.default_material(),
@@ -191,15 +195,21 @@ impl Reader<'_, '_, '_> {
                 let targets: Vec<Value> = shapes
                     .iter()
                     .map(|t| {
+                        let flip = |mut v: [f32; 3]| {
+                            if let Some(axis) = mirror {
+                                v[axis] = -v[axis];
+                            }
+                            v
+                        };
                         let d: Vec<[f32; 3]> = cps
                             .iter()
-                            .map(|cp| t.positions.get(cp).copied().unwrap_or([0.0; 3]))
+                            .map(|cp| flip(t.positions.get(cp).copied().unwrap_or([0.0; 3])))
                             .collect();
                         let mut target = json!({ "POSITION": self.b.positions(d) });
                         if normals {
                             let n: Vec<f32> = cps
                                 .iter()
-                                .flat_map(|cp| t.normals.get(cp).copied().unwrap_or([0.0; 3]))
+                                .flat_map(|cp| flip(t.normals.get(cp).copied().unwrap_or([0.0; 3])))
                                 .collect();
                             target["NORMAL"] = json!(self.b.floats(n, "VEC3", false));
                         }

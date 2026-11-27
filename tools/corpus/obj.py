@@ -12,7 +12,7 @@ import zlib
 
 # The shared modules are beside this script, which `python -I` leaves off the path.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common import (AXES, CUBE_BOUNDS, CUBE_QUADS, CUBE_V, case, fresh, pil_image, png, polygon_area, psd,  # noqa: E402
+from common import (ROOT_NODE, AXES, CUBE_BOUNDS, CUBE_QUADS, CUBE_V, case, fresh, pil_image, png, polygon_area, psd,  # noqa: E402
                     r, srgb_to_linear, webp)
 from common import (DEFAULT_MATERIAL, GRAY, NO_HIGHLIGHT, ROUGHNESS, SAME_PHONG, phong, phong_roughness,  # noqa: E402
                     phong_specular, same_phong_expect)
@@ -182,7 +182,7 @@ case(FMT, "syntax_ignored_statements", {
 }, {
     "spec": OBJ_SPEC + ": smoothing, display and free-form statements are skipped (and counted)",
     "source": SRC, "triangles": 2, "area": 1.0,
-    "document": {"nodes": 1, "node_names": ["group1 group2"],
+    "document": {"nodes": 2, "node_names": ["group1 group2", ROOT_NODE],
                  "source": {"skipped": {"mg": 1, "vp": 1, "cstype": 1, "deg": 1, "lod": 1, "shadow_obj": 1,
                                         "trace_obj": 1}}},
 })
@@ -194,7 +194,7 @@ case(FMT, "objects_and_groups", {
 }, {
     "spec": OBJ_SPEC + ": objects (o) and groups (g) as nodes, each drawing its faces; a name used again goes on",
     "source": SRC, "triangles": 4,
-    "document": {"nodes": 3, "meshes": 3, "node_names": ["left", "top", "bottom"],
+    "document": {"nodes": 4, "meshes": 3, "node_names": ["left", "top", "bottom", ROOT_NODE],
                  "source": {"comments": ["Two objects, the second in two groups", "made by hand"]}},
 })
 

@@ -139,14 +139,16 @@ impl Reader<'_, '_, '_> {
                 mul(&inverse(&link), &self.world_of(m))
             });
             // The vertex goes geometry → model → bone space.
-            ibms.extend(crate::skin::inverse_bind(to_column_major(&mul(&transform, geometric))));
+            ibms.extend(crate::skin::inverse_bind(to_column_major(
+                &self.seen(&mul(&transform, geometric)),
+            )));
             joints.push(self.node_of[&bone]);
         }
         // The model's own node: at bind time it's where `Transform` says, so its inverse bind matrix is the
         // geometric transform.
         if unbound || joints.is_empty() {
             joints.push(self.node_of[&m]);
-            ibms.extend(crate::skin::inverse_bind(to_column_major(geometric)));
+            ibms.extend(crate::skin::inverse_bind(to_column_major(&self.seen(geometric))));
         }
         let acc = self.b.floats(ibms, "MAT4", false);
         let mut out = json!({ "joints": joints, "inverseBindMatrices": acc });

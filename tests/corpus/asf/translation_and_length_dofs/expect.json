@@ -9,12 +9,13 @@
     "frames": 2
   },
   "document": {
-    "nodes": 4,
+    "nodes": 5,
     "node_names": [
       "root",
       "hips",
       "neck",
-      "neck_end"
+      "neck_end",
+      "RootNode"
     ]
   },
   "json": {
@@ -22,7 +23,13 @@
     "/asset/extras/source/upAxis": "+Y",
     "/asset/extras/source/metersPerUnit": 0.0254,
     "/scenes/0/nodes": [
+      4
+    ],
+    "/nodes/4/children": [
       0
+    ],
+    "/asset/extras/source/converted": [
+      "units"
     ],
     "/asset/extras/source/frameRate": 120.0,
     "/asset/extras/source/assumed": [
@@ -32,12 +39,40 @@
   },
   "rig": [
     {
-      "node": "root",
+      "node": "RootNode",
       "parent": null,
       "translation": [
+        0,
+        0,
+        0
+      ],
+      "rotation": [
+        0,
+        0,
+        0,
+        1
+      ],
+      "scale": [
+        0.0254,
+        0.0254,
+        0.0254
+      ]
+    },
+    {
+      "node": "root",
+      "world": [
         0.0,
         0.0,
         0.0
+      ]
+    },
+    {
+      "node": "root",
+      "parent": "RootNode",
+      "translation": [
+        0,
+        0,
+        0
       ],
       "rotation": [
         0,
@@ -55,9 +90,9 @@
       "node": "hips",
       "parent": "root",
       "translation": [
-        0.0,
-        0.0,
-        0.0
+        0,
+        0,
+        0
       ],
       "rotation": [
         0,
@@ -76,7 +111,7 @@
       "parent": "hips",
       "translation": [
         0.0,
-        0.1016,
+        4.0,
         0.0
       ],
       "rotation": [
@@ -96,7 +131,7 @@
       "parent": "neck",
       "translation": [
         0.0,
-        0.0508,
+        2.0,
         0.0
       ],
       "rotation": [
@@ -115,9 +150,9 @@
       "node": "hips",
       "time": 0.008333333,
       "translation": [
-        -0.0508,
-        0.0254,
-        0.0762
+        -2.0,
+        1.0,
+        3.0
       ],
       "rotation": [
         0.0,

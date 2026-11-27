@@ -114,6 +114,9 @@ pub struct Document {
     /// The most points and line segments [`Document::flatten`] draws (see
     /// [`Document::set_max_points`]).
     pub(crate) max_points: usize,
+    /// Whether the reader settled how the file's axes and units reach glTF's (see `formats::frame`): under a root
+    /// node, or in the data. A load puts the scene of a document that isn't under the root node.
+    pub(crate) framed: bool,
 }
 
 impl fmt::Debug for Document {
@@ -610,6 +613,7 @@ impl Document {
             max_triangles: MAX_TRIANGLES,
             lines_and_points: true,
             max_points: MAX_POINTS,
+            framed: false,
         }
     }
 

@@ -14,7 +14,7 @@
 //! the top left, as glTF's do, and are kept as written. Triangles are wound clockwise seen from the front, so each
 //! is turned around for glTF. A surface with no triangles is left out.
 //!
-//! Each tag is a root node named after it, at its place in the first frame (its axes are the columns of its
+//! Each tag is a node named after it, a root of the file, at its place in the first frame (its axes are the columns of its
 //! rotation). With more than one frame, the frames become one linear animation, with no name as the file gives it none: a weights
 //! channel per surface with a key per frame that turns that frame's target fully on (the first frame's key turns
 //! them all off), and translation and rotation channels per tag. The format has no frame rate; frames are taken at
@@ -26,7 +26,7 @@
 //! the model when there is one (`surface,texture` lines, as player models name theirs). Shader scripts, which can
 //! name a different texture for a shader, aren't read; frame bounds are dropped.
 //!
-//! The format is Z up and right-handed, as the engine it belongs to is, so the scene's roots are turned for glTF's Y
+//! The format is Z up and right-handed, as the engine it belongs to is, so the scene stays as the file has it under the document's `RootNode`, which turns it for glTF's Y
 //! up (the source info's `upAxis` is a declared `+Z`, converted, and its `handedness` a declared `right`); game units are kept unscaled, and their length unknown. With more than
 //! one frame the assumed frame rate is recorded. The header's name (the model's path in the game's folders) is kept
 //! as `name`.
@@ -202,7 +202,7 @@ pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
     if n_frames > 1 {
         scene.info.frame_rate = Fact::Assumed(f64::from(RATE));
     }
-    scene.rotate_roots(Z_UP_TO_Y_UP);
+    scene.turn(Z_UP_TO_Y_UP);
     scene.finish(keep)
 }
 

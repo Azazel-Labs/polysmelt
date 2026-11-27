@@ -27,7 +27,8 @@
 //! a drawing aren't wound any one way. Layers turned off or frozen and paper space are left out.
 //!
 //! The drawing sits under a `RootNode` that turns it from Z-up to glTF's Y-up and scales it to
-//! meters by `$INSUNITS` (unitless drawings are left as they are, their units unknown). Text,
+//! meters by `$INSUNITS` (unitless drawings are left as they are, their units unknown): model
+//! space's own entities are one unnamed node under it, and each block reference a node beside it. Text,
 //! hatches, dimensions and ACIS solids and surfaces aren't read: the asset's
 //! `extras.source.skipped` counts them.
 //!
@@ -43,6 +44,7 @@ use serde_json::{Map, Value, json};
 
 use super::Input;
 use super::dates;
+use super::frame::{self, Frame};
 use super::nurbs;
 use super::stream::{self, f64_from};
 use crate::Result;
@@ -578,15 +580,15 @@ impl Model {
         }
     }
 
-    /// What the drawing says of itself: `units` from `$INSUNITS`, and whether a root turns it to
-    /// Y-up (and scales it, unless its unit is the meter).
-    fn info(&self, units: Option<(f64, &'static str)>, rooted: bool) -> SourceInfo {
+    /// What the drawing says of itself: `units` from `$INSUNITS`. What the root node converts is
+    /// recorded when it is made.
+    fn info(&self, units: Option<(f64, &'static str)>) -> SourceInfo {
         // A UTC date when the drawing has one, else a local one.
         let date = |utc: Option<f64>, local: Option<f64>| {
             utc.and_then(|d| dates::julian(d, true))
                 .or_else(|| local.and_then(|d| dates::julian(d, false)))
         };
-        let mut info = SourceInfo {
+        SourceInfo {
             format: Some("DXF".into()),
             version: Some(self.version.clone()).filter(|v| !v.is_empty()),
             meters_per_unit: units.map_or(Fact::Unknown, |(m, _)| Fact::Declared(m)),
@@ -597,10 +599,7 @@ impl Model {
             created: date(self.created_utc, self.created),
             modified: date(self.modified_utc, self.modified),
             ..SourceInfo::default()
-        };
-        info.converted.up_axis = rooted;
-        info.converted.units = rooted && units.is_some_and(|(m, _)| (m - 1.0).abs() > 1e-12);
-        info
+        }
     }
 
     fn tables(&mut self, p: &mut Pairs<'_>) {
@@ -1561,22 +1560,13 @@ impl Build {
         };
         let (mesh, children) = self.content(0, top, 0)?;
         let units = unit(self.m.units);
+        // Model space: its own entities on one node, then its inserts.
         let mut roots = Vec::new();
-        if mesh.is_some() || !children.is_empty() {
-            let h = std::f64::consts::FRAC_1_SQRT_2;
-            let mut root = json!({ "name": "RootNode", "rotation": [-h, 0.0, 0.0, h] });
-            if let Some((u, _)) = units.filter(|&(u, _)| (u - 1.0).abs() > 1e-12) {
-                root["scale"] = json!([u, u, u]);
-            }
-            if let Some(m) = mesh {
-                root["mesh"] = json!(m);
-            }
-            if !children.is_empty() {
-                root["children"] = json!(children);
-            }
-            self.nodes.push(root);
+        if let Some(m) = mesh {
+            self.nodes.push(json!({ "mesh": m }));
             roots.push(self.nodes.len() - 1);
         }
+        roots.extend(children);
         let mut source = json!({ "encoding": if self.binary { "binary" } else { "ascii" } });
         if let Some(m) = self.m.measurement.filter(|m| matches!(m, 0 | 1)) {
             source["measurement"] = json!(if m == 0 { "imperial" } else { "metric" });
@@ -1597,7 +1587,7 @@ impl Build {
             source["notes"] = json!(self.m.notes);
         }
         if let Value::Object(map) = &mut source {
-            self.m.info(units, !roots.is_empty()).write(map);
+            self.m.info(units).write(map);
         }
         let mut json = Map::new();
         json.insert("asset".into(), json!({ "extras": { "source": source } }));
@@ -1617,7 +1607,10 @@ impl Build {
         self.b.materials(self.materials, Vec::new(), &mut json);
         let mut facts = Map::new();
         facts.insert("triangles".into(), json!(self.triangles));
-        Ok(self.b.finish(json, facts))
+        let mut doc = self.b.finish(json, facts);
+        // Z up to Y up, and the drawing's unit to meters when it has one.
+        frame::root(&mut doc, Frame::z_up().scaled(units.map_or(1.0, |(u, _)| u)));
+        Ok(doc)
     }
 }
 

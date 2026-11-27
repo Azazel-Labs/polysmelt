@@ -965,7 +965,7 @@ Shape { geometry Box {} }
     assert_eq!(info.title.as_deref(), Some("cube"));
     assert_eq!(info.meters_per_unit, Fact::Declared(1.0));
     assert_eq!(info.unit.as_deref(), Some("meter"));
-    assert_eq!(info.converted, Converted::default());
+    assert_eq!(info.converted, crate::source::Converted::default());
 }
 
 #[test]

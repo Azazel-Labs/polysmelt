@@ -4,9 +4,10 @@
   "triangles": 2,
   "area": 1.0,
   "document": {
-    "nodes": 1,
+    "nodes": 2,
     "node_names": [
-      "group1 group2"
+      "group1 group2",
+      "RootNode"
     ],
     "source": {
       "skipped": {

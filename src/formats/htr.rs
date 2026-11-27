@@ -24,7 +24,8 @@
 //! glTF has no way to say, so rows whose factor isn't 1 are counted, and the factor is dropped. The header's
 //! `ScaleFactor` is recorded and not applied. A missing or bad `DataFrameRate` is taken as 30.
 //!
-//! Lengths become meters, and a Z (or X) gravity axis is turned to glTF's Y up. The source info has
+//! Lengths and axes stay the file's: the document's `RootNode` scales them to meters and turns a Z (or X) gravity
+//! axis to glTF's Y up. The source info has
 //! `CalibrationUnits` as the `unit` and its length as `metersPerUnit`, declared (unknown when it's missing or not a
 //! unit, which leaves lengths as they are), `GlobalAxisofGravity` as the up axis, declared (`+Y` assumed when it's
 //! missing, unknown when it isn't an axis), `DataFrameRate` as `frameRate`, declared (30 assumed), and
@@ -437,10 +438,10 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document> {
         facts.insert("global".into(), json!(true));
     }
     scene.source = source;
-    scene.scale(f32_of(meters.unwrap_or(1.0)));
+    scene.unit(meters.unwrap_or(1.0));
     // Y up needs no turn; every other axis's quaternion has w below 1.
     if let Some(q) = up.filter(|q| q[3] < 1.0) {
-        scene.rotate_roots(quat::normalize(q));
+        scene.turn(quat::normalize(q));
     }
     scene.finish(keep)
 }
@@ -498,17 +499,22 @@ knee 0 -400 0 0 0 90 300
         let doc = read(HTR).unwrap();
         let nodes = doc.json()["nodes"].as_array().unwrap();
         let names: Vec<_> = nodes.iter().map(|n| n["name"].as_str().unwrap()).collect();
-        assert_eq!(names, ["hip", "knee", "knee_end"]);
+        assert_eq!(names, ["hip", "knee", "knee_end", "RootNode"]);
+        // Millimeters, Y up: the root node scales and doesn't turn.
+        assert_eq!(
+            nodes[3],
+            json!({ "name": "RootNode", "children": [0], "scale": [0.001, 0.001, 0.001] })
+        );
         assert_eq!(doc.facts["segments"], json!(2));
         assert_eq!(doc.facts["frames"], json!(2));
         assert_eq!(doc.facts["scale_factors_dropped"], json!(1));
         let rig = doc.rig().unwrap();
-        assert!(near(&rig.nodes[0].rest.translation, &[0.0, 1.0, 0.0]));
+        assert!(near(&rig.nodes[0].rest.translation, &[0.0, 1000.0, 0.0]));
         let s = std::f32::consts::FRAC_1_SQRT_2;
         assert!(near(&rig.nodes[1].rest.rotation, &[0.0, 0.0, s, s]));
-        assert!(near(&rig.nodes[2].rest.translation, &[0.0, 0.3, 0.0]));
+        assert!(near(&rig.nodes[2].rest.translation, &[0.0, 300.0, 0.0]));
         let pose = rig.pose(Some(0), 0.1);
-        assert!(near(&pose[0].translation, &[0.1, 1.0, 0.0]));
+        assert!(near(&pose[0].translation, &[100.0, 1000.0, 0.0]));
         assert!(near(&pose[0].rotation, &[0.0, s, 0.0, s]));
         // knee: the base's 90° about Z, then the row's 90° about X.
         let want = quat::normalize(quat::mul(
@@ -546,8 +552,15 @@ knee 0 -400 0 0 0 90 300
         assert_eq!(info.frame_rate, Fact::Declared(10.0));
         assert!(info.converted.units && info.converted.up_axis);
         let rig = doc.rig().unwrap();
-        // 1000 tenths of a meter up Z is 100 m up Y.
-        assert!(near(&rig.nodes[0].rest.translation, &[0.0, 0.0, -100.0]));
+        // The hip stays where the file has it, 1000 tenths of a meter along Y; the root node turns Z up to Y up
+        // and scales, so it is 100 m along -Z.
+        assert!(near(&rig.nodes[0].rest.translation, &[0.0, 1000.0, 0.0]));
+        assert!(near(&rig.nodes[0].rest.rotation, &[0.0, 0.0, 0.0, 1.0]));
+        let top = &doc.json()["nodes"][3];
+        assert_eq!(top["name"], "RootNode");
+        assert_eq!(top["scale"], json!([0.1, 0.1, 0.1]));
+        let at = rig.world(&rig.pose(None, 0.0))[0];
+        assert!(near(&at[12..15], &[0.0, 0.0, -100.0]));
         assert_eq!(unit_length("mm"), Some(0.001));
         assert_eq!(unit_length("1/10.000 m"), Some(0.1));
         assert!((unit_length("2.54cm").unwrap() - 0.0254).abs() < 1e-12);
@@ -580,7 +593,21 @@ knee 0 -400 0 0 0 90 300
         assert_eq!(info.frame_rate, Fact::Assumed(30.0));
         assert_eq!(info.up_axis, Fact::Assumed(Axis::PosY));
         assert_eq!(info.meters_per_unit, Fact::Unknown);
-        assert_eq!(doc.json()["scenes"][0]["nodes"], json!([0, 1]));
+        // Both segments are roots of the file: both are under the one root node.
+        let top = doc.json()["scenes"][0]["nodes"][0].as_u64().unwrap();
+        let top = &doc.json()["nodes"][usize::try_from(top).unwrap()];
+        assert_eq!(top["name"], "RootNode");
+        let rig = doc.rig().unwrap();
+        let roots: Vec<_> = top["children"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c.as_u64().unwrap())
+            .collect();
+        assert_eq!(roots.len(), 2);
+        for (r, name) in roots.iter().zip(["a", "b"]) {
+            assert_eq!(rig.nodes[usize::try_from(*r).unwrap()].name.as_deref(), Some(name));
+        }
     }
 
     #[test]

@@ -130,8 +130,14 @@ impl Writer<'_> {
                 }
             }
             // With every vertex weighted the model is no joint: it is the one other node of the mesh's name, a
-            // node that holds nothing, where the reader left it when it drew the mesh from a root of its own.
-            if name(i).is_empty() || parents.get(i).copied().flatten().is_some() {
+            // node that holds nothing, where the reader left it when it drew the mesh from a root of its own (or
+            // from a child of the root node a reader adds, when that converts nothing and so isn't written).
+            let at_root = parents
+                .get(i)
+                .copied()
+                .flatten()
+                .is_none_or(|p| super::frame_root(&nodes[p]));
+            if name(i).is_empty() || !at_root {
                 continue;
             }
             let is_joint = |j: usize| joints.iter().any(|v| v.as_u64() == Some(j as u64));

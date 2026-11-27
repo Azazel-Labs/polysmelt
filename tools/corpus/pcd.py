@@ -6,8 +6,11 @@ then the points: `ascii` (a point per line), `binary` (records one after another
 `binary_compressed` (the fields one after another, LZF-compressed, after the compressed and
 uncompressed sizes). `rgb` is a packed 0x00RRGGBB, stored as the bits of a float or as an
 unsigned integer; `normal_x/y/z` are normals; other fields are kept as custom attributes; NaN
-positions (an organized cloud's holes) are left out. PCD names no axes or units: positions are
-taken as meters, as they are.
+positions (an organized cloud's holes) are left out. PCD names no axes or units. The unit is
+unknown and nothing is scaled; Z is taken to be up, as it is for a scanner's text formats
+(`.xyz`, `.pts`, `.ptx`, `.asc`), so a point (x, y, z) lands at (x, z, -y) and so do normals:
+one scan lands the same way whichever of these formats it is saved in. A cloud is sampled data
+with no scene, so it is turned in its data and has no `RootNode`.
 
 Also two real files from PCL's test data (BSD license, see LICENSE-PCL beside the cases):
 bun0.pcd (ascii, with normals) and car6.pcd (binary_compressed). They are kept in their case
@@ -144,20 +147,32 @@ def lin(c):
     return [r(srgb_to_linear(x / 255)) for x in c] + [1.0]
 
 
+def y_up(p):
+    """A Z-up point in glTF's Y-up axes."""
+    return [p[0], p[2], -p[1]]
+
+
 def bounds(pts):
-    return {"min": [r(min(p[k] for p in pts)) for k in range(3)], "max": [r(max(p[k] for p in pts)) for k in range(3)]}
+    g = [y_up(p) for p in pts]
+    return {"min": [r(min(p[k] for p in g)) for k in range(3)], "max": [r(max(p[k] for p in g)) for k in range(3)]}
+
+
+# What every cloud's source says of its axes, and that it has no root node: its one node draws the points.
+Z_UP = {"/asset/extras/source/upAxis": "+Z", "/asset/extras/source/assumed": ["upAxis"],
+        "/asset/extras/source/converted": ["upAxis"], "/asset/extras/source/metersPerUnit": None,
+        "/scenes/0/nodes": [0], "/nodes/0/name": None, "/nodes/0/rotation": None, "/nodes/1": None}
 
 
 XYZ = [("x", "F", 4, 1), ("y", "F", 4, 1), ("z", "F", 4, 1)]
 PTS = [[0.0, 0.0, 0.0], [1.0, 0.5, 0.0], [1.0, 1.0, 2.0], [-0.5, 0.25, 1.5], [0.125, -1.0, 0.75]]
 COLS = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (10, 128, 200), (255, 255, 255)]
 NRM = [[0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [0.6, 0.8, 0.0], [0.0, -0.6, 0.8]]
-BASE = {"points": len(PTS), "triangles": 0, "bounds": bounds(PTS), "positions_include": PTS}
+BASE = {"points": len(PTS), "triangles": 0, "bounds": bounds(PTS), "positions_include": [y_up(p) for p in PTS]}
 
 for data in ("ascii", "binary", "binary_compressed"):
     case(FMT, f"xyz_{data}", {"cloud.pcd": pcd(XYZ, PTS, data)},
          {"spec": f"{SPEC}: x y z floats, DATA {data}", "source": SRC, **BASE, "colors": False,
-          "document": {"attributes": ["POSITION"]}})
+          "document": {"attributes": ["POSITION"]}, "json": Z_UP})
     rows = [[*p, packed_float(c)] for p, c in zip(PTS, COLS)]
     case(FMT, f"rgb_float_{data}", {"cloud.pcd": pcd(XYZ + [("rgb", "F", 4, 1)], rows, data)},
          {"spec": f"{SPEC}: rgb packed into the bits of a float, DATA {data}", "source": SRC, **BASE,
@@ -167,7 +182,8 @@ for data in ("ascii", "binary", "binary_compressed"):
                     ("curvature", "F", 4, 1), ("label", "U", 4, 1)]
     case(FMT, f"normals_and_fields_{data}", {"cloud.pcd": pcd(fields, rows, data)},
          {"spec": f"{SPEC}: normal_x/y/z, and other fields kept as custom attributes, DATA {data}",
-          "source": SRC, **BASE, "document": {"attributes": ["POSITION", "NORMAL", "_CURVATURE", "_LABEL"]}})
+          "source": SRC, **BASE, "document": {"attributes": ["POSITION", "NORMAL", "_CURVATURE", "_LABEL"]},
+          "normals_in": [y_up(n) for n in NRM]})
 
 rows = [[*p, (0xFF << 24) | (c[0] << 16) | (c[1] << 8) | c[2]] for p, c in zip(PTS, COLS)]
 case(FMT, "rgba_unsigned", {"cloud.pcd": pcd(XYZ + [("rgba", "U", 4, 1)], rows, "binary")},
@@ -191,7 +207,7 @@ GRID = [[0.0, 0.0, 1.0], [nan, nan, nan], [2.0, 0.0, 1.0], [0.0, 1.0, 1.0], [1.0
 for data in ("ascii", "binary"):
     case(FMT, f"organized_nan_holes_{data}", {"cloud.pcd": pcd(XYZ, GRID, data, width=3, height=2)},
          {"spec": f"{SPEC}: an organized cloud (WIDTH 3, HEIGHT 2) whose holes are NaN, DATA {data}",
-          "source": SRC, "points": 4, "bounds": {"min": [0, 0, 1], "max": [2, 1, 1]}})
+          "source": SRC, "points": 4, "bounds": bounds([p for p in GRID if not any(math.isnan(c) for c in p)])})
 
 case(FMT, "multi_count_field", {"cloud.pcd": pcd(XYZ + [("hist", "F", 4, 3)], [[*p, 1.0 + k, 2.0 - k, 3.0 * k]
                                                                                for k, p in enumerate(PTS)], "binary")},
@@ -252,5 +268,5 @@ for name, folder in REAL.items():
     case(FMT, folder, {name: real[name]},
          {"spec": f"{SPEC}: a real file, fields " + " ".join(names), "source":
           "PCL test data (test/), BSD license, see ../LICENSE-PCL", "points": len(pts), "triangles": 0,
-          "bounds": bounds(pts), "positions_include": [[r(v) for v in p] for p in pick],
+          "bounds": bounds(pts), "positions_include": [[r(v) for v in y_up(p)] for p in pick],
           **({"document": {"attributes": ["NORMAL", "_CURVATURE"]}} if "normal_x" in names else {})})

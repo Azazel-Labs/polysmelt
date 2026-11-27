@@ -6,15 +6,35 @@
   "material_count": 2,
   "image_count": 1,
   "document": {
-    "nodes": 3,
+    "nodes": 4,
     "skins": 1,
     "joints": 2,
     "animations": 0
   },
   "rig": [
     {
+      "node": "RootNode",
+      "parent": null,
+      "translation": [
+        0,
+        0,
+        0
+      ],
+      "rotation": [
+        -0.7071067811865476,
+        0,
+        0,
+        0.7071067811865476
+      ],
+      "scale": [
+        1,
+        1,
+        1
+      ]
+    },
+    {
       "node": "root",
-      "parent": null
+      "parent": "RootNode"
     },
     {
       "node": "arm",

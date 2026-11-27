@@ -29,7 +29,7 @@ import sys
 
 # The shared modules are beside this script, which `python -I` leaves off the path.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common import case, fresh, png, r, srgb_to_linear  # noqa: E402
+from common import ROOT_NODE, case, fresh, png, r, srgb_to_linear  # noqa: E402
 from common import NO_HIGHLIGHT, phong, phong_roughness  # noqa: E402
 
 FMT = "ogre"
@@ -683,7 +683,7 @@ def quad_expect(what, source):
         "normals_in": [[0, 0, 1]],
         "winding_matches_normals": True,
         "facts": QUAD_FACTS,
-        "document": {"nodes": 1, "skins": 0, "animations": 0, "node_names": ["quad"],
+        "document": {"nodes": 2, "skins": 0, "animations": 0, "node_names": ["quad", ROOT_NODE],
                      "attributes": ["POSITION", "NORMAL", "TEXCOORD_0", "COLOR_0"],
                      "source": dict(source, materialScripts=["quad.material"])},
         "json": {"/meshes/0/extras/submeshNames": {"0": "face"}, "/materials/0/name": "Quad/Red",
@@ -952,7 +952,7 @@ case(FMT, "skinned", {
     "winding_matches_normals": True,
     "facts": {"submeshes": 2, "joints": 2, "animations": 1, "unknown_bone_assignments": 2,
               "missing_materials": ["Plain"]},
-    "document": {"nodes": 4, "skins": 1, "joints": 2, "animations": 1, "channels": 4,
+    "document": {"nodes": 5, "skins": 1, "joints": 2, "animations": 1, "channels": 4,
                  "node_names": ["rig", "rig (unskinned)", "root", "arm"],
                  "attributes": ["JOINTS_0", "WEIGHTS_0"],
                  "source": ogre_source("MeshSerializer_v1.100", skeleton="rig.skeleton",
@@ -961,7 +961,7 @@ case(FMT, "skinned", {
     "json": {"/animations/0/name": "bend", "/animations/0/extras": {"length": 2.0},
              "/meshes/1/name": "rig (unskinned)"},
     "rig": [
-        {"node": "root", "parent": None, "translation": [0, 0, 0], "rotation": [0, 0, 0, 1],
+        {"node": "root", "parent": ROOT_NODE, "translation": [0, 0, 0], "rotation": [0, 0, 0, 1],
          "keys": {"translation": [0, 2], "rotation": 2, "scale": None}},
         {"node": "arm", "parent": "root", "translation": [0, 1, 0], "keys": {"translation": 3, "rotation": [0, 1, 2]}},
         {"node": "arm", "time": 1.0, "rotation": rq(Z90), "translation": [0, 1, 0]},
@@ -997,11 +997,11 @@ case(FMT, "skeleton_only", {
     "no_mesh": True,
     "facts": {"joints": 3, "animations": 1, "tracks_on_unknown_bones": 1,
               "missing_linked_skeletons": ["missing.skeleton"]},
-    "document": {"nodes": 3, "animations": 1, "channels": 3, "node_names": ["hip", "knee", "foot"],
+    "document": {"nodes": 4, "animations": 1, "channels": 3, "node_names": ["hip", "knee", "foot", ROOT_NODE],
                  "source": {"format": "OGRE", "version": "Serializer_v1.80", "kind": "skeleton",
                             "byteOrder": "big"}},
     "rig": [
-        {"node": "hip", "parent": None, "translation": [0, 1, 0], "rotation": rq(Y90), "scale": [1, 1, 1],
+        {"node": "hip", "parent": ROOT_NODE, "translation": [0, 1, 0], "rotation": rq(Y90), "scale": [1, 1, 1],
          "keys": {"translation": 2, "rotation": 2, "scale": [0, 1]}},
         {"node": "knee", "parent": "hip", "translation": [0, -0.5, 0], "scale": [1, 2, 1], "keys": {"rotation": None}},
         {"node": "foot", "parent": "knee"},

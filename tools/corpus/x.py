@@ -28,7 +28,7 @@ import zlib
 
 # The shared modules are beside this script, which `python -I` leaves off the path.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common import (AXES, CUBE_BOUNDS, CUBE_QUADS, CUBE_V, DEFAULT_MATERIAL, NO_HIGHLIGHT, ROOT,  # noqa: E402
+from common import (ROOT_NODE, AXES, CUBE_BOUNDS, CUBE_QUADS, CUBE_V, DEFAULT_MATERIAL, NO_HIGHLIGHT, ROOT,  # noqa: E402
                     SAME_PHONG, case, fresh, phong, png, r, same_phong_expect, srgb_to_linear)
 
 FMT = "x"
@@ -316,7 +316,7 @@ case(FMT, "text_cube", {"cube.x": text_file(CUBE_SCENE)},
       "material_count": 1, "materials": [DEFAULT_MATERIAL],
       "json": {"/asset/extras/source/encoding": "ascii", "/asset/extras/source/floatSize": 32,
                "/asset/extras/source/version": "3.3"},
-      "document": {"nodes": 1, "node_names": ["Box"]}})
+      "document": {"nodes": 2, "node_names": ["Box", ROOT_NODE]}})
 
 case(FMT, "text_double", {"cube.x": text_file(CUBE_SCENE, float_size="0064")},
      {"spec": SPEC + ": a text file with float size 0064", "source": SRC, **SHADED,
@@ -378,7 +378,7 @@ case(FMT, "ngon_fan", {"pentagon.x": scene([mesh("Pentagon", PENT, [[0, 1, 2, 3,
                                                  [normals([[0, 0, 1]], [[0] * 5])])])},
      {"spec": SPEC + ": a five-sided face, cut into a fan of three triangles; a mesh outside any frame",
       "source": SRC, "triangles": 3, "area": r(pent_area), "normals_in": [[0, 0, 1]],
-      "winding_matches_normals": True, "document": {"nodes": 1}})
+      "winding_matches_normals": True, "document": {"nodes": 2}})
 
 case(FMT, "normals_per_vertex",
      {"cube.x": scene([frame("Box", [mesh("Cube", CUBE_V, QUADS, [
@@ -492,7 +492,7 @@ case(FMT, "frame_hierarchy",
      {"spec": SPEC + ": nested frames: FrameTransformMatrix is each frame's transform, relative to its parent",
       "source": SRC, "triangles": 12, "area": 24.0, "bounds": {"min": [1, 0, 2], "max": [3, 2, 4]},
       "winding_matches_normals": True,
-      "rig": [{"node": "Root", "parent": None, "translation": [1, 0, 0], "scale": [2, 2, 2]},
+      "rig": [{"node": "Root", "parent": ROOT_NODE, "translation": [1, 0, 0], "scale": [2, 2, 2]},
               {"node": "Child", "parent": "Root", "translation": [0, 0, 2], "rotation": [r(c) for c in Q90Y]}]})
 
 case(FMT, "mirrored_frame",
@@ -538,7 +538,7 @@ case(FMT, "skin",
       "source": SRC, **SHADED,
       "document": {"skins": 1, "joints": 2, "animations": 1, "channels": 1,
                    "attributes": ["JOINTS_0", "WEIGHTS_0"]},
-      "rig": [{"node": "Lower", "parent": None, "translation": [0, 0, 0]},
+      "rig": [{"node": "Lower", "parent": ROOT_NODE, "translation": [0, 0, 0]},
               {"node": "Upper", "parent": "Lower", "translation": [0, 1, 0]},
               {"node": "Upper", "time": 1.0, "translation": [0, 2, 0], "keys": {"translation": [0, 1]}}]})
 
@@ -552,7 +552,7 @@ orphan = cube(kids=[skin_weights("Ghost", list(range(8)), [1.0] * 8, translate((
 case(FMT, "skin_bone_without_frame",
      {"cube.x": scene([frame("Body", [orphan])])},
      {"spec": SPEC + ": a bone no frame is named for: a node where its offset puts it", "source": SRC, **SHADED,
-      "rig": [{"node": "Ghost", "parent": None, "translation": [0, 3, 0]}]})
+      "rig": [{"node": "Ghost", "parent": ROOT_NODE, "translation": [0, 3, 0]}]})
 
 # --- Animation -----------------------------------------------------------------------------------------------------
 

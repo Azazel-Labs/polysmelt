@@ -22,10 +22,17 @@
 //! Smoothing groups are bit masks: faces sharing a bit share normals at their common corners (by position, so a
 //! texture seam doesn't crease them), and a material shaded flat ignores them. A mesh matrix that mirrors leaves its
 //! faces wound inside out in world space; they are turned back. An opacity map that is the color map uses its alpha.
-//! 3DS is Z up; the data stays so under a root node that turns it to glTF's Y up.
+//! 3DS is Z up; the data stays so, as the file has it, under the root node (`RootNode`) that turns it to glTF's Y
+//! up and scales it by the file's master scale.
 //!
 //! The source info has Z up and right-handed, declared (3D Studio's space is every file's), 30 frames a second
-//! assumed when there is a keyframer (the file doesn't say), and no units: 3DS has none. The master scale isn't applied; it is kept as `masterScale`, beside
+//! assumed when there is a keyframer (the file doesn't say), and no unit: 3DS names none, so its length is unknown. The `MASTER_SCALE` chunk is, in Autodesk's
+//! words, "a master scale factor for all geometry coordinates", which 3ds Max's importer multiplies them by: the
+//! root node scales by it (by 1 when the chunk is missing or isn't a positive number), and camera clip planes and
+//! light ranges with it. Autodesk's toolkit adds that "a master scale of 1.0 translates into one unit per inch", but
+//! the file has no field for a unit and other programs write their own units with a master scale of 1, so no unit
+//! is assumed and `converted` doesn't list `units`: a file with a master scale of 1 is the size its numbers say.
+//! The master scale is kept as `masterScale`, beside
 //! the `meshVersion`, the `ambient` light and the `keyframer`'s name, revision, length and segment.
 
 use std::borrow::Cow;
@@ -34,6 +41,7 @@ use std::path::Path;
 
 use serde_json::{Map, Value, json};
 
+use super::frame::{self, Frame};
 use super::keys::{self, Interp, Track};
 use super::xform::{self, IDENTITY, M4};
 use crate::Result;
@@ -1641,24 +1649,29 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
                     node["mesh"] = json!(m);
                 }
             }
-            Body::Camera(c) if keep.cameras => {
+            // A camera or light that isn't kept leaves its node where it stood, as pruning one does: the scene
+            // is the file's, whatever is kept of it.
+            Body::Camera(c) => {
                 node["translation"] = cleans(&c.position);
                 if let Some(q) = look_at(c.position.map(f64::from), c.target.map(f64::from), f64::from(c.roll)) {
                     node["rotation"] = json!(q);
                 }
-                cameras.push(camera_json(c, &o.name, keep.extras));
-                node["camera"] = json!(cameras.len() - 1);
+                if keep.cameras {
+                    cameras.push(camera_json(c, &o.name, keep.extras));
+                    node["camera"] = json!(cameras.len() - 1);
+                }
             }
-            Body::Light(l) if keep.lights => {
+            Body::Light(l) => {
                 node["translation"] = cleans(&l.position);
                 let aim = |s: &Spot| look_at(l.position.map(f64::from), s.target.map(f64::from), 0.0);
                 if let Some(q) = l.spot.as_ref().and_then(aim) {
                     node["rotation"] = json!(q);
                 }
-                lights.push(light_json(l, &o.name, keep.extras));
-                node["extensions"] = json!({ "KHR_lights_punctual": { "light": lights.len() - 1 } });
+                if keep.lights {
+                    lights.push(light_json(l, &o.name, keep.extras));
+                    node["extensions"] = json!({ "KHR_lights_punctual": { "light": lights.len() - 1 } });
+                }
             }
-            Body::Camera(_) | Body::Light(_) => continue,
             Body::Empty => {}
         }
         if keep.extras {
@@ -1945,7 +1958,13 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         }
         source.insert("keyframer".into(), Value::Object(k));
     }
-    let mut info = SourceInfo {
+    // The master scale multiplies every coordinate (see the module's notes); it names no unit.
+    let master = source
+        .get("masterScale")
+        .and_then(Value::as_f64)
+        .filter(|s| s.is_finite() && *s > 0.0)
+        .unwrap_or(1.0);
+    let info = SourceInfo {
         format: Some("3DS".into()),
         version: source.get("version").map(ToString::to_string),
         up_axis: Fact::Declared(Axis::PosZ),
@@ -1957,16 +1976,29 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         },
         ..SourceInfo::default()
     };
-    info.converted.up_axis = true;
     info.write(&mut source);
+    // What a camera sees and a light reaches are lengths of the scene, scaled as it is drawn.
+    for c in &mut cameras {
+        for key in ["znear", "zfar"] {
+            if let Some(v) = c.pointer_mut(&format!("/perspective/{key}"))
+                && let Some(x) = v.as_f64()
+            {
+                *v = json!(x * master);
+            }
+        }
+    }
+    for l in &mut lights {
+        if let Some(v) = l.get_mut("range")
+            && let Some(x) = v.as_f64()
+        {
+            *v = json!(x * master);
+        }
+    }
 
-    // Z-up to Y-up: a quarter turn about X.
-    let h = std::f32::consts::FRAC_1_SQRT_2;
-    nodes.push(json!({ "name": "RootNode", "children": roots, "rotation": [-h, 0.0, 0.0, h] }));
     let mut json = Map::new();
     json.insert("asset".into(), json!({ "extras": { "source": source } }));
     json.insert("scene".into(), json!(0));
-    json.insert("scenes".into(), json!([{ "nodes": [nodes.len() - 1] }]));
+    json.insert("scenes".into(), json!([{ "nodes": roots }]));
     json.insert("nodes".into(), Value::Array(nodes));
     json.insert("meshes".into(), Value::Array(meshes.list));
     if !cameras.is_empty() {
@@ -1994,7 +2026,10 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         }
     }
     // `read` counts the triangles drawn, from the document.
-    Ok(b.finish(json, Map::new()))
+    let mut doc = b.finish(json, Map::new());
+    // Z-up to Y-up (a quarter turn about X), and the file's master scale.
+    frame::root_by_factor(&mut doc, Frame::z_up().scaled(master));
+    Ok(doc)
 }
 
 /// A trimesh's faces, into the prims of their materials. A corner's normal averages the faces around its vertex that
@@ -2259,6 +2294,9 @@ mod tests {
         )
     }
 
+    /// What the root node scales these files by: their master scale, 1 (or none).
+    const UNIT: f32 = 1.0;
+
     fn close(a: [f32; 3], b: [f32; 3]) -> bool {
         (0..3).all(|k| (a[k] - b[k]).abs() < 1e-4)
     }
@@ -2289,9 +2327,11 @@ mod tests {
         assert_eq!(info.format.as_deref(), Some("3DS"));
         assert_eq!(info.up_axis, Fact::Declared(Axis::PosZ));
         assert_eq!(info.handedness, Fact::Declared(Handedness::Right));
+        // 3DS names no unit, and with no master scale nothing is scaled.
         assert_eq!(info.meters_per_unit, Fact::Unknown);
         assert_eq!(info.frame_rate, Fact::Unknown, "no keyframer");
         assert!(info.converted.up_axis && !info.converted.units);
+        assert!(doc.json()["nodes"][2].get("scale").is_none());
         let red = &doc.json()["materials"][0]["extras"]["3ds"];
         assert_eq!(red["diffuse"], json!([255, 0, 0]));
         assert_eq!(red["transparency"], json!(25.0));
@@ -2311,7 +2351,12 @@ mod tests {
             "Z up became Y up: {:?}",
             floor.positions
         );
-        assert!(floor.positions.iter().any(|&p| close(p, [2.0, 0.0, -2.0])));
+        assert!(
+            floor
+                .positions
+                .iter()
+                .any(|&p| close(p.map(|c| c / UNIT), [2.0, 0.0, -2.0]))
+        );
         assert!(floor.normals.iter().all(|n| n[1] > 0.99), "{:?}", floor.normals);
         assert!(floor.uvs.contains(&[0.0, 1.0]), "V flipped to glTF's origin");
         let wall = &mesh.prims[1];
@@ -2391,10 +2436,10 @@ mod tests {
         let mut want: Vec<[f32; 3]> = at([5., 0., 0.])
             .into_iter()
             .chain(at([5., 3., 0.]))
-            .map(|[x, y, z]| [x, z, -y])
+            .map(|[x, y, z]| [x, z, -y].map(|c| c * UNIT))
             .collect();
         #[allow(clippy::cast_possible_truncation, reason = "small test values")]
-        let key = |p: &[f32; 3]| p.map(|c| (c * 1000.0).round() as i64);
+        let key = |p: &[f32; 3]| p.map(|c| (c * 100_000.0).round() as i64);
         got.sort_by_key(key);
         want.sort_by_key(key);
         assert!(got.iter().zip(&want).all(|(a, b)| close(*a, *b)), "{got:?} != {want:?}");
@@ -2469,7 +2514,8 @@ mod tests {
             let mesh = doc.flatten(pose).unwrap().unwrap();
             mesh.prims.iter().flat_map(|p| p.positions.clone()).collect()
         };
-        let y_up = |v: &[[f32; 3]]| -> Vec<[f32; 3]> { v.iter().map(|&[x, y, z]| [x, z, -y]).collect() };
+        let y_up =
+            |v: &[[f32; 3]]| -> Vec<[f32; 3]> { v.iter().map(|&[x, y, z]| [x, z, -y].map(|c| c * UNIT)).collect() };
         let same = |got: &[[f32; 3]], want: &[[f32; 3]]| want.iter().all(|w| got.iter().any(|g| close(*g, *w)));
         // On frame 30 it is where the file has it.
         let then = drawn(Pose::Animation { index: 0, time: 1.0 });
@@ -2529,7 +2575,8 @@ mod tests {
     fn drawn(doc: &Document, pose: Pose) -> Vec<[f32; 3]> {
         let mesh = doc.flatten(pose).unwrap().unwrap();
         let points = mesh.prims.iter().flat_map(|p| p.positions.clone());
-        points.map(|[x, y, z]| [x, -z, y]).collect()
+        // Back in the file's Z up and units: the root node's turn and scale taken off.
+        points.map(|[x, y, z]| [x, -z, y].map(|c| c / UNIT)).collect()
     }
 
     fn same(got: &[[f32; 3]], want: &[[f32; 3]]) -> bool {

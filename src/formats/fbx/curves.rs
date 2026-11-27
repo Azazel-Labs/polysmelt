@@ -28,6 +28,10 @@ impl Reader<'_, '_, '_> {
         if prim.lines.is_empty() {
             return None;
         }
+        let mut prim = prim;
+        if let Some(axis) = self.mirror {
+            super::mirror_prim(&mut prim, axis);
+        }
         let material = match mats.first() {
             Some(&i) => i,
             None if self.keep.materials => {

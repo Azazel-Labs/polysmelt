@@ -25,7 +25,7 @@ import sys
 
 # The shared modules are beside this script, which `python -I` leaves off the path.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common import (DEFAULT_MATERIAL, SAME_PHONG, case, fresh, phong, png, r, same_phong_expect,  # noqa: E402
+from common import (ROOT_NODE, DEFAULT_MATERIAL, SAME_PHONG, case, fresh, phong, png, r, same_phong_expect,  # noqa: E402
                     srgb_to_linear)
 
 FMT = "b3d"
@@ -287,9 +287,9 @@ case(FMT, "node_hierarchy", {
     "spec": f"{SPEC}: nested nodes with positions, scales and w-first rotations, mirrored into a right-handed scene",
     "source": SRC,
     "triangles": 1,
-    "document": {"nodes": 2},
+    "document": {"nodes": 3},
     "rig": [
-        {"node": "parent", "parent": None, "translation": mirror(P_T), "rotation": gltf_quat(P_Q)},
+        {"node": "parent", "parent": ROOT_NODE, "translation": mirror(P_T), "rotation": gltf_quat(P_Q)},
         {"node": "child", "parent": "parent", "translation": mirror(C_T), "rotation": gltf_quat(C_Q),
          "scale": list(C_S)},
     ],
@@ -330,7 +330,7 @@ case(FMT, "skinned_keys", {
     "spec": f"{SPEC}: a bone weighing a mesh above it, position and rotation keys at frames over the frame rate",
     "source": SRC,
     "triangles": 2,
-    "document": {"nodes": 2, "skins": 1, "joints": 2, "animations": 1, "channels": 2},
+    "document": {"nodes": 3, "skins": 1, "joints": 2, "animations": 1, "channels": 2},
     "json": {"/asset/extras/source/frameRate": 10.0, "/asset/extras/source/frames": 10},
     "rig": [
         {"node": "arm", "parent": "body", "translation": mirror(ARM_T),
@@ -361,7 +361,7 @@ case(FMT, "skinned_placed", {
     "triangles": 2,
     "document": {"skins": 1, "joints": 2},
     "rig": [
-        {"node": "body", "parent": None, "translation": mirror(BODY_T)},
+        {"node": "body", "parent": ROOT_NODE, "translation": mirror(BODY_T)},
         {"node": "arm", "parent": "body", "translation": mirror(ARM_T)},
     ],
     "bounds": bounds(placed),

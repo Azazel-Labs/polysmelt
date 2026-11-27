@@ -6,8 +6,12 @@ normal map when its image is one), smoothing groups as
 bit masks, cameras and lights, the keyframer's hierarchy and tracks, and the departures real files
 make (chunk lengths running past the end, faces naming vertices that don't exist).
 
-3DS is Z up; the document keeps it so under a root node that turns it, and the expectations are in
-glTF's Y up: (x, y, z) becomes (x, z, -y). UVs have their V flipped to glTF's top-left origin.
+3DS is Z up and names no unit. Autodesk's 3DS File Toolkit documents the `MASTER_SCALE` chunk as "a
+master scale factor for all geometry coordinates", and 3ds Max's own importer multiplies coordinates by
+it. The document keeps the file's axes and numbers under the `RootNode` every reader makes, which turns
+them and scales them by the master scale, and the expectations are in glTF's Y up: (x, y, z) becomes
+(x, z, -y) times the master scale. The unit stays unknown: a file with a master scale of 1 is the size
+its numbers say. UVs have their V flipped to glTF's top-left origin.
 
 Also a real file from assimp's test models (test/models/3DS; BSD license, see LICENSE-assimp beside
 the cases), kept in its case folder (or read from the folder given as the first argument): a box
@@ -129,10 +133,10 @@ def obj(name, *parts):
     return chunk(OBJECT, cstr(name), *parts)
 
 
-def model(*editor, before=b"", after=b""):
+def model(*editor, before=b"", after=b"", master=1.0):
     return chunk(MAIN, chunk(VERSION, struct.pack("<I", 3)), before,
                  chunk(EDITOR, chunk(MESH_VERSION, struct.pack("<I", 3)),
-                       chunk(MASTER_SCALE, f32s([1.0])), *editor), after)
+                       chunk(MASTER_SCALE, f32s([master])), *editor), after)
 
 
 def track(cid, keys):
@@ -161,14 +165,20 @@ def keyframer(*nodes, frames=(0, 30)):
                  chunk(KFSEG, struct.pack("<II", *frames)), *nodes)
 
 
-def y_up(p):
-    return [p[0], p[2], -p[1]]
+def y_up(p, unit=1.0):
+    """A point of the file in glTF's space: Y up, times the file's master scale (`unit`)."""
+    return [r(p[0] * unit, 9), r(p[2] * unit, 9), r(-p[1] * unit, 9)]
 
 
-def bounds(points):
-    pts = [y_up(p) for p in points]
+def bounds(points, unit=1.0):
+    pts = [y_up(p, unit) for p in points]
     return {"min": [min(p[k] for p in pts) for k in range(3)],
             "max": [max(p[k] for p in pts) for k in range(3)]}
+
+
+def area(units, unit=1.0):
+    """A surface area of the file's square units, as drawn under a master scale of `unit`."""
+    return r(units * unit * unit, 12)
 
 
 def lin(rgb, alpha=1.0):
@@ -190,7 +200,7 @@ def moved(verts, d):
     return [tuple(v[k] + d[k] for k in range(3)) for v in verts]
 
 
-CUBE = {"triangles": 12, "bounds": bounds(CUBE_V), "area": 6.0, "winding_matches_normals": True}
+CUBE = {"triangles": 12, "bounds": bounds(CUBE_V), "area": area(6.0), "winding_matches_normals": True}
 FLAT = {**CUBE, "normals_in": AXES, "vertices": 24}
 
 # --- geometry and smoothing -------------------------------------------------------------------
@@ -200,7 +210,22 @@ case(FMT, "cube_no_smoothing", {"cube.3ds": model(obj("Cube", trimesh(CUBE_V, CU
       "material_count": 1, "uvs": False,
       "document": {"nodes": 2, "meshes": 1, "node_names": ["Cube", "RootNode"],
                    "source": {"format": "3DS", "upAxis": "+Z", "version": "3", "meshVersion": 3,
-                              "masterScale": 1.0}}})
+                              "masterScale": 1.0, "converted": ["upAxis"]}},
+      # The root node is the last node and the only one the scene lists: it turns Z up to Y up. A master scale of
+      # 1 scales nothing, and 3DS names no unit.
+      "json": {"/scenes/0/nodes": [1], "/nodes/1/children": [0], "/nodes/1/scale": None,
+               "/nodes/1/rotation": [-math.sqrt(0.5), 0, 0, math.sqrt(0.5)],
+               "/asset/extras/source/metersPerUnit": None, "/asset/extras/source/unit": None,
+               "/asset/extras/source/assumed": None}})
+
+case(FMT, "master_scale",
+     {"cube.3ds": model(obj("Cube", trimesh(CUBE_V, CUBE_FACES)), master=12.0)},
+     {"spec": SPEC + ": a master scale of 12: the root scales every coordinate by it, and the unit stays unknown",
+      "source": SRC, "triangles": 12, "bounds": bounds(CUBE_V, 12), "area": area(6.0, 12),
+      "winding_matches_normals": True,
+      "document": {"nodes": 2, "source": {"masterScale": 12.0, "converted": ["upAxis"]}},
+      "json": {"/nodes/1/scale": [12, 12, 12], "/asset/extras/source/metersPerUnit": None,
+               "/asset/extras/source/unit": None, "/asset/extras/source/assumed": None}})
 
 case(FMT, "cube_smoothing_zero",
      {"cube.3ds": model(obj("Cube", trimesh(CUBE_V, CUBE_FACES, smoothing=[0] * 12)))},
@@ -243,7 +268,7 @@ case(FMT, "smoothing_chunk_short",
 case(FMT, "two_objects",
      {"two.3ds": model(obj("A", trimesh(CUBE_V, CUBE_FACES)),
                        obj("B", trimesh(moved(CUBE_V, (3, 0, 0)), CUBE_FACES)))},
-     {"spec": SPEC + ": two objects, a node and mesh each", "source": SRC, "triangles": 24, "area": 12.0,
+     {"spec": SPEC + ": two objects, a node and mesh each", "source": SRC, "triangles": 24, "area": area(12.0),
       "bounds": bounds(CUBE_V + moved(CUBE_V, (3, 0, 0))), "normals_in": AXES,
       "winding_matches_normals": True,
       "document": {"nodes": 3, "meshes": 2, "node_names": ["A", "B", "RootNode"]}})
@@ -255,7 +280,7 @@ matrix = [1, 0, 0, 0, 1, 0, 0, 0, 1, 10.5, 20.5, 30.5]
 case(FMT, "mesh_matrix_not_applied",
      {"cube.3ds": model(obj("Cube", trimesh(far, CUBE_FACES, matrix=matrix)))},
      {"spec": SPEC + ": vertices are in world space; the local matrix (0x4160) is not applied again",
-      "source": SRC, "triangles": 12, "bounds": bounds(far), "area": 6.0})
+      "source": SRC, "triangles": 12, "bounds": bounds(far), "area": area(6.0)})
 
 case(FMT, "cameras_and_lights",
      {"scene.3ds": model(obj("Camera01", chunk(CAMERA, f32s([0, -10, 5, 0, 0, 0, 0, 45]))),
@@ -398,7 +423,7 @@ def textured(name, ref, files, expect_textured=True, extra=None):
     want = {"name": "Tex", "textured": expect_textured}
     want.update({"color": [1, 1, 1, 1], "pixel": TEAL} if expect_textured else {"color": lin(RED)})
     case(FMT, name, {"quad.3ds": model(material("Tex", color24(RED), texmap(ref)), obj("Quad", quad)), **files},
-         {"spec": SPEC + extra, "source": SRC, "triangles": 2, "area": 2.0, "bounds": bounds(QUAD),
+         {"spec": SPEC + extra, "source": SRC, "triangles": 2, "area": area(2.0), "bounds": bounds(QUAD),
           "uvs_include": FLIPPED, "materials": [want]})
 
 
@@ -527,7 +552,7 @@ case(FMT, "keyframer_hierarchy",
                                             rot=[(0, [0, 0, 0, 1]), (30, [math.pi / 2, 0, 0, 1])])))},
      {"spec": SPEC + ": the keyframer's object nodes as the hierarchy, their first keys the rest pose and "
                      "their tracks an animation; meshes moved into their nodes back through mesh matrix and pivot",
-      "source": SRC, "triangles": 24, "area": 12.0, "bounds": bounds(base_v + arm_v),
+      "source": SRC, "triangles": 24, "area": area(12.0), "bounds": bounds(base_v + arm_v),
       "document": {"nodes": 3, "meshes": 2, "animations": 1, "channels": 2,
                    "node_names": ["Base", "Arm", "RootNode"],
                    "source": {"keyframer": {"name": "MAXSCENE", "revision": 5, "length": 30,
@@ -542,7 +567,7 @@ case(FMT, "keyframer_instances",
                                          node(1, "Cube", parent=0, pos=[(0, [0, 0, -1])]),
                                          node(2, "Cube", parent=0, instance="Cube02", pos=[(0, [3, 0, -1])])))},
      {"spec": SPEC + ": a dummy node (named by its instance name) and a second node placing the same object",
-      "source": SRC, "triangles": 24, "area": 12.0, "bounds": bounds(CUBE_V + moved(CUBE_V, (3, 0, 0))),
+      "source": SRC, "triangles": 24, "area": area(12.0), "bounds": bounds(CUBE_V + moved(CUBE_V, (3, 0, 0))),
       "document": {"nodes": 4, "meshes": 1, "animations": 0,
                    "node_names": ["Group", "Cube", "Cube02", "RootNode"]}})
 
@@ -692,7 +717,7 @@ case(FMT, REAL[real_name], {real_name: real[real_name]},
                 "frame 0) times Box02's first position and rotation keys is Box02's mesh matrix, to 1e-4. The file "
                 "doesn't say which way a roll turns (it is 0 where the file was saved), so nothing that depends on "
                 "the roll is compared. A target's node is named as 3ds Max names it, `<camera>.Target`",
-      "triangles": len(all_t), "bounds": bounds(all_v), "area": r(sum(triangle_area(*t) for t in all_t), 4),
+      "triangles": len(all_t), "bounds": bounds(all_v), "area": area(sum(triangle_area(*t) for t in all_t)),
       "tolerance": 1e-3,
       "document": {"nodes": 5, "meshes": 2, "cameras": 1, "animations": 1,
                    "node_names": ["Box01", "Camera01", "Box02", "Camera01.Target", "RootNode"]},

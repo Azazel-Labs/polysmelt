@@ -18,13 +18,13 @@
 //! (continued in `LABELS2`, `LABELS3`, …), or `marker<n>` where it has none. A marker's rest position is its first
 //! sample that isn't missing. Its track is a linear translation channel with a key at each frame where it isn't
 //! missing, frame `k` (counting from 0) at `k / rate` seconds; glTF has no way to leave a gap, so a missing stretch
-//! is filled in by the keys on each side, and the missing samples are counted. Lengths become meters from
-//! `POINT:UNITS` (millimeters when it's absent). The root turns the capture so that `POINT:Y_SCREEN`, the axis that
-//! points up on screen, is glTF's Y and `POINT:X_SCREEN` is its X; a file without them is taken to be Z-up, as
-//! laboratory captures nearly all are.
+//! is filled in by the keys on each side, and the missing samples are counted. Positions stay in the file's unit and
+//! axes: the document's `RootNode`, over `markers`, scales them to meters from `POINT:UNITS` and turns the capture so
+//! that `POINT:Y_SCREEN`, the axis that points up on screen, is glTF's Y and `POINT:X_SCREEN` is its X; a file
+//! without them is taken to be Z-up, as laboratory captures nearly all are.
 //!
-//! The source info has `POINT:UNITS` as the `unit` and its length as `metersPerUnit`, declared (assumed `mm` when
-//! it's absent, unknown when it names a unit that isn't known, which leaves lengths as they are); `POINT:Y_SCREEN`
+//! The source info has `POINT:UNITS` as the `unit` and its length as `metersPerUnit`, declared (unknown when
+//! it's absent or names a unit that isn't known, which leaves lengths as they are); `POINT:Y_SCREEN`
 //! as the up axis, declared (assumed `+Z` without the screen axes); the header's rate, or `POINT:RATE`, as
 //! `frameRate`, declared (an assumed default when neither gives one); and `MANUFACTURER:SOFTWARE` as the `tool`.
 //! `MANUFACTURER:COMPANY`, `MANUFACTURER:VERSION_LABEL` and `SUBJECTS:NAMES` are kept as `company`,
@@ -471,10 +471,8 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document> {
 
     // Units and the up axis.
     let units = params.string("POINT:UNITS");
-    let meters = match &units {
-        Some(u) => meters_in(u),
-        None => Some(0.001),
-    };
+    // A file that doesn't say its unit has none that is known: nothing is scaled.
+    let meters = units.as_deref().and_then(meters_in);
     let x_screen = params.string("POINT:X_SCREEN");
     let y_screen = params.string("POINT:Y_SCREEN");
     let screen = match (x_screen.as_deref().and_then(axis), y_screen.as_deref().and_then(axis)) {
@@ -485,12 +483,8 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document> {
 
     let info = &mut scene.info;
     info.format = Some("C3D".into());
-    info.meters_per_unit = match (&units, meters) {
-        (Some(_), Some(m)) => Fact::Declared(m),
-        (None, Some(m)) => Fact::Assumed(m),
-        (_, None) => Fact::Unknown,
-    };
-    info.unit = Some(units.clone().unwrap_or_else(|| "mm".into()));
+    info.meters_per_unit = meters.map_or(Fact::Unknown, Fact::Declared);
+    info.unit.clone_from(&units);
     info.up_axis = match y_screen.as_deref().and_then(|s| s.parse().ok()) {
         Some(up) if screen.is_some() => Fact::Declared(up),
         _ => Fact::Assumed(Axis::PosZ),
@@ -551,8 +545,8 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document> {
         facts.insert("parameters_cut_short".into(), json!(true));
     }
     scene.source = source;
-    scene.scale(f32_of(meters.unwrap_or(1.0)));
-    scene.rotate_roots(quat::normalize(turn));
+    scene.unit(meters.unwrap_or(1.0));
+    scene.turn(quat::normalize(turn));
     scene.finish(keep)
 }
 
@@ -682,26 +676,32 @@ mod tests {
                 assert_eq!(doc.facts["missing_samples"], json!(1));
                 let info = doc.source_info();
                 assert_eq!(info.up_axis, Fact::Assumed(Axis::PosZ), "{p:?}");
-                assert_eq!(info.meters_per_unit, Fact::Assumed(0.001));
-                assert_eq!(info.unit.as_deref(), Some("mm"));
+                // No `POINT:UNITS`: the unit is unknown, and nothing is scaled.
+                assert_eq!(info.meters_per_unit, Fact::Unknown);
+                assert_eq!(info.unit, None);
                 assert_eq!(info.frame_rate, Fact::Declared(10.0));
-                assert!(info.converted.units && info.converted.up_axis);
+                assert!(!info.converted.units && info.converted.up_axis);
                 let rig = doc.rig().unwrap();
                 assert_eq!(rig.nodes[1].name.as_deref(), Some("LASI"));
                 assert_eq!(rig.nodes[2].name.as_deref(), Some("marker2"));
-                // Z-up millimeters: (100, 200, 300) mm is (0.1, 0.3, -0.2) m in glTF.
+                // The markers are as the file has them, under `markers`, under the root node that turns them.
+                assert_eq!(rig.nodes[3].name.as_deref(), Some("RootNode"));
+                assert_eq!(rig.nodes[0].parent, Some(3));
+                assert!(near(&rig.nodes[0].rest.rotation, &[0.0, 0.0, 0.0, 1.0]));
                 let pose = rig.pose(Some(0), 0.0);
-                let world =
-                    |i: usize| quat::rotate(pose[0].rotation.map(f64::from), pose[i].translation.map(f64::from));
+                assert!(near(&pose[1].translation, &[100.0, 200.0, 300.0]));
+                // Z up: (100, 200, 300) is (100, 300, -200) in glTF.
+                let world = |pose: &[crate::rig::Trs], i: usize| {
+                    let m = rig.world(pose)[i];
+                    [m[12], m[13], m[14]]
+                };
                 assert!(
-                    near(&world(1).map(f32_of), &[0.1, 0.3, -0.2]),
+                    near(&world(&pose, 1), &[100.0, 300.0, -200.0]),
                     "{p:?} {scale}: {:?}",
-                    world(1)
+                    world(&pose, 1)
                 );
                 let pose = rig.pose(Some(0), 0.2);
-                let world =
-                    |i: usize| quat::rotate(pose[0].rotation.map(f64::from), pose[i].translation.map(f64::from));
-                assert!(near(&world(2).map(f32_of), &[0.0, 1.0, -0.01]), "{p:?} {scale}");
+                assert!(near(&world(&pose, 2), &[0.0, 1000.0, -10.0]), "{p:?} {scale}");
                 assert_eq!(rig.animations[0].channels[1].times, [0.1, 0.2]);
             }
         }
@@ -726,7 +726,8 @@ mod tests {
         assert!(!info.converted.up_axis, "a file that is Y up already isn't turned");
         let rig = doc.rig().unwrap();
         assert!(near(&rig.nodes[1].rest.translation, &[100.0, 200.0, 300.0]));
-        assert!(near(&rig.nodes[0].rest.rotation, &[0.0, 0.0, 0.0, 1.0]));
+        // Y up, in meters: the root node is there and changes nothing.
+        assert_eq!(doc.json()["nodes"][2], json!({ "name": "RootNode", "children": [0] }));
         // Screen right -Y and up +Z: file -Y is glTF X, +Z is Y, so +X is glTF Z... (−Y)×Z = −X toward the viewer.
         let q = screen_rotation(axis("-Y").unwrap(), axis("+Z").unwrap()).unwrap();
         assert!(near(&quat::rotate(q, [0.0, -1.0, 0.0]).map(f32_of), &[1.0, 0.0, 0.0]));

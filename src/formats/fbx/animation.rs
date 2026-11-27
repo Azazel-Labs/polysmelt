@@ -828,13 +828,15 @@ impl Reader<'_, '_, '_> {
             return;
         }
         let finite = |m: M4| m.iter().flatten().all(|c| c.is_finite()).then_some(m);
-        let rest_m = finite(local.at(None, None, None, parent_rest)).unwrap_or(IDENTITY);
+        let mirror = self.mirror;
+        let seen = |m: M4| mirror.map_or(m, |axis| super::mirrored(&m, axis));
+        let rest_m = seen(finite(local.at(None, None, None, parent_rest)).unwrap_or(IDENTITY));
         let at = |k: usize, t: f64| tracks[k].as_ref().map(|a| a.at(t));
         let trs: Vec<Trs> = times
             .iter()
             .map(|&t| {
                 let under = parent.map_or(parent_rest, |p| p.at(t));
-                decompose(&finite(local.at(at(0, t), at(1, t), at(2, t), under)).unwrap_or(rest_m))
+                decompose(&finite(local.at(at(0, t), at(1, t), at(2, t), under)).map_or(rest_m, seen))
             })
             .collect();
         let rest = decompose(&rest_m);

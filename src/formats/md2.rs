@@ -22,7 +22,7 @@
 //! in the source facts. GL commands (the triangle strips and fans the engine draws with) repeat the triangles and
 //! are skipped.
 //!
-//! The format is Z up and right-handed, as the engine it belongs to is, so the mesh node is turned for glTF's Y up
+//! The format is Z up and right-handed, as the engine it belongs to is, so the document's `RootNode`, over the mesh node, turns it for glTF's Y up
 //! (the source info's `upAxis` is a declared `+Z`, converted, and its `handedness` a declared `right`); game units are kept unscaled, and their length unknown. The assumed
 //! frame rate is recorded when there are frames to animate.
 //!
@@ -204,7 +204,7 @@ pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
     if !model.skins.is_empty() {
         scene.source.insert("skins".into(), json!(model.skins));
     }
-    scene.rotate_roots(Z_UP_TO_Y_UP);
+    scene.turn(Z_UP_TO_Y_UP);
     scene.finish(keep)
 }
 

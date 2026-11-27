@@ -105,6 +105,10 @@ def psd(rgb, size=2):
     return head + sections + struct.pack(">H", 0) + planes
 
 
+# The node every reader of a format with a scene puts the file's roots under: always there, whatever the file's
+# axes and unit, with the turn to +Y up and the scale to meters. A document has this one node more than the file.
+ROOT_NODE = "RootNode"
+
 # The usual name of a unit by its length in meters: what `asset.extras.source.unit` is, whatever the file calls it.
 UNIT_NAMES = {1e-9: "nanometer", 1e-6: "micrometer", 0.001: "millimeter", 0.01: "centimeter", 0.1: "decimeter",
               1.0: "meter", 1000.0: "kilometer", 0.0254: "inch", 0.3048: "foot", 0.9144: "yard", 1609.344: "mile"}

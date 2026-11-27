@@ -7,7 +7,7 @@
     "frames": 3
   },
   "document": {
-    "nodes": 5,
+    "nodes": 6,
     "animations": 1,
     "channels": 6,
     "node_names": [
@@ -15,7 +15,8 @@
       "Spine",
       "LThigh",
       "Spine_end",
-      "LThigh_end"
+      "LThigh_end",
+      "RootNode"
     ]
   },
   "json": {
@@ -27,15 +28,39 @@
     "/asset/extras/source/frameRate": 60.0,
     "/asset/extras/source/assumed": null,
     "/scenes/0/nodes": [
+      5
+    ],
+    "/nodes/5/children": [
       0
     ],
+    "/asset/extras/source/converted": null,
     "/animations/0/name": "units_unknown",
     "/animations/0/samplers/0/interpolation": "LINEAR"
   },
   "rig": [
     {
-      "node": "Hips",
+      "node": "RootNode",
       "parent": null,
+      "translation": [
+        0,
+        0,
+        0
+      ],
+      "rotation": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ]
+    },
+    {
+      "node": "Hips",
+      "parent": "RootNode",
       "translation": [
         10.0,
         950.0,
@@ -51,6 +76,11 @@
         1,
         1,
         1
+      ],
+      "world": [
+        10.0,
+        950.0,
+        -20.0
       ]
     },
     {
@@ -97,9 +127,9 @@
       "node": "Spine_end",
       "parent": "Spine",
       "translation": [
-        0.0,
-        300.0,
-        0.0
+        0,
+        300,
+        0
       ],
       "rotation": [
         0,
@@ -112,9 +142,9 @@
       "node": "LThigh_end",
       "parent": "LThigh",
       "translation": [
-        0.0,
-        420.0,
-        0.0
+        0,
+        420,
+        0
       ],
       "rotation": [
         0,

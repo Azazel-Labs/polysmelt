@@ -7,13 +7,14 @@
     "frames": 2
   },
   "document": {
-    "nodes": 3,
+    "nodes": 4,
     "animations": 1,
     "channels": 2,
     "node_names": [
       "markers",
       "a",
-      "b"
+      "b",
+      "RootNode"
     ]
   },
   "json": {
@@ -21,8 +22,9 @@
     "/asset/extras/source/frameRate": 100.0,
     "/asset/extras/source/metersPerUnit": 1.0,
     "/scenes/0/nodes": [
-      0
+      3
     ],
+    "/asset/extras/source/converted": null,
     "/animations/0/name": "screen_y_up_meters",
     "/animations/0/samplers/0/interpolation": "LINEAR",
     "/asset/extras/source/upAxis": "+Y",
@@ -33,7 +35,7 @@
   },
   "rig": [
     {
-      "node": "markers",
+      "node": "RootNode",
       "parent": null,
       "translation": [
         0,
@@ -45,6 +47,31 @@
         0.0,
         0.0,
         1.0
+      ],
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ]
+    },
+    {
+      "node": "markers",
+      "parent": "RootNode",
+      "translation": [
+        0,
+        0,
+        0
+      ],
+      "rotation": [
+        0,
+        0,
+        0,
+        1
+      ],
+      "scale": [
+        1,
+        1,
+        1
       ]
     },
     {
@@ -57,6 +84,11 @@
         1
       ],
       "translation": [
+        1.0,
+        2.0,
+        3.0
+      ],
+      "world": [
         1.0,
         2.0,
         3.0
@@ -78,12 +110,22 @@
         1.0,
         2.0,
         3.0
+      ],
+      "world": [
+        1.0,
+        2.0,
+        3.0
       ]
     },
     {
       "node": "a",
       "time": 0.01,
       "translation": [
+        1.5,
+        2.5,
+        3.5
+      ],
+      "world": [
         1.5,
         2.5,
         3.5
@@ -102,6 +144,11 @@
         4.0,
         5.0,
         6.0
+      ],
+      "world": [
+        4.0,
+        5.0,
+        6.0
       ]
     },
     {
@@ -120,12 +167,22 @@
         4.0,
         5.0,
         6.0
+      ],
+      "world": [
+        4.0,
+        5.0,
+        6.0
       ]
     },
     {
       "node": "b",
       "time": 0.01,
       "translation": [
+        4.0,
+        5.5,
+        7.0
+      ],
+      "world": [
         4.0,
         5.5,
         7.0

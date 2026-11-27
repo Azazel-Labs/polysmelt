@@ -233,6 +233,14 @@ fn trs_matrix((t, r, s): Trs) -> M4 {
     mul(&translate(t), &mul(&rotation(r), &scale(s)))
 }
 
+/// Whether `node` is the root node a reader made that converts nothing: named so, with children and nothing else.
+fn frame_root(node: &Value) -> bool {
+    node.as_object().is_some_and(|n| {
+        n.get("name").and_then(Value::as_str) == Some(super::frame::ROOT)
+            && n.keys().all(|k| k == "name" || k == "children")
+    })
+}
+
 impl<'d> Writer<'d> {
     fn new(doc: &'d Document) -> Self {
         Self {
@@ -317,6 +325,16 @@ impl<'d> Writer<'d> {
             }
             (0..nodes.len()).filter(|&i| !child[i]).collect()
         };
+        // The root node a reader puts over every scene (see `formats::frame`), when it converts nothing, is not a
+        // model of the file: its children are the roots. So a file read and written again has the nodes it had,
+        // however often.
+        roots = roots
+            .into_iter()
+            .flat_map(|r| match nodes.get(r) {
+                Some(n) if frame_root(n) => children(n).collect(),
+                _ => vec![r],
+            })
+            .collect();
         let mark = |roots: &[usize], keep: &mut Vec<bool>| {
             let mut stack: Vec<usize> = roots.to_vec();
             while let Some(n) = stack.pop() {

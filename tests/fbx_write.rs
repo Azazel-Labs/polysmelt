@@ -951,7 +951,11 @@ fn static_meshes_materials_and_textures_come_back() {
     for name in ["Root", "Left", "Right", "Placed", "Wire", "Empty"] {
         let (a, b) = (rig_a.find(name).unwrap(), rig_b.find(name).expect(name));
         let pa = rig_a.nodes[a].parent.and_then(|p| rig_a.nodes[p].name.clone());
-        let pb = rig_b.nodes[b].parent.and_then(|p| rig_b.nodes[p].name.clone());
+        // What is read back is under the root node every reader makes, which isn't one of the file's nodes.
+        let pb = rig_b.nodes[b]
+            .parent
+            .and_then(|p| rig_b.nodes[p].name.clone())
+            .filter(|p| p != "RootNode");
         assert_eq!(pa, pb, "{name}'s parent");
     }
     let (wa, wb) = (worlds(&rig_a, None, 0.0), worlds(&rig_b, None, 0.0));
@@ -1062,9 +1066,15 @@ fn a_read_skinned_mesh_writes_back_as_one_model() {
 fn a_mesh_folded_onto_its_joint_keeps_its_geometric_offset() {
     let doc = mesh_model_scene();
     let (_, back) = round_trip(&doc, "mesh_model");
-    assert_eq!(layout(&doc), layout(&back));
+    // The same nodes, under the root node every reader makes.
+    let (mut names, joints) = layout(&doc);
+    names.push("RootNode".into());
+    assert_eq!((names, joints), layout(&back));
     let d = diff(&doc, &back);
     assert!(d.is_empty(), "differs in {d:?}");
+    // That root node isn't written as a model: written and read again, the nodes are the same.
+    let (_, again) = round_trip(&back, "mesh_model_again");
+    assert_eq!(layout(&back), layout(&again));
 }
 
 #[test]

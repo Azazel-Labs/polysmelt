@@ -11,7 +11,7 @@
   "rig": [
     {
       "node": "turned",
-      "parent": null,
+      "parent": "RootNode",
       "translation": [
         0.0,
         1.0,

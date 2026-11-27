@@ -37,7 +37,7 @@
 //! `bounds` are dropped. A mesh and its animations are separate files, each read on its own; both share the joint
 //! names that tie them together.
 //!
-//! The format is Z up and right-handed, as the engine it belongs to is, so the scene's roots are turned for glTF's Y
+//! The format is Z up and right-handed, as the engine it belongs to is, so the scene stays as the file has it under the document's `RootNode`, which turns it for glTF's Y
 //! up (the source info's `upAxis` is a declared `+Z`, converted, and its `handedness` a declared `right`); game units are kept unscaled, and their length unknown. The exporter's
 //! `commandline` is kept as written.
 //!
@@ -98,7 +98,7 @@ pub(crate) fn load(input: Input<'_>, ext: &str, assets: &dyn Assets, keep: Keep)
     if !file.commandline.is_empty() {
         scene.source.insert("commandline".into(), json!(file.commandline));
     }
-    scene.rotate_roots(Z_UP_TO_Y_UP);
+    scene.turn(Z_UP_TO_Y_UP);
     scene.finish(keep)
 }
 

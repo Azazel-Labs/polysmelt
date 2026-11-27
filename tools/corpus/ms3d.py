@@ -25,7 +25,7 @@ import sys
 
 # The shared modules are beside this script, which `python -I` leaves off the path.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common import (DEFAULT_MATERIAL, NO_HIGHLIGHT, SAME_PHONG, case, fresh, phong, png, r,  # noqa: E402
+from common import (ROOT_NODE, DEFAULT_MATERIAL, NO_HIGHLIGHT, SAME_PHONG, case, fresh, phong, png, r,  # noqa: E402
                     same_phong_expect, srgb_to_linear)
 
 FMT = "ms3d"
@@ -287,7 +287,7 @@ case(FMT, "position_key_in_rest_frame", {
     "triangles": 1,
     "document": {"skins": 1, "joints": 1, "animations": 1, "channels": 1},
     "rig": [
-        {"node": "turned", "parent": None, "translation": TURNED_POS, "rotation": quaternion(euler(TURNED_ROT))},
+        {"node": "turned", "parent": ROOT_NODE, "translation": TURNED_POS, "rotation": quaternion(euler(TURNED_ROT))},
         {"node": "turned", "time": 1.0, "translation": [r(c) for c in turned_at_1]},
     ],
 })
@@ -301,11 +301,11 @@ case(FMT, "skeleton_keys", {
     "spec": f"{SPEC}: two joints with Euler rest rotations, rotation and position keys relative to the rest",
     "source": SRC,
     "triangles": 2,
-    "document": {"nodes": 3, "skins": 1, "joints": 2, "animations": 1, "channels": 3},
+    "document": {"nodes": 4, "skins": 1, "joints": 2, "animations": 1, "channels": 3},
     "facts": {"triangles": 2, "joints": 2, "groups": 1},
     "json": {"/asset/extras/source/frameRate": 30.0, "/asset/extras/source/frames": 31},
     "rig": [
-        {"node": "root", "parent": None, "translation": ROOT_POS, "rotation": [0, 0, 0, 1],
+        {"node": "root", "parent": ROOT_NODE, "translation": ROOT_POS, "rotation": [0, 0, 0, 1],
          "keys": {"rotation": [0, 1], "translation": [0, 1], "scale": None}},
         {"node": "arm", "parent": "root", "translation": ARM_POS, "rotation": quaternion(euler(ARM_ROT)),
          "keys": {"rotation": [0, 0.5, 1], "translation": None}},

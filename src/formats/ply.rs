@@ -37,6 +37,7 @@ use std::path::Path;
 use serde_json::{Map, Value, json};
 
 use super::Input;
+use super::frame::{self, Frame};
 use super::stream::{self, Blocks};
 use crate::assets::Assets;
 use crate::document::{Builder, Document, Keep, Part};
@@ -696,7 +697,9 @@ pub(crate) fn ply(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<D
         // Packed splats are unpacked from the whole file, not a block at a time.
         drop(blocks);
         let data = input.read()?;
-        return compressed::load(data.get(start..).unwrap_or(&[]), &head, &elements, keep.points());
+        let mut doc = compressed::load(data.get(start..).unwrap_or(&[]), &head, &elements, keep.points())?;
+        frame::flat(&mut doc);
+        return Ok(doc);
     }
     blocks.consume(start);
     let room = blocks.size_hint().saturating_sub(start);
@@ -905,8 +908,18 @@ pub(crate) fn ply(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<D
     json.insert("scene".into(), json!(0));
     json.insert("scenes".into(), json!([{ "nodes": [0] }]));
     json.insert("nodes".into(), json!([{ "mesh": 0 }]));
+    // Only points (a cloud, or splats) is sampled data, converted in place if at all; a mesh is a scene.
+    let sampled = primitives
+        .iter()
+        .all(|p| p.get("mode").and_then(Value::as_u64) == Some(0));
     json.insert("meshes".into(), json!([{ "primitives": primitives }]));
-    Ok(b.finish(json, facts))
+    let mut doc = b.finish(json, facts);
+    if sampled {
+        frame::flat(&mut doc);
+    } else {
+        frame::root(&mut doc, Frame::IDENTITY);
+    }
+    Ok(doc)
 }
 
 /// The extra columns for `n` drawn vertices: the file's own when `src` is `None`, otherwise

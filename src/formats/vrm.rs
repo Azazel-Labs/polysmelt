@@ -5,8 +5,9 @@
 //! fallback, so the extensions are kept but not needed, and a file that marks one required
 //! (which VRM never asks for) is read anyway.
 //!
-//! A VRM 0.x avatar faces -Z, where glTF's front (and VRM 1.0's) is +Z, so it is turned half
-//! about Y under a `RootNode` to face the viewer as other models do.
+//! Every VRM's scene is under a `RootNode`, as every converted format's is. A VRM 0.x avatar
+//! faces -Z, where glTF's front (and VRM 1.0's) is +Z, so its `RootNode` turns it half about Y to
+//! face the viewer as other models do; a VRM 1.0's, and an animation's, has no transform.
 //!
 //! The asset's `extras.source` says which version the file is and whether it was turned, with
 //! glTF's frame declared (a 0.x avatar's forward is -Z) and the avatar's meta: its name or
@@ -17,6 +18,7 @@
 use serde_json::{Map, Value, json};
 
 use super::Input;
+use super::frame::{self, Frame};
 use crate::Result;
 use crate::assets::Assets;
 use crate::document::{Document, Keep};
@@ -107,9 +109,6 @@ pub(crate) fn load<'a>(input: Input<'a>, assets: &'a dyn Assets, keep: Keep) -> 
         info.version = Some(text(v.get("specVersion")).unwrap_or_else(|| "1.0".into()));
     }
     info.write(&mut source);
-    if turn {
-        turn_half(json);
-    }
     let asset = json.entry("asset").or_insert_with(|| json!({ "version": "2.0" }));
     if !asset["extras"].is_object() {
         asset["extras"] = json!({});
@@ -118,27 +117,14 @@ pub(crate) fn load<'a>(input: Input<'a>, assets: &'a dyn Assets, keep: Keep) -> 
         Some(Value::Object(old)) => old.extend(source),
         _ => asset["extras"]["source"] = Value::Object(source),
     }
+    // Every scene under the root node, as every reader's is: turned half about Y for a 0.x avatar.
+    let frame = if turn {
+        Frame::IDENTITY.turned([0.0, 1.0, 0.0, 0.0])
+    } else {
+        Frame::IDENTITY
+    };
+    frame::root(&mut doc, frame);
     Ok(doc)
-}
-
-/// Puts each scene's roots under a `RootNode` turned half about Y.
-fn turn_half(json: &mut serde_json::Map<String, Value>) {
-    let scenes = json.get("scenes").and_then(Value::as_array).map_or(0, Vec::len);
-    for s in 0..scenes {
-        let roots = json["scenes"][s]["nodes"].take();
-        if roots.as_array().is_none_or(Vec::is_empty) {
-            json["scenes"][s]["nodes"] = roots;
-            continue;
-        }
-        let nodes = json.entry("nodes").or_insert_with(|| json!([]));
-        let Some(nodes) = nodes.as_array_mut() else {
-            json["scenes"][s]["nodes"] = roots;
-            continue;
-        };
-        nodes.push(json!({ "name": "RootNode", "children": roots, "rotation": [0.0, 1.0, 0.0, 0.0] }));
-        let root = nodes.len() - 1;
-        json["scenes"][s]["nodes"] = json!([root]);
-    }
 }
 
 #[cfg(test)]

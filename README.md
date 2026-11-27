@@ -119,14 +119,27 @@ Early. What exists today:
   Model `.iqm`, Valve `.smd` and `.vta`, MilkShape 3D `.ms3d` and Blitz3D `.b3d` (skinned and
   animated), OGRE `.mesh` and `.skeleton` (binary in either byte order and XML, with poses and
   morphs as morph targets and `.material` scripts as materials), and motion capture: Acclaim `.asf` skeletons with `.amc` motions, HTR, and C3D
-  and TRC marker tracks (each marker an animated node). Left-handed and Z-up sources are turned
-  to glTF's axes. Every animation starts at time 0 (what was taken off its keys is its
+  and TRC marker tracks (each marker an animated node). Every animation starts at time 0 (what was taken off its keys is its
   `extras.timeOffset`), with keys that are finite and in order and rotations that turn the
   short way. Keys are the file's own where glTF can hold the curve: stepped, linear, and for
   3DS and OpenGEX cubic splines. Curves glTF can't hold are sampled into linear keys: FBX
   (Bezier and TCB curves, Euler rotations, pivots and layers), COLLADA (Bezier, Hermite,
   B-spline and cardinal curves, and stacks of transforms), USD (transform stacks and time
   samples), MikuMikuDance motions (Bezier eases) and Irrlicht animators.
+  Every format reaches glTF's frame (+Y up, right-handed, meters) one way, so a caller never
+  branches on the format. A file with a scene (nodes, meshes, skeletons, animation, cameras,
+  lights) is kept in its own axes and units under one top-level node, always there and always
+  named `RootNode`, which turns the file's up axis to +Y and scales its unit to meters: every
+  root of the file, skinned meshes and skeletons included, is a child of it, and a file that
+  needs neither has a `RootNode` with no transform. A left-handed file is mirrored where it
+  is read (vertices, normals, transforms, bind matrices and keys, with triangles wound the
+  other way), never by a negative scale. Sampled data with no scene (point clouds, gaussian
+  splats, voxel grids) is converted in its data and has no `RootNode`, and glTF itself, 3D
+  Tiles' glTF included, is kept as it is. Where a file doesn't say its unit and its format
+  defines none, nothing is scaled and the unit is unknown; where it doesn't say which way is
+  up, the format's convention is assumed and said to be (a scanner's cloud is Z up, a PLY, OFF
+  or VTK mesh is left alone). `Document::source_info` tells what the file declared, what was
+  assumed and what was converted.
   `open` reads a file and `read` a model already in memory; both go by the extension (or else
   the first bytes) and return a `Document`. `Format` names each format and its extensions.
 - **`document`**: the common form, a glTF 2.0 document (its JSON and its buffers' bytes).

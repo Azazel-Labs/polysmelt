@@ -34,7 +34,7 @@
     ]
   },
   "document": {
-    "nodes": 4,
+    "nodes": 5,
     "skins": 1,
     "joints": 2,
     "animations": 1,
@@ -70,7 +70,7 @@
   "rig": [
     {
       "node": "root",
-      "parent": null,
+      "parent": "RootNode",
       "translation": [
         0,
         0,

@@ -29,10 +29,11 @@
     }
   ],
   "document": {
-    "nodes": 2,
+    "nodes": 3,
     "node_names": [
       "Cube_Shared",
-      "Sphere_Shared"
+      "Sphere_Shared",
+      "RootNode"
     ],
     "source": {
       "format": "OBJ",

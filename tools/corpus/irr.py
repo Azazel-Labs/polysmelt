@@ -32,7 +32,7 @@ import sys
 
 # The shared modules are beside this script, which `python -I` leaves off the path.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common import CUBE_QUADS, CUBE_V, ROOT, case, fresh, png, r, srgb_to_linear  # noqa: E402
+from common import ROOT_NODE, CUBE_QUADS, CUBE_V, ROOT, case, fresh, png, r, srgb_to_linear  # noqa: E402
 from common import DEFAULT_MATERIAL, NO_HIGHLIGHT, phong  # noqa: E402
 
 FMT = "irr"
@@ -340,7 +340,7 @@ case(FMT, "scene_transforms",
       "positions_include": [[r(c) for c in p] for p in corners], "facts": {"nodes": 2},
       "rig": [{"node": "child", "parent": "parent", "translation": [1, 0, 0],
                "rotation": mirrored_rotation((30, 0, 45))},
-              {"node": "parent", "parent": None, "translation": [0, 5, 0], "rotation": mirrored_rotation((0, 90, 0)),
+              {"node": "parent", "parent": ROOT_NODE, "translation": [0, 5, 0], "rotation": mirrored_rotation((0, 90, 0)),
                "scale": [2, 2, 2]}]})
 
 case(FMT, "scene_sphere",

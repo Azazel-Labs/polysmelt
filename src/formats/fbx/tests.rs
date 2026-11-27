@@ -1026,7 +1026,8 @@ fn a_deep_chain_listed_leaf_first_loads_quickly() {
     let start = std::time::Instant::now();
     let doc = read(&text);
     let took = start.elapsed();
-    assert_eq!(doc.json()["nodes"].as_array().unwrap().len(), 20_000);
+    // The models, and the root node over them.
+    assert_eq!(doc.json()["nodes"].as_array().unwrap().len(), 20_001);
     assert!(took < std::time::Duration::from_secs(10), "took {took:?}");
 }
 
@@ -1791,4 +1792,99 @@ fn damaged_line_geometry_never_panics() {
             load(&bad);
         }
     }
+}
+
+#[test]
+fn a_left_handed_file_is_mirrored_as_it_is_read_and_never_by_a_negative_scale() {
+    // Y up, -Z front, X right: left-handed. A quad facing +Z, a unit along Z from its parent, which is turned a
+    // quarter about Y and moved: the scene the file describes, with Z the other way.
+    let settings = "\t\tP: \"UpAxis\", \"int\", \"Integer\", \"\",1\n\t\tP: \"FrontAxis\", \"int\", \"Integer\", \"\",2\n\
+                    \t\tP: \"FrontAxisSign\", \"int\", \"Integer\", \"\",-1\n\t\tP: \"CoordAxis\", \"int\", \"Integer\", \"\",0\n";
+    let normals = "\t\tLayerElementNormal: 0 {\n\t\t\tMappingInformationType: \"ByControlPoint\"\n\
+                   \t\t\tReferenceInformationType: \"Direct\"\n\t\t\tNormals: *12 {\n\t\t\t\ta: 0,0,1,0,0,1,0,0,1,0,0,1\n\t\t\t}\n\t\t}\n";
+    let objects = quad(normals)
+        + &model(
+            20,
+            "Parent",
+            &(prop("Lcl Translation", "1,2,3") + &prop("Lcl Rotation", "0,90,0")),
+        )
+        + &model(21, "Child", &prop("Lcl Translation", "0,0,1"));
+    let text = ascii(&objects, &links(&[(10, 21), (21, 20), (20, 0)], &[])).replacen(
+        "\tProperties70:  {\n",
+        &format!("\tProperties70:  {{\n{settings}"),
+        1,
+    );
+    let doc = read(&text);
+    let info = doc.source_info();
+    assert_eq!(
+        info.handedness,
+        crate::source::Fact::Declared(crate::source::Handedness::Left)
+    );
+    assert!(
+        info.converted.handedness && !info.converted.up_axis,
+        "{:?}",
+        info.converted
+    );
+    // No node mirrors: the root node has nothing to turn or scale here, and no scale is negative anywhere.
+    let nodes = doc.json()["nodes"].as_array().unwrap();
+    let top = nodes.last().unwrap();
+    assert_eq!(top["name"], "RootNode");
+    assert!(top.get("rotation").is_none() && top.get("scale").is_none(), "{top}");
+    for n in nodes {
+        let negative = n["scale"]
+            .as_array()
+            .is_some_and(|s| s.iter().any(|c| c.as_f64().unwrap() < 0.0));
+        assert!(!negative && n.get("matrix").is_none(), "{n}");
+    }
+    // In the file's space the child is a unit along the parent's Z, which the quarter turn about Y points along
+    // +X: its quad's corners are (2, 2..3, 3 - 0..1). Mirrored, Z is negated.
+    let mesh = doc.flatten(Pose::Rest).unwrap().unwrap();
+    let p = &mesh.prims[0];
+    let (mut min, mut max) = ([f32::MAX; 3], [f32::MIN; 3]);
+    for v in &p.positions {
+        for k in 0..3 {
+            min[k] = min[k].min(v[k]);
+            max[k] = max[k].max(v[k]);
+        }
+    }
+    let near = |a: [f32; 3], b: [f32; 3]| (0..3).all(|k| (a[k] - b[k]).abs() < 1e-5);
+    assert!(
+        near(min, [2.0, 2.0, -3.0]) && near(max, [2.0, 3.0, -2.0]),
+        "{min:?}..{max:?}"
+    );
+    // The quad's normal, +Z in its own space, is +X in the world, mirrored or not; and its triangles still wind
+    // counter-clockwise about it.
+    for t in p.indices.chunks_exact(3) {
+        let [a, b, c] = [0, 1, 2].map(|k| p.positions[t[k] as usize]);
+        let (u, v) = ([0, 1, 2].map(|k| b[k] - a[k]), [0, 1, 2].map(|k| c[k] - a[k]));
+        let face = [
+            u[1] * v[2] - u[2] * v[1],
+            u[2] * v[0] - u[0] * v[2],
+            u[0] * v[1] - u[1] * v[0],
+        ];
+        assert!(face[0] > 0.5, "{face:?}");
+        assert!(
+            near(p.normals[t[0] as usize], [1.0, 0.0, 0.0]),
+            "{:?}",
+            p.normals[t[0] as usize]
+        );
+    }
+    // The same file said to be right-handed is the same scene unmirrored: the mirror is all that differs.
+    let right = read(&text.replace(
+        "\"FrontAxisSign\", \"int\", \"Integer\", \"\",-1",
+        "\"FrontAxisSign\", \"int\", \"Integer\", \"\",1",
+    ));
+    assert!(!right.source_info().converted.handedness);
+    let unmirrored = right.flatten(Pose::Rest).unwrap().unwrap();
+    let mut a: Vec<[f32; 3]> = unmirrored.prims[0]
+        .positions
+        .iter()
+        .map(|&[x, y, z]| [x, y, -z])
+        .collect();
+    let mut b = p.positions.clone();
+    #[allow(clippy::cast_possible_truncation, reason = "small test values")]
+    let key = |v: &[f32; 3]| v.map(|c| (c * 1000.0).round() as i64);
+    a.sort_by_key(key);
+    b.sort_by_key(key);
+    assert!(a.iter().zip(&b).all(|(a, b)| near(*a, *b)), "{a:?} vs {b:?}");
 }

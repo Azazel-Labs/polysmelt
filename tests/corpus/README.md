@@ -33,7 +33,7 @@ cases.
 | PLY | 47 | 42 | 4 |
 | VOX | 31 | 27 | none |
 | OBJ | 67 | 58 | 9 |
-| 3DS | 57 | 50 | none |
+| 3DS | 58 | 51 | none |
 | 3MF | 63 | 55 | none |
 | FBX | 136 | 118 | 18 |
 | USD | 141 | 121 | 20 |
@@ -59,7 +59,7 @@ cases.
 | Blitz3D | 17 | 16 | none |
 | ASF/AMC (`asf/`) | 26 | 26 | none |
 | C3D | 29 | 26 | none |
-| TRC | 19 | 19 | none |
+| TRC | 20 | 20 | none |
 | HTR | 31 | 31 | none |
 | LAS and LAZ | 17 | 15 | none |
 | PCD | 25 | 23 | none |
@@ -250,7 +250,7 @@ writes what its version writes, so `blender_export.py` can differ under another 
   gray `map_Pr` alone serves as it is, and `anisor` rotates the anisotropy. Also
   vertex colors and syntax variants: line continuation, `w` components, number forms and
   non-UTF-8 text.
-- **3DS**: smoothing groups, materials (24-bit and float colors, transparency, shininess,
+- **3DS**: the master scale (1, which scales nothing, and 12), smoothing groups, materials (24-bit and float colors, transparency, shininess,
   self-illumination), textures and two-sided faces. The bump map is the normal map when its
   image is one (by its pixels, a gray image's header, or its name), scaled by its amount; a
   height map, the shininess map and the reflection map stay in `extras`. Also cameras, point and spot lights, and
@@ -438,9 +438,9 @@ writes what its version writes, so `blender_export.py` can differ under another 
   and missing motion lines, a byte order mark, CRLF and comments. Errors: no skeleton, bad
   units, axes and directions.
 - **C3D**: Intel, DEC and MIPS files with integer and float data, labels continued, missing
-  markers, screen axes along each axis, units, frame counts from the parameters, and analog
+  markers, screen axes along each axis, units (and none: nothing is scaled), frame counts from the parameters, and analog
   data and events (counted). Errors: unknown processors and truncation.
-- **TRC** and **HTR**: units, missing cells, dropped and cut-short rows, files without frame
+- **TRC** and **HTR**: units (and a TRC with none: nothing is scaled), missing cells, dropped and cut-short rows, files without frame
   rates, times or frame lines; HTR's Euler orders, gravity and bone length axes, unit
   fractions, the global form and scale factors.
 
@@ -453,7 +453,7 @@ writes what its version writes, so `blender_export.py` can differ under another 
 - **PCD**: `ascii`, `binary` and `binary_compressed` (LZF), positions only, packed `rgb` and
   `rgba`, normals and other fields, multi-count and padding fields, double and integer
   positions, organized clouds with NaN holes, version 0.5 without a viewpoint, a viewpoint
-  kept in `extras`, and CRLF. Errors: truncation, no x y z, unknown data and files that
+  kept in `extras`, and CRLF; every cloud turned from Z up as the text formats' are. Errors: truncation, no x y z, unknown data and files that
   aren't PCD; two real PCL clouds.
 - **Text point clouds**: `.xyz` with spaces, commas, tabs or semicolons (with decimal commas),
   comments and blank lines, 8- and 16-bit colors, normals, intensity, named columns and

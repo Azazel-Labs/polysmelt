@@ -1,8 +1,9 @@
 //! USD (`.usd`, `.usda`, `.usdc`, `.usdz`) as a glTF document, read with the pure-Rust `openusd` crate. The composed
 //! stage (references, payloads, variants and instances resolved) becomes the node hierarchy, each prim a node with its
 //! local transform. Meshes are in their prim's own space and shared between instances; a point instancer places its
-//! prototypes under a node per instance. The stage's up axis and units become a root node that carries them to glTF's
-//! Y-up meters, and are recorded in `asset.extras.source` (see [`crate::source`]; USD's 0.01 meters and Y up are
+//! prototypes under a node per instance. The stage stays in its own up axis and units under the document's one top-level node,
+//! `RootNode`, which is always there and carries the turn to glTF's Y up and the scale to meters (no transform when
+//! the stage needs none); skinned meshes are under it with everything else. The up axis and units are recorded in `asset.extras.source` (see [`crate::source`]; USD's 0.01 meters and Y up are
 //! assumed when the stage doesn't say), with its frame rate (`framesPerSecond`, else `timeCodesPerSecond`), its `doc`
 //! as the description and its `comment`. `startTimeCode`, `endTimeCode`, `defaultPrim` and `customLayerData` are
 //! kept as the stage gives them, and `timeCodesPerSecond` when the frame rate is `framesPerSecond`.
@@ -52,6 +53,7 @@ use openusd_schemas::shade::{self, MaterialBindingAPI};
 use serde_json::{Map, Value, json};
 
 use super::Input;
+use super::frame::{self, Frame};
 use super::keys;
 use super::xform::{
     IDENTITY, M4, Trs, decompose, from_column_major, inverse, mul, rotation, scale, set_transform, translate,
@@ -242,14 +244,9 @@ fn load_capped(input: Input<'_>, assets: &dyn Assets, keep: Keep, max_nodes: usi
         IDENTITY
     };
     basis = mul(&basis, &scale([meters; 3]));
+    // The stage's up axis and unit are the root node's; skinned meshes go under it with everything else.
+    let (frame, _) = Frame::of(&basis);
     let mut scene_nodes = roots;
-    #[allow(clippy::float_cmp, reason = "only the exact identity needs no root")]
-    if basis != IDENTITY {
-        let mut root = json!({ "name": "RootNode", "children": scene_nodes });
-        set_transform(&mut root, &basis);
-        r.nodes.push(root);
-        scene_nodes = vec![r.nodes.len() - 1];
-    }
     scene_nodes.append(&mut r.skinned_roots);
 
     let mut source = Map::new();
@@ -304,7 +301,9 @@ fn load_capped(input: Input<'_>, assets: &dyn Assets, keep: Keep, max_nodes: usi
     let (materials, images) = (std::mem::take(&mut r.materials), std::mem::take(&mut r.images));
     let mut b = r.b;
     b.materials(&materials, images.list, &mut json);
-    Ok(b.finish(json, Map::new()))
+    let mut doc = b.finish(json, Map::new());
+    frame::root(&mut doc, frame);
+    Ok(doc)
 }
 
 /// Whether the stage's root or session layer authors the metadata `field`.

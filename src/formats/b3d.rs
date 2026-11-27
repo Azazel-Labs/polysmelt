@@ -784,8 +784,9 @@ mod tests {
         assert_eq!(rig.nodes[bone].parent, Some(root));
         // A node that isn't placed still holds its skinned mesh itself.
         let plain = read(&sample()).unwrap();
-        assert_eq!(plain.json()["nodes"].as_array().unwrap().len(), 2);
+        assert_eq!(plain.json()["nodes"].as_array().unwrap().len(), 3);
         assert!(plain.json()["nodes"][0]["skin"].is_number());
+        assert_eq!(plain.json()["nodes"][2]["name"], "RootNode");
     }
 
     #[test]

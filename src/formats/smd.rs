@@ -6,7 +6,7 @@
 //! parent bone, or with the bones its links weight, the parent taking whatever weight they leave. A file with more
 //! than one frame becomes an animation at 30 frames a second. A `.vta` file becomes a point cloud, its first frame
 //! the points and each later frame a morph target. Rotations are Euler angles in radians, applied X, then Y, then
-//! Z. SMD is Z up and right-handed: the scene is turned to Y up. In the source info, the up axis (`+Z`), handedness
+//! Z. SMD is Z up and right-handed: the scene stays so under the document's `RootNode`, which turns it to Y up. In the source info, the up axis (`+Z`), handedness
 //! and frame rate are assumed, as the format's convention; game units are kept unscaled, and their length unknown.
 
 use std::collections::HashMap;
@@ -160,7 +160,7 @@ pub(crate) fn load(input: super::Input<'_>, ext: &str, assets: &dyn Assets, keep
         Empty,
         "SMD file has no skeleton, triangles or vertex animation"
     );
-    scene.rotate_roots(scene::Z_UP_TO_Y_UP);
+    scene.turn(scene::Z_UP_TO_Y_UP);
     scene.facts = facts;
     scene.finish(keep)
 }

@@ -8,7 +8,7 @@
     "frames": 0
   },
   "document": {
-    "nodes": 3,
+    "nodes": 4,
     "animations": 0,
     "channels": 0,
     "node_names": [
@@ -24,7 +24,7 @@
   "rig": [
     {
       "node": "Hips",
-      "parent": null,
+      "parent": "RootNode",
       "translation": [
         0,
         90,

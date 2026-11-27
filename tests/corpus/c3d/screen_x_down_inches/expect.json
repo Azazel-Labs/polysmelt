@@ -7,13 +7,14 @@
     "frames": 2
   },
   "document": {
-    "nodes": 3,
+    "nodes": 4,
     "animations": 1,
     "channels": 2,
     "node_names": [
       "markers",
       "a",
-      "b"
+      "b",
+      "RootNode"
     ]
   },
   "json": {
@@ -21,7 +22,11 @@
     "/asset/extras/source/frameRate": 100.0,
     "/asset/extras/source/metersPerUnit": 0.0254,
     "/scenes/0/nodes": [
-      0
+      3
+    ],
+    "/asset/extras/source/converted": [
+      "units",
+      "upAxis"
     ],
     "/animations/0/name": "screen_x_down_inches",
     "/animations/0/samplers/0/interpolation": "LINEAR",
@@ -33,7 +38,7 @@
   },
   "rig": [
     {
-      "node": "markers",
+      "node": "RootNode",
       "parent": null,
       "translation": [
         0,
@@ -45,6 +50,31 @@
         -0.5,
         0.5,
         -0.5
+      ],
+      "scale": [
+        0.0254,
+        0.0254,
+        0.0254
+      ]
+    },
+    {
+      "node": "markers",
+      "parent": "RootNode",
+      "translation": [
+        0,
+        0,
+        0
+      ],
+      "rotation": [
+        0,
+        0,
+        0,
+        1
+      ],
+      "scale": [
+        1,
+        1,
+        1
       ]
     },
     {
@@ -57,9 +87,14 @@
         1
       ],
       "translation": [
-        0.0254,
-        0.0508,
-        0.0762
+        1.0,
+        2.0,
+        3.0
+      ],
+      "world": [
+        0.0762,
+        -0.0254,
+        -0.0508
       ]
     },
     {
@@ -75,18 +110,28 @@
       "node": "a",
       "time": 0.0,
       "translation": [
-        0.0254,
-        0.0508,
-        0.0762
+        1.0,
+        2.0,
+        3.0
+      ],
+      "world": [
+        0.0762,
+        -0.0254,
+        -0.0508
       ]
     },
     {
       "node": "a",
       "time": 0.01,
       "translation": [
-        0.0381,
-        0.0635,
-        0.0889
+        1.5,
+        2.5,
+        3.5
+      ],
+      "world": [
+        0.0889,
+        -0.0381,
+        -0.0635
       ]
     },
     {
@@ -99,9 +144,14 @@
         1
       ],
       "translation": [
-        0.1016,
-        0.127,
-        0.1524
+        4.0,
+        5.0,
+        6.0
+      ],
+      "world": [
+        0.1524,
+        -0.1016,
+        -0.127
       ]
     },
     {
@@ -117,18 +167,28 @@
       "node": "b",
       "time": 0.0,
       "translation": [
-        0.1016,
-        0.127,
-        0.1524
+        4.0,
+        5.0,
+        6.0
+      ],
+      "world": [
+        0.1524,
+        -0.1016,
+        -0.127
       ]
     },
     {
       "node": "b",
       "time": 0.01,
       "translation": [
-        0.1016,
-        0.1397,
-        0.1778
+        4.0,
+        5.5,
+        7.0
+      ],
+      "world": [
+        0.1778,
+        -0.1016,
+        -0.1397
       ]
     }
   ]

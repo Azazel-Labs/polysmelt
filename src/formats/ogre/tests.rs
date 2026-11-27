@@ -134,8 +134,8 @@ fn skeleton_parent_cycles_are_broken() {
                <boneparent bone=\"c\" parent=\"a\"/></bonehierarchy></skeleton>";
     let doc = load_as(xml.as_bytes(), "loop.skeleton.xml", &Memory::new()).unwrap();
     let nodes = doc.json()["nodes"].as_array().unwrap();
-    assert_eq!(nodes.len(), 3);
-    let roots = doc.json()["scenes"][0]["nodes"].as_array().unwrap();
+    assert_eq!(nodes.len(), 4);
+    let roots = nodes[3]["children"].as_array().unwrap();
     assert!(!roots.is_empty(), "a cycle leaves a root");
 }
 

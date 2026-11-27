@@ -1,6 +1,13 @@
-//! What every reader does the same way: the facts it reports and how it spells them, and how it
-//! decodes and makes up names.
+//! What every reader does the same way: the facts it reports and how it spells them, how it
+//! decodes and makes up names, and how it brings a file's axes and units to glTF's.
 #![cfg(feature = "default")]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::format_push_string,
+    clippy::format_collect,
+    reason = "the files written here are small: their counts and indices fit any of these types"
+)]
 
 use polysmelt::source::{Axis, Fact, Handedness};
 use polysmelt::{Document, ErrorKind};
@@ -299,4 +306,445 @@ fn a_library_of_meshes_no_node_draws_is_not_empty() {
     let nothing = br#"{"asset":{"version":"2.0"},"scenes":[{"nodes":[]}],"materials":[{"name":"m"}]}"#;
     let e = polysmelt::read(nothing.to_vec(), "a.gltf").map(|_| ()).unwrap_err();
     assert_eq!(e.kind(), ErrorKind::Empty);
+}
+
+/// One box, 100 by 200 by 300, written in each format: its corners, and its faces as quads wound
+/// counter-clockwise seen from outside. Corner `i` has x in bit 0, y in bit 1, z in bit 2.
+mod boxed {
+    pub const SIZE: [f64; 3] = [100.0, 200.0, 300.0];
+    pub const QUADS: [[usize; 4]; 6] = [
+        [0, 2, 3, 1],
+        [4, 5, 7, 6],
+        [0, 1, 5, 4],
+        [2, 6, 7, 3],
+        [0, 4, 6, 2],
+        [1, 3, 7, 5],
+    ];
+
+    /// The corners, each coordinate times `scale`, as `f` arranges them.
+    pub fn corners(scale: f64, f: impl Fn([f64; 3]) -> [f64; 3]) -> Vec<[f64; 3]> {
+        (0..8)
+            .map(|i| f([0, 1, 2].map(|k| if i >> k & 1 == 1 { SIZE[k] * scale } else { 0.0 })))
+            .collect()
+    }
+
+    /// Numbers separated by `sep`.
+    pub fn list<T: ToString>(v: impl IntoIterator<Item = T>, sep: &str) -> String {
+        v.into_iter().map(|x| x.to_string()).collect::<Vec<_>>().join(sep)
+    }
+
+    pub fn flat(corners: &[[f64; 3]]) -> Vec<f64> {
+        corners.iter().flatten().copied().collect()
+    }
+
+    pub fn triangles() -> Vec<[usize; 3]> {
+        QUADS
+            .iter()
+            .flat_map(|q| [[q[0], q[1], q[2]], [q[0], q[2], q[3]]])
+            .collect()
+    }
+
+    /// The box with Z up, in centimeters, as FBX ASCII.
+    pub fn fbx() -> Vec<u8> {
+        let v = list(flat(&corners(1.0, |p| p)), ",");
+        let polygons = list(
+            QUADS
+                .iter()
+                .flat_map(|q| [q[0] as i64, q[1] as i64, q[2] as i64, -(q[3] as i64) - 1]),
+            ",",
+        );
+        let setting = |name: &str, value: i32| format!("\t\tP: \"{name}\", \"int\", \"Integer\", \"\",{value}\n");
+        format!(
+            "; FBX 7.4.0 project file\nFBXHeaderExtension:  {{\n\tFBXHeaderVersion: 1003\n\tFBXVersion: 7400\n}}\n\
+             GlobalSettings:  {{\n\tVersion: 1000\n\tProperties70:  {{\n{}{}{}{}{}{}\
+             \t\tP: \"UnitScaleFactor\", \"double\", \"Number\", \"\",1\n\t}}\n}}\n\
+             Objects:  {{\n\tGeometry: 10, \"Geometry::Cube\", \"Mesh\" {{\n\t\tVertices: *24 {{\n\t\t\ta: {v}\n\t\t}}\n\
+             \t\tPolygonVertexIndex: *24 {{\n\t\t\ta: {polygons}\n\t\t}}\n\t}}\n\
+             \tModel: 20, \"Model::Cube\", \"Mesh\" {{\n\t}}\n}}\n\
+             Connections:  {{\n\tC: \"OO\",10,20\n\tC: \"OO\",20,0\n}}\n",
+            setting("UpAxis", 2),
+            setting("UpAxisSign", 1),
+            setting("FrontAxis", 1),
+            setting("FrontAxisSign", -1),
+            setting("CoordAxis", 0),
+            setting("CoordAxisSign", 1),
+        )
+        .into_bytes()
+    }
+
+    /// The box with Z up, in centimeters, as COLLADA.
+    pub fn dae() -> Vec<u8> {
+        let v = list(flat(&corners(1.0, |p| p)), " ");
+        let p = list(triangles().into_iter().flatten(), " ");
+        format!(
+            r##"<COLLADA xmlns="http://www.collada.org/2005/11/COLLADASchema" version="1.4.1"><asset><unit name="centimeter" meter="0.01"/><up_axis>Z_UP</up_axis></asset><library_geometries><geometry id="g"><mesh><source id="p"><float_array id="pa" count="24">{v}</float_array><technique_common><accessor source="#pa" count="8" stride="3"><param name="X" type="float"/><param name="Y" type="float"/><param name="Z" type="float"/></accessor></technique_common></source><vertices id="v"><input semantic="POSITION" source="#p"/></vertices><triangles count="12"><input semantic="VERTEX" source="#v" offset="0"/><p>{p}</p></triangles></mesh></geometry></library_geometries><library_visual_scenes><visual_scene id="s"><node id="n" name="Cube"><instance_geometry url="#g"/></node></visual_scene></library_visual_scenes><scene><instance_visual_scene url="#s"/></scene></COLLADA>"##
+        )
+        .into_bytes()
+    }
+
+    /// The box with Z up, as 3DS always is, with a master scale of a hundredth.
+    pub fn tds() -> Vec<u8> {
+        fn chunk(id: u16, body: &[u8]) -> Vec<u8> {
+            let mut out = id.to_le_bytes().to_vec();
+            out.extend((body.len() as u32 + 6).to_le_bytes());
+            out.extend(body);
+            out
+        }
+        let mut vertices = 8u16.to_le_bytes().to_vec();
+        for c in flat(&corners(1.0, |p| p)) {
+            vertices.extend((c as f32).to_le_bytes());
+        }
+        let mut faces = 12u16.to_le_bytes().to_vec();
+        for t in triangles() {
+            for i in t {
+                faces.extend((i as u16).to_le_bytes());
+            }
+            faces.extend(7u16.to_le_bytes());
+        }
+        let mesh = [chunk(0x4110, &vertices), chunk(0x4120, &faces)].concat();
+        let object = [b"Cube\0".to_vec(), chunk(0x4100, &mesh)].concat();
+        // 3DS names no unit: its master scale multiplies every coordinate.
+        let master = 0.01f32.to_le_bytes();
+        let editor = [chunk(0x0100, &master), chunk(0x4000, &object)].concat();
+        chunk(
+            0x4D4D,
+            &[chunk(0x0002, &3u32.to_le_bytes()), chunk(0x3D3D, &editor)].concat(),
+        )
+    }
+
+    /// The box as OBJ, which names no up axis and no unit.
+    pub fn obj() -> Vec<u8> {
+        let mut out = String::from("o Cube\n");
+        for c in corners(1.0, |p| p) {
+            out += &format!("v {} {} {}\n", c[0], c[1], c[2]);
+        }
+        for q in QUADS {
+            out += &format!("f {}\n", list(q.map(|i| i + 1), " "));
+        }
+        out.into_bytes()
+    }
+
+    /// The box with Z up, as 3MF always is, in its millimeters.
+    pub fn threemf() -> Vec<u8> {
+        use std::io::Write as _;
+        let vertices: String = corners(10.0, |p| p)
+            .iter()
+            .map(|c| format!(r#"<vertex x="{}" y="{}" z="{}"/>"#, c[0], c[1], c[2]))
+            .collect();
+        let triangles: String = triangles()
+            .iter()
+            .map(|t| format!(r#"<triangle v1="{}" v2="{}" v3="{}"/>"#, t[0], t[1], t[2]))
+            .collect();
+        let model = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?><model unit="millimeter" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"><resources><object id="1" type="model" name="Cube"><mesh><vertices>{vertices}</vertices><triangles>{triangles}</triangles></mesh></object></resources><build><item objectid="1"/></build></model>"#
+        );
+        let types = r#"<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/></Types>"#;
+        let rels = r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Target="/3D/3dmodel.model" Id="rel0" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/></Relationships>"#;
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for (name, body) in [
+            ("[Content_Types].xml", types),
+            ("_rels/.rels", rels),
+            ("3D/3dmodel.model", model.as_str()),
+        ] {
+            let stored = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+            zip.start_file(name, stored).unwrap();
+            zip.write_all(body.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap().into_inner()
+    }
+
+    /// The box with Z up, in centimeters, as a USD text layer.
+    pub fn usda() -> Vec<u8> {
+        let points = list(
+            corners(1.0, |p| p)
+                .iter()
+                .map(|c| format!("({}, {}, {})", c[0], c[1], c[2])),
+            ", ",
+        );
+        let indices = list(QUADS.into_iter().flatten(), ", ");
+        format!(
+            "#usda 1.0\n(\n    metersPerUnit = 0.01\n    upAxis = \"Z\"\n)\ndef Mesh \"Cube\"\n{{\n    \
+             int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]\n    int[] faceVertexIndices = [{indices}]\n    \
+             point3f[] points = [{points}]\n}}\n"
+        )
+        .into_bytes()
+    }
+
+    /// The box in centimeters as X3D, whose standard has Y up: the same box, laid out Y up.
+    pub fn x3d() -> Vec<u8> {
+        let points = list(flat(&corners(1.0, |[x, y, z]| [x, z, -y])), " ");
+        let indices = list(
+            QUADS
+                .iter()
+                .flat_map(|q| [q[0] as i64, q[1] as i64, q[2] as i64, q[3] as i64, -1]),
+            " ",
+        );
+        format!(
+            r#"<X3D version="3.3"><head><unit category="length" name="centimeters" conversionFactor="0.01"/></head><Scene><Transform DEF="Cube"><Shape><IndexedFaceSet coordIndex="{indices}"><Coordinate point="{points}"/></IndexedFaceSet></Shape></Transform></Scene></X3D>"#
+        )
+        .into_bytes()
+    }
+}
+
+/// What a document draws, in the world: its bounds, its triangle count, and whether every triangle faces away
+/// from the middle of them.
+fn drawn(doc: &Document) -> ([f32; 3], [f32; 3], usize, bool) {
+    let mesh = doc.flatten(polysmelt::document::Pose::Rest).unwrap().unwrap();
+    let (mut min, mut max) = ([f32::MAX; 3], [f32::MIN; 3]);
+    for p in mesh.prims.iter().flat_map(|p| &p.positions) {
+        for k in 0..3 {
+            min[k] = min[k].min(p[k]);
+            max[k] = max[k].max(p[k]);
+        }
+    }
+    let middle = [0, 1, 2].map(|k| f32::midpoint(min[k], max[k]));
+    let mut outward = true;
+    for prim in &mesh.prims {
+        for t in prim.indices.chunks_exact(3) {
+            let [a, b, c] = [0, 1, 2].map(|k| prim.positions[t[k] as usize]);
+            let (u, v) = ([0, 1, 2].map(|k| b[k] - a[k]), [0, 1, 2].map(|k| c[k] - a[k]));
+            let n = [
+                u[1] * v[2] - u[2] * v[1],
+                u[2] * v[0] - u[0] * v[2],
+                u[0] * v[1] - u[1] * v[0],
+            ];
+            let out: f32 = (0..3).map(|k| n[k] * (a[k] - middle[k])).sum();
+            outward &= out > 0.0;
+            // A normal the reader wrote faces the way its triangle does.
+            if let Some(vn) = prim.normals.get(t[0] as usize) {
+                outward &= (0..3).map(|k| n[k] * vn[k]).sum::<f32>() > 0.0;
+            }
+        }
+    }
+    (min, max, mesh.triangles(), outward)
+}
+
+fn near(a: [f32; 3], b: [f32; 3]) -> bool {
+    (0..3).all(|k| (a[k] - b[k]).abs() < 1e-4)
+}
+
+/// The one top-level node of a document: its index, and the names of its children.
+fn root_of(doc: &Document) -> (Value, Vec<Value>) {
+    let j = doc.json();
+    let tops = j["scenes"][0]["nodes"].as_array().unwrap();
+    assert_eq!(tops.len(), 1, "one top-level node, whatever the format: {tops:?}");
+    let root = j["nodes"][tops[0].as_u64().unwrap() as usize].clone();
+    let children = root["children"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| j["nodes"][c.as_u64().unwrap() as usize]["name"].clone())
+        .collect();
+    (root, children)
+}
+
+#[test]
+fn one_box_is_the_same_document_in_every_format() {
+    // Z up to Y up: a quarter turn about X.
+    let h = std::f64::consts::FRAC_1_SQRT_2;
+    let quarter = json!([-h, 0.0, 0.0, h]);
+    let centimeters = json!([0.01, 0.01, 0.01]);
+    // (file, bytes, the root's rotation, the root's scale, what was converted, the up axis, the unit's length)
+    let z = Fact::Declared(Axis::PosZ);
+    #[allow(clippy::type_complexity, reason = "a table of cases")]
+    let cases: Vec<(&str, Vec<u8>, Value, Value, [bool; 2], Fact<Axis>, Fact<f64>)> = vec![
+        (
+            "box.fbx",
+            boxed::fbx(),
+            quarter.clone(),
+            centimeters.clone(),
+            [true, true],
+            z,
+            Fact::Declared(0.01),
+        ),
+        (
+            "box.dae",
+            boxed::dae(),
+            quarter.clone(),
+            centimeters.clone(),
+            [true, true],
+            z,
+            Fact::Declared(0.01),
+        ),
+        (
+            "box.usda",
+            boxed::usda(),
+            quarter.clone(),
+            centimeters.clone(),
+            [true, true],
+            z,
+            Fact::Declared(0.01),
+        ),
+        // 3MF is millimeters here, its coordinates ten times the others'.
+        (
+            "box.3mf",
+            boxed::threemf(),
+            quarter.clone(),
+            json!([0.001, 0.001, 0.001]),
+            [true, true],
+            z,
+            Fact::Declared(0.001),
+        ),
+        // X3D's standard is Y up: its root only scales.
+        (
+            "box.x3d",
+            boxed::x3d(),
+            Value::Null,
+            centimeters.clone(),
+            [true, false],
+            Fact::Declared(Axis::PosY),
+            Fact::Declared(0.01),
+        ),
+    ];
+    for (name, bytes, rotation, scale, [units, up], up_axis, meters) in cases {
+        let doc = read(&bytes, name);
+        let (root, children) = root_of(&doc);
+        assert_eq!(root["name"], "RootNode", "{name}");
+        assert_eq!(
+            children,
+            [json!("Cube")],
+            "{name}: the file's one root is the root node's one child"
+        );
+        assert_eq!(root.get("rotation").cloned().unwrap_or(Value::Null), rotation, "{name}");
+        assert_eq!(root["scale"], scale, "{name}");
+        assert!(
+            root.get("mesh").is_none() && root.get("translation").is_none(),
+            "{name}: {root}"
+        );
+        let (min, max, triangles, outward) = drawn(&doc);
+        assert_eq!(triangles, 12, "{name}");
+        assert!(
+            near(min, [0.0, 0.0, -2.0]) && near(max, [1.0, 3.0, 0.0]),
+            "{name}: {min:?}..{max:?}"
+        );
+        assert!(outward, "{name}: every face faces out");
+        let info = doc.source_info();
+        assert_eq!((info.converted.units, info.converted.up_axis), (units, up), "{name}");
+        assert!(!info.converted.handedness, "{name}");
+        assert_eq!(info.up_axis, up_axis, "{name}");
+        assert_eq!(info.meters_per_unit, meters, "{name}");
+        assert_eq!(info.output_meters_per_unit(), Fact::Declared(1.0), "{name}");
+    }
+
+    // 3DS: the same shape of document. It names no unit, so none is known or converted; its master scale, a
+    // hundredth here, is a factor the root node scales by.
+    let doc = read(&boxed::tds(), "box.3ds");
+    let (root, children) = root_of(&doc);
+    assert_eq!((&root["name"], &children), (&json!("RootNode"), &vec![json!("Cube")]));
+    assert_eq!(root["rotation"], quarter);
+    let (min, max, triangles, outward) = drawn(&doc);
+    assert!(
+        near(min, [0.0, 0.0, -2.0]) && near(max, [1.0, 3.0, 0.0]),
+        "{min:?}..{max:?}"
+    );
+    assert!(triangles == 12 && outward);
+    let info = doc.source_info();
+    assert_eq!(info.meters_per_unit, Fact::Unknown);
+    assert!((root["scale"][0].as_f64().unwrap() - 0.01).abs() < 1e-8, "{root}");
+    assert!(!info.converted.units && info.converted.up_axis);
+
+    // OBJ names no axis and no unit: the same shape of document, with a root node that changes nothing.
+    let doc = read(&boxed::obj(), "box.obj");
+    let (root, children) = root_of(&doc);
+    assert_eq!(root, json!({ "name": "RootNode", "children": root["children"] }));
+    assert_eq!(children, [json!("Cube")]);
+    let (min, max, triangles, outward) = drawn(&doc);
+    assert!(
+        near(min, [0.0; 3]) && near(max, [100.0, 200.0, 300.0]),
+        "{min:?}..{max:?}"
+    );
+    assert!(triangles == 12 && outward);
+    let info = doc.source_info();
+    assert_eq!(info.up_axis, Fact::Assumed(Axis::PosY));
+    assert_eq!(info.meters_per_unit, Fact::Unknown);
+    assert_eq!(info.converted, polysmelt::source::Converted::default());
+    assert_eq!(info.output_meters_per_unit(), Fact::Unknown);
+}
+
+#[test]
+fn sampled_data_is_converted_in_place_and_gltf_is_kept_as_it_is() {
+    // A scanner's cloud is Z up, in `.xyz` and in `.pcd` alike: the same points land the same way, with no
+    // root node, and say what was assumed.
+    let xyz = read(b"1 2 3\n4 5 6\n", "a.xyz");
+    let pcd = read(
+        b"VERSION .7\nFIELDS x y z\nSIZE 4 4 4\nTYPE F F F\nCOUNT 1 1 1\nWIDTH 2\nHEIGHT 1\nPOINTS 2\nDATA ascii\n1 2 3\n4 5 6\n",
+        "a.pcd",
+    );
+    for (name, doc) in [("xyz", &xyz), ("pcd", &pcd)] {
+        let j = doc.json();
+        assert_eq!(j["nodes"].as_array().unwrap().len(), 1, "{name}: no root node");
+        assert!(j["nodes"][0].get("name").is_none() && j["nodes"][0].get("rotation").is_none());
+        let info = doc.source_info();
+        assert_eq!(info.up_axis, Fact::Assumed(Axis::PosZ), "{name}");
+        assert_eq!(info.meters_per_unit, Fact::Unknown, "{name}");
+        assert!(info.converted.up_axis && !info.converted.units, "{name}");
+        let mesh = doc.flatten(polysmelt::document::Pose::Rest).unwrap().unwrap();
+        assert_eq!(mesh.prims[0].positions, [[1.0, 3.0, -2.0], [4.0, 6.0, -5.0]], "{name}");
+    }
+    // A PLY, OFF or VTK mesh says nothing of its axes and has no convention: nothing is assumed or converted,
+    // and it is a scene like any other mesh.
+    let off = b"OFF\n3 1 0\n0 0 0\n1 0 0\n0 1 0\n3 0 1 2\n";
+    let ply = b"ply\nformat ascii 1.0\nelement vertex 3\nproperty float x\nproperty float y\nproperty float z\nelement face 1\nproperty list uchar int vertex_indices\nend_header\n0 0 0\n1 0 0\n0 1 0\n3 0 1 2\n";
+    let vtk = b"# vtk DataFile Version 3.0\nt\nASCII\nDATASET POLYDATA\nPOINTS 3 float\n0 0 0 1 0 0 0 1 0\nPOLYGONS 1 4\n3 0 1 2\n";
+    for (name, bytes) in [("a.off", &off[..]), ("a.ply", &ply[..]), ("a.vtk", &vtk[..])] {
+        let doc = read(bytes, name);
+        let info = doc.source_info();
+        assert_eq!(info.up_axis, Fact::Unknown, "{name}");
+        assert_eq!(info.meters_per_unit, Fact::Unknown, "{name}");
+        assert_eq!(info.converted, polysmelt::source::Converted::default(), "{name}");
+        let (root, _) = root_of(&doc);
+        assert_eq!(root["name"], "RootNode", "{name}");
+        assert!(root.get("rotation").is_none() && root.get("scale").is_none(), "{name}");
+    }
+    // A PLY of only points is a cloud: no root node.
+    let cloud = b"ply\nformat ascii 1.0\nelement vertex 2\nproperty float x\nproperty float y\nproperty float z\nend_header\n1 2 3\n4 5 6\n";
+    let doc = read(cloud, "a.ply");
+    assert_eq!(doc.json()["nodes"].as_array().unwrap().len(), 1);
+    assert_eq!(doc.source_info().up_axis, Fact::Unknown);
+    // glTF is in glTF's frame already: no node is added.
+    let gltf = br#"{"asset":{"version":"2.0"},"scenes":[{"nodes":[0,1]}],"nodes":[{"name":"a"},{"name":"b"}]}"#;
+    let doc = read(gltf, "a.gltf");
+    assert_eq!(doc.json()["scenes"][0]["nodes"], json!([0, 1]));
+    assert_eq!(doc.json()["nodes"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn a_motion_capture_file_that_names_no_unit_is_not_scaled() {
+    // TRC without `Units`, as HTR without `CalibrationUnits` and BVH always: the unit is unknown, and the root
+    // node has no scale. With one, the root scales to meters and the markers stay as the file has them.
+    let trc = |units: &str, value: &str| {
+        format!(
+            "PathFileType\t4\t(X/Y/Z)\tt.trc\nDataRate\tNumFrames\tNumMarkers{units}\n10\t1\t1{value}\nFrame#\tTime\ta\t\t\n\t\tX1\tY1\tZ1\n\n1\t0\t100\t200\t300\n"
+        )
+    };
+    let silent = read(trc("", "").as_bytes(), "a.trc");
+    let (root, children) = root_of(&silent);
+    assert_eq!(children, [json!("markers")]);
+    assert!(root.get("scale").is_none(), "{root}");
+    assert_eq!(silent.source_info().meters_per_unit, Fact::Unknown);
+    assert!(!silent.source_info().converted.units);
+    let declared = read(trc("\tUnits", "\tmm").as_bytes(), "a.trc");
+    let (root, _) = root_of(&declared);
+    assert_eq!(root["scale"], json!([0.001, 0.001, 0.001]));
+    assert_eq!(declared.source_info().meters_per_unit, Fact::Declared(0.001));
+    for doc in [&silent, &declared] {
+        let rig = doc.rig().unwrap();
+        let a = rig.find("a").unwrap();
+        assert_eq!(rig.nodes[a].rest.translation, [100.0, 200.0, 300.0]);
+    }
+    let at = |doc: &Document| {
+        let rig = doc.rig().unwrap();
+        let m = rig.world(&rig.pose(None, 0.0))[rig.find("a").unwrap()];
+        [m[12], m[13], m[14]]
+    };
+    assert!(near(at(&silent), [100.0, 200.0, 300.0]));
+    assert!(near(at(&declared), [0.1, 0.2, 0.3]));
+    let bvh = read(
+        b"HIERARCHY\nROOT Hips\n{\nOFFSET 0 90 0\nCHANNELS 3 Xrotation Yrotation Zrotation\nEnd Site\n{\nOFFSET 0 10 0\n}\n}\nMOTION\nFrames: 1\nFrame Time: 0.04\n0 0 0\n",
+        "a.bvh",
+    );
+    let (root, children) = root_of(&bvh);
+    assert_eq!(children, [json!("Hips")]);
+    assert_eq!(root, json!({ "name": "RootNode", "children": root["children"] }));
+    assert_eq!(bvh.source_info().meters_per_unit, Fact::Unknown);
 }

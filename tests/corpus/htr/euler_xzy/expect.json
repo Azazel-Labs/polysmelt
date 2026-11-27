@@ -7,7 +7,7 @@
     "frames": 3
   },
   "document": {
-    "nodes": 5,
+    "nodes": 6,
     "animations": 1,
     "channels": 6,
     "node_names": [
@@ -15,7 +15,8 @@
       "Spine",
       "LThigh",
       "Spine_end",
-      "LThigh_end"
+      "LThigh_end",
+      "RootNode"
     ]
   },
   "json": {
@@ -27,19 +28,45 @@
     "/asset/extras/source/frameRate": 60.0,
     "/asset/extras/source/assumed": null,
     "/scenes/0/nodes": [
+      5
+    ],
+    "/nodes/5/children": [
       0
+    ],
+    "/asset/extras/source/converted": [
+      "units"
     ],
     "/animations/0/name": "euler_xzy",
     "/animations/0/samplers/0/interpolation": "LINEAR"
   },
   "rig": [
     {
-      "node": "Hips",
+      "node": "RootNode",
       "parent": null,
       "translation": [
-        0.01,
-        0.95,
-        -0.02
+        0,
+        0,
+        0
+      ],
+      "rotation": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "scale": [
+        0.001,
+        0.001,
+        0.001
+      ]
+    },
+    {
+      "node": "Hips",
+      "parent": "RootNode",
+      "translation": [
+        10.0,
+        950.0,
+        -20.0
       ],
       "rotation": [
         0.054447,
@@ -51,6 +78,11 @@
         1,
         1,
         1
+      ],
+      "world": [
+        0.01,
+        0.95,
+        -0.02
       ]
     },
     {
@@ -58,7 +90,7 @@
       "parent": "Hips",
       "translation": [
         0.0,
-        0.12,
+        120.0,
         0.0
       ],
       "rotation": [
@@ -77,8 +109,8 @@
       "node": "LThigh",
       "parent": "Hips",
       "translation": [
-        0.09,
-        -0.04,
+        90.0,
+        -40.0,
         0.0
       ],
       "rotation": [
@@ -97,9 +129,9 @@
       "node": "Spine_end",
       "parent": "Spine",
       "translation": [
-        0.0,
-        0.3,
-        0.0
+        0,
+        300,
+        0
       ],
       "rotation": [
         0,
@@ -112,9 +144,9 @@
       "node": "LThigh_end",
       "parent": "LThigh",
       "translation": [
-        0.0,
-        0.42,
-        0.0
+        0,
+        420,
+        0
       ],
       "rotation": [
         0,
@@ -142,9 +174,9 @@
       "node": "Hips",
       "time": 0.0,
       "translation": [
-        0.01,
-        0.95,
-        -0.02
+        10.0,
+        950.0,
+        -20.0
       ],
       "rotation": [
         0.054447,
@@ -157,9 +189,9 @@
       "node": "Hips",
       "time": 0.016666667,
       "translation": [
-        0.015,
-        0.948,
-        -0.01
+        15.0,
+        948.0,
+        -10.0
       ],
       "rotation": [
         0.132398,
@@ -172,9 +204,9 @@
       "node": "Hips",
       "time": 0.033333333,
       "translation": [
-        0.022,
-        0.947,
-        0.002
+        22.0,
+        947.0,
+        2.0
       ],
       "rotation": [
         -0.205352,
@@ -203,7 +235,7 @@
       "time": 0.0,
       "translation": [
         0.0,
-        0.12,
+        120.0,
         0.0
       ],
       "rotation": [
@@ -218,7 +250,7 @@
       "time": 0.016666667,
       "translation": [
         0.0,
-        0.121,
+        121.0,
         0.0
       ],
       "rotation": [
@@ -233,7 +265,7 @@
       "time": 0.033333333,
       "translation": [
         0.0,
-        0.122,
+        122.0,
         0.0
       ],
       "rotation": [
@@ -262,8 +294,8 @@
       "node": "LThigh",
       "time": 0.0,
       "translation": [
-        0.09,
-        -0.04,
+        90.0,
+        -40.0,
         0.0
       ],
       "rotation": [
@@ -277,8 +309,8 @@
       "node": "LThigh",
       "time": 0.016666667,
       "translation": [
-        0.09,
-        -0.04,
+        90.0,
+        -40.0,
         0.0
       ],
       "rotation": [
@@ -292,9 +324,9 @@
       "node": "LThigh",
       "time": 0.033333333,
       "translation": [
-        0.091,
-        -0.04,
-        -0.001
+        91.0,
+        -40.0,
+        -1.0
       ],
       "rotation": [
         -0.525738,

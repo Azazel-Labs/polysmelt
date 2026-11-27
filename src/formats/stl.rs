@@ -13,7 +13,7 @@
 //! exporter's `KEY=value` settings.
 //!
 //! STL is for printing, where Z is up (the build plate is XY), so the solids sit under a
-//! `RootNode` that turns them from Z-up to glTF's Y-up: the source's up axis is `+Z` by that
+//! `RootNode` (the one top-level node every reader makes) that turns them from Z-up to glTF's Y-up: the source's up axis is `+Z` by that
 //! convention (assumed, not declared), and converted. Units are left as they are and unknown: STL
 //! has none, though many files are millimeters.
 //!
@@ -24,6 +24,7 @@ use std::collections::HashMap;
 use serde_json::{Map, Value, json};
 
 use super::Input;
+use super::frame::{self, Frame};
 use super::stream::{self, Blocks};
 use crate::Result;
 use crate::document::Document;
@@ -137,14 +138,7 @@ fn document(
     let crease = keep.crease_angle();
     let mut doc = Document::from_named(meshes, &mesh.materials, Vec::new(), source, facts, &[], crease);
     // Z-up to Y-up: a quarter turn about X.
-    let h = std::f32::consts::FRAC_1_SQRT_2;
-    let json = doc.base_mut();
-    let roots = json["scenes"][0]["nodes"].take();
-    if let Some(nodes) = json["nodes"].as_array_mut() {
-        nodes.push(json!({ "name": "RootNode", "children": roots, "rotation": [-h, 0.0, 0.0, h] }));
-        let root = nodes.len() - 1;
-        json["scenes"][0]["nodes"] = json!([root]);
-    }
+    frame::root(&mut doc, Frame::z_up());
     doc
 }
 

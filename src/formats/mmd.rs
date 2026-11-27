@@ -23,8 +23,8 @@
 //! 60 samples a span). Morph keys go in `asset.extras.source.morphKeys`; camera, light, shadow and IK keys are
 //! counted.
 //!
-//! The format is left-handed and Y up with a unit of 8 cm, so the scene is mirrored through its XY plane and
-//! scaled by 0.08 into meters. Text is UTF-16 or UTF-8 in PMX, as its header says, and Shift-JIS in PMD and VMD.
+//! The format is left-handed and Y up with a unit of 8 cm, so the scene is mirrored through its XY plane, and
+//! the document's `RootNode` scales it by 0.08 into meters: positions and translations stay in the file's units. Text is UTF-16 or UTF-8 in PMX, as its header says, and Shift-JIS in PMD and VMD.
 //!
 //! The source info has the handedness and the up axis `+Y` as declared (the program's space is every file's), the
 //! handedness converted, and `metersPerUnit` an assumed 0.08 (the unit's length is the users' convention, not the format's), converted.
@@ -53,7 +53,7 @@ use crate::quat;
 use crate::source::{Axis, Fact, Handedness, SourceInfo};
 
 /// Meters per MMD unit.
-const UNIT: f32 = 0.08;
+const UNIT: f64 = 0.08;
 /// Frames per second of a motion's keys.
 const FPS: f64 = 30.0;
 /// The most morph offsets held for targets, over all primitives.
@@ -253,9 +253,9 @@ fn sjis(b: &[u8]) -> String {
     scene::shift_jis(b).trim_end_matches('\u{FFFD}').to_owned()
 }
 
-/// A position as glTF has it: mirrored and in meters.
+/// A position as the document has it: mirrored, in the file's units as the nodes are.
 fn pt(v: [f32; 3]) -> [f32; 3] {
-    [v[0] * UNIT, v[1] * UNIT, -v[2] * UNIT]
+    [v[0], v[1], -v[2]]
 }
 
 /// A direction as glTF has it: mirrored.
@@ -1417,7 +1417,7 @@ fn build(m: Model, input: &Input<'_>, stem: &str, assets: &dyn Assets, keep: Kee
     );
 
     scene.mirror_z();
-    scene.scale(UNIT);
+    scene.unit(UNIT);
 
     let mut source = Map::new();
     convention(&mut scene.info);
@@ -1727,14 +1727,13 @@ fn motion(data: &[u8], stem: &str, keep: Keep) -> Result<Document> {
     scene.source = source;
     scene.facts = facts;
     scene.mirror_z();
-    scene.scale(UNIT);
+    scene.unit(UNIT);
     scene.finish(keep)
 }
 
 /// The source info the formats share: left-handed and Y up, as the format defines, in units taken as 8 cm.
 fn convention(info: &mut SourceInfo) {
-    // 0.08 as written, not the f32 widened (0.0799999982).
-    info.meters_per_unit = Fact::Assumed(0.08);
+    info.meters_per_unit = Fact::Assumed(UNIT);
     info.up_axis = Fact::Declared(Axis::PosY);
     info.handedness = Fact::Declared(Handedness::Left);
 }

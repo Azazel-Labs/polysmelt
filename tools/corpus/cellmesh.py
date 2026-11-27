@@ -221,7 +221,7 @@ def measure(points, groups, point_data=None, normals=None, ordered=True):
         # hard: copies of the file's points, after them.
         if exact_vertices and (normals is not None or not expect["triangles"]):
             expect["vertices"] = vertices
-        document = {"nodes": len(meshes)}
+        document = {"nodes": len(meshes) + 1}
         if names:
             document["attributes"] = sorted(names)
         node_names = [m["name"] for m in meshes if m["name"]]

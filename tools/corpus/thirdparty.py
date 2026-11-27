@@ -570,6 +570,7 @@ CASES = [
     assimp("off", "cube", "OFF/Cube.off", "a cube of quads"),
     assimp("off", "wuson", "OFF/Wuson.off", "a creature of 3732 triangles"),
 
+    # Each of these files has a master scale of 1, so assimp's numbers are the file's, as the document draws them.
     assimp("3ds", "test1", "3DS/test1.3ds", "nine boxes with three materials"),
     assimp("3ds", "cubes_with_alpha", "3DS/cubes_with_alpha.3DS", "cubes with transparent materials"),
     assimp("3ds", "fels", "3DS/fels.3ds", "a rock"),

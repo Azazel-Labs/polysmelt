@@ -13,7 +13,10 @@
 //! USD's fallback centimeters, and an OBJ is +Y up only because most are: assumed.
 //!
 //! The values describe the source file as it was written. What the reader did about them is in
-//! [`SourceInfo::converted`]: a COLLADA file in centimeters, Z up, is read into glTF's meters, Y up,
+//! [`SourceInfo::converted`]. Every format with a scene is converted one way: the file's nodes, meshes and keys stay
+//! in its own axes and unit under one top-level node, `RootNode`, which is always there and turns and scales them,
+//! and a left-handed file is mirrored as it is read. Point clouds, splats and voxels are converted in their data, and
+//! glTF is kept as it is. So a COLLADA file in centimeters, Z up, is read into glTF's meters, Y up,
 //! so its `metersPerUnit` is `0.01` and its `upAxis` `+Z`, and `converted` says both were
 //! converted. [`SourceInfo::output_meters_per_unit`] answers the question most users have: how long
 //! is a unit of the geometry as it is now.
@@ -296,9 +299,11 @@ pub enum Handedness {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub struct Converted {
-    /// Lengths were scaled from the file's unit to meters.
+    /// Lengths were scaled from the file's unit to meters: by the document's root node, or in the data of a point
+    /// cloud, splats or voxels.
     pub units: bool,
-    /// The scene was turned so that the file's up is +Y.
+    /// The scene was turned to glTF's axes, so that the file's up is +Y (and a VRM 0.x avatar faces +Z): by the
+    /// document's root node, or in the data of a point cloud, splats or voxels.
     pub up_axis: bool,
     /// The scene was mirrored from left-handed to right-handed.
     pub handedness: bool,

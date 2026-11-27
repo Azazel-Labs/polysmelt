@@ -193,7 +193,7 @@ impl Reader<'_, '_, '_> {
         if let Some(name) = name_of(node) {
             out["name"] = json!(name);
         }
-        place(&mut out, &self.rest_local(m));
+        place(&mut out, &self.seen(&self.rest_local(m)));
         if hidden(&self.objs.props(m)) {
             self.hidden.insert(m);
         }
@@ -309,12 +309,12 @@ impl Reader<'_, '_, '_> {
                     self.cameras.push(cam);
                     // FBX cameras look down +X, glTF's down -Z.
                     let c = self.child(node, None);
-                    self.nodes[c]["rotation"] = json!([
+                    self.nodes[c]["rotation"] = json!(self.seen_turn([
                         0.0,
                         -std::f64::consts::FRAC_1_SQRT_2,
                         0.0,
                         std::f64::consts::FRAC_1_SQRT_2
-                    ]);
+                    ]));
                     self.nodes[c]["camera"] = json!(self.cameras.len() - 1);
                 }
                 "Light" if self.keep.lights => {
@@ -324,12 +324,12 @@ impl Reader<'_, '_, '_> {
                     self.lights.push(light);
                     // FBX lights shine down -Y, glTF's down -Z.
                     let c = self.child(node, None);
-                    self.nodes[c]["rotation"] = json!([
+                    self.nodes[c]["rotation"] = json!(self.seen_turn([
                         -std::f64::consts::FRAC_1_SQRT_2,
                         0.0,
                         0.0,
                         std::f64::consts::FRAC_1_SQRT_2
-                    ]);
+                    ]));
                     self.nodes[c]["extensions"] = json!({ "KHR_lights_punctual": { "light": self.lights.len() - 1 } });
                 }
                 _ => {}
@@ -342,12 +342,24 @@ impl Reader<'_, '_, '_> {
     fn child(&mut self, parent: usize, m: Option<&M4>) -> usize {
         let mut n = json!({});
         if let Some(m) = m {
-            place(&mut n, m);
+            place(&mut n, &self.seen(m));
         }
         self.nodes.push(n);
         let c = self.nodes.len() - 1;
         self.add_child(parent, c);
         c
+    }
+
+    /// `m`, a transform in the file's space, as the document holds it: mirrored on both sides when the file is
+    /// left-handed, which with mirrored vertices and triangles wound the other way is the same scene in a
+    /// right-handed space.
+    pub(super) fn seen(&self, m: &M4) -> M4 {
+        self.mirror.map_or(*m, |axis| super::mirrored(m, axis))
+    }
+
+    /// A turn in the file's space as the document holds it (see [`Reader::seen`]).
+    fn seen_turn(&self, q: [f64; 4]) -> [f64; 4] {
+        self.mirror.map_or(q, |axis| super::mirrored_turn(q, axis))
     }
 
     /// Model `m`'s world transform in the file's space: its parents' times its own.

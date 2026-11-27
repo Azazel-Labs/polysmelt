@@ -40,7 +40,8 @@
 //! any text at all would otherwise read as an empty scene. VRML 1.0 is refused as unsupported.
 //!
 //! The asset's `extras.source` records the encoding, the version and the length unit (meters
-//! unless `UNIT length` names another, a scene in another unit scaled to meters), +Y up as the
+//! unless `UNIT length` names another, which the document's `RootNode` scales to meters; the node
+//! is over the scene's top-level nodes whether or not there is a unit to convert), +Y up as the
 //! standard has it, the first `WorldInfo`'s title and `info` strings (as comments), and the `META`
 //! statements (`meta` elements): `title`, `creator` or `author`, `generator` as the tool,
 //! `description`, `copyright` or `rights`, `license`, `created`, `modified` and `keywords` by
@@ -58,6 +59,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{Map, Value, json};
 
 use super::Input;
+use super::frame::{self, Frame};
 use crate::Result;
 use crate::assets::Assets;
 use crate::document::{Builder, Document, Keep};
@@ -67,7 +69,7 @@ use crate::material::{Alpha, CLAMP, Full, REPEAT, Tex};
 use crate::mesh::{GRAY, Material, srgb_to_linear};
 use crate::num::f32_of;
 use crate::quat::{self, rotate};
-use crate::source::{Axis, Converted, Fact, Handedness, SourceInfo};
+use crate::source::{Axis, Fact, Handedness, SourceInfo};
 
 /// An absent index.
 pub(super) const NONE: u32 = u32::MAX;
@@ -408,18 +410,16 @@ pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
     for r in c.graphs[0].roots.clone() {
         roots.extend(c.visit(0, r, 0)?);
     }
-    if let Some(u) = c.graphs[0].unit.filter(|u| u.is_finite() && *u > 0.0)
-        && (u - 1.0).abs() > 1e-12
-        && !roots.is_empty()
-    {
-        roots = vec![c.push_node(json!({ "name": "RootNode", "children": roots, "scale": [u, u, u] }))];
-    }
+    let unit = c.graphs[0].unit.filter(|u| u.is_finite() && *u > 0.0).unwrap_or(1.0);
     if roots.is_empty() && info.cut {
         return Err(crate::Error::cut_short(
             "X3D or VRML file is cut short before anything whole to keep",
         ));
     }
-    Ok(c.finish(&roots, &info))
+    let mut doc = c.finish(&roots, &info);
+    // X3D is Y up; a `UNIT` statement's length is the root node's scale.
+    frame::root(&mut doc, Frame::IDENTITY.scaled(unit));
+    Ok(doc)
 }
 
 /// The name of an XML document's root element: the first tag that isn't a declaration, a processing
@@ -991,10 +991,6 @@ impl Convert<'_> {
             // The standard's coordinate system: right-handed, +Y straight up.
             up_axis: Fact::Declared(Axis::PosY),
             handedness: Fact::Declared(Handedness::Right),
-            converted: Converted {
-                units: unit.is_some_and(|u| (u - 1.0).abs() > 1e-12) && !roots.is_empty(),
-                ..Converted::default()
-            },
             title: self.title.clone(),
             comments: std::mem::take(&mut self.info),
             ..SourceInfo::default()

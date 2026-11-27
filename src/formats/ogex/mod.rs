@@ -33,8 +33,8 @@
 //! cubic splines. Others (a track inside a stack of transforms glTF can't split, Bézier
 //! times) are sampled, at every key and four times between.
 //!
-//! `OpenGEX` is Z up by default, in its distance metric's units: the scene's root turns it Y up
-//! and scales it to meters. Angles and times are scaled by their metrics, and colors are
+//! `OpenGEX` is Z up by default, in its distance metric's units: the document's `RootNode`, its first node, turns it Y up
+//! and scales it to meters (and has no transform for a file that is Y up, in meters). Angles and times are scaled by their metrics, and colors are
 //! converted from the file's primaries to sRGB's. What has no glTF slot stays in `extras`.
 //!
 //! The asset's `extras.source` records the distance metric (a meter, assumed, when there's
@@ -54,6 +54,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value, json};
 
+use super::frame::{self, Frame};
 use super::xform::col::{self, IDENTITY, M4, mul, scaling, translation};
 use super::xform::set_trs;
 use crate::Result;
@@ -581,20 +582,21 @@ fn track_targets(t: &Tree<'_>, n: u32) -> Vec<u32> {
     out
 }
 
+/// What brings the file to glTF's Y up and meters: its `up` and `distance` metrics.
+fn frame_of(metric: &Metric) -> Frame {
+    let up = if metric.y_up {
+        Frame::IDENTITY
+    } else {
+        Frame::up(Axis::PosZ)
+    };
+    up.scaled(metric.distance)
+}
+
 /// Builds the glTF nodes: the root (turning the file Y up, in meters), then every node. Returns whether that's a
 /// scene even without meshes: the file has nodes, or lights or cameras to place without them.
 fn nodes(c: &mut Ctx<'_>) -> bool {
     let t = c.t;
-    let mut root = json!({ "name": "RootNode" });
-    if !c.metric.y_up {
-        let h = std::f64::consts::FRAC_1_SQRT_2;
-        root["rotation"] = json!([-h, 0.0, 0.0, h]);
-    }
-    let d = c.metric.distance;
-    if (d - 1.0).abs() > 0.0 {
-        root["scale"] = json!([d, d, d]);
-    }
-    c.nodes.push(root);
+    c.nodes.push(frame::node(frame_of(&c.metric)));
     c.kids.push(Vec::new());
     let mut stack: Vec<(u32, usize)> = Vec::new();
     let push_kids = |stack: &mut Vec<(u32, usize)>, n: u32, parent: usize| {
@@ -1043,7 +1045,9 @@ fn finish(mut c: Ctx<'_>) -> Document {
     let images = std::mem::replace(&mut c.images, Images::new(true, Path::new(""))).list;
     c.b.materials(&c.materials, images, &mut json);
     let lines_or_points = c.lines_or_points;
+    let frame = frame_of(&c.metric);
     let mut doc = c.b.finish(json, facts);
+    frame::placed(&mut doc, frame);
     if lines_or_points {
         doc.set_lines_and_points(true);
     }

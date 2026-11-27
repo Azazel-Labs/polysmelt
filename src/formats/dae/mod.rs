@@ -2,8 +2,9 @@
 //!
 //! The visual scene becomes the node hierarchy, each node's transforms (`matrix`, `translate`, `rotate`, `scale`,
 //! `lookat`, `skew`) composed into its local transform; `instance_node` places a copy of a node's subtree (a node
-//! that instances itself is cut off). The document's unit and up axis become a root node that carries the scene to
-//! glTF's Y-up meters, and are recorded in `asset.extras.source` (see [`crate::source`]) with what else the
+//! that instances itself is cut off). The scene stays in the document's unit and axes under the one top-level node,
+//! `RootNode`, which is always there and carries the turn to glTF's Y up and the scale to meters (no transform when
+//! the document needs none); skinned meshes are under it with everything else. The unit and up axis are recorded in `asset.extras.source` (see [`crate::source`]) with what else the
 //! `<asset>` says: its contributors, title, subject, keywords and dates; a node's own `<asset>` changes them below it. A
 //! document with no scene shows its geometries. URLs into other documents (geometry, nodes, materials, lights and
 //! cameras in other `.dae` files, beside the model or in the archive) are followed, each document read once and
@@ -50,6 +51,7 @@ use serde_json::{Map, Value, json};
 use zip::ZipArchive;
 
 use super::Input;
+use super::frame::{self, Frame};
 use super::xform::{IDENTITY, M4, inverse, mul, scale, set_transform, to_column_major, translate};
 use crate::assets::Assets;
 use crate::document::{Builder, Document, Keep};
@@ -249,15 +251,9 @@ pub(super) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
         r.animations();
     }
 
-    let basis = basis(meters, &up);
+    // The file's up axis and unit are the root node's; skinned meshes go under it with everything else.
+    let (frame, _) = Frame::of(&basis(meters, &up));
     let mut scene_nodes = roots;
-    #[allow(clippy::float_cmp, reason = "only the exact identity needs no root")]
-    if basis != IDENTITY {
-        let mut root_node = json!({ "name": "RootNode", "children": scene_nodes });
-        set_transform(&mut root_node, &basis);
-        r.nodes.push(root_node);
-        scene_nodes = vec![r.nodes.len() - 1];
-    }
     scene_nodes.append(&mut r.skinned_roots);
 
     let mut source = source_info(&dom, root, asset, meters, &up);
@@ -299,7 +295,9 @@ pub(super) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
     let images = std::mem::take(&mut r.images);
     let mut b = r.b;
     b.materials(materials, images.list, &mut json);
-    Ok(b.finish(json, Map::new()))
+    let mut doc = b.finish(json, Map::new());
+    frame::root(&mut doc, frame);
+    Ok(doc)
 }
 
 /// The entry of an archive that holds its document: the one `manifest.xml` names (a `.zae`), or the first model a

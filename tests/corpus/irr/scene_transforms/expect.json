@@ -79,7 +79,7 @@
     },
     {
       "node": "parent",
-      "parent": null,
+      "parent": "RootNode",
       "translation": [
         0,
         5,

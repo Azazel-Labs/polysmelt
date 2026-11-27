@@ -4,14 +4,14 @@
   "triangles": 12,
   "bounds": {
     "min": [
-      0,
-      0,
-      -1
+      0.0,
+      0.0,
+      -1.0
     ],
     "max": [
-      1,
-      1,
-      0
+      1.0,
+      1.0,
+      0.0
     ]
   },
   "area": 6.0,
@@ -63,7 +63,28 @@
       "upAxis": "+Z",
       "version": "3",
       "meshVersion": 3,
-      "masterScale": 1.0
+      "masterScale": 1.0,
+      "converted": [
+        "upAxis"
+      ]
     }
+  },
+  "json": {
+    "/scenes/0/nodes": [
+      1
+    ],
+    "/nodes/1/children": [
+      0
+    ],
+    "/nodes/1/scale": null,
+    "/nodes/1/rotation": [
+      -0.7071067811865476,
+      0,
+      0,
+      0.7071067811865476
+    ],
+    "/asset/extras/source/metersPerUnit": null,
+    "/asset/extras/source/unit": null,
+    "/asset/extras/source/assumed": null
   }
 }

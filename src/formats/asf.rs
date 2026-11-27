@@ -39,7 +39,8 @@
 //! motion's own name (`walk.asf` for `walk.amc`), then by the name up to its last `_` (`02.asf` for `02_01.amc`, as
 //! subject-and-trial collections name them). Not finding it is an error.
 //!
-//! Lengths become meters (an inch is 0.0254 m, divided by `length`): the source info's `metersPerUnit`, declared
+//! Lengths stay in the file's unit, and the document's `RootNode` scales them to meters (an inch is 0.0254 m,
+//! divided by `length`): the source info's `metersPerUnit`, declared
 //! when `:units` gives `length` and assumed (an inch) when it doesn't. The skeleton's `name` is its `title` and its
 //! `version` the source's. Capture is Y up, as glTF is; the file doesn't say so, so `+Y` is assumed. Nothing is
 //! allocated from a count the file gives: the bones are capped, and keys take room as lines are read.
@@ -878,7 +879,7 @@ pub(crate) fn load(input: Input<'_>, ext: &str, assets: &dyn Assets, keep: Keep)
         }
     }
     scene.source = source;
-    scene.scale(f32_of(INCH / sk.length));
+    scene.unit(INCH / sk.length);
     scene.finish(keep)
 }
 
@@ -959,7 +960,10 @@ mod tests {
         let doc = asf(ASF).unwrap();
         let nodes = doc.json()["nodes"].as_array().unwrap();
         let names: Vec<_> = nodes.iter().map(|n| n["name"].as_str().unwrap()).collect();
-        assert_eq!(names, ["root", "upper", "lower", "lower_end"]);
+        assert_eq!(names, ["root", "upper", "lower", "lower_end", "RootNode"]);
+        // The root node is the only top-level one, over the skeleton's root, and has nothing to convert.
+        assert_eq!(doc.json()["scenes"][0]["nodes"], json!([4]));
+        assert_eq!(nodes[4], json!({ "name": "RootNode", "children": [0] }));
         // `length 0.0254` makes a unit a meter.
         assert_eq!(nodes[2]["translation"], json!([2.0, 0.0, 0.0]));
         assert_eq!(nodes[3]["translation"], json!([0.0, 3.0, 0.0]));

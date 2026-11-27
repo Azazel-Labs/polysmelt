@@ -4,6 +4,51 @@ Breaking changes are allowed in minor releases until 1.0.
 
 ## Unreleased
 
+- Every reader brings a file's axes and units to glTF's (+Y up, right-handed, meters) the
+  same way, and gives the same shape of document, so nothing depends on the format, or on
+  which axes and unit a file happens to use. Before there were four ways: a `RootNode` that
+  was always there (STL, 3DS, 3MF, AMF, DXF, OpenGEX), one only when the file needed
+  converting (FBX, COLLADA, USD, X3D, VRM), a rotation on each of the file's roots (MD2, MD3,
+  MD5, IQM, SMD, HTR, C3D) and conversion written into the data. Now:
+  - A format with a scene has exactly one top-level node, always there and always named
+    `RootNode`, with the turn to +Y up and the scale to meters (no transform when the file
+    needs none). Every root of the file is its child: node paths gain that parent in every
+    format but glTF, and `scenes[0].nodes` is one node. This is every format except the
+    sampled ones below and glTF, so OBJ, PLY and OFF meshes, VTK, Gmsh, Medit, LightWave,
+    AC3D, XGL, Irrlicht, DirectX, the game and motion capture formats and SketchUp have the
+    node too. OpenFlight's header node and DXF's model space are children of it, not it.
+  - Skinned meshes are under `RootNode` in FBX, COLLADA and USD (they were beside it), and
+    the game formats no longer add a `Skeleton` node over a skin's several roots.
+  - Units are the root's scale everywhere: MikuMikuDance (0.08), ASF, C3D, TRC, HTR and
+    SketchUp keep their positions, translations, keys and bind matrices in the file's unit
+    and axes, as FBX and COLLADA always did. What is drawn is where it was. `Pose::Bind`
+    gives a skinned mesh as the file stores it, so in the file's units for these formats too.
+  - A left-handed FBX file is mirrored as it is read (vertices, normals, tangents, morph
+    targets, node transforms, bind matrices and keys, triangles wound the other way) as
+    every other left-handed format is; it was left as a negative scale on the root.
+  - Point clouds, gaussian splats and voxel grids are converted in their data, as before, and
+    have no `RootNode`. A PCD cloud is now taken to be Z up and turned, as `.xyz`, `.pts`,
+    `.ptx` and `.asc` are, so one scan lands the same way in each (it was a quarter turn
+    apart); its `upAxis` is `+Z`, assumed.
+  - 3DS: the master scale is applied. It is the file's "master scale factor for all
+    geometry coordinates", so the root scales by it, and camera clip planes and light
+    ranges with it. A file whose master scale is 1, as nearly all are, is the size it was.
+    3DS names no unit, so the unit stays unknown and `converted` doesn't list `units`.
+  - A file that doesn't say its unit, in a format that defines none, has an unknown unit and
+    is not scaled: C3D without `POINT:UNITS` and TRC without `Units` were taken to be
+    millimeters, and now are as HTR and BVH are.
+  - `converted` in the source info says what the root does: `upAxis` when it turns, `units`
+    when it scales, neither for a file that needed nothing. C3D claimed a turn for Y-up
+    files, and VRM 0.x claimed none for its half turn.
+  - glTF 2.0 and 1.0 and 3D Tiles are kept as they are. A `.vrm` or `.vrma` has the
+    `RootNode` whatever its version.
+  - The root's turn is written as the same exact numbers by every reader (a quarter turn
+    about X is `[-0.7071067811865476, 0, 0, 0.7071067811865476]`), where some wrote it in
+    single precision and some from a matrix.
+  - The FBX writer doesn't write a `RootNode` that converts nothing as a model, so a file
+    read and written again keeps the nodes it had. 3DS keeps the node of a camera or light
+    that isn't kept (`Keep` without cameras or lights), as pruning one does.
+
 - Every reader now treats geometry that can't be drawn the same way. A triangle, line segment
   or point that names a vertex that isn't there, or one whose position isn't finite, is
   dropped: never moved to the origin, and never an error for the whole file. Each is counted

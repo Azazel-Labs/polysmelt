@@ -22,8 +22,8 @@
 //! the children its current mask shows; an animated group shows its children in turn, each
 //! scaled to nothing when it's not its turn. Light sources become `KHR_lights_punctual` lights.
 //!
-//! `OpenFlight` is Z up, counterclockwise from the front, in the header's units: the scene's root
-//! turns it Y up and scales it to meters. What has no glTF slot (the header's placement on the
+//! `OpenFlight` is Z up, counterclockwise from the front, in the header's units: the document's
+//! `RootNode`, over the header's node, turns it Y up and scales it to meters. What has no glTF slot (the header's placement on the
 //! earth, ranges, comments, record kinds) stays in `extras`.
 //!
 //! The asset's `extras.source` records the version, the header's units, Z up, what was
@@ -40,6 +40,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value, json};
 
+use super::frame::{self, Frame};
 use super::keys::{self, Interp, Track};
 use super::xform::col::{self, IDENTITY, mul, scaling, translation};
 use super::xform::set_trs;
@@ -319,16 +320,8 @@ fn expand(c: &mut Ctx<'_>) -> Result<Scene> {
             let r = col::rotation(from_to([0.0, 0.0, -1.0], d));
             m = mul(&m, &mul(&translation(pos), &r));
         }
-        if top {
-            // The scene's root: Z up to Y up, and the file's units to meters.
-            let h = std::f64::consts::FRAC_1_SQRT_2;
-            let u = c.files[0].db.meters();
-            j["rotation"] = json!([-h, 0.0, 0.0, h]);
-            if (u - 1.0).abs() > 0.0 {
-                j["scale"] = json!([u, u, u]);
-            }
-            j["name"] = json!(if node.name.is_empty() { "RootNode" } else { &node.name });
-        } else {
+        // The header stands where the file's space does: the root node over it turns and scales that.
+        if !top {
             if (it.scale - 1.0).abs() > 0.0 {
                 m = mul(&m, &scaling([it.scale; 3]));
             }
@@ -1559,5 +1552,7 @@ fn finish(mut c: Ctx<'_>, mut s: Scene) -> Document {
     if c.lines_or_points {
         doc.set_lines_and_points(true);
     }
+    // Z up to Y up, and the file's units to meters.
+    frame::root(&mut doc, Frame::z_up().scaled(meters));
     doc
 }

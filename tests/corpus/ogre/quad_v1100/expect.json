@@ -95,11 +95,12 @@
     }
   },
   "document": {
-    "nodes": 1,
+    "nodes": 2,
     "skins": 0,
     "animations": 0,
     "node_names": [
-      "quad"
+      "quad",
+      "RootNode"
     ],
     "attributes": [
       "POSITION",

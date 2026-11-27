@@ -8,7 +8,7 @@
     "frames": 2
   },
   "document": {
-    "nodes": 2,
+    "nodes": 3,
     "animations": 1,
     "channels": 3,
     "node_names": [
@@ -19,8 +19,17 @@
   "json": {
     "/asset/extras/source/format": "BVH",
     "/scenes/0/nodes": [
-      0
+      2
     ],
+    "/nodes/2": {
+      "name": "RootNode",
+      "children": [
+        0
+      ]
+    },
+    "/nodes/2/rotation": null,
+    "/nodes/2/scale": null,
+    "/asset/extras/source/converted": null,
     "/asset/extras/source/frameRate": 25.0,
     "/asset/extras/source/assumed": [
       "upAxis"
@@ -31,7 +40,7 @@
   "rig": [
     {
       "node": "Hips",
-      "parent": null,
+      "parent": "RootNode",
       "translation": [
         0,
         90,

@@ -15,7 +15,8 @@
 //! - BMP and TGA textures are re-encoded as PNG; GIF and TIFF textures are dropped. A texture with
 //!   an alpha channel is cut out at a half, as `SketchUp` draws it.
 //! - Unpainted faces take the default material every reader gives faces with none.
-//! - Lengths are turned from inches to meters, and Z up to glTF's Y up.
+//! - The model stays in its own inches and Z up: the document's `RootNode`, over the model's node, turns it to
+//!   glTF's Y up and scales it to meters.
 //!
 //! The asset's `extras.source` records the header's version, `SketchUp` and its version as the
 //! tool, and the inches and Z up the file is in, both converted.
@@ -31,9 +32,10 @@ mod zip;
 use serde_json::{Map, json};
 
 use super::Input;
+use super::frame::{self, Frame};
 use crate::assets::Memory;
 use crate::document::{Document, Keep};
-use crate::source::{Axis, Converted, Fact, Handedness, SourceInfo};
+use crate::source::{Axis, Fact, Handedness, SourceInfo};
 use crate::{Result, Within as _};
 
 /// Reads the `SketchUp` model `input`, with what it holds in a glTF document.
@@ -53,6 +55,8 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document> {
     doc.base_mut()
         .entry("asset")
         .or_insert_with(|| json!({ "version": "2.0" }))["extras"] = json!({ "source": source });
+    // The model is kept in its own inches and Z up: the root node turns it Y up and scales it to meters.
+    frame::root(&mut doc, Frame::z_up().scaled(glb::INCH));
     Ok(doc)
 }
 
@@ -66,11 +70,6 @@ fn source_info(bytes: &[u8], major: u32) -> SourceInfo {
         unit: Some("inch".into()),
         up_axis: Fact::Declared(Axis::PosZ),
         handedness: Fact::Declared(Handedness::Right),
-        converted: Converted {
-            units: true,
-            up_axis: true,
-            handedness: false,
-        },
         tool: Some(format!("SketchUp {}", version_name(major))),
         ..SourceInfo::default()
     }
@@ -174,8 +173,8 @@ mod tests {
         assert_eq!(info.tool.as_deref(), Some("SketchUp 2023"));
         assert_eq!(info.meters_per_unit, Fact::Declared(0.0254));
         assert_eq!(info.up_axis, Fact::Declared(Axis::PosZ));
-        assert_eq!(info.output_meters_per_unit(), Fact::Declared(1.0));
-        assert!(info.converted.units && info.converted.up_axis);
+        // What is converted is said when the root node is made, on a load.
+        assert!(!info.converted.units && !info.converted.up_axis);
     }
 
     #[test]

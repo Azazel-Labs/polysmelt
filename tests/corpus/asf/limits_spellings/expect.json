@@ -7,7 +7,7 @@
     "channels": 15
   },
   "document": {
-    "nodes": 8,
+    "nodes": 9,
     "node_names": [
       "root",
       "lhipjoint",
@@ -16,7 +16,8 @@
       "ltibia_end",
       "lowerback",
       "head",
-      "head_end"
+      "head_end",
+      "RootNode"
     ],
     "animations": 0
   },
@@ -25,7 +26,13 @@
     "/asset/extras/source/upAxis": "+Y",
     "/asset/extras/source/metersPerUnit": 0.05644444444444444,
     "/scenes/0/nodes": [
+      8
+    ],
+    "/nodes/8/children": [
       0
+    ],
+    "/asset/extras/source/converted": [
+      "units"
     ],
     "/animations": null,
     "/asset/extras/source/frameRate": null,
@@ -50,12 +57,40 @@
   },
   "rig": [
     {
-      "node": "root",
+      "node": "RootNode",
       "parent": null,
       "translation": [
+        0,
+        0,
+        0
+      ],
+      "rotation": [
+        0,
+        0,
+        0,
+        1
+      ],
+      "scale": [
+        0.056444444,
+        0.056444444,
+        0.056444444
+      ]
+    },
+    {
+      "node": "root",
+      "world": [
         0.0,
         0.0,
         0.0
+      ]
+    },
+    {
+      "node": "root",
+      "parent": "RootNode",
+      "translation": [
+        0,
+        0,
+        0
       ],
       "rotation": [
         0,
@@ -73,9 +108,9 @@
       "node": "lhipjoint",
       "parent": "root",
       "translation": [
-        0.0,
-        0.0,
-        0.0
+        0,
+        0,
+        0
       ],
       "rotation": [
         0,
@@ -93,8 +128,8 @@
       "node": "lfemur",
       "parent": "lhipjoint",
       "translation": [
-        0.084667,
-        -0.112889,
+        1.5,
+        -2.0,
         0.0
       ],
       "rotation": [
@@ -113,8 +148,8 @@
       "node": "ltibia",
       "parent": "lfemur",
       "translation": [
-        0.134392,
-        -0.371553,
+        2.380953,
+        -6.582634,
         0.0
       ],
       "rotation": [
@@ -133,8 +168,8 @@
       "node": "ltibia_end",
       "parent": "ltibia",
       "translation": [
-        0.138231,
-        -0.382169,
+        2.44898,
+        -6.770709,
         0.0
       ],
       "rotation": [
@@ -153,9 +188,9 @@
       "node": "lowerback",
       "parent": "root",
       "translation": [
-        0.0,
-        0.0,
-        0.0
+        0,
+        0,
+        0
       ],
       "rotation": [
         0,
@@ -174,7 +209,7 @@
       "parent": "lowerback",
       "translation": [
         0.0,
-        0.112889,
+        2.0,
         0.0
       ],
       "rotation": [
@@ -194,8 +229,8 @@
       "parent": "head",
       "translation": [
         0.0,
-        0.168493,
-        0.016849
+        2.985112,
+        0.298511
       ],
       "rotation": [
         0,

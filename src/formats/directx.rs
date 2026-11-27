@@ -25,8 +25,8 @@
 //!   opacity), its emissive color, and its specular power and color as the highlight (the classic material every
 //!   reader reads one way, `legacy_material`). Faces with no material take the default one. `TextureFilename` is the base color texture and `NormalmapFilename` the normal map.
 //! - `SkinWeights` names a bone (a frame), the vertices it moves with their weights, and the offset matrix from the
-//!   mesh into the bone, which is the joint's inverse bind matrix. A skinned mesh hangs from a root node of its own,
-//!   since a skin places it. A bone no frame is named for becomes a root node where its offset puts it, and
+//!   mesh into the bone, which is the joint's inverse bind matrix. A skinned mesh hangs from a node of its own beside the
+//!   file's frames, since a skin places it. A bone no frame is named for becomes a node there where its offset puts it, and
 //!   vertices no bone moves are bound to the mesh's frame, so they stay where it puts them.
 //! - `AnimationSet` is an animation and each `Animation` in it animates the frame it refers to. `AnimationKey`s of
 //!   type 0 (rotation, a quaternion stored w first), 1 (scale), 2 (translation) and 3 or 4 (a matrix, decomposed)

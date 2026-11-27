@@ -15,7 +15,8 @@ use crate::material::Alpha;
 use crate::polygon::{newell, triangulate_holes};
 use crate::vec3::{cross, dot, sub, unit};
 
-const INCH: f64 = 0.0254;
+/// An inch in meters: the model's unit, which the document's root node scales by.
+pub(super) const INCH: f64 = 0.0254;
 /// More nodes than any real model has; a file that nests big instance arrays inside each other could otherwise ask
 /// for billions.
 const MAX_NODES: usize = 1_000_000;
@@ -65,28 +66,20 @@ fn srgb_to_linear(c: u8) -> f64 {
     crate::mesh::srgb_to_linear_f64(f64::from(c) / 255.0)
 }
 
-/// `SketchUp`'s inches, Z up, to glTF's meters, Y up. A rotation, so it keeps winding.
-fn to_gltf(p: [f64; 3]) -> [f64; 3] {
-    [p[0] * INCH, p[2] * INCH, -p[1] * INCH]
-}
-
-/// `SketchUp`'s 13-value transform as a column-major glTF matrix in meters and Y up, or `None` when it holds
-/// non-finite values. Index 12 is a uniform scale that multiplies the rest.
+/// `SketchUp`'s 13-value transform as a column-major glTF matrix, in the model's own inches and Z up as the
+/// vertices are (the document's root node turns and scales them all), or `None` when it holds non-finite values.
+/// Index 12 is a uniform scale that multiplies the rest.
 fn node_matrix(m: &[f64; 13]) -> Option<[f64; 16]> {
     let s = if m[12] == 0.0 { 1.0 } else { m[12] };
-    let a = |r: usize, c: usize| m[r * 3 + c] * s;
-    // swap axes on both sides: R * A * R^T with R = (x, y, z) -> (x, z, -y)
-    let src = [0, 2, 1];
-    let sign = [1.0, 1.0, -1.0];
     let mut out = [0.0; 16];
     for r in 0..3 {
         for c in 0..3 {
-            out[c * 4 + r] = sign[r] * sign[c] * a(src[r], src[c]);
+            out[c * 4 + r] = m[r * 3 + c] * s;
         }
     }
-    out[12] = m[9] * s * INCH;
-    out[13] = m[11] * s * INCH;
-    out[14] = -m[10] * s * INCH;
+    out[12] = m[9] * s;
+    out[13] = m[10] * s;
+    out[14] = m[11] * s;
     out[15] = 1.0;
     out.iter().all(|v| v.is_finite()).then_some(out)
 }
@@ -763,7 +756,7 @@ fn add_face(
     smoothed: Option<&[[f64; 3]]>,
 ) -> usize {
     let points: Vec<[f64; 3]> = face.loops.iter().flatten().copied().collect();
-    let out: Vec<[f32; 3]> = points.iter().map(|&p| to_gltf(p).map(|v| v as f32)).collect();
+    let out: Vec<[f32; 3]> = points.iter().map(|&p| p.map(|v| v as f32)).collect();
     if out.iter().flatten().any(|v| !v.is_finite()) {
         return 0;
     }
@@ -783,7 +776,7 @@ fn add_face(
         return 0;
     }
     let sign = if reverse { -1.0 } else { 1.0 };
-    let gltf_normal = |n: [f64; 3]| to_gltf(n).map(|v| (sign * v / INCH) as f32);
+    let gltf_normal = |n: [f64; 3]| n.map(|v| (sign * v) as f32);
     let normal = gltf_normal(n);
     let matrix = if reverse { face.back_uv_matrix } else { face.uv_matrix };
     let inv = matrix.as_ref().map(invert_3x3);
@@ -837,15 +830,7 @@ mod tests {
     }
 
     #[test]
-    fn axis_swap_is_a_rotation() {
-        assert_eq!(to_gltf([1.0, 0.0, 0.0]), [INCH, 0.0, 0.0]);
-        // SketchUp's up becomes glTF's up, and SketchUp's north (+Y) points away from a glTF viewer (-Z)
-        assert_eq!(to_gltf([0.0, 0.0, 1.0]), [0.0, INCH, 0.0]);
-        assert_eq!(to_gltf([0.0, 1.0, 0.0]), [0.0, 0.0, -INCH]);
-    }
-
-    #[test]
-    fn node_matrices_match_baked_points() {
+    fn node_matrices_place_points_as_the_model_does() {
         // rotate 90 degrees about Z, then move by (1, 2, 3) inches
         let m = [0.0, -1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 2.0, 3.0, 1.0];
         let g = node_matrix(&m).unwrap();
@@ -855,11 +840,10 @@ mod tests {
             m[3] * p[0] + m[4] * p[1] + m[5] * p[2] + m[10],
             m[6] * p[0] + m[7] * p[1] + m[8] * p[2] + m[11],
         ];
-        let want = to_gltf(moved);
-        let q = to_gltf(p);
+        // The matrix is in the model's own space, as the vertices are.
         for r in 0..3 {
-            let got = g[r] * q[0] + g[4 + r] * q[1] + g[8 + r] * q[2] + g[12 + r];
-            assert!((got - want[r]).abs() < 1e-12, "row {r}: {got} vs {}", want[r]);
+            let got = g[r] * p[0] + g[4 + r] * p[1] + g[8 + r] * p[2] + g[12 + r];
+            assert!((got - moved[r]).abs() < 1e-12, "row {r}: {got} vs {}", moved[r]);
         }
         assert!(node_matrix(&[f64::NAN; 13]).is_none());
     }
@@ -1004,8 +988,9 @@ mod tests {
         };
         let (front_n, front_i) = read(&prims[0]);
         let (back_n, back_i) = read(&prims[1]);
-        assert_eq!(front_n[0], [0.0, 1.0, 0.0]);
-        assert_eq!(back_n[0], [0.0, -1.0, 0.0]);
+        // In the model's own Z up.
+        assert_eq!(front_n[0], [0.0, 0.0, 1.0]);
+        assert_eq!(back_n[0], [0.0, 0.0, -1.0]);
         for (f, b) in front_i.chunks_exact(3).zip(back_i.chunks_exact(3)) {
             assert_eq!([f[0], f[2], f[1]], b);
         }
@@ -1092,10 +1077,10 @@ mod tests {
         let bin = doc.blob.as_deref().unwrap();
         let prim = doc.meshes().next().unwrap().primitives().next().unwrap();
         let normals: Vec<[f32; 3]> = prim.reader(|_| Some(bin)).read_normals().unwrap().collect();
-        // glTF's Y is SketchUp's Z
+        // In the model's own Z up.
         let h = std::f32::consts::FRAC_1_SQRT_2;
-        assert!((normals[0][0] - h).abs() < 1e-6 && (normals[0][1] - h).abs() < 1e-6);
-        assert_eq!(normals[1], [0.0, 1.0, 0.0]);
+        assert!((normals[0][0] - h).abs() < 1e-6 && (normals[0][2] - h).abs() < 1e-6);
+        assert_eq!(normals[1], [0.0, 0.0, 1.0]);
     }
 
     #[test]

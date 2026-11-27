@@ -8,14 +8,15 @@
     "unattached_bones": 1
   },
   "document": {
-    "nodes": 6,
+    "nodes": 7,
     "node_names": [
       "root",
       "a",
       "b",
       "b_end",
       "c",
-      "d"
+      "d",
+      "RootNode"
     ],
     "animations": 0
   },
@@ -24,19 +25,53 @@
     "/asset/extras/source/upAxis": "+Y",
     "/asset/extras/source/metersPerUnit": 0.0254,
     "/scenes/0/nodes": [
+      6
+    ],
+    "/nodes/6/children": [
       0
+    ],
+    "/asset/extras/source/converted": [
+      "units"
     ],
     "/animations": null,
     "/asset/extras/source/frameRate": null
   },
   "rig": [
     {
-      "node": "root",
+      "node": "RootNode",
       "parent": null,
       "translation": [
+        0,
+        0,
+        0
+      ],
+      "rotation": [
+        0,
+        0,
+        0,
+        1
+      ],
+      "scale": [
+        0.0254,
+        0.0254,
+        0.0254
+      ]
+    },
+    {
+      "node": "root",
+      "world": [
         0.0,
         0.0,
         0.0
+      ]
+    },
+    {
+      "node": "root",
+      "parent": "RootNode",
+      "translation": [
+        0,
+        0,
+        0
       ],
       "rotation": [
         0,
@@ -54,9 +89,9 @@
       "node": "a",
       "parent": "root",
       "translation": [
-        0.0,
-        0.0,
-        0.0
+        0,
+        0,
+        0
       ],
       "rotation": [
         0,
@@ -74,7 +109,7 @@
       "node": "b",
       "parent": "a",
       "translation": [
-        0.0254,
+        1.0,
         0.0,
         0.0
       ],
@@ -95,7 +130,7 @@
       "parent": "b",
       "translation": [
         0.0,
-        0.0254,
+        1.0,
         0.0
       ],
       "rotation": [
@@ -114,9 +149,9 @@
       "node": "c",
       "parent": "root",
       "translation": [
-        0.0,
-        0.0,
-        0.0
+        0,
+        0,
+        0
       ],
       "rotation": [
         0,
@@ -136,7 +171,7 @@
       "translation": [
         0.0,
         0.0,
-        0.0254
+        1.0
       ],
       "rotation": [
         0,

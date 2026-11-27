@@ -12,11 +12,12 @@
 //! channel with a key at each frame where it was seen, the first frame at 0 seconds; glTF has no way to leave a gap,
 //! so a missing stretch is filled in by the keys on each side, and the missing samples are counted. A frame's time
 //! is its `Time` cell, or `(Frame# − 1) / DataRate` without one; a row with neither, or whose time doesn't follow the
-//! row before it, is left out and counted. Lengths become meters from `Units` (millimeters when it's absent).
+//! row before it, is left out and counted. Positions stay in the file's unit: the
+//! document's `RootNode`, over `markers`, scales them to meters from `Units`.
 //! TRC files don't say which way is up; they're taken to be Y-up, as biomechanics tools write them.
 //!
-//! The source info has `Units` as the `unit` and its length as `metersPerUnit`, declared (assumed `mm` when it's
-//! absent, unknown when it isn't a unit, which leaves lengths as they are), the up axis `+Y` assumed, and
+//! The source info has `Units` as the `unit` and its length as `metersPerUnit`, declared (unknown when it's
+//! absent or isn't a unit, which leaves lengths as they are), the up axis `+Y` assumed, and
 //! `DataRate` as `frameRate`, declared (an assumed default when it's missing or not above 0). Nothing is allocated from a count the file gives: markers come from the names and columns there are,
 //! and frames from the rows there are.
 
@@ -80,7 +81,8 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document> {
         .filter(|r| r.is_finite() && *r > 0.0);
     let rate = rate_given.unwrap_or(DEFAULT_RATE);
     let units = get("units").filter(|u| !u.is_empty());
-    let meters = units.map_or(Some(0.001), meters_in);
+    // A file that doesn't say its unit has none that is known: nothing is scaled.
+    let meters = units.and_then(meters_in);
 
     // The marker names: every non-empty cell after Frame# and Time, each over three columns.
     let names_line = lines.next().unwrap_or("");
@@ -172,12 +174,8 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document> {
 
     let info = &mut scene.info;
     info.format = Some("TRC".into());
-    info.unit = Some(units.unwrap_or("mm").to_owned());
-    info.meters_per_unit = match (units, meters) {
-        (Some(_), Some(m)) => Fact::Declared(m),
-        (None, Some(m)) => Fact::Assumed(m),
-        (_, None) => Fact::Unknown,
-    };
+    info.unit = units.map(str::to_owned);
+    info.meters_per_unit = meters.map_or(Fact::Unknown, Fact::Declared);
     // The file doesn't say; biomechanics tools write Y up.
     info.up_axis = Fact::Assumed(Axis::PosY);
     info.frame_rate = rate_given.map_or(Fact::Assumed(rate), Fact::Declared);
@@ -219,7 +217,7 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document> {
         facts.insert("dropped_rows".into(), json!(dropped));
     }
     scene.source = source;
-    scene.scale(f32_of(meters.unwrap_or(1.0)));
+    scene.unit(meters.unwrap_or(1.0));
     scene.finish(keep)
 }
 
@@ -262,12 +260,19 @@ Frame#\tTime\tL.Knee\t\t\tR Knee\t\t\t
         let rig = doc.rig().unwrap();
         assert_eq!(rig.nodes[1].name.as_deref(), Some("L.Knee"));
         assert_eq!(rig.nodes[2].name.as_deref(), Some("R Knee"));
-        assert!(near(&rig.nodes[1].rest.translation, &[0.1, 0.2, 0.3]));
-        assert!(near(&rig.nodes[2].rest.translation, &[0.0, 0.5, 0.0]));
+        // Positions stay in the file's millimeters; the root node scales them to meters.
+        assert!(near(&rig.nodes[1].rest.translation, &[100.0, 200.0, 300.0]));
+        assert!(near(&rig.nodes[2].rest.translation, &[0.0, 500.0, 0.0]));
+        assert_eq!(
+            doc.json()["nodes"][3],
+            json!({ "name": "RootNode", "children": [0], "scale": [0.001, 0.001, 0.001] })
+        );
+        let at = rig.world(&rig.pose(None, 0.0))[1];
+        assert!(near(&at[12..15], &[0.1, 0.2, 0.3]));
         assert!(near(&rig.animations[0].channels[0].times, &[0.0, 0.1, 0.2]));
         assert!(near(&rig.animations[0].channels[1].times, &[0.1]));
         let pose = rig.pose(Some(0), 0.15);
-        assert!(near(&pose[1].translation, &[0.115, 0.205, 0.295]));
+        assert!(near(&pose[1].translation, &[115.0, 205.0, 295.0]));
         assert_eq!(doc.json()["asset"]["extras"]["source"]["startTime"], json!(0.5));
         let info = doc.source_info();
         assert_eq!(info.format.as_deref(), Some("TRC"));
@@ -286,7 +291,8 @@ Frame#\tTime\tL.Knee\t\t\tR Knee\t\t\t
         assert_eq!(doc.facts["dropped_rows"], json!(1));
         assert_eq!(doc.facts["missing_samples"], json!(1));
         let rig = doc.rig().unwrap();
-        assert!(near(&rig.nodes[2].rest.translation, &[0.04, 0.05, 0.06]));
+        assert!(near(&rig.nodes[2].rest.translation, &[4.0, 5.0, 6.0]));
+        assert_eq!(doc.json()["nodes"][3]["scale"], json!([0.01, 0.01, 0.01]));
         assert!(near(&rig.animations[0].channels[0].times, &[0.0, 0.5]));
     }
 

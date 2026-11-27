@@ -23,7 +23,7 @@ import zipfile
 
 # The shared modules are beside this script, which `python -I` leaves off the path.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common import AXES, CUBE_BOUNDS, CUBE_QUADS, CUBE_V, case, fresh, png, polygon_area, r, srgb_to_linear  # noqa: E402
+from common import ROOT_NODE, AXES, CUBE_BOUNDS, CUBE_QUADS, CUBE_V, case, fresh, png, polygon_area, r, srgb_to_linear  # noqa: E402
 from common import DEFAULT_MATERIAL, NO_HIGHLIGHT, SAME_PHONG, phong, same_phong_expect  # noqa: E402
 
 FMT = "dae"
@@ -455,7 +455,7 @@ write("matrix_and_lookat", {"cube.dae": collada([lib("geometries", cube())], nod
       f"{SPEC}: a row-major <matrix> on a parent, a <lookat> on its child", triangles=12,
       bounds=bounds([apply(child_m, v) for v in CUBE_V]), document={"node_names": ["Parent", "Child"]},
       rig=[{"node": "Child", "parent": "Parent", "translation": [0, 0, 4]},
-           {"node": "Parent", "parent": None, "translation": [5, 0, 0], "rotation": quat((1, 0, 0), 30)}])
+           {"node": "Parent", "parent": ROOT_NODE, "translation": [5, 0, 0], "rotation": quat((1, 0, 0), 30)}])
 
 eye2 = (3, 0, 0)
 # Looking down -X from +X, Y up: local Z is +X, local X is up x Z = -Z.
@@ -493,7 +493,7 @@ write("nested_hierarchy", {"cube.dae": collada([lib("geometries", cube())], node
            "Mid", "Mid"), "Top", "Top"))},
       f"{SPEC}: transforms compose from the root down", triangles=12,
       bounds={"min": [2, 1, 0], "max": [4, 3, 2]},
-      rig=[{"node": "Top", "parent": None, "translation": [0, 1, 0]},
+      rig=[{"node": "Top", "parent": ROOT_NODE, "translation": [0, 1, 0]},
            {"node": "Mid", "parent": "Top", "scale": [2, 2, 2]},
            {"node": "Leaf", "parent": "Mid", "translation": [1, 0, 0]}])
 

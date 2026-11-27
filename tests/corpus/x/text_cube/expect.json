@@ -89,9 +89,10 @@
     "/asset/extras/source/version": "3.3"
   },
   "document": {
-    "nodes": 1,
+    "nodes": 2,
     "node_names": [
-      "Box"
+      "Box",
+      "RootNode"
     ]
   }
 }

@@ -7,12 +7,13 @@
     "frames": 2
   },
   "document": {
-    "nodes": 2,
+    "nodes": 3,
     "animations": 1,
     "channels": 1,
     "node_names": [
       "markers",
-      "m"
+      "m",
+      "RootNode"
     ]
   },
   "json": {
@@ -20,7 +21,10 @@
     "/asset/extras/source/frameRate": 100.0,
     "/asset/extras/source/metersPerUnit": null,
     "/scenes/0/nodes": [
-      0
+      2
+    ],
+    "/asset/extras/source/converted": [
+      "upAxis"
     ],
     "/animations/0/name": "unknown_units",
     "/animations/0/samplers/0/interpolation": "LINEAR",
@@ -29,7 +33,7 @@
   },
   "rig": [
     {
-      "node": "markers",
+      "node": "RootNode",
       "parent": null,
       "translation": [
         0,
@@ -41,6 +45,31 @@
         0.0,
         0.0,
         0.707107
+      ],
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ]
+    },
+    {
+      "node": "markers",
+      "parent": "RootNode",
+      "translation": [
+        0,
+        0,
+        0
+      ],
+      "rotation": [
+        0,
+        0,
+        0,
+        1
+      ],
+      "scale": [
+        1,
+        1,
+        1
       ]
     },
     {
@@ -56,6 +85,11 @@
         1.0,
         2.0,
         3.0
+      ],
+      "world": [
+        1.0,
+        3.000001,
+        -2.000003
       ]
     },
     {
@@ -74,6 +108,11 @@
         1.0,
         2.0,
         3.0
+      ],
+      "world": [
+        1.0,
+        3.000001,
+        -2.000003
       ]
     },
     {
@@ -83,6 +122,11 @@
         2.0,
         3.0,
         4.0
+      ],
+      "world": [
+        2.0,
+        4.000001,
+        -3.000004
       ]
     }
   ]
