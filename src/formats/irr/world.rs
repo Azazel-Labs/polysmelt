@@ -208,7 +208,8 @@ pub(super) fn load(text: &str, dir: &Path, limit: usize, assets: &dyn Assets, ke
         facts.insert("unsupported_animators".into(), json!(unsupported_animators));
     }
     if !missing.is_empty() {
-        // In the source, as other readers name the files a model refers to and can't find.
+        // In the source, as other readers name the files a model refers to and can't find: after the textures
+        // the scene's materials didn't find, each file once.
         let asset = &mut doc.base_mut()["asset"];
         if !asset["extras"].is_object() {
             asset["extras"] = json!({});
@@ -216,7 +217,17 @@ pub(super) fn load(text: &str, dir: &Path, limit: usize, assets: &dyn Assets, ke
         if !asset["extras"]["source"].is_object() {
             asset["extras"]["source"] = json!({});
         }
-        asset["extras"]["source"]["missingFiles"] = json!(missing);
+        let list = &mut asset["extras"]["source"]["missingFiles"];
+        if !list.is_array() {
+            *list = json!([]);
+        }
+        if let Some(list) = list.as_array_mut() {
+            for m in missing {
+                if !list.iter().any(|v| v.as_str() == Some(m.as_str())) {
+                    list.push(Value::from(m));
+                }
+            }
+        }
     }
     Ok(doc)
 }

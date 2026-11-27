@@ -841,7 +841,12 @@ fn bind_pose(doc: &Document, rest: Option<&Mesh>) -> Result<(), String> {
         ));
     }
     for (k, (r, b)) in rest.prims.iter().zip(&bind.prims).enumerate() {
-        if r.indices != b.indices || r.skin_joints != b.skin_joints || r.skin_weights != b.skin_weights {
+        if r.indices != b.indices
+            || r.skin_joints != b.skin_joints
+            || r.skin_weights != b.skin_weights
+            || r.skin_joint_sets != b.skin_joint_sets
+            || r.skin_weight_sets != b.skin_weight_sets
+        {
             return Err(format!("bind pose primitive {k}: different triangles or joints"));
         }
         if !r.is_skinned() && (r.positions != b.positions || r.normals != b.normals) {

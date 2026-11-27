@@ -648,8 +648,22 @@ case(FMT, "texture_data_uri", {"cube.gltf": g.embedded()},
 g = G()
 textured(g, {"uri": "missing.png"})
 case(FMT, "texture_missing", {"cube.glb": g.glb()},
-     {"spec": SPEC + ": a texture file that isn't there leaves the material untextured", "source": SRC, **CUBE,
-      "materials": [{"textured": False}]})
+     {"spec": SPEC + ": a texture file that isn't there leaves the material untextured; it is counted as dropped "
+              "and named as missing, as every reader reports a texture it doesn't have", "source": SRC, **CUBE,
+      "materials": [{"textured": False}],
+      "json": {"/asset/extras/source/droppedTextures": 1, "/asset/extras/source/missingFiles": ["missing.png"]}})
+
+# One image that isn't there behind two textures (the base color and the normal map, each its own sampler): one
+# texture the document doesn't have, counted once and named once.
+g = G()
+textured(g, {"uri": "missing.png"}, {"uri": "missing.png"})
+g.j["images"].pop()
+g.j["textures"][1]["source"] = 0
+case(FMT, "texture_missing_shared", {"cube.glb": g.glb()},
+     {"spec": SPEC + ": two textures on one image file that isn't there: the image is counted once and named "
+              "once", "source": SRC, **CUBE, "materials": [{"textured": False}],
+      "json": {"/asset/extras/source/droppedTextures": 1, "/asset/extras/source/missingFiles": ["missing.png"],
+               "/textures/1/source": 0}})
 
 # EXT_texture_webp with a PNG fallback: the PNG is used.
 # A complete 1x1 lossless WebP, so the file validates; readers that don't embed WebP skip it.
@@ -1122,6 +1136,62 @@ case(FMT, "gltf1_animation", {"cube.gltf": text, "model.bin": binary},
       "source": SRC, **CUBE, "document": {"animations": 1, "channels": 1},
       "json": {"/animations/0/channels/0/target": {"node": 0, "path": "translation"},
                "/animations/0/samplers/0": {"input": times, "output": moves, "interpolation": "LINEAR"}}})
+
+# An animation whose keys start a second in: it's moved to start at 0, the second noted in extras.
+g = cube_doc()
+times = g.acc([1, 2], typ="SCALAR", target=None, minmax=True)
+moves = g.acc([[0, 0, 0], [2, 0, 0]], target=None)
+doc = v1(g)
+doc["animations"] = {"anim_0": {
+    "parameters": {"TIME": f"acc_{times}", "translation": f"acc_{moves}"},
+    "samplers": {"s": {"input": "TIME", "output": "translation", "interpolation": "LINEAR"}},
+    "channels": [{"sampler": "s", "target": {"id": "node_0", "path": "translation"}}]}}
+text, binary = v1_gltf(doc, g)
+case(FMT, "gltf1_late_animation", {"cube.gltf": text, "model.bin": binary},
+     {"spec": SPEC1 + ": an animation whose keys start at 1 second: as every reader's, it starts at 0, the second "
+              "taken off noted as its timeOffset; the upgraded file hangs from a RootNode as every reader's does",
+      "source": SRC, **CUBE, "document": {"animations": 1, "channels": 1, "node_names": ["node_0", "RootNode"]},
+      "animation_spans": [[0, 1]],
+      "rig": [{"node": "node_0", "translation": [1, 0, 0], "time": 0.5},
+              {"node": "node_0", "parent": "RootNode", "keys": {"translation": [0, 1]}}],
+      "json": {"/animations/0/extras/timeOffset": 1, "/scenes/0/nodes": [1], "/nodes/1/children": [0]}})
+
+# A skin whose weights break the rule: the first half of the vertices name joint 0 twice, a quarter each
+# (merged, then scaled to sum to 1); the rest have no weight at all (bound to a rest joint, the node that
+# draws them, so they stay with it). Root moves 2 along X: the bound half goes with it, the rest stays.
+g = G()
+half = len(CUBE_POS) // 2
+joints = g.acc([[0, 0, 0, 0]] * len(CUBE_POS), typ="VEC4")
+weights = g.acc([[0.25, 0.25, 0, 0]] * half + [[0, 0, 0, 0]] * (len(CUBE_POS) - half), typ="VEC4")
+prim = {"attributes": {"POSITION": g.acc(CUBE_POS, minmax=True), "NORMAL": g.acc(CUBE_NRM), "JOINTS_0": joints,
+                       "WEIGHTS_0": weights}, "indices": g.acc(CUBE_IDX, U16, "SCALAR", target=34963)}
+root = g.node(root=False, jointName="Root")
+arm = g.node(root=False, translation=[0, 2, 0], jointName="Arm")
+g.j["nodes"][root]["children"] = [arm]
+ibm = g.acc([IDENT, trs((0, -2, 0))], typ="MAT4", target=None)
+g.node(mesh=g.mesh([prim]))
+g.j["scenes"][0]["nodes"].append(root)
+times = g.acc([0, 1], typ="SCALAR", target=None, minmax=True)
+moves = g.acc([[0, 0, 0], [2, 0, 0]], target=None)
+doc = v1(g, binary=True)
+doc["skins"] = {"skin_0": {"bindShapeMatrix": IDENT, "inverseBindMatrices": f"acc_{ibm}",
+                           "jointNames": ["Root", "Arm"]}}
+doc["nodes"]["node_2"].update({"skin": "skin_0", "skeletons": ["node_0"]})
+doc["animations"] = {"anim_0": {
+    "parameters": {"TIME": f"acc_{times}", "translation": f"acc_{moves}"},
+    "samplers": {"s": {"input": "TIME", "output": "translation", "interpolation": "LINEAR"}},
+    "channels": [{"sampler": "s", "target": {"id": "node_0", "path": "translation"}}]}}
+moved = [[p[0] + 2, p[1], p[2]] for p in CUBE_POS[:half]] + CUBE_POS[half:]
+lo = [min(p[k] for p in moved) for k in range(3)]
+hi = [max(p[k] for p in moved) for k in range(3)]
+case(FMT, "gltf1_skin_weights", {"skin.glb": v1_glb(doc, g)},
+     {"spec": SPEC1 + ": a skin's weights held to the one skinning rule every reader follows: a joint named twice "
+              "on a vertex merged, weights scaled to sum to 1, and a vertex no joint moves bound to the node that "
+              "draws it (a joint added to the skin, its inverse bind matrix the identity); skin.skeleton is the "
+              "joints' common root, the RootNode over both scene roots",
+      "source": SRC, **CUBE, "document": {"skins": 1, "joints": 3, "animations": 1},
+      "poses": [{"animation": 0, "time": 1, "bounds": {"min": lo, "max": hi}}],
+      "json": {"/skins/0/joints": [0, 1, 2], "/skins/0/skeleton": 3, "/nodes/3/name": "RootNode"}})
 
 g = cube_doc(material=0)
 doc = v1(g, {"mat_0": {**common("CONSTANT", emission=[0, 1, 0, 1]), "name": "Glow"}})

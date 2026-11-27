@@ -18,6 +18,9 @@
     "animations": 1,
     "channels": 3
   },
+  "json": {
+    "/asset/extras/source/frameRate": null
+  },
   "poses": [
     {
       "animation": 0,

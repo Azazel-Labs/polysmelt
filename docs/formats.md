@@ -15,7 +15,7 @@ specification and, for most, files that real tools wrote; see [testing.md](testi
 | FBX | `.fbx` | `fbx` | Binary and ASCII FBX 7.x (older files are refused as `Unsupported`), every axis system. The node tree, meshes, materials and textures, skins, blend shapes, cameras and lights; animation with Bezier and TCB curves, Euler rotations, pivots and layers, sampled into linear keys; line geometry and NURBS curves as lines. |
 | USD | `.usda`, `.usdc`, `.usdz` | `usd` | All three encodings and composition. Meshes, materials, `UsdSkel` skeletons and skins, transform stacks and time samples; basis, NURBS and Hermite curves and points. |
 | glTF 2.0 | `.gltf`, `.glb` | `gltf` | Passed through untouched, Draco and meshopt compression included. |
-| glTF 1.0 | `.gltf`, `.glb` | `gltf` | With `KHR_binary_glTF` and `KHR_materials_common`, upgraded to 2.0 as it's read. |
+| glTF 1.0 | `.gltf`, `.glb` | `gltf` | With `KHR_binary_glTF` and `KHR_materials_common`, upgraded to 2.0 as it's read, under a `RootNode` and held to the reader rules as glTF 2.0 is not. |
 | COLLADA | `.dae`, `.zae`, `.kmz` | `dae` | The node tree, instanced geometry, materials and effects, skins, cameras and lights, lines and line strips; animation with Bezier, Hermite, B-spline and cardinal curves, stacks of transforms, and animation clips. |
 | 3DS | `.3ds` | `3ds` | Objects, materials and texture maps, the keyframer's hierarchy and animation (its cubic splines kept as glTF cubic splines), cameras and lights. The master scale is applied. |
 | X3D and VRML97 | `.x3d`, `.x3dv`, `.x3dz`, `.wrl`, `.wrz` | `x3d` | XML and classic encodings, gzipped or not. Shapes, line and point sets, Extrusion, the 2D nodes, PROTO and EXTERNPROTO instances, materials, textures, lights and viewpoints. |
@@ -46,7 +46,7 @@ specification and, for most, files that real tools wrote; see [testing.md](testi
 
 | Format | Extensions | Feature | What's read |
 | --- | --- | --- | --- |
-| VRM | `.vrm`, `.vrma` | `gltf` | VRM 0.x and 1.0 avatars and VRM animations, through the glTF reader. |
+| VRM | `.vrm`, `.vrma` | `gltf` | VRM 0.x and 1.0 avatars and VRM animations, through the glTF reader, under a `RootNode` and held to the reader rules as glTF 2.0 is not. |
 | MikuMikuDance | `.pmx`, `.pmd`, `.vmd` | `mmd` | PMX 2.0 and 2.1 and PMD models, skinned, with morph targets, IK and materials; VMD motions with their Bezier eases. |
 | DirectX | `.x` | `directx` | Text, binary and MSZIP-compressed, 32- and 64-bit floats: frames, meshes, materials, skins and animation sets. |
 | Quake II | `.md2` | `md2` | Frames as morph targets, and their animations. |

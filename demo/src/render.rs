@@ -866,8 +866,10 @@ impl Renderer {
                 buffer("colors", bytemuck::cast_slice(&colors), vertex),
             ];
             if self.scene.skinned {
+                // The shaders blend four joints: each vertex's four strongest, their weights scaled to sum to 1
+                // (a vertex weighted to more loses its weakest).
                 let (joints, weights) = if p.is_skinned() {
-                    (p.skin_joints.clone(), p.skin_weights.clone())
+                    (p.skin_joints.clone(), p.renormalized_skin_weights())
                 } else {
                     (vec![[0; 4]; n], vec![[0.0; 4]; n])
                 };

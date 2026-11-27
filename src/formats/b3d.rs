@@ -34,8 +34,11 @@ use crate::source::{Axis, Fact, Handedness};
 
 /// How deep nodes may nest.
 const MAX_DEPTH: usize = 256;
-/// The frame rate when the file gives none: the format's own default (its specification lists an `ANIM` chunk's
-/// `fps` as `default=60`). So that, not the readers' shared assumption.
+/// The frame rate when the file gives none (no `ANIM` chunk, or an `fps` not above 0): the format's own default.
+/// Blitz Research's specification ("Blitz3d file format V0.01", `b3dfile_specs.txt`, the `ANIM` chunk) lists
+/// `float fps ;default=60`. `Blitz3D` itself reads and ignores `fps` (`blitz3d/loader_b3d.cpp`,
+/// <https://github.com/blitz-research/blitz3d>), as its `Animate` command sets the speed. So 60, assumed, not the
+/// readers' shared 30.
 const DEFAULT_FPS: f32 = 60.0;
 
 /// A texture: its file.
@@ -721,6 +724,11 @@ mod tests {
 
     /// [`sample`] with its root node and its bone moved to `root` and `bone`.
     fn sample_at(root: [f32; 3], bone_at: [f32; 3]) -> Vec<u8> {
+        sample_with(root, bone_at, Some(10.0))
+    }
+
+    /// [`sample_at`] with an `ANIM` chunk at `fps` frames a second, or none.
+    fn sample_with(root: [f32; 3], bone_at: [f32; 3], fps: Option<f32>) -> Vec<u8> {
         let mut texs = b"skin.png\0".to_vec();
         texs.extend(i(&[1, 2]));
         texs.extend(f(&[0.0, 0.0, 1.0, 1.0, 0.0]));
@@ -754,7 +762,9 @@ mod tests {
         keys.extend(f(&[half, 0.0, half, 0.0]));
         bone.extend(chunk(*b"KEYS", &keys));
         let mut kids = chunk(*b"MESH", &mesh);
-        kids.extend(chunk(*b"ANIM", &[i(&[0, 10]), f(&[10.0])].concat()));
+        if let Some(fps) = fps {
+            kids.extend(chunk(*b"ANIM", &[i(&[0, 10]), f(&[fps])].concat()));
+        }
         kids.extend(node_chunk("bone", bone_at, [1.0, 0.0, 0.0, 0.0], &bone));
         let root = node_chunk("root", root, [1.0, 0.0, 0.0, 0.0], &kids);
         let mut body = i(&[1]);
@@ -817,6 +827,18 @@ mod tests {
         assert_eq!(info.up_axis, Fact::Assumed(Axis::PosY));
         assert_eq!(info.meters_per_unit, Fact::Unknown);
         assert_eq!(info.frame_rate, Fact::Declared(10.0));
+    }
+
+    #[test]
+    fn keys_without_a_rate_play_at_the_specifications_default() {
+        // No `ANIM` chunk, or one whose `fps` is 0: the specification's default=60, assumed. Frame 10 is a sixth
+        // of a second in.
+        for fps in [None, Some(0.0)] {
+            let doc = read(&sample_with([0.0; 3], [0.0; 3], fps)).unwrap();
+            let a = &doc.rig().unwrap().animations[0];
+            assert!((a.channels[0].times[1] - 10.0 / 60.0).abs() < 1e-6, "{fps:?}");
+            assert_eq!(doc.source_info().frame_rate, Fact::Assumed(60.0), "{fps:?}");
+        }
     }
 
     #[test]

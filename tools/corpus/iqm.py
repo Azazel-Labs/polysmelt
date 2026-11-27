@@ -126,32 +126,39 @@ def arm_frame(f):
     return [f, round(math.sin(a) * U16), round(math.cos(a) * U16)]
 
 
-text = Text()
-quad_name, skin_name = text("quad"), text("skin")
 COLORS_SRGB = [(255, 128, 0, 255)] * 4
 HALF_COLORS = [(0.25, 0.5, 0.75)] * 4
-skinned = build(
-    text,
-    [
-        (POSITION, FLOAT, 3, flat(QUAD)),
-        (NORMAL, FLOAT, 3, [0, 0, 1] * 4),
-        (TEXCOORD, FLOAT, 2, flat([(0, 0), (1, 0), (1, 1), (0.25, 0.75)])),
-        (TEXCOORD, UBYTE, 2, flat([(255, 0), (0, 255), (255, 255), (0, 0)])),
-        (COLOR, HALF, 3, flat(HALF_COLORS)),
-        (COLOR, UBYTE, 4, flat(COLORS_SRGB)),
-        (BLENDINDEXES, UBYTE, 4, flat([(0, 0, 0, 0)] * 2 + [(1, 0, 0, 0)] * 2)),
-        (BLENDWEIGHTS, UBYTE, 4, flat([(255, 0, 0, 0)] * 4)),
-        (TANGENT, FLOAT, 4, [1, 0, 0, 1] * 4),
-    ],
-    4, QUAD_TRIS, [(quad_name, skin_name, 0, 4, 0, 2)],
-    joints=[("root", -1, (0, 0, 0), (0, 0, 0, 1), (1, 1, 1)), ("arm", 0, (0, 1, 0), (0, 0, 0, 1), (1, 1, 1))],
-    poses=[
-        (1 << 7, [0, 0, 0, 0, 0, 0, 1, 1, 1, 1], [0] * 7 + [0.5, 0, 0]),
-        (1 << 1 | 1 << 5 | 1 << 6, [0, 1, 0, 0, 0, 0, 0, 1, 1, 1], [0, 1, 0, 0, 0, 1 / U16, 1 / U16, 0, 0, 0]),
-    ],
-    anims=[("wave", 0, 3, 10.0, 1), ("hold", 2, 1, 0.0, 0)],
-    frames=[[f] + arm_frame(f) for f in range(3)],
-)
+
+
+def skinned_rig(wave_rate):
+    """The skinned quad and its two animations, "wave" at `wave_rate` frames a second and "hold" at 0."""
+    text = Text()
+    quad_name, skin_name = text("quad"), text("skin")
+    return build(
+        text,
+        [
+            (POSITION, FLOAT, 3, flat(QUAD)),
+            (NORMAL, FLOAT, 3, [0, 0, 1] * 4),
+            (TEXCOORD, FLOAT, 2, flat([(0, 0), (1, 0), (1, 1), (0.25, 0.75)])),
+            (TEXCOORD, UBYTE, 2, flat([(255, 0), (0, 255), (255, 255), (0, 0)])),
+            (COLOR, HALF, 3, flat(HALF_COLORS)),
+            (COLOR, UBYTE, 4, flat(COLORS_SRGB)),
+            (BLENDINDEXES, UBYTE, 4, flat([(0, 0, 0, 0)] * 2 + [(1, 0, 0, 0)] * 2)),
+            (BLENDWEIGHTS, UBYTE, 4, flat([(255, 0, 0, 0)] * 4)),
+            (TANGENT, FLOAT, 4, [1, 0, 0, 1] * 4),
+        ],
+        4, QUAD_TRIS, [(quad_name, skin_name, 0, 4, 0, 2)],
+        joints=[("root", -1, (0, 0, 0), (0, 0, 0, 1), (1, 1, 1)), ("arm", 0, (0, 1, 0), (0, 0, 0, 1), (1, 1, 1))],
+        poses=[
+            (1 << 7, [0, 0, 0, 0, 0, 0, 1, 1, 1, 1], [0] * 7 + [0.5, 0, 0]),
+            (1 << 1 | 1 << 5 | 1 << 6, [0, 1, 0, 0, 0, 0, 0, 1, 1, 1], [0, 1, 0, 0, 0, 1 / U16, 1 / U16, 0, 0, 0]),
+        ],
+        anims=[("wave", 0, 3, wave_rate, 1), ("hold", 2, 1, 0.0, 0)],
+        frames=[[f] + arm_frame(f) for f in range(3)],
+    )
+
+
+skinned = skinned_rig(10.0)
 
 
 def posed(f):
@@ -223,6 +230,27 @@ case(FMT, "skinned_animated", {
         {"animation": 0, "time": 0.1, "bounds": bounds_of(posed(1))},
         {"animation": 0, "time": 0.2, "bounds": bounds_of(posed(2))},
         {"animation": 1, "time": 0.0, "bounds": bounds_of(posed(2))},
+    ],
+})
+
+# The same rig with every animation's framerate 0: the specification's iqmanim gives a framerate and no default,
+# so frames are at the readers' shared 30 a second, assumed (frame 1 is a thirtieth of a second in), and the
+# animations, all at one rate, carry none of their own.
+case(FMT, "animated_no_rate", {"rig.iqm": skinned_rig(0.0)}, {
+    "spec": SPEC + ": animations whose framerate is 0, at the shared 30 frames a second",
+    "source": SRC,
+    "triangles": 2,
+    "document": {"animations": 2},
+    "json": {
+        "/animations/0/extras": {"loop": True},
+        "/animations/0/extras/frameRate": None,
+        "/animations/1/extras": None,
+        "/asset/extras/source/frameRate": 30.0,
+        "/asset/extras/source/assumed": ["frameRate"],
+    },
+    "rig": [
+        {"node": "root", "keys": {"scale": [0, 1 / 30, 2 / 30]}},
+        {"node": "arm", "time": 1 / 30, "translation": [0, 2, 0], "rotation": turned(90)},
     ],
 })
 

@@ -9,7 +9,7 @@ use crate::Result;
 use crate::document::Bounds;
 #[cfg(doc)]
 use crate::document::Document;
-use crate::mesh::{Mesh, Prim};
+use crate::mesh::{MAX_INFLUENCES, Mesh, Prim};
 use crate::num::{f32_of, u32_of};
 use crate::vec3;
 #[cfg(feature = "draco")]
@@ -159,9 +159,12 @@ struct Geometry {
     color_sets: Vec<Vec<[f32; 4]>>,
     draws: Draws,
     joints: Vec<u32>,
-    /// Each vertex's four strongest joints as nodes (`u32::MAX` for none), and their weights.
+    /// Each vertex's strongest joints as nodes (`u32::MAX` for none), and their weights, in sets of four as
+    /// [`Prim`] has them.
     skin_joints: Vec<[u32; 4]>,
     skin_weights: Vec<[f32; 4]>,
+    skin_joint_sets: Vec<Vec<[u32; 4]>>,
+    skin_weight_sets: Vec<Vec<[f32; 4]>>,
 }
 
 /// What a primitive draws on its vertices, as indices into them.
@@ -227,15 +230,54 @@ pub(super) fn retain_groups<const N: usize>(idx: &mut Vec<u32>, keep: impl Fn(&[
     idx.truncate(w);
 }
 
-/// What [`Reader::skin`] gives each vertex: its strongest joint's node, and its four strongest
-/// joints' nodes (`u32::MAX` for none) and weights, summing to 1.
+/// What [`Reader::skin`] gives each vertex: its strongest joint's node, and its [`MAX_INFLUENCES`]
+/// strongest joints' nodes (`u32::MAX` for none) and weights, summing to 1, in sets of four.
 #[derive(Default)]
 struct Skinned {
     strongest: Vec<u32>,
-    joints: Vec<[u32; 4]>,
-    weights: Vec<[f32; 4]>,
+    /// `JOINTS_0`'s first, then a set for each further four that some vertex has.
+    joints: Vec<Vec<[u32; 4]>>,
+    weights: Vec<Vec<[f32; 4]>>,
     /// What the joints scale a volume's thickness by; `None` when they don't move the mesh.
     thickness: Option<f32>,
+}
+
+impl Skinned {
+    /// Adds the next vertex, `v`, with its first `count` joints and weights: a set the vertices
+    /// before it didn't need is made for it, with no joint for them, and the sets it doesn't fill
+    /// have none for it.
+    fn push(&mut self, v: usize, joints: &[u32; MAX_INFLUENCES], weights: &[f32; MAX_INFLUENCES], count: usize) {
+        let need = count.div_ceil(4).max(1);
+        while self.joints.len() < need {
+            let cap = self.joints.first().map_or(v, Vec::capacity);
+            let mut j = Vec::with_capacity(cap);
+            j.resize(v, [u32::MAX; 4]);
+            let mut w = Vec::with_capacity(cap);
+            w.resize(v, [0.0; 4]);
+            self.joints.push(j);
+            self.weights.push(w);
+        }
+        for (s, (js, ws)) in self.joints.iter_mut().zip(&mut self.weights).enumerate() {
+            let at = s * 4;
+            js.push(std::array::from_fn(|k| joints[at + k]));
+            ws.push(std::array::from_fn(|k| weights[at + k]));
+        }
+    }
+
+    /// Its sets as [`Prim`] keeps them: the first, then the others with the first's slot empty.
+    #[allow(clippy::type_complexity, reason = "the four lists Prim has")]
+    fn into_sets(self) -> (Vec<[u32; 4]>, Vec<[f32; 4]>, Vec<Vec<[u32; 4]>>, Vec<Vec<[f32; 4]>>) {
+        let mut joints = self.joints.into_iter();
+        let mut weights = self.weights.into_iter();
+        let (j0, w0) = (joints.next().unwrap_or_default(), weights.next().unwrap_or_default());
+        let (js, ws): (Vec<_>, Vec<_>) = (joints.collect(), weights.collect());
+        if js.is_empty() {
+            return (j0, w0, Vec::new(), Vec::new());
+        }
+        let js = std::iter::once(Vec::new()).chain(js).collect();
+        let ws = std::iter::once(Vec::new()).chain(ws).collect();
+        (j0, w0, js, ws)
+    }
 }
 
 /// Triangle lists from a primitive's indices, by mode (4 triangles, 5 strip, 6 fan), per the
@@ -472,9 +514,11 @@ impl Reader<'_> {
         let nodes = self.nodes;
         let mut used = vec![false; nodes.len()];
         for p in mesh.prims.iter().filter(|p| p.is_skinned()) {
-            for &j in p.skin_joints.as_flattened() {
-                if let Some(u) = used.get_mut(j as usize) {
-                    *u = true;
+            for (joints, _) in p.skin_sets() {
+                for &j in joints.as_flattened() {
+                    if let Some(u) = used.get_mut(j as usize) {
+                        *u = true;
+                    }
                 }
             }
         }
@@ -554,14 +598,22 @@ impl Reader<'_> {
             if mesh.skeleton.is_empty() || !p.is_skinned() {
                 p.skin_joints = Vec::new();
                 p.skin_weights = Vec::new();
+                p.skin_joint_sets = Vec::new();
+                p.skin_weight_sets = Vec::new();
                 continue;
             }
             // Slots no joint fills keep weight 0 and name the first bone.
-            for (j, w) in p.skin_joints.iter_mut().zip(&p.skin_weights) {
-                *j = std::array::from_fn(|k| {
-                    let b = bone.get(j[k] as usize).copied().unwrap_or(0);
-                    if w[k] > 0.0 { b } else { 0 }
-                });
+            let to_bones = |joints: &mut [[u32; 4]], weights: &[[f32; 4]]| {
+                for (j, w) in joints.iter_mut().zip(weights) {
+                    *j = std::array::from_fn(|k| {
+                        let b = bone.get(j[k] as usize).copied().unwrap_or(0);
+                        if w[k] > 0.0 { b } else { 0 }
+                    });
+                }
+            };
+            to_bones(&mut p.skin_joints, &p.skin_weights);
+            for (j, w) in p.skin_joint_sets.iter_mut().zip(&p.skin_weight_sets) {
+                to_bones(j, w);
             }
         }
     }
@@ -730,6 +782,9 @@ impl Reader<'_> {
             }
         }
 
+        let thickness = skinned.thickness.unwrap_or(u.thickness);
+        let strongest = std::mem::take(&mut skinned.strongest);
+        let (skin_joints, skin_weights, skin_joint_sets, skin_weight_sets) = skinned.into_sets();
         let g = Geometry {
             positions,
             normals,
@@ -739,11 +794,13 @@ impl Reader<'_> {
             colors,
             color_sets,
             draws,
-            joints: skinned.strongest,
-            skin_joints: skinned.joints,
-            skin_weights: skinned.weights,
+            joints: strongest,
+            skin_joints,
+            skin_weights,
+            skin_joint_sets,
+            skin_weight_sets,
         };
-        let material = self.material(material, skinned.thickness.unwrap_or(u.thickness), mesh);
+        let material = self.material(material, thickness, mesh);
         self.charge(&g.draws, u.transforms.len());
         mesh.prims.push(place(g, &u.transforms, material));
         Ok(())
@@ -893,8 +950,8 @@ impl Reader<'_> {
         let mean = if count > 0.0 { (sum / count).exp() } else { 1.0 };
         let mut out = Skinned {
             strongest: Vec::with_capacity(n),
-            joints: Vec::with_capacity(n),
-            weights: Vec::with_capacity(n),
+            joints: vec![Vec::with_capacity(n)],
+            weights: vec![Vec::with_capacity(n)],
             thickness: Some(self.scale_met(mean)),
         };
         #[allow(
@@ -918,8 +975,9 @@ impl Reader<'_> {
         let bits = |a: [f32; 4]| a.map(f32::to_bits);
         // One vertex's influences, (joint index, weight), reused.
         let mut inf: Vec<(f32, f32)> = Vec::with_capacity(4 * sets.len());
-        // The previous vertex's output, kept at hand for the next one that repeats it.
-        let mut prev = (u32::MAX, [u32::MAX; 4], [0.0f32; 4]);
+        // The previous vertex's output, kept at hand for the next one that repeats it: its strongest
+        // joint, and its joints, their weights and how many.
+        let mut prev = (u32::MAX, [u32::MAX; MAX_INFLUENCES], [0.0f32; MAX_INFLUENCES], 0);
         for v in 0..n {
             // The same rows as the previous vertex: everything it worked out holds for this one.
             if v > 0
@@ -928,8 +986,7 @@ impl Reader<'_> {
                     .all(|(ji, wi)| bits(ji[v]) == bits(ji[v - 1]) && bits(wi[v]) == bits(wi[v - 1]))
             {
                 out.strongest.push(prev.0);
-                out.joints.push(prev.1);
-                out.weights.push(prev.2);
+                out.push(v, &prev.1, &prev.2, prev.3);
                 continue;
             }
             inf.clear();
@@ -956,20 +1013,27 @@ impl Reader<'_> {
             }
             prev.0 = inf.first().and_then(|&(j, _)| node(j)).map_or(u32::MAX, u32_of);
             out.strongest.push(prev.0);
-            // The four strongest that name a joint, for binding the vertex back to them.
-            let mut top = [(u32::MAX, 0.0f32); 4];
-            let mut slots = top.iter_mut();
+            // The strongest that name a joint, as many as every reader keeps, for binding the vertex
+            // back to them.
+            let mut top = [(u32::MAX, 0.0f32); MAX_INFLUENCES];
+            let mut count = 0;
             for &(j, w) in &inf {
                 if let Some(nd) = node(j) {
-                    let Some(slot) = slots.next() else { break };
+                    let Some(slot) = top.get_mut(count) else { break };
                     *slot = (u32_of(nd), w);
+                    count += 1;
                 }
             }
             let kept: f32 = top.iter().map(|t| t.1).sum();
             prev.1 = top.map(|t| t.0);
-            prev.2 = if kept > 0.0 { top.map(|t| t.1 / kept) } else { [0.0; 4] };
-            out.joints.push(prev.1);
-            out.weights.push(prev.2);
+            if kept > 0.0 && kept.is_finite() {
+                prev.2 = top.map(|t| t.1 / kept);
+                prev.3 = count;
+            } else {
+                prev.2 = [0.0; MAX_INFLUENCES];
+                prev.3 = 0;
+            }
+            out.push(v, &prev.1, &prev.2, prev.3);
 
             let sum: f32 = inf.iter().map(|t| t.1).sum();
             if bind || !(sum > 0.0 && sum.is_finite()) {
@@ -1121,6 +1185,8 @@ fn place(mut g: Geometry, transforms: &[M4], material: usize) -> Prim {
             joints: g.joints,
             skin_joints: g.skin_joints,
             skin_weights: g.skin_weights,
+            skin_joint_sets: g.skin_joint_sets,
+            skin_weight_sets: g.skin_weight_sets,
         };
     }
     let n = g.positions.len();
@@ -1140,6 +1206,16 @@ fn place(mut g: Geometry, transforms: &[M4], material: usize) -> Prim {
         joints: Vec::with_capacity(g.joints.len() * k),
         skin_joints: Vec::with_capacity(g.skin_joints.len() * k),
         skin_weights: Vec::with_capacity(g.skin_weights.len() * k),
+        skin_joint_sets: g
+            .skin_joint_sets
+            .iter()
+            .map(|s| Vec::with_capacity(s.len() * k))
+            .collect(),
+        skin_weight_sets: g
+            .skin_weight_sets
+            .iter()
+            .map(|s| Vec::with_capacity(s.len() * k))
+            .collect(),
     };
     for t in transforms {
         p.positions.extend(g.positions.iter().map(|&v| apply_point(t, v)));
@@ -1158,6 +1234,12 @@ fn place(mut g: Geometry, transforms: &[M4], material: usize) -> Prim {
         p.joints.extend_from_slice(&g.joints);
         p.skin_joints.extend_from_slice(&g.skin_joints);
         p.skin_weights.extend_from_slice(&g.skin_weights);
+        for (to, from) in p.skin_joint_sets.iter_mut().zip(&g.skin_joint_sets) {
+            to.extend_from_slice(from);
+        }
+        for (to, from) in p.skin_weight_sets.iter_mut().zip(&g.skin_weight_sets) {
+            to.extend_from_slice(from);
+        }
     }
     extend(&mut p, &g.draws, n, transforms);
     p

@@ -2,6 +2,59 @@
 
 Breaking changes are allowed in minor releases until 1.0.
 
+## 0.22.0
+
+- A flattened `mesh::Prim` keeps up to 16 joints and weights a vertex, as documents do, instead
+  of only the 4 strongest: so `Pose::Bind` meshes skinned on the GPU, and meshes written back out
+  with `mesh::to_glb`, keep every influence a file gives. `skin_joints` and `skin_weights` are
+  still the strongest four (`JOINTS_0`/`WEIGHTS_0`); the new `skin_joint_sets` and
+  `skin_weight_sets` hold influences 5 to 16 four at a time (`JOINTS_n`/`WEIGHTS_n`, slot 0 left
+  empty, as `uv_sets` and `color_sets` do). Weights now sum to 1 over every set, as glTF's do, so
+  `skin_weights` alone sums to less where a vertex has more than four; the new
+  `Prim::renormalized_skin_weights()` gives the four scaled to sum to 1, for a renderer that
+  blends four, and `Prim::skin_sets()` walks every set. `mesh::to_glb` writes each set, and
+  `mesh::MAX_INFLUENCES` is public. Breaking: a `Prim` built with a struct literal needs the two
+  new fields (or `..Prim::default()`).
+- Every reader counts `source.droppedTextures` the same way: each distinct texture once, however
+  many materials use it, with the names not found in `missingFiles`, each once (see
+  docs/consistency.md). AC3D, OpenFlight, LightWave, OpenGEX, AMF and glTF counted their own way:
+  - OpenFlight counted a texture once per palette entry and file naming it, and LightWave once
+    per surface; LightWave now also counts a missing normal map. Names that find the same file
+    that isn't an image are one texture in AC3D and OpenFlight too, and OpenGEX counts such a file.
+  - AC3D, OpenFlight, LightWave and OpenGEX now list missing textures in `missingFiles`. They
+    counted missing textures even in a read that keeps no textures or materials, which no other
+    reader does; such a read now reports none.
+  - AMF counted each set of channels that made no image, and each unreadable texture whether or not
+    a triangle uses it; now it counts each texture triangles name that no image has.
+  - glTF counted only textures in KTX2 or AVIF, once per texture object. Now an image file that
+    isn't found counts too, and is listed in `missingFiles`, and each image is counted once however
+    many textures use it. Only that report changes: the document's images and textures are as before.
+  - An Irrlicht scene that refers to a mesh file that isn't there kept the textures its materials
+    didn't find out of `missingFiles`; they're listed, and each missing file once.
+- USD: a `timeCodesPerSecond` that isn't above 0 is passed over for the stage's
+  `framesPerSecond`, as USD does when it isn't authored, then for USD's 24, which is now
+  reported as assumed. It was reported as a declared 24, and a `framesPerSecond` beside it was
+  ignored for timing keys.
+- glTF 1.0, VRM and 3D Tiles, which convert their glTF rather than pass it through, follow
+  the animation, skin and name rules every other reader does. glTF 2.0 read as itself is
+  unchanged, as before. What already follows the rules is left as the file has it:
+  - An animation whose keys don't start at 0 starts at 0, what was taken off kept as its
+    `extras.timeOffset`, and its keys are cleaned (increasing times, unit rotations that turn
+    the short way).
+  - A skinned primitive with more than 16 influences on a vertex, a joint named twice, weights
+    that don't sum to 1 or a vertex no joint weights has its joints and weights rewritten: the
+    16 strongest kept, duplicates merged, weights normalized, and an unweighted vertex bound to
+    the node that draws the mesh (added to the skin as a joint, its inverse bind matrix the
+    identity) rather than to the skin's first joint. Every skin's `skeleton` is its joints'
+    common root.
+  - A `name` of `""` is taken away.
+- A glTF 1.0 file loads under a `RootNode` with no transform, as every format with a scene
+  does. The node is the last in the list, so the file's nodes keep their indices. (A glTF 1.0
+  inside a 3D Tiles tile has none, as 3D Tiles has no `RootNode`.)
+- **Breaking:** a tileset lists the tiles it couldn't find in
+  `asset.extras.source.missingFiles`, the key every reader uses, rather than `missingTiles`.
+  `Document::facts` still counts them as `missing_tiles`.
+
 ## 0.21.0
 
 - Every reader brings a file's axes and units to glTF's (+Y up, right-handed, meters) the

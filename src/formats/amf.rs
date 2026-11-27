@@ -162,7 +162,6 @@ struct Amf {
     /// What's dropped.
     curved: usize,
     formulas: usize,
-    bad_textures: usize,
     /// The XML ended inside an element.
     truncated: bool,
     vertices: usize,
@@ -626,11 +625,10 @@ fn close(a: &mut Amf, s: &mut State, t: Tag, parent: Option<Tag>, limit: usize) 
         }
         Tag::Texture => {
             if let Some(mut t) = s.texture.take() {
+                // One that can't be read is as one that isn't there: triangles that name it count it.
                 if let Some(pixels) = crate::gltf::decode_base64(&s.text) {
                     t.pixels = pixels;
                     a.textures.push(t);
-                } else {
-                    a.bad_textures += 1;
                 }
             }
         }
@@ -760,7 +758,6 @@ struct Textures<'a> {
     images: Vec<Source>,
     /// Each image's wrap.
     wraps: Vec<[u32; 2]>,
-    dropped: usize,
 }
 
 impl Textures<'_> {
@@ -770,11 +767,30 @@ impl Textures<'_> {
             return i;
         }
         let i = self.make(tex);
-        if i.is_none() {
-            self.dropped += 1;
-        }
         self.made.insert(tex, i);
         i
+    }
+
+    /// How many of the textures triangles name no image has: not in the file, unreadable, or in a set of channels
+    /// that can't make one. Each texture once, however many triangles and sets of channels name it, as every
+    /// reader counts a texture it doesn't have.
+    fn dropped(&self) -> usize {
+        let mut named = HashSet::new();
+        let mut drawn = HashSet::new();
+        for (tex, image) in &self.made {
+            for &k in tex.iter().filter(|&&k| k != u32::MAX) {
+                named.insert(k);
+                let there = self
+                    .amf
+                    .texture_ids
+                    .get(k as usize)
+                    .is_some_and(|id| self.by_id.contains_key(id.as_str()));
+                if there && image.is_some() {
+                    drawn.insert(k);
+                }
+            }
+        }
+        named.difference(&drawn).count()
     }
 
     fn make(&mut self, tex: [u32; 4]) -> Option<usize> {
@@ -841,7 +857,6 @@ fn build(a: &Amf, zipped: bool, crease: f32) -> Result<Document> {
         made: HashMap::new(),
         images: Vec::new(),
         wraps: Vec::new(),
-        dropped: 0,
     };
     let mut b = Builder::new(crease);
     let mut looks: HashMap<Look, usize> = HashMap::new();
@@ -1093,7 +1108,6 @@ fn build(a: &Amf, zipped: bool, crease: f32) -> Result<Document> {
         ("droppedFormulas", a.formulas),
         (crate::geometry::DROPPED, bad),
         ("droppedInstances", dropped),
-        ("droppedTextures", tex.dropped + a.bad_textures),
     ] {
         if n > 0 {
             source[key] = json!(n);
@@ -1118,7 +1132,11 @@ fn build(a: &Amf, zipped: bool, crease: f32) -> Result<Document> {
     json.insert("scenes".into(), json!([{ "nodes": roots }]));
     json.insert("nodes".into(), Value::Array(nodes));
     json.insert("meshes".into(), Value::Array(meshes));
-    b.materials(&materials, tex.images, &mut json);
+    // Counted where every reader's textures are, so a read that keeps none reports none.
+    let dropped_textures = tex.dropped();
+    let mut images = crate::images::List::from(tex.images);
+    images.missed.dropped = dropped_textures;
+    b.materials(&materials, images, &mut json);
     let mut doc = b.finish(json, facts);
     // Z-up to Y-up (a quarter turn about X), and the unit to meters.
     frame::root(&mut doc, Frame::z_up().scaled(scale));

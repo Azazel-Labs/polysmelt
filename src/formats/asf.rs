@@ -63,9 +63,12 @@ use crate::source::{Axis, Fact};
 const MAX_BONES: usize = 32_768;
 /// Dofs one bone (or the root's `order`) may list. The format defines seven.
 const MAX_DOFS: usize = 64;
-/// Frames per second when the motion doesn't say. The format has no rate of its own; nearly every ASF/AMC file
-/// is from, or made to go with, the CMU Graphics Lab Motion Capture Database, which documents its motions as
-/// captured at 120 Hz. So that, not the readers' shared assumption, is the default here.
+/// Frames per second when the motion has no `:SAMPLES-PER-SECOND` (or one not above 0). Acclaim's format gives
+/// AMC no rate, and no specification gives a default, so this is a convention: most ASF/AMC files are from, or
+/// made to go with, the CMU Graphics Lab Motion Capture Database, captured on cameras "recording at 120 Hz"
+/// (<http://mocap.cs.cmu.edu/faqs.php>). Readers that know `:SAMPLES-PER-SECOND` take 120 without it too, such as
+/// `ASFLoader.cpp` in Seoul National University's taesooLib (`BaseLib/motion`). So 120, assumed, not the readers'
+/// shared 30.
 const DEFAULT_RATE: f64 = 120.0;
 /// Meters in an inch, the unit ASF lengths are in once divided by `length`.
 const INCH: f64 = 0.0254;

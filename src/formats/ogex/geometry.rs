@@ -95,9 +95,11 @@ pub(super) fn meshes(c: &mut Ctx<'_>) -> Result<()> {
         } else {
             // What a full read would count, counted.
             for k in t.kids(n).filter(|&k| t.ident(k) == "MaterialRef") {
-                match t.reference(k).and_then(|r| t.resolve(k, r)) {
-                    Some(m) if t.ident(m) == "Material" => super::material::count_missing(c, m),
-                    _ => c.stats.missing_materials += 1,
+                if t.reference(k)
+                    .and_then(|r| t.resolve(k, r))
+                    .is_none_or(|m| t.ident(m) != "Material")
+                {
+                    c.stats.missing_materials += 1;
                 }
             }
         }

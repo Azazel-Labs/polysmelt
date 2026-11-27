@@ -108,7 +108,9 @@ case(FMT, "morph_frame_groups", {
         "/asset/extras/source/format": "MD2",
         "/asset/extras/source/version": "8",
         "/asset/extras/source/upAxis": "+Z",
+        # The header has no rate: Quake II's, a frame every 100 ms, assumed.
         "/asset/extras/source/frameRate": 10,
+        "/asset/extras/source/assumed": ["frameRate"],
     },
     "uvs_include": [[0, 0], [1, 0], [1, 1], [0, 1], [0.25, 0.25]],
     "normals_in": [[0, 1, 0]],

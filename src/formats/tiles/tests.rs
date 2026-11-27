@@ -1093,7 +1093,7 @@ fn a_tileset_that_cannot_be_read_says_why() {
     let doc = read(&root).unwrap();
     assert_eq!(doc.facts["missing_tiles"], 2);
     assert_eq!(
-        doc.json()["asset"]["extras"]["source"]["missingTiles"],
+        doc.json()["asset"]["extras"]["source"]["missingFiles"],
         json!(["gone.b3dm", "https://example.com/a.b3dm"])
     );
     assert_eq!(read(&content("gone.b3dm")).unwrap_err().kind(), ErrorKind::MissingAsset);

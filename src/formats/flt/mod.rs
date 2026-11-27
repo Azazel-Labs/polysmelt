@@ -142,6 +142,8 @@ struct Ctx<'a> {
     b: Builder,
     images: Images,
     image_of: FastMap<(u32, i16), Option<Found>>,
+    /// Each texture file found, by its path, so palette entries in any of the files that name it are one texture.
+    texture_at: FastMap<PathBuf, Option<Found>>,
     materials: Vec<Full>,
     material_at: FastMap<MatKey, usize>,
     meshes: Vec<Value>,
@@ -163,7 +165,6 @@ struct Ctx<'a> {
 #[derive(Default)]
 struct Stats {
     hidden_faces: usize,
-    dropped_textures: usize,
     /// The external references' files that weren't found, by the paths the file gives.
     missing_files: Vec<String>,
     missing_instances: usize,
@@ -202,6 +203,7 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         b: Builder::new(keep.crease_angle()),
         images: Images::new(!keep.image_bytes, &dir),
         image_of: FastMap::default(),
+        texture_at: FastMap::default(),
         materials: Vec::new(),
         material_at: FastMap::default(),
         meshes: Vec::new(),
@@ -1002,36 +1004,48 @@ fn material_of(c: &mut Ctx<'_>, key: MatKey, image: Option<usize>) -> usize {
 /// transparent pixels (known for SGI images); `None` when it's missing. A face whose texture is
 /// found is textured whether or not textures are kept, so its primitive is the one a full read
 /// makes.
+///
+/// What isn't there is counted as every reader counts it ([`Images`]): each texture once, however many palette
+/// entries and files name it, by its name when it isn't found and by its file when that isn't an image.
 fn texture_image(c: &mut Ctx<'_>, file: u32, index: i16) -> Option<Found> {
     if let Some(&i) = c.image_of.get(&(file, index)) {
         return i;
     }
     let f = &c.files[file as usize];
+    let textures = c.keep.materials && c.keep.textures;
     let found = f.db.textures.get(&i32::from(index)).cloned().and_then(|name: String| {
         let Some(path) = c.assets.find(&name, &f.dir) else {
-            c.stats.dropped_textures += 1;
+            if textures {
+                c.images.miss(&name);
+            }
             return None;
         };
-        if !(c.keep.materials && c.keep.textures) {
+        if !textures {
             return Some((None, false));
+        }
+        if let Some(&got) = c.texture_at.get(&path) {
+            return got;
         }
         let got = if sgi::is_sgi_name(&name) {
             // SGI images are decoded now, as PNG.
-            c.assets.read(&path).and_then(|b| {
+            let sgi = c.assets.read(&path).and_then(|b| {
                 let (w, h, channels, px) = sgi::decode(&b)?;
                 let alpha = channels % 2 == 0 && px.chunks_exact(channels).any(|p| p[channels - 1] < 255);
                 let png = sgi::png(w, h, channels, &px)?;
                 let i = c
                     .images
-                    .bytes(Cow::Owned(png), &name, Location::File(path), Image::png_or_jpeg)?;
+                    .bytes(Cow::Owned(png), &name, Location::File(path.clone()), Image::png_or_jpeg)?;
                 Some((Some(i), alpha))
-            })
+            });
+            if sgi.is_none() {
+                // Found, and not an image: [`Images::file`] counts the others so.
+                c.images.list.missed.dropped += 1;
+            }
+            sgi
         } else {
-            c.images.file(c.assets, path, &name).map(|i| (Some(i), false))
+            c.images.file(c.assets, path.clone(), &name).map(|i| (Some(i), false))
         };
-        if got.is_none() {
-            c.stats.dropped_textures += 1;
-        }
+        c.texture_at.insert(path, got);
         got
     });
     c.image_of.insert((file, index), found);
@@ -1325,7 +1339,10 @@ fn animation(sequences: &[(parse::Sequence, Vec<usize>)]) -> (Vec<Track>, bool) 
         let frame = if seq.loop_duration > 0.0 {
             seq.loop_duration / count
         } else {
-            // No duration given: the readers' shared assumed frame rate.
+            // No duration: a file before 15.8, which has none, or a loop duration of 0, which "indicates that
+            // the loop is to play as fast as possible" (OGC 16-009r4, OpenFlight in CDB, Group Record,
+            // <https://docs.ogc.org/bp/16-009r4/16-009r4.html>), a rate the display sets. Either way the
+            // readers' shared assumed frame rate.
             assumed = true;
             f32_of(1.0 / keys::ASSUMED_FRAME_RATE)
         };
@@ -1488,7 +1505,6 @@ fn finish(mut c: Ctx<'_>, mut s: Scene) -> Document {
     let st = &c.stats;
     for (key, n) in [
         ("hiddenFaces", st.hidden_faces),
-        ("droppedTextures", st.dropped_textures),
         ("missingInstances", st.missing_instances),
         ("cycles", st.cycles),
         ("tooDeep", st.too_deep),

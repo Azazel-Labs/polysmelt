@@ -8,7 +8,12 @@
     "animations": 1
   },
   "json": {
-    "/asset/extras/source/frameRate": 30.0
+    "/asset/extras/source/frameRate": 30.0,
+    "/asset/extras/source/assumed": [
+      "upAxis",
+      "handedness",
+      "frameRate"
+    ]
   },
   "facts": {
     "bones": 2,

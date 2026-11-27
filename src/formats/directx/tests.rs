@@ -501,14 +501,22 @@ fn animation_keys_and_ticks() {
     let at = rig.pose(Some(0), 1.0)[node];
     assert!(close(&at.translation, &[1.0, 0.0, -2.0]), "{:?}", at.translation);
     assert!(close(&at.scale, &[1.5, 1.5, 1.5]), "{:?}", at.scale);
-    // Without AnimTicksPerSecond, 4800 ticks are a second.
-    let doc = read(&format!(
-        "xof 0303txt 0032\nFrame F {{ Mesh {{ {CUBE} }} }}\nAnimation {{ {{ F }} \
-         AnimationKey {{ 2; 2; 0;3;0,0,0;;, 4800;3;1,0,0;;; }} }}"
-    ));
-    let rig = doc.rig().unwrap();
-    let span = rig.animations[0].span();
-    assert!((span.1 - 1.0).abs() < 1e-6, "{span:?}");
+    assert_eq!(doc.source_info().frame_rate, crate::source::Fact::Declared(24.0));
+    // Without AnimTicksPerSecond, or with one of 0, 4800 ticks are a second, assumed.
+    for ticks in ["", "AnimTicksPerSecond { 0; }\n"] {
+        let doc = read(&format!(
+            "xof 0303txt 0032\n{ticks}Frame F {{ Mesh {{ {CUBE} }} }}\nAnimation {{ {{ F }} \
+             AnimationKey {{ 2; 2; 0;3;0,0,0;;, 4800;3;1,0,0;;; }} }}"
+        ));
+        let rig = doc.rig().unwrap();
+        let span = rig.animations[0].span();
+        assert!((span.1 - 1.0).abs() < 1e-6, "{ticks}{span:?}");
+        assert_eq!(
+            doc.source_info().frame_rate,
+            crate::source::Fact::Assumed(4800.0),
+            "{ticks}"
+        );
+    }
 }
 
 #[test]

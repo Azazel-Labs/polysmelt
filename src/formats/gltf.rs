@@ -11,13 +11,17 @@
 //!   textures are ([`Assets::find`]): by file name beside the model or in the pack, in any case, or in another
 //!   image format, so another machine's absolute path or a `file:` URI finds its file. One that isn't found
 //!   keeps its URI.
-//! - A texture whose images are all in a format Polysmelt doesn't decode (KTX2, AVIF) isn't
-//!   drawn: `asset.extras.source.droppedTextures` counts them.
+//! - A texture none of whose images Polysmelt both has and decodes (one in KTX2 or AVIF, or a file that
+//!   isn't found) isn't drawn. Its images are counted in `asset.extras.source.droppedTextures`, each once
+//!   however many textures use it, and those not found are listed in `missingFiles`, as every reader
+//!   reports a texture it doesn't have. Nothing else of the document changes for it.
 //! - `asset.extras.source` gets what every reader writes there: the format and version, and glTF's
 //!   meters, +Y up, +Z forward and right-handedness, declared. A file that has a source already (a
 //!   model Polysmelt converted, read back) keeps it.
 //! - glTF 1.0 (and its binary GLB, `KHR_binary_glTF`) is upgraded to 2.0 first; see
-//!   [`super::gltf1`].
+//!   [`super::gltf1`]. An upgraded document is converted, not passed through, so it follows the rules every
+//!   converting reader does ([`super::rules`]): it hangs from a `RootNode`, its animations start at 0 and its
+//!   skins follow the one skinning rule. A glTF 2.0 file is left as it is.
 
 use std::path::{Component, Path};
 
@@ -32,8 +36,20 @@ use crate::num::usize_of;
 use crate::source::{Axis, Fact, Handedness, SourceInfo};
 use crate::{Bytes, Context as _, ErrorKind, Result};
 
-/// Reads the glTF or GLB `input`.
+/// Reads the glTF or GLB file `input`: a glTF 2.0 one as it is, and a glTF 1.0 one upgraded and held to the
+/// reader rules, under a `RootNode`.
 pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document> {
+    let (mut doc, upgraded) = read(input, assets, keep)?;
+    if upgraded {
+        super::frame::root(&mut doc, super::frame::Frame::IDENTITY);
+        super::rules::conform(&mut doc, keep);
+    }
+    Ok(doc)
+}
+
+/// Reads the glTF or GLB `input` (glTF 1.0 upgraded to 2.0) as it is, for a reader that has its own use for
+/// it; and whether it was upgraded.
+pub(crate) fn read(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<(Document, bool)> {
     let (json, mut bin) = match input.bytes() {
         Some(b) if b.starts_with(b"glTF") => glb_in_memory(b, |part| input.share(part))?,
         Some(b) => (gltf_json(b)?, None),
@@ -68,10 +84,8 @@ pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
     if fix.is_none() {
         own_source(&mut json, &version);
     }
-    let dropped = undecodable_textures(&json);
-    if dropped > 0 {
-        source(&mut json)["droppedTextures"] = json!(dropped);
-    }
+    // Told by what the file declares, before images are read.
+    let undecodable = undecodable_images(&json);
     let mut doc = Document::new(json, Vec::new(), Map::new(), crate::images::Refs::new());
     let n = doc.base.get("buffers").and_then(Value::as_array).map_or(0, Vec::len);
     for i in 0..n {
@@ -106,18 +120,27 @@ pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
         }
         doc.buffers.push(blob);
     }
+    let upgraded = fix.is_some();
     if let Some(fix) = fix {
         gltf1::finish(&mut doc, &fix)?;
     }
-    // Images that would only be dropped aren't read.
+    // Images that would only be dropped aren't read, nor counted.
     if keep.materials && keep.textures {
         if keep.image_bytes {
-            embed_images(&mut doc, input, assets);
+            let lacks = embed_images(&mut doc, input, assets);
+            report_dropped(&mut doc, &undecodable, |i| lacks.get(&i).copied());
         } else {
             reference_images(&mut doc, input, assets);
+            let refs = std::mem::take(&mut doc.refs);
+            report_dropped(&mut doc, &undecodable, |i| {
+                refs.get(&i)
+                    .is_some_and(|r| matches!(r.location(), Location::Missing))
+                    .then_some(true)
+            });
+            doc.refs = refs;
         }
     }
-    Ok(doc)
+    Ok((doc, upgraded))
 }
 
 /// The asset's `extras.source`, made if it isn't there. `json` has its `asset`.
@@ -160,17 +183,15 @@ fn own_source(json: &mut Map<String, Value>, version: &str) {
     }
 }
 
-/// How many textures have images, none in a format Polysmelt decodes: KTX2
-/// (`KHR_texture_basisu`), AVIF (`EXT_texture_avif`), or WebP without the `webp` feature. Such
-/// a texture isn't drawn. An image's format is the type it declares, or its name's, not its
-/// bytes', so the count is the same however much of the file is read.
-fn undecodable_textures(json: &Map<String, Value>) -> usize {
-    let list = |key: &str| json.get(key).and_then(Value::as_array).map_or(&[][..], Vec::as_slice);
-    let images = list("images");
-    let undecodable = |source: &Value| {
-        let Some(img) = source.as_u64().and_then(|i| images.get(usize_of(i))) else {
-            return false;
-        };
+/// Which images are in a format Polysmelt doesn't decode: KTX2 (`KHR_texture_basisu`), AVIF
+/// (`EXT_texture_avif`), or WebP without the `webp` feature. An image's format is the type it declares,
+/// or its name's, not its bytes', so the answer is the same however much of the file is read.
+fn undecodable_images(json: &Map<String, Value>) -> Vec<bool> {
+    let images = json
+        .get("images")
+        .and_then(Value::as_array)
+        .map_or(&[][..], Vec::as_slice);
+    let undecodable = |img: &Value| {
         let uri = img.get("uri").and_then(Value::as_str).unwrap_or("");
         let named = if let Some(rest) = uri.strip_prefix("data:") {
             rest.split([';', ',']).next().map(str::to_owned)
@@ -192,22 +213,70 @@ fn undecodable_textures(json: &Map<String, Value>) -> usize {
             _ => false,
         }
     };
-    list("textures")
-        .iter()
-        .filter(|t| {
-            let extensions = t.get("extensions").and_then(Value::as_object);
-            let mut sources = t
-                .get("source")
-                .into_iter()
-                .chain(extensions.into_iter().flatten().filter_map(|(_, e)| e.get("source")))
-                .peekable();
-            sources.peek().is_some() && sources.all(undecodable)
-        })
-        .count()
+    images.iter().map(undecodable).collect()
 }
 
-/// Moves each image named by URI into a buffer of its own, when it's found and its type known.
-fn embed_images(doc: &mut Document, input: Input<'_>, assets: &dyn Assets) {
+/// Reports the textures the document can't draw as every reader reports textures it doesn't have
+/// ([`crate::images::Missed`]), changing nothing else. A texture is drawn from its `source` or an
+/// extension's; one with none that Polysmelt decodes ([`undecodable_images`]) and has isn't drawn.
+/// Each image of such a texture is counted once in `droppedTextures`, however many textures and
+/// materials use it (images that name one file by the same URI are one), and the URIs of those not
+/// found are listed in `missingFiles`, as written.
+/// `lacks(i)` is `Some(true)` for an image whose file wasn't found, `Some(false)` for one found that
+/// isn't an image that can be embedded, and `None` for one that's there.
+fn report_dropped(doc: &mut Document, undecodable: &[bool], lacks: impl Fn(usize) -> Option<bool>) {
+    let list = |key: &str| {
+        doc.base
+            .get(key)
+            .and_then(Value::as_array)
+            .map_or(&[][..], Vec::as_slice)
+    };
+    let images = list("images");
+    let mut dropped = std::collections::BTreeSet::new();
+    let mut missed = crate::images::Missed::default();
+    for t in list("textures") {
+        let extensions = t.get("extensions").and_then(Value::as_object);
+        let sources: Vec<Option<usize>> = t
+            .get("source")
+            .into_iter()
+            .chain(extensions.into_iter().flatten().filter_map(|(_, e)| e.get("source")))
+            .map(|s| s.as_u64().map(usize_of).filter(|&i| i < images.len()))
+            .collect();
+        // A source that names no image is left to the rest of the reader, as before.
+        let usable =
+            |s: &Option<usize>| s.is_none_or(|i| !undecodable.get(i).copied().unwrap_or(false) && lacks(i).is_none());
+        if sources.is_empty() || sources.iter().any(usable) {
+            continue;
+        }
+        for i in sources.into_iter().flatten() {
+            let uri = images[i]
+                .get("uri")
+                .and_then(Value::as_str)
+                .filter(|u| !u.starts_with("data:"));
+            if !dropped.insert(uri.ok_or(i)) {
+                continue;
+            }
+            if let Some(uri) = uri.filter(|_| lacks(i) == Some(true)) {
+                missed.files.push(uri.to_owned());
+            }
+        }
+    }
+    missed.dropped = dropped.len();
+    if missed.is_empty() {
+        return;
+    }
+    if let Value::Object(source) = source(doc.base_mut()) {
+        let counted = !source.contains_key("droppedTextures");
+        missed.write(source);
+        doc.missed = Some(Box::new((missed, counted)));
+    }
+}
+
+/// Moves each image named by URI into a buffer of its own, when it's found and its type known. Returns
+/// the images it couldn't: `true` for a file that wasn't found, `false` for one found whose type isn't
+/// known.
+fn embed_images(doc: &mut Document, input: Input<'_>, assets: &dyn Assets) -> std::collections::HashMap<usize, bool> {
+    let mut lacks = std::collections::HashMap::new();
     let n = doc.base.get("images").and_then(Value::as_array).map_or(0, Vec::len);
     for i in 0..n {
         let img = &doc.base["images"][i];
@@ -223,9 +292,15 @@ fn embed_images(doc: &mut Document, input: Input<'_>, assets: &dyn Assets) {
                 .and_then(|(named, bytes)| Some((typed(&bytes, named.as_deref())?, Blob::Bytes(bytes.into()))))
         } else {
             let named = container::mime_from_name(&container::percent_decode(uri));
-            read_image(input, assets, uri)
-                .ok()
-                .and_then(|bytes| Some((typed(&bytes, named)?, Blob::Bytes(bytes))))
+            let Ok(bytes) = read_image(input, assets, uri) else {
+                lacks.insert(i, true);
+                continue;
+            };
+            let mime = typed(&bytes, named);
+            if mime.is_none() {
+                lacks.insert(i, false);
+            }
+            mime.map(|mime| (mime, Blob::Bytes(bytes)))
         };
         let Some((mime, blob)) = found else { continue };
         let len = blob.len();
@@ -238,6 +313,7 @@ fn embed_images(doc: &mut Document, input: Input<'_>, assets: &dyn Assets) {
         img.insert("bufferView".into(), json!(view));
         img.insert("mimeType".into(), json!(mime));
     }
+    lacks
 }
 
 /// Notes where each image named by URI (other than a `data:` one) is, without reading it. A file
@@ -479,12 +555,13 @@ mod tests {
 
     /// The JSON without what writing may restate: views' default `byteOffset`, where in the
     /// binary chunk each view sits, and empty buffers at the end, which no view can use. Nor
-    /// the count of dropped textures, the one note reading adds.
+    /// the textures it doesn't have, the one note reading adds.
     fn normalized(mut json: Value) -> Value {
         if let Some(asset) = json.get_mut("asset").and_then(Value::as_object_mut) {
             let extras = asset.get_mut("extras").and_then(Value::as_object_mut);
             if let Some(source) = extras.and_then(|e| e.get_mut("source")?.as_object_mut()) {
                 source.remove("droppedTextures");
+                source.remove("missingFiles");
                 // What reading writes of the file itself.
                 if source.get("format") == Some(&serde_json::json!("glTF")) {
                     for key in [

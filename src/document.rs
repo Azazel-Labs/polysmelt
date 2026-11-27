@@ -1280,12 +1280,18 @@ impl<'s> Rigging<'s> {
     }
 }
 
-/// A skinned primitive's joints and weights as every reader's are written ([`crate::skin::sets`]): each bone
-/// index moved up by `offset` (past the root a skin may have first), weights summing to 1, and a vertex no bone
-/// moves bound to the root, joint 0. A slot with no weight names joint 0, as glTF's validator wants.
-fn skin_attributes(joints: &[[u32; 4]], weights: &[[f32; 4]], offset: u32, count: usize) -> crate::skin::Sets {
-    crate::skin::sets(joints.len().min(weights.len()), count, 0, |v, list| {
-        list.extend((0..4).map(|k| (joints[v][k].saturating_add(offset), weights[v][k])));
+/// One set of four joints and their weights, a vertex at a time: glTF's `JOINTS_n` and `WEIGHTS_n`.
+type SkinSet<'a> = (&'a [[u32; 4]], &'a [[f32; 4]]);
+
+/// A skinned primitive's joints and weights as every reader's are written ([`crate::skin::sets`]), from every set
+/// of four it has (each with a joint and a weight for each of its `n` vertices): each bone index moved up by
+/// `offset` (past the root a skin may have first), weights summing to 1, and a vertex no bone moves bound to the
+/// root, joint 0. A slot with no weight names joint 0, as glTF's validator wants.
+fn skin_attributes(sets: &[SkinSet<'_>], n: usize, offset: u32, count: usize) -> crate::skin::Sets {
+    crate::skin::sets(n, count, 0, |v, list| {
+        for (joints, weights) in sets {
+            list.extend((0..4).map(|k| (joints[v][k].saturating_add(offset), weights[v][k])));
+        }
     })
 }
 
@@ -1327,6 +1333,100 @@ fn blend_vertex_alpha(json: &mut Map<String, Value>, translucent: &[usize]) {
         };
         if mat.get("alphaMode").is_none() && vertex.mode() == crate::material::Alpha::Blend {
             mat["alphaMode"] = json!("BLEND");
+        }
+    }
+}
+
+/// Data added to a document that holds its buffers already, as a reader that converts a glTF document adds what
+/// it rewrites: accessors on views of one new buffer, written into the document by [`Added::finish`]. The indices
+/// it gives are those the accessors have once written.
+#[cfg(feature = "gltf")]
+pub(crate) struct Added {
+    bytes: Vec<u8>,
+    /// Each view's offset, length and target.
+    views: Vec<(usize, usize, Option<u32>)>,
+    accessors: Vec<Value>,
+    first_view: usize,
+    first_accessor: usize,
+}
+
+#[cfg(feature = "gltf")]
+impl Added {
+    /// Nothing added yet to `doc`.
+    pub fn new(doc: &Document) -> Added {
+        let count = |k: &str| list(doc.json(), k).len();
+        Added {
+            bytes: Vec::new(),
+            views: Vec::new(),
+            accessors: Vec::new(),
+            first_view: count("bufferViews"),
+            first_accessor: count("accessors"),
+        }
+    }
+
+    /// An accessor of `count` elements of `kind` and `component_type` over `bytes`, on a view of its own (for
+    /// `target`, when given); returns the accessor's index.
+    pub fn accessor(
+        &mut self,
+        bytes: &[u8],
+        component_type: u32,
+        count: usize,
+        kind: &str,
+        target: Option<u32>,
+    ) -> usize {
+        while !self.bytes.len().is_multiple_of(4) {
+            self.bytes.push(0);
+        }
+        self.views.push((self.bytes.len(), bytes.len(), target));
+        self.bytes.extend_from_slice(bytes);
+        self.accessors.push(json!({
+            "bufferView": self.first_view + self.views.len() - 1,
+            "componentType": component_type,
+            "count": count,
+            "type": kind,
+        }));
+        self.first_accessor + self.accessors.len() - 1
+    }
+
+    /// A float accessor of `v`, `kind` elements, with its `min` and `max` when `bounds` are given; returns its
+    /// index.
+    pub fn floats(&mut self, v: &[f32], kind: &str, bounds: Option<(Vec<f32>, Vec<f32>)>) -> usize {
+        let width = match kind {
+            "VEC2" => 2,
+            "VEC3" => 3,
+            "VEC4" => 4,
+            "MAT4" => 16,
+            _ => 1,
+        };
+        let bytes: Vec<u8> = v.iter().flat_map(|x| x.to_le_bytes()).collect();
+        let a = self.accessor(&bytes, 5126, v.len() / width, kind, None);
+        if let Some((min, max)) = bounds {
+            let acc = &mut self.accessors[a - self.first_accessor];
+            acc["min"] = json!(min);
+            acc["max"] = json!(max);
+        }
+        a
+    }
+
+    /// Writes what was added into `doc`: the buffer, its views and the accessors. Nothing, when nothing was.
+    pub fn finish(self, doc: &mut Document) {
+        if self.accessors.is_empty() {
+            return;
+        }
+        let buffer = doc.push_buffer(self.bytes);
+        for (offset, len, target) in self.views {
+            let mut view = json!({ "buffer": buffer, "byteOffset": offset, "byteLength": len });
+            if let Some(t) = target {
+                view["target"] = json!(t);
+            }
+            doc.push_view(view);
+        }
+        let list = doc.json_mut().entry("accessors").or_insert_with(|| json!([]));
+        if !list.is_array() {
+            *list = json!([]);
+        }
+        if let Value::Array(list) = list {
+            list.extend(self.accessors);
         }
     }
 }
@@ -1503,7 +1603,13 @@ impl Builder {
             && p.skin_joints.len() == n
             && p.skin_weights.len() == n
         {
-            let sets = skin_attributes(&p.skin_joints, &p.skin_weights, offset, count);
+            // Every set of four with both halves for every vertex: `JOINTS_0` first, as `Prim::skin_sets` has them.
+            let extra = p.skin_joint_sets.iter().zip(&p.skin_weight_sets).skip(1);
+            let sets: Vec<SkinSet<'_>> = std::iter::once((&p.skin_joints[..], &p.skin_weights[..]))
+                .chain(extra.map(|(j, w)| (&j[..], &w[..])))
+                .filter(|(j, w)| j.len() == n && w.len() == n)
+                .collect();
+            let sets = skin_attributes(&sets, n, offset, count);
             for (key, a) in sets.write(self, count) {
                 attributes[key] = json!(a);
             }

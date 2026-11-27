@@ -46,7 +46,7 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document> {
     let mut doc = match glb {
         Some(glb) => {
             let glb = crate::Bytes::from(glb);
-            super::gltf::load(Input::shared(&glb, input.path), &Memory::new(), keep)?
+            super::gltf::read(Input::shared(&glb, input.path), &Memory::new(), keep)?.0
         }
         None => Document::empty(Map::new()),
     };

@@ -9,8 +9,9 @@
     reason = "the files written here are small: their counts and indices fit any of these types"
 )]
 
+use polysmelt::assets::Memory;
 use polysmelt::source::{Axis, Fact, Handedness};
-use polysmelt::{Document, ErrorKind};
+use polysmelt::{Document, ErrorKind, Keep, Loader};
 use serde_json::{Value, json};
 
 fn read(bytes: &[u8], name: &str) -> Document {
@@ -773,4 +774,210 @@ fn a_motion_capture_file_that_names_no_unit_is_not_scaled() {
     assert_eq!(children, [json!("Hips")]);
     assert_eq!(root, json!({ "name": "RootNode", "children": root["children"] }));
     assert_eq!(bvh.source_info().meters_per_unit, Fact::Unknown);
+}
+
+/// One texture, `gone.png`, that isn't there, used by three materials, in each format that names texture files by
+/// text. Binary formats are checked the same way beside their readers.
+fn one_missing_texture_used_three_times() -> Vec<(&'static str, Vec<u8>)> {
+    let obj = "mtllib m.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 0 1\n\
+               usemtl a\nf 1/1 2/2 3/3\nusemtl b\nf 1/1 3/3 2/2\nusemtl c\nf 2/2 1/1 3/3\n";
+    let ac_object = |name: &str, mat: usize| {
+        format!(
+            "OBJECT poly\nname \"{name}\"\ntexture \"gone.png\"\nnumvert 3\n0 0 0\n1 0 0\n0 1 0\nnumsurf 1\nSURF 0x10\nmat {mat}\nrefs 3\n\
+             0 0 0\n1 1 0\n2 0 1\nkids 0\n"
+        )
+    };
+    let ac = format!(
+        "AC3Db\n{}OBJECT world\nkids 3\n{}{}{}",
+        ["red 1 0 0", "green 0 1 0", "blue 0 0 1"]
+            .iter()
+            .map(|m| {
+                let (name, rgb) = m.split_once(' ').unwrap();
+                format!("MATERIAL \"{name}\" rgb {rgb}  amb 0.2 0.2 0.2  emis 0 0 0  spec 0 0 0  shi 0  trans 0\n")
+            })
+            .collect::<String>(),
+        ac_object("a", 0),
+        ac_object("b", 1),
+        ac_object("c", 2)
+    );
+    let ogex_material = |id: &str, color: &str, attrib: &str| {
+        format!(
+            "Material ${id} {{ Color (attrib = \"diffuse\") {{ float[3] {{ {{{color}}} }} }} \
+             Texture (attrib = \"{attrib}\") {{ string {{ \"gone.png\" }} }} }}\n"
+        )
+    };
+    let ogex_node =
+        |id: &str| format!("GeometryNode {{ ObjectRef {{ ref {{ $g }} }} MaterialRef {{ ref {{ ${id} }} }} }}\n");
+    let ogex = format!(
+        "{}{}{}GeometryObject $g {{ Mesh {{ VertexArray (attrib = \"position\") {{ float[3] {{ {{0, 0, 0}}, {{1, 0, 0}}, {{0, 1, 0}} }} }} \
+         VertexArray (attrib = \"texcoord\") {{ float[2] {{ {{0, 0}}, {{1, 0}}, {{0, 1}} }} }} \
+         IndexArray {{ unsigned_int16[3] {{ {{0, 1, 2}} }} }} }} }}\n{}{}{}",
+        ogex_node("a"),
+        ogex_node("b"),
+        ogex_node("c"),
+        ogex_material("a", "1, 0, 0", "diffuse"),
+        ogex_material("b", "0, 1, 0", "diffuse"),
+        ogex_material("c", "0, 0, 1", "normal")
+    );
+    // Three textures (each its own sampler) used by three materials, on two images that name the one file.
+    let gltf = r#"{"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0,1,2]}],"nodes":[{"mesh":0},{"mesh":1},{"mesh":2}],
+"meshes":[{"primitives":[{"attributes":{"POSITION":0,"TEXCOORD_0":1},"material":0}]},
+{"primitives":[{"attributes":{"POSITION":0,"TEXCOORD_0":1},"material":1}]},
+{"primitives":[{"attributes":{"POSITION":0,"TEXCOORD_0":1},"material":2}]}],
+"materials":[{"pbrMetallicRoughness":{"baseColorTexture":{"index":0}}},{"pbrMetallicRoughness":{"baseColorTexture":{"index":1}}},
+{"normalTexture":{"index":2}}],
+"samplers":[{"wrapS":33071},{"wrapS":10497},{"wrapS":33648}],
+"textures":[{"source":0,"sampler":0},{"source":0,"sampler":1},{"source":1,"sampler":2}],"images":[{"uri":"gone.png"},{"uri":"gone.png"}],
+"accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]},
+{"bufferView":1,"componentType":5126,"count":3,"type":"VEC2"}],
+"bufferViews":[{"buffer":0,"byteLength":36},{"buffer":0,"byteOffset":36,"byteLength":24}],
+"buffers":[{"byteLength":60,"uri":"data:application/octet-stream;base64,AAAAAAAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAgD8AAAAAAAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/"}]}"#;
+    let dae_effect = |id: &str, image: &str| {
+        format!(
+            r#"<effect id="{id}"><profile_COMMON>
+  <newparam sid="surf"><surface type="2D"><init_from>{image}</init_from></surface></newparam>
+  <newparam sid="samp"><sampler2D><source>surf</source></sampler2D></newparam>
+  <technique sid="t"><lambert><diffuse><texture texture="samp" texcoord="UV"/></diffuse></lambert></technique>
+</profile_COMMON></effect>"#
+        )
+    };
+    let dae_node = |id: &str, mat: &str| {
+        format!(
+            r##"<node id="{id}"><instance_geometry url="#g"><bind_material><technique_common>
+  <instance_material symbol="m" target="#{mat}"><bind_vertex_input semantic="UV" input_semantic="TEXCOORD" input_set="0"/></instance_material>
+</technique_common></bind_material></instance_geometry></node>"##
+        )
+    };
+    // Two image elements naming the one file, and one of them used twice.
+    let dae = format!(
+        r##"<COLLADA xmlns="http://www.collada.org/2005/11/COLLADASchema" version="1.4.1">
+<library_images><image id="i1"><init_from>gone.png</init_from></image><image id="i2"><init_from>gone.png</init_from></image></library_images>
+<library_effects>{}{}{}</library_effects>
+<library_materials><material id="ma"><instance_effect url="#fa"/></material><material id="mb"><instance_effect url="#fb"/></material><material id="mc"><instance_effect url="#fc"/></material></library_materials>
+<library_geometries><geometry id="g"><mesh>
+  <source id="p"><float_array id="pa" count="9">0 0 0 1 0 0 0 1 0</float_array><technique_common><accessor source="#pa" count="3" stride="3"><param name="X" type="float"/><param name="Y" type="float"/><param name="Z" type="float"/></accessor></technique_common></source>
+  <source id="u"><float_array id="ua" count="6">0 0 1 0 0 1</float_array><technique_common><accessor source="#ua" count="3" stride="2"><param name="S" type="float"/><param name="T" type="float"/></accessor></technique_common></source>
+  <vertices id="v"><input semantic="POSITION" source="#p"/></vertices>
+  <triangles count="1" material="m"><input semantic="VERTEX" source="#v" offset="0"/><input semantic="TEXCOORD" source="#u" offset="0" set="0"/><p>0 1 2</p></triangles>
+</mesh></geometry></library_geometries>
+<library_visual_scenes><visual_scene id="s">{}{}{}</visual_scene></library_visual_scenes>
+<scene><instance_visual_scene url="#s"/></scene></COLLADA>"##,
+        dae_effect("fa", "i1"),
+        dae_effect("fb", "i2"),
+        dae_effect("fc", "i1"),
+        dae_node("na", "ma"),
+        dae_node("nb", "mb"),
+        dae_node("nc", "mc")
+    );
+    let x3d_shape = |color: &str| {
+        format!(
+            r#"<Shape><Appearance><Material diffuseColor="{color}"/><ImageTexture url='"gone.png"'/></Appearance>
+<IndexedFaceSet coordIndex="0 1 2 -1"><Coordinate point="0 0 0 1 0 0 0 1 0"/><TextureCoordinate point="0 0 1 0 0 1"/></IndexedFaceSet></Shape>"#
+        )
+    };
+    let x3d = format!(
+        "<X3D><Scene>{}{}{}</Scene></X3D>",
+        x3d_shape("1 0 0"),
+        x3d_shape("0 1 0"),
+        x3d_shape("0 0 1")
+    );
+    vec![
+        ("pack/model.obj", obj.into()),
+        ("pack/model.ac", ac.into_bytes()),
+        ("pack/model.ogex", ogex.into_bytes()),
+        ("pack/model.gltf", gltf.into()),
+        ("pack/model.dae", dae.into_bytes()),
+        ("pack/model.x3d", x3d.into_bytes()),
+    ]
+}
+
+#[test]
+fn a_missing_texture_many_materials_use_is_counted_once_and_named_once_in_every_reader() {
+    let mtl = "newmtl a\nKd 1 0 0\nmap_Kd gone.png\nnewmtl b\nKd 0 1 0\nmap_Kd gone.png\nnewmtl c\nKd 0 0 1\nnorm gone.png\nmap_Kd gone.png\n";
+    for image_bytes in [true, false] {
+        for (name, bytes) in one_missing_texture_used_three_times() {
+            let assets = Memory::new().with("pack/m.mtl", mtl);
+            let doc = Loader::new()
+                .keep(Keep::ALL.with_image_bytes(image_bytes))
+                .assets(assets)
+                .read(bytes.clone(), name)
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
+            let src = source(&doc);
+            assert_eq!(src["droppedTextures"], 1, "{name} (image bytes {image_bytes}): {src}");
+            assert_eq!(
+                src["missingFiles"],
+                json!(["gone.png"]),
+                "{name} (image bytes {image_bytes}): {src}"
+            );
+            // A read that keeps no textures doesn't look for them, so misses none.
+            for keep in [Keep::ALL.with_textures(false), Keep::ALL.with_materials(false)] {
+                let doc = Loader::new()
+                    .keep(keep.with_image_bytes(image_bytes))
+                    .assets(Memory::new().with("pack/m.mtl", mtl))
+                    .read(bytes.clone(), name)
+                    .unwrap_or_else(|e| panic!("{name}: {e}"));
+                let src = source(&doc);
+                assert!(src.get("droppedTextures").is_none(), "{name} without textures: {src}");
+                assert!(src.get("missingFiles").is_none(), "{name} without textures: {src}");
+            }
+        }
+    }
+}
+
+#[test]
+fn a_texture_the_document_cannot_draw_is_counted_once_however_many_use_it() {
+    // AMF holds its textures: texture 7, which isn't in the file, is named by three triangles in two sets of
+    // channels. It is one texture the document doesn't have, and no file is missing.
+    let tri = |v: &str, channels: &str| {
+        format!(
+            "<triangle>{v}<texmap {channels}><utex1>0</utex1><utex2>1</utex2><utex3>0</utex3><vtex1>0</vtex1><vtex2>0</vtex2><vtex3>1</vtex3></texmap></triangle>"
+        )
+    };
+    let amf = format!(
+        "<amf><object id=\"1\"><mesh><vertices>\
+         <vertex><coordinates><x>0</x><y>0</y><z>0</z></coordinates></vertex>\
+         <vertex><coordinates><x>1</x><y>0</y><z>0</z></coordinates></vertex>\
+         <vertex><coordinates><x>0</x><y>1</y><z>0</z></coordinates></vertex>\
+         </vertices><volume>{}{}{}</volume></mesh></object></amf>",
+        tri("<v1>0</v1><v2>1</v2><v3>2</v3>", r#"rtexid="7" gtexid="7" btexid="7""#),
+        tri("<v1>2</v1><v2>1</v2><v3>0</v3>", r#"rtexid="7" gtexid="7" btexid="7""#),
+        tri("<v1>1</v1><v2>0</v2><v3>2</v3>", r#"rtexid="7""#)
+    );
+    let doc = read(amf.as_bytes(), "a.amf");
+    let src = source(&doc);
+    assert_eq!(src["droppedTextures"], 1, "{src}");
+    assert!(src.get("missingFiles").is_none(), "{src}");
+
+    // glTF: one KTX2 image behind two textures, and a third texture whose KTX2 has a PNG to fall back on. One
+    // image the document can't draw from; the fallback texture is drawn, so its KTX2 isn't counted on its own.
+    let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
+    let gltf = format!(
+        r#"{{"asset":{{"version":"2.0"}},"extensionsUsed":["KHR_texture_basisu"],"scene":0,"scenes":[{{"nodes":[0]}}],"nodes":[{{"mesh":0}}],
+"meshes":[{{"primitives":[{{"attributes":{{"POSITION":0,"TEXCOORD_0":1}},"material":0}},{{"attributes":{{"POSITION":0,"TEXCOORD_0":1}},"material":1}},{{"attributes":{{"POSITION":0,"TEXCOORD_0":1}},"material":2}}]}}],
+"materials":[{{"pbrMetallicRoughness":{{"baseColorTexture":{{"index":0}}}}}},{{"pbrMetallicRoughness":{{"baseColorTexture":{{"index":1}}}}}},{{"pbrMetallicRoughness":{{"baseColorTexture":{{"index":2}}}}}}],
+"textures":[{{"extensions":{{"KHR_texture_basisu":{{"source":0}}}}}},{{"extensions":{{"KHR_texture_basisu":{{"source":0}}}}}},
+{{"source":2,"extensions":{{"KHR_texture_basisu":{{"source":1}}}}}}],
+"images":[{{"uri":"a.ktx2"}},{{"uri":"b.ktx2"}},{{"uri":"data:image/png;base64,{png}"}}],
+"accessors":[{{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]}},
+{{"bufferView":1,"componentType":5126,"count":3,"type":"VEC2"}}],
+"bufferViews":[{{"buffer":0,"byteLength":36}},{{"buffer":0,"byteOffset":36,"byteLength":24}}],
+"buffers":[{{"byteLength":60,"uri":"data:application/octet-stream;base64,AAAAAAAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAgD8AAAAAAAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/"}}]}}"#
+    );
+    let ktx2 = [0xAB, 0x4B, 0x54, 0x58, 0x20, 0x32, 0x30, 0xBB, 0x0D, 0x0A, 0x1A, 0x0A];
+    for image_bytes in [true, false] {
+        let assets = Memory::new()
+            .with("a.ktx2", ktx2.to_vec())
+            .with("b.ktx2", ktx2.to_vec());
+        let doc = Loader::new()
+            .keep(Keep::ALL.with_image_bytes(image_bytes))
+            .assets(assets)
+            .read(gltf.clone().into_bytes(), "m.gltf")
+            .unwrap();
+        let src = source(&doc);
+        assert_eq!(src["droppedTextures"], 1, "image bytes {image_bytes}: {src}");
+        assert!(src.get("missingFiles").is_none(), "{src}");
+        // Only the report: the textures and images are the file's.
+        assert_eq!(doc.json()["textures"].as_array().unwrap().len(), 3);
+        assert_eq!(doc.json()["images"].as_array().unwrap().len(), 3);
+    }
 }

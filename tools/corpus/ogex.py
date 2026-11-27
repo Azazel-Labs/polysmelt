@@ -296,7 +296,7 @@ case(FMT, "textured_material",
                "/materials/0/pbrMetallicRoughness/baseColorTexture/extensions/KHR_texture_transform/offset":
                    [0.5, -1.25],
                "/materials/0/normalTexture": None},
-      "document": {"source": {"droppedTextures": 1}}})
+      "document": {"source": {"droppedTextures": 1, "missingFiles": ["missing.png"]}}})
 
 # --- nodes -----------------------------------------------------------------------------------------
 
@@ -763,7 +763,7 @@ for name, folder in REAL.items():
             "assimp_empty_camera": "camera objects and no nodes, each placed under the root by itself",
             "assimp_lights_only": "light objects and no nodes, each placed under the root by itself"}[folder]
     if folder == "assimp_example":
-        expect["document"]["source"] = {"droppedTextures": 1}
+        expect["document"]["source"] = {"droppedTextures": 1, "missingFiles": ["texture/Concrete.tga"]}
     case(FMT, folder, {name: real[name]},
          {"spec": f"{SPEC}: a real file, {what}", "source": "assimp test models (test/models/OpenGEX), BSD license, "
           "see ../LICENSE-assimp", **expect})

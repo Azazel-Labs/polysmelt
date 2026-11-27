@@ -238,6 +238,300 @@ pub(crate) fn set_skeletons(nodes: &[Value], skins: &mut [Value]) {
     }
 }
 
+/// A primitive's attributes as [`conform`] rewrites them: each name and accessor.
+#[cfg(feature = "gltf")]
+type Attributes = Vec<(String, usize)>;
+
+/// Holds the skins of a glTF document that a reader converts (glTF 1.0, VRM, 3D Tiles) to the rule every reader's
+/// follow (see the module's notes): each skinned primitive's joints and weights go through [`sets`], a vertex no
+/// joint moves is bound to a rest joint (the node that draws the mesh, or a node of its own under it when that
+/// node is one of the skin's joints already, with the identity for its inverse bind matrix), and every skin's
+/// `skeleton` is its joints' common root ([`set_skeletons`]).
+///
+/// A primitive whose every vertex already has at most [`MAX_INFLUENCES`] joints, none of them twice, all of them
+/// the skin's, and weights that are positive and sum to 1, is left as the file has it, whatever order its joints
+/// are in. What's rewritten goes into a new buffer. Left as they are: a primitive compressed with Draco (its
+/// joints and weights are in the compressed stream), one whose joints or weights can't be read, and a mesh drawn
+/// with skins of different numbers of joints (its joint indices can't mean the same in each).
+#[cfg(feature = "gltf")]
+pub(crate) fn conform(doc: &mut crate::Document) {
+    let plan = Plan::of(doc);
+    let Plan { rewrites, rests, skins } = plan;
+    let mut added = crate::document::Added::new(doc);
+    // Each rewritten primitive: its mesh and place, how many sets it had, and its new attributes.
+    let mut attributes: Vec<(usize, usize, usize, Attributes)> = Vec::new();
+    for r in rewrites {
+        let wide = r.count + usize::from(r.sets.unbound) > 256;
+        let s = &r.sets;
+        let per = s.vertices * 4;
+        let mut out = Vec::new();
+        for k in 0..s.groups {
+            let joints = &s.joints[k * per..(k + 1) * per];
+            let j = if wide {
+                let b: Vec<u8> = joints
+                    .iter()
+                    .flat_map(|&j| u16::try_from(j).unwrap_or(0).to_le_bytes())
+                    .collect();
+                added.accessor(&b, 5123, s.vertices, "VEC4", Some(34962))
+            } else {
+                let b: Vec<u8> = joints.iter().map(|&j| u8::try_from(j).unwrap_or(0)).collect();
+                added.accessor(&b, 5121, s.vertices, "VEC4", Some(34962))
+            };
+            let w: Vec<u8> = s.weights[k * per..(k + 1) * per]
+                .iter()
+                .flat_map(|x| x.to_le_bytes())
+                .collect();
+            let w = added.accessor(&w, 5126, s.vertices, "VEC4", Some(34962));
+            out.push((format!("JOINTS_{k}"), j));
+            out.push((format!("WEIGHTS_{k}"), w));
+        }
+        attributes.push((r.mesh, r.prim, r.had, out));
+    }
+    // A rest joint's inverse bind matrix is the identity: the vertex stays where it is in the node's space.
+    let rest_ibms: Vec<Option<usize>> = rests
+        .iter()
+        .map(|r| {
+            r.ibms.as_ref().map(|ibms| {
+                let mut all = ibms.clone();
+                all.extend(IDENTITY);
+                added.floats(&all, "MAT4", None)
+            })
+        })
+        .collect();
+    added.finish(doc);
+
+    let json = doc.json_mut();
+    for (m, p, had, out) in attributes {
+        let Some(Value::Object(attrs)) = json
+            .get_mut("meshes")
+            .and_then(|l| l.get_mut(m))
+            .and_then(|mesh| mesh.get_mut("primitives")?.get_mut(p))
+            .and_then(|prim| prim.get_mut("attributes"))
+        else {
+            continue;
+        };
+        for k in 0..had {
+            attrs.remove(&format!("JOINTS_{k}"));
+            attrs.remove(&format!("WEIGHTS_{k}"));
+        }
+        for (key, a) in out {
+            attrs.insert(key, json!(a));
+        }
+    }
+    for (r, ibm) in rests.into_iter().zip(rest_ibms) {
+        let Some(Value::Array(nodes)) = json.get_mut("nodes") else {
+            break;
+        };
+        let mut joints = skins[r.skin].clone();
+        // The node that draws the mesh is the rest joint, unless it is one of the skin's joints already: then a
+        // node of its own under it, which stands where it does.
+        let rest = if joints.contains(&r.node) {
+            nodes.push(json!({}));
+            let child = nodes.len() - 1;
+            if let Some(node) = nodes[r.node].as_object_mut() {
+                match node.entry("children").or_insert_with(|| json!([])) {
+                    Value::Array(kids) => kids.push(json!(child)),
+                    other => *other = json!([child]),
+                }
+            }
+            child
+        } else {
+            r.node
+        };
+        joints.push(rest);
+        let Some(Value::Array(list)) = json.get_mut("skins") else {
+            break;
+        };
+        let mut skin = list[r.skin].clone();
+        skin["joints"] = json!(joints);
+        if let Some(a) = ibm {
+            skin["inverseBindMatrices"] = json!(a);
+        }
+        if r.copy {
+            list.push(skin);
+            let new = list.len() - 1;
+            if let Some(Value::Array(nodes)) = json.get_mut("nodes") {
+                nodes[r.node]["skin"] = json!(new);
+            }
+        } else {
+            list[r.skin] = skin;
+        }
+    }
+    let nodes = json.get("nodes").and_then(Value::as_array).cloned().unwrap_or_default();
+    if let Some(Value::Array(skins)) = json.get_mut("skins") {
+        set_skeletons(&nodes, skins);
+    }
+}
+
+/// The identity, column-major.
+#[cfg(feature = "gltf")]
+const IDENTITY: [f32; 16] = [1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1.];
+
+/// What [`conform`] changes in a document, worked out before anything is.
+#[cfg(feature = "gltf")]
+struct Plan {
+    rewrites: Vec<Rewrite>,
+    rests: Vec<Rest>,
+    /// Each skin's joints.
+    skins: Vec<Vec<usize>>,
+}
+
+/// A skinned primitive whose joints and weights are rewritten.
+#[cfg(feature = "gltf")]
+struct Rewrite {
+    mesh: usize,
+    prim: usize,
+    /// How many sets of joints and weights it had.
+    had: usize,
+    sets: Sets,
+    /// How many joints its skin has.
+    count: usize,
+}
+
+/// A rest joint to add.
+#[cfg(feature = "gltf")]
+struct Rest {
+    /// The node that draws the mesh.
+    node: usize,
+    skin: usize,
+    /// The skin's inverse bind matrices, when it has an accessor of them (without, every one is the identity).
+    ibms: Option<Vec<f32>>,
+    /// Whether the joint goes into a copy of the skin, which another node draws with too.
+    copy: bool,
+}
+
+#[cfg(feature = "gltf")]
+impl Plan {
+    fn of(doc: &crate::Document) -> Plan {
+        let index = |v: &Value, k: &str| v.get(k)?.as_u64().and_then(|i| usize::try_from(i).ok());
+        let json = doc.json();
+        let list = |k: &str| json.get(k).and_then(Value::as_array).map_or(&[][..], Vec::as_slice);
+        let (nodes, skin_list, meshes) = (list("nodes"), list("skins"), list("meshes"));
+        let skins: Vec<Vec<usize>> = skin_list
+            .iter()
+            .map(|s| {
+                s.get("joints")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|j| j.as_u64().and_then(|j| usize::try_from(j).ok()))
+                    .collect()
+            })
+            .collect();
+        // Each node that draws a mesh with a skin: the node, the mesh and the skin.
+        let drawn: Vec<(usize, usize, usize)> = nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(n, node)| {
+                let (m, s) = (index(node, "mesh")?, index(node, "skin")?);
+                (m < meshes.len() && s < skins.len()).then_some((n, m, s))
+            })
+            .collect();
+        // Each skinned mesh's number of joints: the same in every skin it's drawn with, or `None`.
+        let mut counts: std::collections::BTreeMap<usize, Option<usize>> = std::collections::BTreeMap::new();
+        for &(_, m, s) in &drawn {
+            let n = skins[s].len();
+            counts
+                .entry(m)
+                .and_modify(|c| {
+                    if *c != Some(n) {
+                        *c = None;
+                    }
+                })
+                .or_insert(Some(n));
+        }
+        let mut rewrites = Vec::new();
+        for (&m, &count) in &counts {
+            let Some(count) = count.filter(|&c| c > 0) else {
+                continue;
+            };
+            let prims = meshes[m].get("primitives").and_then(Value::as_array);
+            for (p, prim) in prims.into_iter().flatten().enumerate() {
+                if prim.pointer("/extensions/KHR_draco_mesh_compression").is_some() {
+                    continue;
+                }
+                if let Some((had, sets)) = weighed(doc, prim, count) {
+                    rewrites.push(Rewrite {
+                        mesh: m,
+                        prim: p,
+                        had,
+                        sets,
+                        count,
+                    });
+                }
+            }
+        }
+        let unbound: Vec<usize> = rewrites.iter().filter(|r| r.sets.unbound).map(|r| r.mesh).collect();
+        let mut rests = Vec::new();
+        for &(n, _, s) in drawn.iter().filter(|d| unbound.contains(&d.1)) {
+            let ibms = match index(&skin_list[s], "inverseBindMatrices") {
+                Some(a) => match doc.read_floats(a) {
+                    Ok((16, v)) if v.len() == 16 * skins[s].len() => Some(v),
+                    // Inverse bind matrices that can't be read: the skin is left as it is.
+                    _ => continue,
+                },
+                None => None,
+            };
+            rests.push(Rest {
+                node: n,
+                skin: s,
+                ibms,
+                copy: drawn.iter().filter(|d| d.2 == s).count() > 1,
+            });
+        }
+        Plan { rewrites, rests, skins }
+    }
+}
+
+/// A skinned primitive's joints and weights through [`sets`], for a skin of `count` joints, and how many sets
+/// it had; `None` when they are as the rule has them already, or can't be read.
+#[cfg(feature = "gltf")]
+fn weighed(doc: &crate::Document, prim: &Value, count: usize) -> Option<(usize, Sets)> {
+    let attrs = prim.get("attributes")?;
+    let index = |k: &str| attrs.get(k)?.as_u64().and_then(|i| usize::try_from(i).ok());
+    let mut read = Vec::new();
+    for k in 0.. {
+        let (Some(j), Some(w)) = (index(&format!("JOINTS_{k}")), index(&format!("WEIGHTS_{k}"))) else {
+            break;
+        };
+        match (doc.read_floats(j), doc.read_floats(w)) {
+            (Ok((4, j)), Ok((4, w))) if j.len() == w.len() => read.push((j, w)),
+            _ => return None,
+        }
+    }
+    let vertices = read.first()?.0.len() / 4;
+    if read.iter().any(|(j, _)| j.len() != vertices * 4) {
+        return None;
+    }
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a joint index, an unsigned integer read exactly"
+    )]
+    let fill = |v: usize, out: &mut Vec<(u32, f32)>| {
+        for (j, w) in &read {
+            out.extend((v * 4..v * 4 + 4).map(|i| (j[i] as u32, w[i])));
+        }
+    };
+    let mut one = Vec::new();
+    let sound = (0..vertices).all(|v| {
+        one.clear();
+        fill(v, &mut one);
+        if one.iter().any(|&(_, w)| !w.is_finite() || w < 0.0) {
+            return false;
+        }
+        one.retain(|&(_, w)| w > 0.0);
+        // As a validator checks a sum: in single precision, allowing a rounding for each weight.
+        let sum: f32 = one.iter().map(|e| e.1).sum();
+        let unit = f64::from((sum - 1.0).abs()) <= 2e-7 * f64::from(crate::num::u32_of(one.len().max(1)));
+        one.sort_unstable_by_key(|e| e.0);
+        unit && one.len() <= MAX_INFLUENCES
+            && one.iter().all(|&(j, _)| (j as usize) < count)
+            && one.windows(2).all(|w| w[0].0 != w[1].0)
+    });
+    (!sound).then(|| (read.len(), sets(vertices, count, crate::num::u32_of(count), fill)))
+}
+
 /// An inverse bind matrix (column-major) as glTF holds it: the identity when any of it isn't finite, and its last
 /// row `0 0 0 1`.
 pub(crate) fn inverse_bind(m: [f64; 16]) -> [f32; 16] {

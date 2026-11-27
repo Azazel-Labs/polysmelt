@@ -249,8 +249,9 @@ impl Matl {
     }
 }
 
-/// `.vox` has no frame rate, and its editor documents none: animation frames are this many to a second, the
-/// readers' shared assumption.
+/// Animation frames a second: the readers' shared assumption. A `.vox` has no rate: frames are numbered (`_f` in an
+/// `nTRN` frame or `nSHP` model) and nothing says how fast they go (`MagicaVoxel-file-format-vox-extension.txt` at
+/// <https://github.com/ephtracy/voxel-model>).
 #[allow(clippy::cast_possible_truncation, reason = "a small whole number")]
 const FRAMES_PER_SECOND: f32 = keys::ASSUMED_FRAME_RATE as f32;
 

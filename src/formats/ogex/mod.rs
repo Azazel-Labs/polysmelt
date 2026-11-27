@@ -14,7 +14,7 @@
 //! bitangents), texture coordinate sets and color sets keep their indices. Morph targets
 //! become glTF morph targets, the one with the lowest index the base, relative targets kept
 //! relative to theirs; morph weights the node's weights. Skins become glTF skins, their bind
-//! poses inverse bind matrices, each vertex's four strongest bones kept.
+//! poses inverse bind matrices, each vertex's 16 strongest bones kept.
 //!
 //! Materials map onto glTF's metallic-roughness model: diffuse is the base color, metalness
 //! and roughness theirs, emission emissive, opacity alpha, transparency transmission,
@@ -415,9 +415,6 @@ struct Ctx<'a> {
     metric: Metric,
     b: Builder,
     images: Images,
-    image_of: FastMap<String, Option<usize>>,
-    /// The material structures whose missing textures are counted, when materials aren't kept.
-    counted: std::collections::HashSet<u32>,
     materials: Vec<Full>,
     /// How many texture coordinate sets each material reads (its highest set and one).
     material_uvs: Vec<usize>,
@@ -451,7 +448,6 @@ struct Ctx<'a> {
 struct Stats {
     missing_objects: usize,
     missing_materials: usize,
-    missing_textures: usize,
     dropped_lods: usize,
     bad_transforms: usize,
     sheared_transforms: usize,
@@ -515,8 +511,6 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         b: Builder::new(keep.crease_angle()),
         images: Images::new(!keep.image_bytes, &dir),
         dir,
-        image_of: FastMap::default(),
-        counted: std::collections::HashSet::new(),
         materials: Vec::new(),
         material_uvs: Vec::new(),
         default_materials: [None; 2],
@@ -988,7 +982,6 @@ fn finish(mut c: Ctx<'_>) -> Document {
     for (key, n) in [
         ("missingObjects", st.missing_objects),
         ("missingMaterials", st.missing_materials),
-        ("droppedTextures", st.missing_textures),
         ("droppedLevelsOfDetail", st.dropped_lods),
         ("badTransforms", st.bad_transforms),
         ("shearedTransforms", st.sheared_transforms),

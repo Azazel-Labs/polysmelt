@@ -127,9 +127,9 @@ case(FMT, "vrm0_spec_version_missing",
       "bounds": {"min": [-1, 0, -1], "max": [0, 1, 0]}, "document": {"source": {"version": "0.0"}}})
 
 
-def animation():
-    """A VRMA: a hips node moved from 0 to 1 along X over a second."""
-    times = [0.0, 1.0]
+def animation(start=0.0):
+    """A VRMA: a hips node moved from 0 to 1 along X over a second, from `start` seconds."""
+    times = [start, start + 1.0]
     moves = [(0.0, 1.0, 0.0), (1.0, 1.0, 0.0)]
     binary = struct.pack("<2f", *times) + b"".join(struct.pack("<3f", *m) for m in moves)
     doc = {
@@ -138,7 +138,7 @@ def animation():
         "scenes": [{"nodes": [0]}],
         "nodes": [{"name": "hips", "translation": [0.0, 1.0, 0.0]}],
         "accessors": [
-            {"bufferView": 0, "componentType": 5126, "count": 2, "type": "SCALAR", "min": [0.0], "max": [1.0]},
+            {"bufferView": 0, "componentType": 5126, "count": 2, "type": "SCALAR", "min": [times[0]], "max": [times[1]]},
             {"bufferView": 1, "componentType": 5126, "count": 2, "type": "VEC3"},
         ],
         "bufferViews": [{"buffer": 0, "byteOffset": 0, "byteLength": 8},
@@ -159,6 +159,73 @@ case(FMT, "vrma_animation", {"walk.vrma": animation()},
                    "source": {"format": "VRMA", "version": "1.0"}},
       "rig": [{"node": "hips", "translation": [0.5, 1, 0], "time": 0.5},
               {"node": "hips", "translation": [0, 1, 0]}]})
+
+case(FMT, "vrma_late_start", {"walk.vrma": animation(start=1.0)},
+     {"spec": VRMA + ": an animation whose keys start at 1 second: as every reader's, it starts at 0, the second "
+              "taken off noted as its timeOffset", "source": SRC, "no_mesh": True,
+      "document": {"animations": 1, "channels": 1}, "animation_spans": [[0, 1]],
+      "rig": [{"node": "hips", "translation": [0.5, 1, 0], "time": 0.5}],
+      "json": {"/animations/0/extras/timeOffset": 1}})
+
+
+def skinned():
+    """A VRM 1.0 avatar whose cube is skinned to `Bone`, under `Hips` beside `Body`, which draws it. The first
+    half of the vertices name joint 0 twice at a quarter each; the rest have no weight. `Bone` moves 2 along X
+    over a second."""
+    pos, nrm, idx = cube_triangles()
+    half = len(pos) // 2
+    joints = [(0, 0, 0, 0)] * len(pos)
+    weights = [(0.25, 0.25, 0.0, 0.0)] * half + [(0.0, 0.0, 0.0, 0.0)] * (len(pos) - half)
+    parts = [b"".join(struct.pack("<3f", *p) for p in pos), b"".join(struct.pack("<3f", *n) for n in nrm),
+             b"".join(struct.pack("<H", i) for i in idx),
+             b"".join(struct.pack("<4B", *j) for j in joints), b"".join(struct.pack("<4f", *w) for w in weights),
+             struct.pack("<2f", 0.0, 1.0), struct.pack("<6f", 0, 0, 0, 2, 0, 0)]
+    views, offset = [], 0
+    for part, target in zip(parts, [34962, 34962, 34963, 34962, 34962, None, None]):
+        v = {"buffer": 0, "byteOffset": offset, "byteLength": len(part)}
+        if target:
+            v["target"] = target
+        views.append(v)
+        offset += len(part) + -len(part) % 4
+    binary = b"".join(part + bytes(-len(part) % 4) for part in parts)
+    doc = {
+        "asset": {"version": "2.0", "generator": SRC},
+        "scene": 0,
+        "scenes": [{"nodes": [0]}],
+        "nodes": [{"name": "Hips", "children": [1, 2]}, {"name": "Body", "mesh": 0, "skin": 0}, {"name": "Bone"}],
+        "meshes": [{"primitives": [{"attributes": {"POSITION": 0, "NORMAL": 1, "JOINTS_0": 3, "WEIGHTS_0": 4},
+                                    "indices": 2}]}],
+        "skins": [{"joints": [2]}],
+        "accessors": [
+            {"bufferView": 0, "componentType": 5126, "count": len(pos), "type": "VEC3",
+             "min": [min(p[k] for p in pos) for k in range(3)], "max": [max(p[k] for p in pos) for k in range(3)]},
+            {"bufferView": 1, "componentType": 5126, "count": len(pos), "type": "VEC3"},
+            {"bufferView": 2, "componentType": 5123, "count": len(idx), "type": "SCALAR"},
+            {"bufferView": 3, "componentType": 5121, "count": len(pos), "type": "VEC4"},
+            {"bufferView": 4, "componentType": 5126, "count": len(pos), "type": "VEC4"},
+            {"bufferView": 5, "componentType": 5126, "count": 2, "type": "SCALAR", "min": [0.0], "max": [1.0]},
+            {"bufferView": 6, "componentType": 5126, "count": 2, "type": "VEC3"},
+        ],
+        "bufferViews": views,
+        "buffers": [{"byteLength": len(binary)}],
+        "animations": [{"samplers": [{"input": 5, "output": 6}],
+                        "channels": [{"sampler": 0, "target": {"node": 2, "path": "translation"}}]}],
+        "extensionsUsed": ["VRMC_vrm"],
+        "extensions": {"VRMC_vrm": VRMC_VRM},
+    }
+    moved = [[p[0] + 2, p[1], p[2]] for p in pos[:half]] + pos[half:]
+    bounds = {"min": [min(p[k] for p in moved) for k in range(3)], "max": [max(p[k] for p in moved) for k in range(3)]}
+    return glb(doc, binary), bounds
+
+
+avatar_glb, moved = skinned()
+case(FMT, "vrm1_skin_weights", {"avatar.vrm": avatar_glb},
+     {"spec": VRM1 + ": a skin's weights held to the one skinning rule every reader follows: a joint named twice on "
+              "a vertex merged, weights scaled to sum to 1, and a vertex no joint moves bound to the node that draws "
+              "it (Body, added to the skin's joints); skin.skeleton is the joints' common root", "source": SRC,
+      **CUBE, "document": {"skins": 1, "joints": 2, "animations": 1},
+      "poses": [{"animation": 0, "time": 1, "bounds": moved}],
+      "json": {"/skins/0/joints": [2, 1], "/skins/0/skeleton": 0}})
 
 case(FMT, "not_glb", {"broken.vrm": b"glTF\x02\x00\x00\x00\x0c\x00"},
      {"spec": VRM1 + ": a file cut short in its GLB header", "source": SRC, "error": "GLB is cut short",

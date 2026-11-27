@@ -182,7 +182,8 @@ case(FMT, "weights_animation", {
     "source": SRC,
     "triangles": 1,
     "document": {"skins": 1, "joints": 2, "animations": 1},
-    "json": {"/asset/extras/source/frameRate": 30.0},
+    # The SMD has no rate: studiomdl's default for a $sequence, assumed.
+    "json": {"/asset/extras/source/frameRate": 30.0, "/asset/extras/source/assumed": ["upAxis", "handedness", "frameRate"]},
     "facts": {"bones": 2, "frames": 3, "triangles": 1},
     "rig": [
         {"node": "arm", "keys": {"rotation": [0, r(1 / 30), 0.1]}},

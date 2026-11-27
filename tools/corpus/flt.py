@@ -347,7 +347,7 @@ case(FMT, "textures", {"textures.flt": w.bytes(), "skin.rgba": SKIN, "paint.png"
                     {"textured": True, "alpha_mode": "OPAQUE", "pixel": [200, 100, 50]},
                     {"textured": True, "pixel": [10, 120, 30]}, {"textured": False}],
       "json": {"/materials/0/alphaMode": "BLEND", "/materials/1/alphaMode": None},
-      "document": {"source": {"droppedTextures": 1}}})
+      "document": {"source": {"droppedTextures": 1, "missingFiles": ["missing.png"]}}})
 
 # A base texture and two layers (multitexture): a bump map, the normal texture, and a detail
 # texture, each layer with its own coordinates (a UV list).
@@ -556,21 +556,37 @@ case(FMT, "light_sources", {"lights.flt": w.bytes()},
                "/extensions/KHR_lights_punctual/lights/1/type": "directional"},
       "document": {"lights": 2, "node_names": ["lamp", "sun"], "source": {"disabledLights": 1}}})
 
-# An animated group (forward, a 3 second loop) of three squares of sizes 1, 2 and 3, each shown for
-# a second; the ones not shown are scaled to nothing at the origin.
-w = Flt()
-off = w.vertices(quad_at(0) + quad_at(0, size=2.0) + quad_at(0, size=3.0))
-w.push().group("seq", [(16, struct.pack(">I", 0x40000000)), (36, struct.pack(">f", 3.0))]).push()
-for k in range(3):
-    w.group(f"frame{k}").push().face(f"f{k}", off[4 * k:4 * k + 4]).pop()
-w.pop().pop()
-case(FMT, "animated_group", {"anim.flt": w.bytes()},
+# An animated group (forward, a `loop` second loop) of three squares of sizes 1, 2 and 3, each shown
+# for a third of it; the ones not shown are scaled to nothing at the origin.
+def animated_group(loop):
+    w = Flt()
+    off = w.vertices(quad_at(0) + quad_at(0, size=2.0) + quad_at(0, size=3.0))
+    w.push().group("seq", [(16, struct.pack(">I", 0x40000000)), (36, struct.pack(">f", loop))]).push()
+    for k in range(3):
+        w.group(f"frame{k}").push().face(f"f{k}", off[4 * k:4 * k + 4]).pop()
+    w.pop().pop()
+    return w.bytes()
+
+
+case(FMT, "animated_group", {"anim.flt": animated_group(3.0)},
      {"spec": SPEC + ": an animated group showing its children in turn over its loop duration", "source": SRC,
       "triangles": 6, "bounds": square_bounds([(0, 0, 1)]),
       "document": {"animations": 1, "channels": 3},
+      # The loop duration times the frames: no rate stands in.
+      "json": {"/asset/extras/source/frameRate": None},
       "poses": [{"animation": 0, "time": 0.5, "bounds": square_bounds([(0, 0, 1)])},
                 {"animation": 0, "time": 1.5, "bounds": square_bounds([(0, 0, 2)])},
                 {"animation": 0, "time": 2.5, "bounds": square_bounds([(0, 0, 3)])}]})
+# A loop duration of 0 "indicates that the loop is to play as fast as possible" (OGC 16-009r4, Group
+# Record): a rate the display sets, so the readers' shared 30 frames a second, assumed.
+case(FMT, "animated_group_no_duration", {"anim.flt": animated_group(0.0)},
+     {"spec": SPEC + ": an animated group with a loop duration of 0 (as fast as possible), at 30 frames a second",
+      "source": SRC, "triangles": 6, "bounds": square_bounds([(0, 0, 1)]),
+      "document": {"animations": 1, "channels": 3},
+      "json": {"/asset/extras/source/frameRate": 30, "/asset/extras/source/assumed": ["frameRate"]},
+      "poses": [{"animation": 0, "time": 0.5 / 30, "bounds": square_bounds([(0, 0, 1)])},
+                {"animation": 0, "time": 1.5 / 30, "bounds": square_bounds([(0, 0, 2)])},
+                {"animation": 0, "time": 2.5 / 30, "bounds": square_bounds([(0, 0, 3)])}]})
 
 # A subface: a face drawn on the face before it, between push-subface and pop-subface records. The
 # face after the pop is the object's again.

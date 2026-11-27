@@ -485,6 +485,36 @@ fn sgi_textures_are_embedded() {
 }
 
 #[test]
+fn a_texture_many_palette_entries_and_faces_name_is_counted_once_when_it_is_not_there() {
+    // Two palette entries name the one file (`second` as written, or by another path to it); three faces use them.
+    let model = |second: &str| {
+        let mut w = W::new(1640, 0);
+        w.texture(3, "/old/disk/maps/wood.rgb");
+        w.texture(4, second);
+        let v = w.vertices(&SQUARE);
+        w.push();
+        for (name, index) in [("a", 3i16), ("b", 4), ("c", 3)] {
+            w.face(name, &v, |r| put(r, 28, &index.to_be_bytes()));
+        }
+        w.pop();
+        w.bytes()
+    };
+    let doc = read(&model("/old/disk/maps/wood.rgb"), &Memory::new()).unwrap();
+    let src = &doc.json()["asset"]["extras"]["source"];
+    assert_eq!(src["missingFiles"], json!(["/old/disk/maps/wood.rgb"]), "{src}");
+    assert_eq!(src["droppedTextures"], 1, "{src}");
+    // Found but not an image, names that find the one file are one texture.
+    let doc = read(
+        &model("wood.rgb"),
+        &Memory::new().with("wood.rgb", b"not an image".to_vec()),
+    )
+    .unwrap();
+    let src = &doc.json()["asset"]["extras"]["source"];
+    assert_eq!(src["droppedTextures"], 1, "{src}");
+    assert!(src.get("missingFiles").is_none(), "{src}");
+}
+
+#[test]
 fn light_sources_become_lights() {
     let mut w = W::new(1640, 0);
     let mut lp = vec![0u8; 240];

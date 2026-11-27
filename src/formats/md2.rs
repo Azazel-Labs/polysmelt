@@ -47,9 +47,10 @@ use crate::mesh::{FastMap, Material};
 use crate::num::{f32_of, u32_of};
 use crate::source::{Axis, Fact, Handedness};
 
-/// Frames a second, as the format stores none: the rate of the engine the format belongs to, whose game logic
-/// steps a model's frame every 100 ms (`FRAMETIME` 0.1 in id Software's released Quake II source). So that, not
-/// the readers' shared assumption.
+/// Frames a second. The header has no rate (`dmdl_t` in `qcommon/qfiles.h` of id Software's released Quake II
+/// source, <https://github.com/id-Software/Quake-2>), so this is the engine's: its game logic runs every `FRAMETIME`
+/// (0.1 seconds, `game/g_local.h`), and `M_MoveFrame` (`game/g_monster.c`) steps a model one frame each time. So
+/// 10, assumed, not the readers' shared 30.
 const RATE: f32 = 10.0;
 
 /// The most frames read; the engine holds 512.

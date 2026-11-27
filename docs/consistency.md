@@ -4,7 +4,18 @@ polysmelt reads more than sixty formats written over four decades by tools that 
 nothing. Its readers don't pass those differences on to you. Every reader follows the rules
 below, so code that works on a document from one format works on a document from any of them.
 
-glTF is the one exception: it is already the target, so a glTF file is passed through as it is.
+glTF 2.0 is the one exception: it is already the target, so a glTF 2.0 file (`.gltf` or `.glb`)
+is passed through as it is, with no `RootNode`, its compression kept and its animations, skins
+and names as the file has them.
+
+The readers that convert into glTF are not passed through, and follow these rules like any
+other: glTF 1.0, upgraded to 2.0 as it's read, and VRM avatars and animations each load under a
+`RootNode`, and have their animations, skins and names held to the rules below. 3D Tiles is held
+to the same animation, skin and name rules but has no `RootNode`: a tileset is Z up and centered
+on the earth while each tile's glTF is Y up, so there's no one frame of the file to keep under a
+root, and each tile is placed by the node over it. Tiles it can't find are listed in
+`missingFiles`, as every reader lists the files it can't find. In all three, only what breaks a
+rule is rewritten: a skin or an animation that already follows them is left as the file has it.
 
 ## Axes and units
 
@@ -66,7 +77,12 @@ The document is in glTF's frame: +Y up, right-handed, meters.
   the short way, and the file's curve is kept wherever glTF can hold it (step, linear, cubic
   spline). Curves glTF can't hold are sampled into linear keys.
 - **One frame-rate default.** A format that stores frames without saying how fast to play them
-  is played at 30 frames a second, reported as an assumed `frameRate`.
+  is played at 30 frames a second, reported as an assumed `frameRate`. A rate the file gives
+  always wins, declared. Where a format has a convention of its own, that stands in instead,
+  still assumed, and its reader cites where it comes from: MD2 10 (Quake II's game tick), MD5
+  24 (Doom 3's starting value), Blitz3D 60 (its specification), DirectX 4800 ticks (a
+  convention: Microsoft documents no default), AMC 120 (the CMU database's capture rate) and
+  USD 24 time codes (its specification).
 - **Names are the file's.** An animation keeps the name the file gives it. A one-clip file
   (BVH, AMC, C3D, TRC, HTR, VMD, `.md5anim`, SMD) is named after the file. Nothing gets a
   made-up name like `motion`.
@@ -79,8 +95,16 @@ The document is in glTF's frame: +Y up, right-handed, meters.
 - **One lookup.** Every reader finds referenced files the same way: as written, then
   percent-decoded, with `file:` URIs understood, through the `Assets` you give the loader.
 - **Missing files are reported, not fatal.** Files a model refers to that weren't found are
-  listed in `asset.extras.source.missingFiles`, and textures the document doesn't have are
-  counted in `droppedTextures`.
+  listed in `asset.extras.source.missingFiles`, each once, by the name the model gives. Textures
+  the document doesn't have are counted in `droppedTextures`: each distinct texture once, however
+  many materials, objects or palette entries use it. A texture isn't there when no file is found
+  for its name, or when the file found isn't an image that can be embedded (known when images
+  are read, with `Keep::image_bytes`). The same name is the same texture, and so are names that
+  find the same file. In glTF, where materials share images through textures, each image is a
+  texture: an image a texture can't be drawn from (not found, or in a format Polysmelt doesn't
+  decode, such as KTX2) is counted once however many textures use it, and only when the texture
+  has no other image to draw. A read without textures or materials reports neither, as it
+  doesn't look.
 
 ## Errors
 

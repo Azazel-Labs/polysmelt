@@ -1057,7 +1057,7 @@ def tile_case(name, files, model, what, spec=SPEC, check=None, extra=None, wrapp
         e["document"] = {"source": {"format": "3D Tiles", "version": json.loads(data)["asset"]["version"]}}
         if "missing" in reference:
             e["facts"]["missing_tiles"] = len(reference["missing"])
-            e["document"]["source"]["missingTiles"] = reference["missing"]
+            e["document"]["source"]["missingFiles"] = reference["missing"]
     else:
         drawn, reference = content(data, files)
         if reference["kind"] == "pnts" and drawn.cloud:
