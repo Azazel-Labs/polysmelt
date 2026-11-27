@@ -361,7 +361,11 @@ fn blind(
 /// through `read`.
 fn decode(json: &[u8], read: &mut Read<'_>, max: usize, zipped: bool) -> Result<Document> {
     let json = json.strip_prefix(BOM).unwrap_or(json);
-    let meta: Value = serde_json::from_slice(json).context(ErrorKind::Corrupt, "SOG meta.json isn't JSON")?;
+    // An entry that isn't JSON at all is a broken SOG, not another format: the file's own bytes say which.
+    let meta: Value = serde_json::from_slice(json).map_err(|e| match crate::Error::json(e, json, "SOG meta.json") {
+        e if e.kind() == ErrorKind::UnknownFormat => e.of_kind(ErrorKind::Corrupt).within("SOG meta.json isn't JSON"),
+        e => e,
+    })?;
     let means = meta
         .get("means")
         .filter(|v| v.is_object())
@@ -1204,8 +1208,8 @@ mod tests {
             files.fails(kind, has);
         };
         raw("", ErrorKind::Corrupt, "isn't JSON");
-        raw("{\"version\": 2, \"means\": {", ErrorKind::Corrupt, "isn't JSON");
-        raw(&"[".repeat(100_000), ErrorKind::Corrupt, "isn't JSON");
+        raw("{\"version\": 2, \"means\": {", ErrorKind::Truncated, "is cut short");
+        raw(&"[".repeat(100_000), ErrorKind::Corrupt, "doesn't parse");
         raw("[]", ErrorKind::UnknownFormat, "no means");
         raw("{}", ErrorKind::UnknownFormat, "no means");
         raw("{\"means\": 5}", ErrorKind::UnknownFormat, "no means");

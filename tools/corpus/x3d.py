@@ -325,7 +325,7 @@ case(FMT, "x3d_cube",
      {"spec": XML + ": a Shape in a Transform, its nodes as elements and fields as attributes", "source": SRC,
       "triangles": 12, "area": 6.0, "bounds": {"min": [10, 0, 0], "max": [11, 1, 1]},
       "materials": [{"color": [1, 0, 0, 1]}], "document": {"node_names": ["Box"],
-                                                          "source": {"format": "X3D", "encoding": "XML",
+                                                          "source": {"format": "X3D", "encoding": "xml",
                                                                      "version": "3.3"}}})
 
 case(FMT, "x3d_def_use_container_field",
@@ -384,7 +384,7 @@ case(FMT, "x3d_unit_and_viewpoint",
       "bounds": {"min": [0, 0, 0], "max": [0.01, 0.01, 0.01]}, "document": {"cameras": 1}})
 
 case(FMT, "x3dz_gzipped_xml", {"cube.x3dz": gzip.compress(x3d(f"<Shape>{XML_CUBE}</Shape>").encode(), mtime=0)},
-     {"spec": XML + ": gzipped (.x3dz)", "source": SRC, **CUBE, "document": {"source": {"encoding": "XML"}}})
+     {"spec": XML + ": gzipped (.x3dz)", "source": SRC, **CUBE, "document": {"source": {"encoding": "xml"}}})
 
 case(FMT, "x3d_utf16",
      {"cube.x3d": "﻿".encode("utf-16-le") +

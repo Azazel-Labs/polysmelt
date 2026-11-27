@@ -26,7 +26,8 @@
     "/animations/0/name": "motion",
     "/animations/0/samplers/0/interpolation": "LINEAR",
     "/asset/extras/source/startTime": 0,
-    "/asset/extras/source/unit": "in"
+    "/asset/extras/source/unit": "inch",
+    "/asset/extras/source/unitAsWritten": "in"
   },
   "rig": [
     {

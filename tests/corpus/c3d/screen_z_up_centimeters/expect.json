@@ -27,7 +27,8 @@
     "/animations/0/samplers/0/interpolation": "LINEAR",
     "/asset/extras/source/upAxis": "+Z",
     "/asset/extras/source/xScreen": "-Y",
-    "/asset/extras/source/unit": "cm",
+    "/asset/extras/source/unit": "centimeter",
+    "/asset/extras/source/unitAsWritten": "cm",
     "/asset/extras/source/assumed": null
   },
   "rig": [

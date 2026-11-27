@@ -67,10 +67,13 @@ fn unsupported() {
 #[cfg(feature = "ply")]
 #[test]
 fn corrupt() {
-    let err = from_memory(b"ply\nformat ascii 1.0\nelement vertex 1\n", "a.ply");
+    let err = from_memory(b"ply\nformat ascii 1.0\nelement vertex many\nend_header\n", "a.ply");
     assert_eq!(err.kind(), ErrorKind::Corrupt, "{err}");
     assert_eq!(err.format(), Some("ply"));
-    assert_eq!(err.to_string(), "PLY header has no end_header");
+    assert!(err.to_string().starts_with("bad PLY element count"), "{err}");
+    // A header that stops is cut short, not corrupt.
+    let err = from_memory(b"ply\nformat ascii 1.0\nelement vertex 1\n", "a.ply");
+    assert_eq!(err.kind(), ErrorKind::Truncated, "{err}");
 }
 
 #[cfg(feature = "gltf")]

@@ -1171,14 +1171,14 @@ write("extras_kept", {"scene.dae": collada(
 write("not_collada", {"model.dae": '<?xml version="1.0"?><scene><thing/></scene>'},
       f"{SPEC}: an XML document that isn't COLLADA", error="not a COLLADA document", error_kind="UnknownFormat")
 
-write("empty_file", {"model.dae": b""}, f"{SPEC}: an empty file", error="not a COLLADA document",
-      error_kind="UnknownFormat")
+write("empty_file", {"model.dae": b""}, f"{SPEC}: an empty file", error="the file is empty", error_kind="Empty")
 
 full = one_cube_doc()
 write("cut_after_scene", {"cube.dae": full[:full.index("</COLLADA>")]},
       f"{SPEC}: a document cut off after its scene, before </COLLADA>, still reads", **cube_expect())
 
-write("empty_scene", {"empty.dae": collada([], "")}, f"{SPEC}: a scene with nothing in it", no_mesh=True)
+write("empty_scene", {"empty.dae": collada([], "")}, f"{SPEC}: a scene with nothing in it",
+      error="nothing in its scene", error_kind="Empty")
 
 write("bad_indices", {"cube.dae": one_cube_doc(geometry(
     "Cube", f'<triangles count="3">{inputs("Cube", [("VERTEX", 0)])}<p>0 1 2 0 1 99 -1 2 3</p></triangles>',

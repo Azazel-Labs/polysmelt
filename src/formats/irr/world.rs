@@ -209,7 +209,15 @@ pub(super) fn load(text: &str, dir: &Path, limit: usize, assets: &dyn Assets, ke
         facts.insert("unsupported_animators".into(), json!(unsupported_animators));
     }
     if !missing.is_empty() {
-        facts.insert("missing_files".into(), json!(missing));
+        // In the source, as other readers name the files a model refers to and can't find.
+        let asset = &mut doc.base_mut()["asset"];
+        if !asset["extras"].is_object() {
+            asset["extras"] = json!({});
+        }
+        if !asset["extras"]["source"].is_object() {
+            asset["extras"]["source"] = json!({});
+        }
+        asset["extras"]["source"]["missingFiles"] = json!(missing);
     }
     Ok(doc)
 }

@@ -461,7 +461,11 @@ impl Writer {
         if let Some(t) = self.tex(m.metallic_roughness_tex.as_ref(), None) {
             pbr.insert("metallicRoughnessTexture".into(), t);
         }
-        let mut mat = json!({ "name": m.name, "pbrMetallicRoughness": pbr });
+        // A material with no name has no name key, as a node or a mesh without one.
+        let mut mat = json!({ "pbrMetallicRoughness": pbr });
+        if !m.name.is_empty() {
+            mat["name"] = json!(m.name);
+        }
         if let Some(t) = self.tex(m.normal_tex.as_ref(), Some("scale")) {
             mat["normalTexture"] = t;
         }

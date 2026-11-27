@@ -238,7 +238,7 @@ impl Reader {
 
     fn material(&mut self, e: El<'_, '_>) -> usize {
         let index = self.scene.materials.len();
-        let name = id(&e).map_or_else(|| format!("material {index}"), |i| format!("material {i}"));
+        let name = id(&e).map_or_else(|| format!("material{index}"), |i| format!("material{i}"));
         let mut m = Material::plain(&name, [1.0; 4]);
         let mut spec = [0.0f32; 3];
         let mut shine = 0.0f32;
@@ -306,7 +306,7 @@ impl Reader {
                     }
                 }
                 let count = lights.len();
-                let mut node = Node::named(format!("light {count}"), Some(world));
+                let mut node = Node::named(format!("light{count}"), Some(world));
                 // The light shines along its node's -Z: turn -Z to the direction it travels.
                 node.rotation = toward(dir.map(f64::from));
                 let node = self.scene.add(node);
@@ -363,7 +363,7 @@ impl Reader {
                 }
                 "object" => {
                     let count = self.scene.nodes.len();
-                    let child = self.scene.add(Node::named(format!("object {count}"), Some(node)));
+                    let child = self.scene.add(Node::named(format!("object{count}"), Some(node)));
                     self.object(c, child)?;
                 }
                 tag @ ("objectref" | "texture" | "texturergb" | "texturergba" | "linestyle" | "pointstyle") => {
@@ -412,7 +412,7 @@ impl Reader {
         };
         let mut built: BTreeMap<Key, Builder> = BTreeMap::new();
         self.primitives(e, None, &tables, &mut built)?;
-        let name = id(&e).map_or_else(|| format!("mesh {}", self.scene.meshes.len()), |i| format!("mesh {i}"));
+        let name = id(&e).map_or_else(|| format!("mesh{}", self.scene.meshes.len()), |i| format!("mesh{i}"));
         let mut out = SceneMesh {
             name,
             ..SceneMesh::default()

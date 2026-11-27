@@ -22,8 +22,8 @@
 //! in the source facts. GL commands (the triangle strips and fans the engine draws with) repeat the triangles and
 //! are skipped.
 //!
-//! The format is Z up by the engine's convention, so the mesh node is turned for glTF's Y up (the source info's
-//! `upAxis` is an assumed `+Z`, converted); game units are kept unscaled, and their length unknown. The assumed
+//! The format is Z up and right-handed, as the engine it belongs to is, so the mesh node is turned for glTF's Y up
+//! (the source info's `upAxis` is a declared `+Z`, converted, and its `handedness` a declared `right`); game units are kept unscaled, and their length unknown. The assumed
 //! frame rate is recorded when there are frames to animate.
 //!
 //! A file cut short, an offset past its end, a negative count, or a triangle naming a position or texture
@@ -36,7 +36,7 @@ use std::ops::Range;
 use serde_json::json;
 
 use super::Input;
-use super::scene::{self, Animation, Channel, Interp, Node, Path, Primitive, Scene, SceneMesh, Target, Z_UP_TO_Y_UP};
+use super::scene::{Animation, Channel, Interp, Node, Path, Primitive, Scene, SceneMesh, Target, Z_UP_TO_Y_UP};
 use crate::Result;
 use crate::assets::Assets;
 use crate::bytes::Bin;
@@ -44,7 +44,7 @@ use crate::document::{Document, Keep};
 use crate::images::Images;
 use crate::mesh::{FastMap, Material};
 use crate::num::{f32_of, u32_of};
-use crate::source::{Axis, Fact};
+use crate::source::{Axis, Fact, Handedness};
 
 /// Frames a second: the rate the engine's game logic runs at, as the format stores none.
 const RATE: f32 = 10.0;
@@ -186,7 +186,8 @@ pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
     scene.facts.insert("skins".into(), json!(model.skins.len()));
     scene.info.format = Some("MD2".into());
     scene.info.version = Some(model.version.to_string());
-    scene.info.up_axis = Fact::Assumed(Axis::PosZ);
+    scene.info.up_axis = Fact::Declared(Axis::PosZ);
+    scene.info.handedness = Fact::Declared(Handedness::Right);
     if model.names.len() > 1 {
         scene.info.frame_rate = Fact::Assumed(f64::from(RATE));
     }
@@ -227,6 +228,12 @@ fn parse(data: &[u8], morphs: bool) -> Result<Model> {
     for v in &mut h {
         *v = b.i32()?;
     }
+    ensure!(
+        h[0] == 8,
+        Unsupported,
+        "MD2 version {} isn't read, only version 8",
+        h[0]
+    );
     let [
         version,
         skin_w,
@@ -256,7 +263,7 @@ fn parse(data: &[u8], morphs: bool) -> Result<Model> {
     if n_skins > 0 {
         b.seek(size(ofs_skins, "skin offset")?)?;
         for _ in 0..b.count(n_skins as u64, 64)? {
-            skins.push(scene::text(b.fixed_str(64)?));
+            skins.push(crate::bytes::name(b.fixed_str(64)?));
         }
     }
     let mut st = Vec::new();
@@ -335,7 +342,7 @@ fn parse(data: &[u8], morphs: bool) -> Result<Model> {
         b.seek(ofs_frames + f * frame_size)?;
         let scale = b.vec3()?;
         let translate = b.vec3()?;
-        names.push(scene::text(b.fixed_str(16)?));
+        names.push(crate::bytes::name(b.fixed_str(16)?));
         if f >= kept {
             continue;
         }
@@ -512,7 +519,7 @@ mod tests {
         assert_eq!(info.format.as_deref(), Some("MD2"));
         assert_eq!(info.version.as_deref(), Some("8"));
         assert_eq!(info.meters_per_unit, Fact::Unknown);
-        assert_eq!(info.up_axis, Fact::Assumed(Axis::PosZ));
+        assert_eq!(info.up_axis, Fact::Declared(Axis::PosZ));
         assert_eq!(info.frame_rate, Fact::Assumed(10.0));
         assert!(info.converted.up_axis && !info.converted.units);
     }

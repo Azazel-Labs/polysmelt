@@ -178,7 +178,7 @@ case(FMT, "anim_without_rate", {
     "source": SRC,
     "no_mesh": True,
     "facts": {"joints": 2, "frames": 2, "components": 3},
-    "json": {"/asset/extras/source/frameRate": 24.0, "/asset/extras/source/assumed": ["upAxis", "frameRate"]},
+    "json": {"/asset/extras/source/frameRate": 24.0, "/asset/extras/source/assumed": ["frameRate"]},
     "rig": [{"node": "root", "keys": {"translation": [0, 1 / 24]}}],
 })
 

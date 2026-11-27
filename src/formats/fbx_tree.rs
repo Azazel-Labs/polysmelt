@@ -469,7 +469,7 @@ fn binary(data: &[u8]) -> Result<Tree<'_>> {
                 "the node at byte {at} runs past the end of its parent or the file"
             );
         };
-        let name = String::from_utf8_lossy(&data[name_at..props]);
+        let name = crate::bytes::text(&data[name_at..props]);
         let from = b.attrs().len();
         attributes(&data[props..props_end], count, b.attrs())
             .with_within(|| format!("in node {name:?} at byte {at}"))?;
@@ -515,7 +515,7 @@ fn attributes<'a>(mut data: &'a [u8], count: usize, out: &mut Vec<Attr<'a>>) -> 
                 let n = u32_at(&mut data)? as usize;
                 let bytes = take(&mut data, n)?;
                 if kind == b'S' {
-                    Attr::String(String::from_utf8_lossy(bytes))
+                    Attr::String(crate::bytes::text(bytes))
                 } else {
                     Attr::Binary(Cow::Borrowed(bytes))
                 }

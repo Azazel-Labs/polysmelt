@@ -311,7 +311,7 @@ UVS = [[0, 0], [1, 0], [1, 1], [0, 1]]
 case(FMT, "text_cube", {"cube.x": text_file(CUBE_SCENE)},
      {"spec": SPEC + ": a text file: templates, a frame and a mesh of quads with normals and texture coordinates",
       "source": SRC, **SHADED, "uvs": True, "uvs_include": UVS, "vertices": 24,
-      "json": {"/asset/extras/source/encoding": "text", "/asset/extras/source/floatSize": 32,
+      "json": {"/asset/extras/source/encoding": "ascii", "/asset/extras/source/floatSize": 32,
                "/asset/extras/source/version": "3.3"},
       "document": {"nodes": 1, "node_names": ["Box"]}})
 
@@ -329,11 +329,11 @@ case(FMT, "binary_double", {"cube.x": bin_file(CUBE_SCENE, double=True)},
 
 case(FMT, "compressed_text", {"cube.x": mszip(b"xof 0303tzip0032", text_file(CUBE_SCENE).encode()[16:], block=700)},
      {"spec": SPEC + ": MSZIP-compressed text (tzip): blocks after the first refer back into the one before",
-      "source": SRC, **SHADED, "uvs_include": UVS, "json": {"/asset/extras/source/encoding": "compressed text"}})
+      "source": SRC, **SHADED, "uvs_include": UVS, "json": {"/asset/extras/source/encoding": "ascii", "/asset/extras/source/compressed": True}})
 
 case(FMT, "compressed_binary", {"cube.x": mszip(b"xof 0303bzip0032", bin_body(CUBE_SCENE), block=500)},
      {"spec": SPEC + ": MSZIP-compressed binary (bzip)", "source": SRC, **SHADED, "uvs_include": UVS,
-      "json": {"/asset/extras/source/encoding": "compressed binary"}})
+      "json": {"/asset/extras/source/encoding": "binary", "/asset/extras/source/compressed": True}})
 
 case(FMT, "compressed_stored", {"cube.x": mszip(b"xof 0303tzip0032", text_file(CUBE_SCENE).encode()[16:], level=0)},
      {"spec": SPEC + ": MSZIP with stored (uncompressed) deflate blocks", "source": SRC, **SHADED})
@@ -655,7 +655,8 @@ for f, enc in [("test_cube_text.x", "text"), ("test_cube_binary.x", "binary"),
                ("test_cube_compressed.x", "compressed binary")]:
     copy(f[:-2], {"spec": SPEC + f": a cube exported as {enc}, skinned to its own frame",
                           "source": BSD.format(f), **REAL_CUBE,
-                          "json": {"/asset/extras/source/encoding": enc,
+                          "json": {"/asset/extras/source/encoding": "ascii" if enc == "text" else "binary",
+                                   "/asset/extras/source/compressed": True if "compressed" in enc else None,
                                    "/asset/extras/source/frameRate": 24}})
 
 copy("kwxport_cube",

@@ -197,20 +197,26 @@ impl Plan {
                     rows.push(v);
                 }
                 None if rows.is_empty() && names.is_none() && n >= 3 => {
-                    names = Some(
-                        toks[..n]
-                            .iter()
-                            .map(|t| String::from_utf8_lossy(t).into_owned())
-                            .collect(),
-                    );
+                    names = Some(toks[..n].iter().map(|t| crate::bytes::text(t).into_owned()).collect());
                 }
                 _ => {}
             }
         }
         let width = (3..=TOKENS).max_by_key(|&n| (counts[n], n)).filter(|&n| counts[n] > 0);
-        let width = width.with_context(ErrorKind::Empty, || {
-            format!("no points in the {} file", ext.to_ascii_uppercase())
-        })?;
+        let Some(width) = width else {
+            // Text, and no line of it a point: some other kind of file. Only comments, or nothing: empty.
+            let text = body
+                .split(|&b| b == b'\n')
+                .map(trim)
+                .any(|l| !l.is_empty() && !l.starts_with(b"//") && !l.starts_with(b"#"));
+            ensure!(
+                !text,
+                UnknownFormat,
+                "not a point cloud: no line of the {} file is a point",
+                ext.to_ascii_uppercase()
+            );
+            bail!(Empty, "no points in the {} file", ext.to_ascii_uppercase());
+        };
         let rows: Vec<&Vec<f64>> = rows.iter().filter(|r| r.len() == width).collect();
         // Far away, measure from the middle of what was sampled.
         let mut min = [f64::INFINITY; 3];
@@ -549,6 +555,8 @@ fn ptx(bytes: &[u8], keep: Keep) -> Result<Document> {
     let mut all: Option<Part> = None;
     let mut plan: Option<Plan> = None;
     let mut scan_ids: Vec<f32> = Vec::new();
+    // Whether the file ends inside a scan: fewer lines than its header counts.
+    let mut cut = false;
     loop {
         // Skip blank lines between scans.
         while let Some((line, next)) = line_at(bytes, at) {
@@ -577,7 +585,29 @@ fn ptx(bytes: &[u8], keep: Keep) -> Result<Document> {
             ];
             Some((cols, rows, position, axes, m))
         })();
-        let (cols, rows, position, axes, m) = head.context(ErrorKind::Corrupt, "a PTX scan's header is broken")?;
+        let Some((cols, rows, position, axes, m)) = head else {
+            // The file ran out inside the header: cut short, and what came before is kept.
+            if at >= bytes.len()
+                && bytes
+                    .first()
+                    .is_some_and(|c| c.is_ascii_digit() || c.is_ascii_whitespace())
+            {
+                ensure!(
+                    !scans.is_empty(),
+                    Truncated,
+                    "PTX file is cut short inside its first scan's header"
+                );
+                cut = true;
+                break;
+            }
+            // No scan yet and no header to start one: not a PTX file.
+            ensure!(
+                !scans.is_empty(),
+                UnknownFormat,
+                "not a PTX file: it doesn't start with a scan's size"
+            );
+            bail!(Corrupt, "a PTX scan's header is broken");
+        };
         ensure!(
             cols.fract() == 0.0 && rows.fract() == 0.0 && cols >= 0.0 && rows >= 0.0,
             Corrupt,
@@ -614,6 +644,7 @@ fn ptx(bytes: &[u8], keep: Keep) -> Result<Document> {
             }
             found += 1;
         }
+        cut |= found < count;
         at = end;
         let body = &bytes[start..end];
         let plan = plan.get_or_insert_with(|| {
@@ -667,7 +698,10 @@ fn ptx(bytes: &[u8], keep: Keep) -> Result<Document> {
         plan.columns.push((usize::MAX, "SCAN".into()));
         all.columns.push(scan_ids);
     }
-    let source = json!({ "scans": scans, "columns": plan.described_ptx() });
+    let mut source = json!({ "scans": scans, "columns": plan.described_ptx() });
+    if cut {
+        source["truncated"] = json!(true);
+    }
     Ok(all.cloud(&plan, "PTX", source))
 }
 
@@ -724,7 +758,7 @@ fn grid(bytes: &[u8], keep: Keep) -> Result<Document> {
             break;
         }
         ensure!(keys.len() < 32, Corrupt, "the ESRI grid's header is broken");
-        let key = String::from_utf8_lossy(key).to_ascii_lowercase();
+        let key = crate::bytes::text(key).to_ascii_lowercase();
         let v = it
             .next()
             .and_then(f64_from)

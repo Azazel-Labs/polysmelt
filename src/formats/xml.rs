@@ -32,14 +32,60 @@ pub(crate) fn utf16(head: &[u8]) -> Option<(bool, usize)> {
     }
 }
 
-/// An XML document's bytes as UTF-8: UTF-16 converted (an unpaired surrogate becomes U+FFFD), a UTF-8 byte order
-/// mark dropped, anything else as it is.
+/// The single-byte encoding an XML declaration at the start of `head` names: `true` for ISO-8859-1 and
+/// Windows-1252 (read alike, as browsers do: Windows-1252 only adds characters where Latin-1 has controls).
+/// Other encodings aren't known here, and their text is read as UTF-8 where it is and Windows-1252 where not.
+pub(crate) fn declared_single_byte(head: &[u8]) -> bool {
+    let head = &head[..head.len().min(256)];
+    let Some(end) = head.windows(2).position(|w| w == b"?>") else {
+        return false;
+    };
+    let decl = head[..end].to_ascii_lowercase();
+    if !decl.trim_ascii_start().starts_with(b"<?xml") {
+        return false;
+    }
+    let Some(at) = decl.windows(8).position(|w| w == b"encoding") else {
+        return false;
+    };
+    let value: Vec<u8> = decl[at + 8..]
+        .iter()
+        .copied()
+        .skip_while(|c| matches!(c, b' ' | b'=' | b'"' | b'\''))
+        .take_while(|c| !matches!(c, b'"' | b'\'' | b' '))
+        .collect();
+    matches!(
+        value.as_slice(),
+        b"iso-8859-1" | b"iso8859-1" | b"iso_8859-1" | b"latin1" | b"latin-1" | b"l1" | b"windows-1252" | b"cp1252"
+    )
+}
+
+/// Bytes as UTF-8, each one a Windows-1252 character.
+fn from_windows_1252(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len() + bytes.len() / 8);
+    let mut buf = [0; 4];
+    for &b in bytes {
+        if b.is_ascii() {
+            out.push(b);
+        } else {
+            out.extend_from_slice(crate::bytes::windows_1252_char(b).encode_utf8(&mut buf).as_bytes());
+        }
+    }
+    out
+}
+
+/// An XML document's bytes as UTF-8, the same for every XML reader: UTF-16 converted (an unpaired surrogate
+/// becomes U+FFFD), a UTF-8 byte order mark dropped, and a document whose declaration names ISO-8859-1 or
+/// Windows-1252 converted from it. In any other, bytes that aren't UTF-8 are read as Windows-1252 where they
+/// stand, the UTF-8 around them kept: no name comes out empty or as U+FFFD.
 pub(crate) fn utf8(bytes: &[u8]) -> Cow<'_, [u8]> {
     if let Some(rest) = bytes.strip_prefix(b"\xEF\xBB\xBF") {
-        return Cow::Borrowed(rest);
+        return valid_utf8(rest);
     }
     let Some((le, bom)) = utf16(bytes) else {
-        return Cow::Borrowed(bytes);
+        if declared_single_byte(bytes) && !bytes.is_ascii() {
+            return Cow::Owned(from_windows_1252(bytes));
+        }
+        return valid_utf8(bytes);
     };
     let units = bytes[bom..].chunks_exact(2).map(|c| {
         if le {
@@ -61,16 +107,24 @@ pub(crate) fn utf8(bytes: &[u8]) -> Cow<'_, [u8]> {
     Cow::Owned(out)
 }
 
-/// An XML document's text: [`utf8`], and bytes that aren't UTF-8 read as Latin-1.
+/// `bytes` when they're UTF-8; otherwise each run that isn't, read as Windows-1252 where it stands.
+fn valid_utf8(bytes: &[u8]) -> Cow<'_, [u8]> {
+    if std::str::from_utf8(bytes).is_ok() {
+        return Cow::Borrowed(bytes);
+    }
+    let mut out = Vec::with_capacity(bytes.len() + 16);
+    for chunk in bytes.utf8_chunks() {
+        out.extend_from_slice(chunk.valid().as_bytes());
+        out.extend_from_slice(&from_windows_1252(chunk.invalid()));
+    }
+    Cow::Owned(out)
+}
+
+/// An XML document's text: [`utf8`], which is always UTF-8.
 pub(crate) fn text(bytes: &[u8]) -> Cow<'_, str> {
     match utf8(bytes) {
-        Cow::Borrowed(b) => match std::str::from_utf8(b) {
-            Ok(s) => Cow::Borrowed(s),
-            Err(_) => Cow::Owned(b.iter().map(|&c| char::from(c)).collect()),
-        },
-        Cow::Owned(b) => {
-            Cow::Owned(String::from_utf8(b).unwrap_or_else(|e| e.into_bytes().iter().map(|&c| char::from(c)).collect()))
-        }
+        Cow::Borrowed(b) => crate::bytes::text(b),
+        Cow::Owned(b) => Cow::Owned(crate::bytes::text_owned(b)),
     }
 }
 
@@ -79,6 +133,8 @@ pub(crate) struct Utf8Read<R> {
     inner: R,
     /// UTF-16, little-endian or not; `None` for bytes passed through.
     wide: Option<bool>,
+    /// Whether the declaration names ISO-8859-1 or Windows-1252, converted as it's read.
+    single: bool,
     /// UTF-8 converted and not yet consumed: `out[at..]`.
     out: Vec<u8>,
     at: usize,
@@ -96,10 +152,12 @@ impl<R: BufRead> Utf8Read<R> {
         } else {
             utf16(head).map_or((None, 0), |(le, bom)| (Some(le), bom))
         };
+        let single = wide.is_none() && skip == 0 && declared_single_byte(head);
         inner.consume(skip);
         Ok(Self {
             inner,
             wide,
+            single,
             out: Vec::new(),
             at: 0,
             odd: None,
@@ -176,6 +234,16 @@ impl<R: BufRead> Read for Utf8Read<R> {
 impl<R: BufRead> BufRead for Utf8Read<R> {
     fn fill_buf(&mut self) -> io::Result<&[u8]> {
         match self.wide {
+            None if self.single => {
+                if self.at == self.out.len() {
+                    let block = self.inner.fill_buf()?;
+                    self.out = from_windows_1252(block);
+                    self.at = 0;
+                    let n = block.len();
+                    self.inner.consume(n);
+                }
+                Ok(&self.out[self.at..])
+            }
             None => self.inner.fill_buf(),
             Some(le) => {
                 if self.at == self.out.len() {
@@ -188,6 +256,7 @@ impl<R: BufRead> BufRead for Utf8Read<R> {
 
     fn consume(&mut self, n: usize) {
         match self.wide {
+            None if self.single => self.at = (self.at + n).min(self.out.len()),
             None => self.inner.consume(n),
             Some(_) => self.at = (self.at + n).min(self.out.len()),
         }
@@ -257,7 +326,7 @@ impl<'a> Xml<'a> {
                 let mut i = at + 2;
                 loop {
                     let Some(&c) = b.get(i) else {
-                        bail!(Corrupt, "XML document type left open");
+                        bail!(Truncated, "XML is cut short inside its document type");
                     };
                     if quote != 0 {
                         if c == quote {
@@ -297,7 +366,8 @@ impl<'a> Xml<'a> {
         }
         if let Some(&open) = stack.last() {
             let (s, e) = doc.nodes[open].name;
-            bail!(Corrupt, "XML element <{}> left open", &src[s..e]);
+            // The document ends with an element open: the rest of the file isn't there.
+            bail!(Truncated, "XML is cut short: element <{}> is left open", &src[s..e]);
         }
         ensure!(!doc.nodes.is_empty(), Corrupt, "XML holds no element");
         Ok(doc)
@@ -364,7 +434,7 @@ impl<'a> Xml<'a> {
             };
             let v0 = at + 1;
             let Some(len) = memchr(q, &b[v0..]) else {
-                bail!(Corrupt, "XML attribute value left open");
+                bail!(Truncated, "XML is cut short inside an attribute value");
             };
             at = v0 + len + 1;
             self.attrs.push(XAttr {
@@ -510,17 +580,16 @@ pub(crate) fn unescape_bytes(s: &[u8]) -> Cow<'_, [u8]> {
     Cow::Owned(out)
 }
 
-/// Text as a string, bytes that aren't UTF-8 replaced with U+FFFD.
+/// Text as a string, as every reader decodes it ([`crate::bytes::text`]): bytes that aren't UTF-8 are read as
+/// Windows-1252.
 pub(crate) fn lossy(b: Cow<'_, [u8]>) -> Cow<'_, str> {
     match b {
-        Cow::Borrowed(b) => String::from_utf8_lossy(b),
-        Cow::Owned(v) => {
-            Cow::Owned(String::from_utf8(v).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned()))
-        }
+        Cow::Borrowed(b) => crate::bytes::text(b),
+        Cow::Owned(v) => Cow::Owned(crate::bytes::text_owned(v)),
     }
 }
 
-/// [`unescape_bytes`] as a string, bytes that aren't UTF-8 replaced with U+FFFD.
+/// [`unescape_bytes`] as a string, bytes that aren't UTF-8 read as Windows-1252.
 pub(crate) fn unescape_lossy(s: &[u8]) -> Cow<'_, str> {
     lossy(unescape_bytes(s))
 }
@@ -846,7 +915,7 @@ mod tests {
         assert!(matches!(unescape("plain text"), Cow::Borrowed("plain text")));
         assert!(matches!(unescape_bytes(b"no refs"), Cow::Borrowed(b"no refs")));
         assert_eq!(unescape("\u{e9}&amp;\u{1F600}"), "\u{e9}&\u{1F600}");
-        assert_eq!(unescape_lossy(b"a\xff&amp;"), "a\u{FFFD}&");
+        assert_eq!(unescape_lossy(b"a\xff&amp;"), "a\u{ff}&", "not UTF-8: Windows-1252");
         assert_eq!(&*unescape_bytes(b"\xff&lt;"), b"\xff<");
     }
 

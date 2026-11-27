@@ -80,9 +80,17 @@ impl Header {
         let (mut width, mut height, mut points) = (None, None, None);
         let mut viewpoint = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0];
         loop {
-            ensure!(at < b.len().min(HEADER), UnknownFormat, "not a PCD file: no DATA line");
+            if at >= b.len().min(HEADER) {
+                // A header that started and never reached its DATA line: the file ends inside it.
+                ensure!(
+                    at < b.len() || (version.is_empty() && names.is_empty()),
+                    Truncated,
+                    "PCD header is cut short: it has no DATA line"
+                );
+                bail!(UnknownFormat, "not a PCD file: no DATA line");
+            }
             let end = b[at..].iter().position(|&c| c == b'\n').map_or(b.len(), |n| at + n);
-            let line = String::from_utf8_lossy(&b[at..end]);
+            let line = crate::bytes::text(&b[at..end]);
             at = (end + 1).min(b.len());
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {

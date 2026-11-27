@@ -142,7 +142,7 @@ impl Parser<'_> {
                         }
                         t.push(c);
                     }
-                    args.push(Arg::Text(String::from_utf8_lossy(&t).into_owned()));
+                    args.push(Arg::Text(crate::bytes::text(&t).into_owned()));
                 }
                 c if c == b'-' || c == b'+' || c == b'.' || c.is_ascii_digit() => {
                     let start = self.at;

@@ -131,7 +131,7 @@ impl Lex<'_> {
                     Some(b'*') => {
                         let rest = &self.b[self.at + 2..];
                         let Some(end) = rest.windows(2).position(|w| w == b"*/") else {
-                            bail!(Corrupt, "an OpenDDL comment isn't closed")
+                            bail!(Truncated, "OpenDDL file is cut short inside a comment")
                         };
                         self.at += end + 4;
                         continue;
@@ -239,7 +239,7 @@ impl Lex<'_> {
             self.at += 1;
             loop {
                 let Some(&c) = self.b.get(self.at) else {
-                    bail!(Corrupt, "an OpenDDL string isn't closed")
+                    bail!(Truncated, "OpenDDL file is cut short inside a string")
                 };
                 self.at += 1;
                 match c {
@@ -250,7 +250,7 @@ impl Lex<'_> {
             }
         }
         ensure!(any, Corrupt, "expected a string at byte {} of an OpenDDL file", self.at);
-        Ok(String::from_utf8(out).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned()))
+        Ok(String::from_utf8(out).unwrap_or_else(|e| crate::bytes::text(e.as_bytes()).into_owned()))
     }
 
     /// The character an escape sequence (after its backslash) stands for, into `out` as UTF-8.
@@ -569,7 +569,11 @@ impl<'a> Tree<'a> {
                 );
             }
         }
-        ensure!(open.is_empty(), Corrupt, "an OpenDDL structure isn't closed");
+        ensure!(
+            open.is_empty(),
+            Truncated,
+            "OpenDDL file is cut short: a structure isn't closed"
+        );
         Ok(t)
     }
 
@@ -692,7 +696,7 @@ impl<'a> Tree<'a> {
                     bail!(Corrupt, "expected a data type in an OpenDDL file")
                 };
                 let id = &self.src[s as usize..(s + n) as usize];
-                self.strs.push(String::from_utf8_lossy(id).into_owned());
+                self.strs.push(crate::bytes::text(id).into_owned());
             }
             Ty::Base64 => {
                 lex.skip()?;
@@ -705,7 +709,7 @@ impl<'a> Tree<'a> {
                     lex.at += 1;
                 }
                 self.strs
-                    .push(String::from_utf8_lossy(&self.src[start..lex.at]).into_owned());
+                    .push(crate::bytes::text(&self.src[start..lex.at]).into_owned());
             }
             Ty::Bool => {
                 lex.skip()?;
@@ -988,7 +992,7 @@ mod tests {
             b"1 {}",
             b"X { float {0x1FFFFFFFFFFFFFFFFF} }",
         ] {
-            assert!(Tree::parse(src).is_err(), "{}", String::from_utf8_lossy(src));
+            assert!(Tree::parse(src).is_err(), "{}", crate::bytes::text(src));
         }
         let deep = "X {".repeat(MAX_DEPTH + 1) + &"}".repeat(MAX_DEPTH + 1);
         assert!(Tree::parse(deep.as_bytes()).is_err());

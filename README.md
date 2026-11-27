@@ -163,7 +163,7 @@ Early. What exists today:
   and are left out. The output is the same bytes every time.
 - **Conformance corpus**: 1155 cases under `tests/corpus`, each a file and the GLB it must
   become. They cover every format above and the variants exporters really write: OBJ's face
-  forms and MTL dialects, both PLY byte orders, every FBX version and axis system, and USD's
+  forms and MTL dialects, both PLY byte orders, FBX 7.x in both encodings (older versions are refused) and every axis system, and USD's
   three encodings and its composition, glTF's accessor types, node hierarchy, skins and extensions, BVH's rotation orders and
   damaged motion rows, and files SketchUp itself saved, from SketchUp 3 to 2026. Most are generated against the specifications; the rest
   are Blender 5.2 exports and SketchUp's own files. See [tests/corpus/README.md](tests/corpus/README.md). Every

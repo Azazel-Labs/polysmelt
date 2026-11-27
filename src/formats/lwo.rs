@@ -140,15 +140,12 @@ impl<'a> Rd<'a> {
         }
     }
 
-    /// A string: up to a zero byte (or the end), padded to an even length. UTF-8 when it is, else Latin-1.
+    /// A string: up to a zero byte (or the end), padded to an even length. UTF-8 when it is, else Windows-1252.
     fn s0(&mut self) -> Option<String> {
         let rest = self.d.get(self.i..).filter(|r| !r.is_empty())?;
         let n = rest.iter().position(|&c| c == 0).unwrap_or(rest.len());
         let b = &rest[..n];
-        let s = match std::str::from_utf8(b) {
-            Ok(s) => s.to_owned(),
-            Err(_) => b.iter().map(|&c| char::from(c)).collect(),
-        };
+        let s = crate::bytes::text(b).into_owned();
         self.i = (self.i + ((n + 2) & !1)).min(self.d.len());
         Some(s)
     }
@@ -1312,7 +1309,7 @@ fn cleans(v: &[f32]) -> Value {
 }
 
 fn id_str(id: [u8; 4]) -> String {
-    String::from_utf8_lossy(&id).trim_end().to_owned()
+    crate::bytes::text(&id).trim_end().to_owned()
 }
 
 /// Everything a texture layer says, for `extras`.
@@ -2056,14 +2053,20 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         meshes.push(mesh);
         mesh_of.push(Some(meshes.len() - 1));
     }
-    ensure!(!meshes.is_empty(), Empty, "this LightWave object has no polygons");
+    if meshes.is_empty() {
+        return Err(crate::Error::nothing_left(
+            m.truncated,
+            "LightWave object",
+            "this LightWave object has no polygons",
+        ));
+    }
 
     // The layers as nodes, each at its pivot, relative to its parent's.
     let parent = parents(&m.layers);
     let mut nodes: Vec<Value> = Vec::with_capacity(m.layers.len());
     let mut roots = Vec::new();
     for (i, l) in m.layers.iter().enumerate() {
-        let name = l.name.clone().unwrap_or_else(|| format!("Layer {}", l.number));
+        let name = l.name.clone().unwrap_or_else(|| format!("layer{}", l.number));
         let mut node = json!({ "name": name });
         let base = parent[i].map_or([0.0; 3], |p| m.layers[p].pivot);
         let t = [l.pivot[0] - base[0], l.pivot[1] - base[1], -(l.pivot[2] - base[2])];
@@ -2118,7 +2121,9 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
 
     // The format fixes the units and axes, so they are declared.
     let mut info = SourceInfo {
-        format: Some(m.kind.name().into()),
+        format: Some("LWO".into()),
+        // The form's type: LWOB (LightWave 5 and before), LWO2 (6 on) or LWO3 (2018 on).
+        version: Some(m.kind.name().into()),
         meters_per_unit: Fact::Declared(1.0),
         unit: Some("meter".into()),
         up_axis: Fact::Declared(Axis::PosY),
@@ -2418,7 +2423,7 @@ mod tests {
         assert_eq!(mesh["extras"]["targetNames"], json!(["smile"]));
         assert_eq!(mesh["weights"], json!([0.0]));
         let source = &doc.json()["asset"]["extras"]["source"];
-        assert_eq!(source["format"], "LWO2");
+        assert_eq!((&source["format"], &source["version"]), (&json!("LWO"), &json!("LWO2")));
         assert_eq!(source["description"], "a box");
         let info = doc.source_info();
         assert_eq!(info.meters_per_unit, Fact::Declared(1.0));
@@ -2481,7 +2486,7 @@ mod tests {
         assert_eq!(nodes[1]["children"], json!([2]));
         assert_eq!(nodes[1]["translation"], json!([1.0, 2.0, 3.0]));
         assert_eq!(nodes[2]["translation"], json!([0.0, 1.0, 0.0]));
-        assert_eq!(nodes[2]["name"], "Layer 3");
+        assert_eq!(nodes[2]["name"], "layer3");
         assert_eq!(doc.json()["asset"]["extras"]["source"]["droppedCurves"], 1);
         let m = flat(&doc);
         assert_eq!(m.triangles(), 3);
@@ -2578,7 +2583,7 @@ mod tests {
         assert!((area - 6.0).abs() < 1e-5 && (vol - 1.0).abs() < 1e-5, "{area} {vol}");
         assert_eq!(m.materials[0].name, "Red");
         assert_eq!(m.materials[0].color, [0.75, 0.0, 0.0, 1.0]);
-        assert_eq!(doc.json()["asset"]["extras"]["source"]["format"], "LWOB");
+        assert_eq!(doc.json()["asset"]["extras"]["source"]["version"], "LWOB");
     }
 
     #[test]
@@ -2604,7 +2609,7 @@ mod tests {
         assert_eq!(gold.color, [1.0, 1.0, 0.0, 1.0]);
         // Untagged polygons get LightWave's default surface.
         assert!(m.materials.iter().any(|x| x.name == "Default"));
-        assert_eq!(doc.json()["asset"]["extras"]["source"]["format"], "LWO3");
+        assert_eq!(doc.json()["asset"]["extras"]["source"]["version"], "LWO3");
     }
 
     #[test]

@@ -16,7 +16,7 @@ Breaking changes are allowed in minor releases until 1.0.
 - LAS: `converted` lists `units` only when the cloud's unit across is known. With a vertical
   unit alone (heights in feet under degrees, say) the heights are still made meters, but
   `output_meters_per_unit` no longer says the whole cloud is in meters.
-- `.splat`: a file that is empty or isn't a whole number of 32-byte splats long is refused as
+- `.splat`: a file that isn't a whole number of 32-byte splats long is refused as
   `UnknownFormat`. Any bytes at all used to load, as no splats or with `trailingBytes` counted.
 - X3D and VRML: a file must start as the formats say, with `#VRML V2.0` or `#X3D V3` (or
   later) for the classic encoding or an `<X3D>` root element for XML; anything else is
@@ -53,6 +53,73 @@ Breaking changes are allowed in minor releases until 1.0.
   rotation before it is added to the rest position, as MilkShape plays it.
 - VOX: glass is `KHR_materials_transmission` alone, opaque to alpha. It was also blended by
   an opacity from the same transparency, so a renderer with both thinned it twice.
+- The same failure is the same `ErrorKind` in every reader:
+  - A file with no bytes is `Empty`, whatever its extension. It was `UnknownFormat`, `Corrupt`,
+    `Truncated`, `MissingAsset` or an empty model, by format.
+  - A file that isn't the format it is read as is `UnknownFormat`: one without the format's
+    signature (its magic bytes, or the first words of its text or XML). USD, E57, SOG, OGRE,
+    Irrlicht, XGL, OpenGEX, PTX and 3D Tiles called such a file `Corrupt`, X3D and VRML read it as
+    an empty model, and OBJ and the text point clouds called it `Empty`.
+  - A file cut short is `Truncated`, or, where the reader keeps what came before the cut, a
+    model whose `asset.extras.source.truncated` is `true`. A binary STL whose header counts more
+    triangles than the file holds is `Truncated` (it was `UnknownFormat`); so are a zip archive
+    with no end record under any zipped format (3MF, USDZ, ZAE, KMZ, SOG, AMF), glTF JSON that
+    ends early, a PLY header with no `end_header`, a LAS or PCD header that stops, an E57 file
+    shorter than its header says, an OpenGEX file that ends inside a structure, and XML that
+    ends with an element open (Irrlicht, OGRE, XGL, VTK). 3DS, ASCII STL, COLLADA, X3D and VRML,
+    PTX, C3D, BVH, HTR, TRC and PMD now set `truncated` on the partial model they return, and
+    3DS, AMF, LightWave, AC3D, OpenFlight, COLLADA and X3D are `Truncated` rather than `Empty`
+    when nothing whole came before the cut. OBJ, `.xyz`, `.pts` and `.asc` have no count and no
+    end mark, so half of one still reads as a smaller model.
+  - A well-formed file with nothing to convert is `Empty` in every reader: a document that
+    draws nothing and has no node that is named, has children, or carries a camera, a light or
+    a skin. glTF, COLLADA, USD, SketchUp, DXF, X3D, the point cloud and splat readers and
+    3D Tiles used to return an empty document for one; a skeleton, a motion, a scene of only
+    cameras or lights, or a library of meshes no node instances still loads.
+  - glTF JSON that starts as JSON and doesn't parse is `Corrupt`; it was `UnknownFormat`.
+- Every reader reports the same facts, spelled the same way:
+  - The glTF 2.0 reader writes `asset.extras.source` as every other reader does: `format`,
+    `version`, glTF's meters, +Y up, +Z forward and right-handedness (declared), the generator
+    as `tool` and the copyright. A file that carries a source already (a model converted from
+    another format, read back) keeps it.
+  - `Document::facts` has `triangles`, and `points` and `lines` when there are any, from every
+    reader, counted by `Document::counts`. VOX and BVH had none, and motion capture files now
+    say `triangles: 0`.
+  - `Fact::Declared` means the file states the value or its format fixes it for every file;
+    `Fact::Assumed` means a default the file didn't override, or a guess. Now declared: the up
+    axis and handedness of 3DS, MD2, MD3, MD5, IQM, VOX, AC3D, MilkShape 3D and glTF 1.0 (MD2,
+    MD3 and MD5 reported no handedness), the up axis of AMF, E57, DXF, X3D and MikuMikuDance,
+    and DirectX's handedness.
+  - `unit` is always the unit's usual name by its length (`"millimeter"`), and absent when the
+    length is unknown or no common unit's. The file's own word, where it differs, is
+    `unitAsWritten`: COLLADA, C3D, TRC and HTR wrote the file's word as `unit` (`"mm"`). An AMF
+    with a unit the format doesn't have reports the millimeters it was read as, assumed, where
+    it reported `unit: "furlong"` beside `metersPerUnit: 0.001`.
+  - An assumed `frameRate` is written only for a model with animation. USD and VOX wrote one
+    for static files.
+  - `encoding` is `"ascii"` or `"binary"` (STL, OFF, DXF, VTK, Gmsh and Medit wrote `"ASCII"`, X3D
+    `"XML"`, DirectX `"text"`). PLY's byte order is `byteOrder` (`"little"`, `"big"`) beside
+    `encoding: "binary"`, as OGRE's, VTK's, Gmsh's and Medit's are; DirectX's compression is `compressed`;
+    MikuMikuDance's text encoding is `textEncoding`.
+  - Textures a file names that the document doesn't have are counted as
+    `source.droppedTextures` (OpenGEX wrote `missingTextures`), and the files a model refers to
+    that weren't found are listed as `source.missingFiles` (OpenFlight wrote a count, Irrlicht a
+    `missing_files` fact). OGRE's `missing_materials` and `missing_textures` facts stay facts:
+    a read that keeps no materials can't know them.
+  - LightWave reports `format: "LWO"` with the variant (`LWOB`, `LWO2`, `LWO3`) as `version`.
+    USD's `truncated` is `true`, the reason beside it as `truncatedBy`.
+  - MD2, MD3 and MD5 refuse versions other than 8, 15 and 10 as `Unsupported`, as their docs
+    said they read only those.
+- Names and text decode the same way in every reader: UTF-8 as it is (a byte order mark
+  dropped, UTF-16 with a byte order mark decoded), anything else as Windows-1252, unless the
+  format or the file states an encoding (an XML declaration naming ISO-8859-1 or Windows-1252
+  is honored). Names that aren't UTF-8 used to come out as Latin-1 (OBJ, LightWave, AC3D,
+  OpenFlight, DirectX, the game formats), with U+FFFD in them (3DS, FBX, STL, PLY, DXF, X3D,
+  AMF, 3MF) or empty (COLLADA, VOX). Padding after a fixed-size name is dropped everywhere.
+- A thing with no name has no `name` key: unnamed 3DS objects and unnamed materials (X3D,
+  COLLADA) had `"name": ""`. Names a reader makes up for things a format numbers are the kind
+  and the number together, in every reader: `material3`, `object1`, `frame2`, `model0` (they
+  were `material 3`, `material_3`, `object_1`, `frame 2`, `model_0` by format).
 
 ## 0.20.0
 

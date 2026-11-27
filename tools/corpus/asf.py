@@ -435,7 +435,7 @@ def bad(name, spec, text, error, files=None, file=None, kind=None):
 
 bad("not_asf", "a file that doesn't start with a `:` section", "HIERARCHY\nROOT Hips\n", "not an ASF file",
     kind="UnknownFormat")
-bad("empty_file", "an empty file", "", "not an ASF file", kind="UnknownFormat")
+bad("empty_file", "an empty file", "", "the file is empty", kind="Empty")
 bad("defined_twice", "two bones with one name",
     sk.text().replace("name lowerback", "name lfemur"), "defined twice", kind="Corrupt")
 bad("ends_inside_bone", "a file cut short inside a bone's begin … end",

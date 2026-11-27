@@ -79,7 +79,7 @@
     "source": {
       "format": "PMX",
       "version": "2.0",
-      "encoding": "UTF-16LE",
+      "textEncoding": "UTF-16LE",
       "title": "\u30e2\u30c7\u30eb",
       "englishName": "model",
       "description": "\u30b3\u30e1\u30f3\u30c8",

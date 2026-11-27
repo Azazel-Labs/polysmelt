@@ -3,9 +3,14 @@
 //!
 //! Every reader records this in `asset.extras.source`, under the keys listed here, so it survives
 //! being written out as glTF and read back. [`Document::source_info`](crate::document::Document::source_info)
-//! reads it as a [`SourceInfo`]. Each value says whether the file declared it ([`Fact::Declared`]),
-//! the reader took the format's convention or a guess ([`Fact::Assumed`]), or nothing is known
-//! ([`Fact::Unknown`]): an STL's units are unknown, not millimeters.
+//! reads it as a [`SourceInfo`]. Each value says whether it is declared ([`Fact::Declared`]: the file
+//! states it, or its format fixes it for every file), assumed ([`Fact::Assumed`]: the file could have
+//! said and didn't, or files of the format vary, and the reader took the default or the usual
+//! convention), or not known ([`Fact::Unknown`]): an STL's units are unknown, not millimeters.
+//!
+//! The same rule holds in every reader. A 3MF is +Z up and a `LightWave` object left-handed because
+//! their formats say so of every file: declared. A USD stage that authors no `metersPerUnit` is in
+//! USD's fallback centimeters, and an OBJ is +Y up only because most are: assumed.
 //!
 //! The values describe the source file as it was written. What the reader did about them is in
 //! [`SourceInfo::converted`]: a COLLADA file in centimeters, Z up, is read into glTF's meters, Y up,
@@ -18,17 +23,38 @@
 //! | key | value |
 //! |---|---|
 //! | `format`, `version` | the format's name (`"FBX"`) and the file's version of it, as strings |
-//! | `metersPerUnit`, `unit` | the length of the file's unit in meters, and its name (`"centimeter"`) |
+//! | `metersPerUnit`, `unit` | the length of the file's unit in meters, and the unit's usual name (`"centimeter"`, never `"cm"`); `unit` is absent when the length is unknown or no common unit's |
+//! | `unitAsWritten` | the file's own word for its unit, when that isn't the usual name (`"mm"`, `"furlong"`) |
 //! | `upAxis`, `forwardAxis` | signed axes, `"+Y"`, `"-Z"` |
 //! | `handedness` | `"right"` or `"left"` |
-//! | `frameRate` | frames (or keys, or ticks) per second |
+//! | `frameRate` | frames (or keys, or ticks) per second; an assumed one only when the model has animation |
 //! | `assumed` | the keys above that are a convention or a guess, not declared by the file |
 //! | `converted` | which of `units`, `upAxis`, `handedness` the reader converted to glTF's |
 //! | `tool`, `author`, `title`, `description`, `copyright`, `license`, `created`, `modified` | strings; dates in ISO 8601 when the file's can be read as dates, else as written |
 //! | `keywords`, `comments` | arrays of strings |
 //! | `georeference` | where a scan or survey sits on Earth: `wkt`, `epsg`, `verticalEpsg`, `origin` and the like |
 //!
-//! Every other key is the format's own detail, kept as the reader found it.
+//! Every other key is the format's own detail, kept as the reader found it. Those that several formats
+//! share are spelled one way, in camelCase:
+//!
+//! | key | value |
+//! |---|---|
+//! | `truncated` | `true` when the file is cut short and the reader kept what came before the cut |
+//! | `encoding` | how the file's data is written: `"ascii"` or `"binary"`, or a format's own other way in lower case (`"xml"`, `"classic"`) |
+//! | `byteOrder` | `"little"` or `"big"`, for a binary file of a format that comes in either |
+//! | `textEncoding` | the encoding of the file's text, where the file states it (`"UTF-8"`, `"UTF-16LE"`, `"Shift-JIS"`) |
+//! | `droppedTextures` | how many textures the file names that the document doesn't have: missing, unreadable or in a format that isn't decoded |
+//! | `missingFiles` | the names of the files the model refers to that weren't found |
+//!
+//! What a reader left out is counted here, under `dropped…` and `missing…` keys.
+//! [`Document::facts`](crate::document::Document::facts) holds counts of what was read, in snake case:
+//! `triangles` always, and `points` and `lines` when there are any, counted the same way whatever the
+//! format ([`Document::counts`](crate::document::Document::counts)).
+//!
+//! Names (of nodes, meshes, materials, animations) are the file's: text that isn't UTF-8 is read as
+//! Windows-1252 unless the format or the file states another encoding, and trailing padding is dropped.
+//! A thing with no name has no `name` key, never an empty one. Where a format numbers its things and a
+//! reader has to name them, the name is the kind and the file's number together: `material3`, `object1`.
 //!
 //! Reading it, and telling a declared value from an assumed one:
 //!
@@ -89,7 +115,8 @@ pub const KEYS: [&str; 21] = [
     "georeference",
 ];
 
-/// A value as the file gave it: declared, assumed (the format's convention, or a guess), or unknown.
+/// A value as the file gave it: declared (by the file, or by its format for every file), assumed (a default
+/// the file didn't override, or a guess), or unknown.
 ///
 /// Exhaustive: these three are every case there is, so a `match` on one needs no wildcard arm.
 ///
@@ -99,18 +126,20 @@ pub const KEYS: [&str; 21] = [
 /// let units: Fact<f64> = Fact::Assumed(0.001);
 /// let note = match units {
 ///     Fact::Declared(m) => format!("{m} m, as the file says"),
-///     Fact::Assumed(m) => format!("{m} m, by the format's convention"),
+///     Fact::Assumed(m) => format!("{m} m, the format's default"),
 ///     Fact::Unknown => "unknown".to_owned(),
 /// };
-/// assert_eq!(note, "0.001 m, by the format's convention");
+/// assert_eq!(note, "0.001 m, the format's default");
 /// assert_eq!(units.value(), Some(&0.001));
 /// assert_eq!(units.declared(), None);
 /// ```
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Fact<T> {
-    /// The file says so.
+    /// The file says so, or its format fixes it for every file (its specification, or the one program whose
+    /// format it is): no file of the format could differ.
     Declared(T),
-    /// The file doesn't say; this is the format's convention or the reader's guess.
+    /// The file doesn't say and could have (the format's default stands in), or files of the format vary and
+    /// this is the usual convention: a guess, however good.
     Assumed(T),
     /// Nothing is known.
     #[default]
@@ -483,6 +512,60 @@ impl SourceInfo {
     }
 }
 
+/// Makes what a reader wrote in `asset.extras.source` say the same thing the same way whatever the format, as
+/// every load does once the reader is done:
+///
+/// - `unit` is the unit's usual name by its length (`"millimeter"`, never `"mm"`), and absent when the length
+///   is unknown or no common unit's. The file's own word for it, where that differs, moves to `unitAsWritten`.
+/// - An assumed `frameRate` is left out of a model with no animation (`animated`): a guess about nothing. One
+///   the file declares stays.
+pub(crate) fn normalize(source: &mut Map<String, Value>, animated: bool) {
+    let written = match source.get("unit") {
+        Some(Value::String(s)) => Some(s.trim().to_owned()),
+        _ => None,
+    };
+    let usual = source.get("metersPerUnit").and_then(Value::as_f64).and_then(unit_name);
+    if written.as_deref() != usual {
+        match usual {
+            Some(u) => source.insert("unit".into(), json!(u)),
+            None => source.remove("unit"),
+        };
+        if let Some(w) = written.filter(|w| !w.is_empty() && !source.contains_key("unitAsWritten")) {
+            source.insert("unitAsWritten".into(), json!(w));
+        }
+    }
+    if !animated {
+        drop_assumed_frame_rate(source);
+    }
+}
+
+/// Takes an assumed `frameRate` out of `source`: for a model with no animation, where it is a guess about
+/// nothing. A declared one stays. Pruning a document's animations away does the same, so that reading less
+/// and pruning give the same document.
+pub(crate) fn drop_assumed_frame_rate(source: &mut Map<String, Value>) {
+    if !source.contains_key("frameRate") {
+        return;
+    }
+    let assumed = match source.get_mut("assumed") {
+        Some(Value::Array(a)) => {
+            let n = a.len();
+            a.retain(|k| k != "frameRate");
+            a.len() != n
+        }
+        _ => false,
+    };
+    if assumed {
+        source.remove("frameRate");
+        if source
+            .get("assumed")
+            .and_then(Value::as_array)
+            .is_some_and(Vec::is_empty)
+        {
+            source.remove("assumed");
+        }
+    }
+}
+
 /// A unit's usual name by its length in meters (`"millimeter"` for 0.001), within a part in a
 /// million; `None` for a length no common unit has.
 #[allow(dead_code, reason = "readers that give their units as lengths use it")]
@@ -497,6 +580,7 @@ pub(crate) fn unit_name(meters: f64) -> Option<&'static str> {
         ("kilometer", 1000.0),
         ("inch", 0.0254),
         ("foot", 0.3048),
+        ("US survey foot", 1200.0 / 3937.0),
         ("yard", 0.9144),
         ("mile", 1609.344),
     ]
@@ -587,6 +671,59 @@ mod tests {
         for a in [Axis::PosX, Axis::NegX, Axis::PosY, Axis::NegY, Axis::PosZ, Axis::NegZ] {
             assert_eq!(a.to_string().parse(), Ok(a));
         }
+    }
+
+    #[test]
+    fn units_are_named_one_way_and_guessed_frame_rates_need_animation() {
+        let run = |v: Value, animated: bool| {
+            let Value::Object(mut m) = v else { unreachable!() };
+            normalize(&mut m, animated);
+            Value::Object(m)
+        };
+        // The file's spelling moves aside for the usual name.
+        assert_eq!(
+            run(json!({ "unit": "mm", "metersPerUnit": 0.001 }), false),
+            json!({ "unit": "millimeter", "unitAsWritten": "mm", "metersPerUnit": 0.001 })
+        );
+        assert_eq!(
+            run(json!({ "unit": "centimeter", "metersPerUnit": 0.01 }), false),
+            json!({ "unit": "centimeter", "metersPerUnit": 0.01 })
+        );
+        // A unit the reader didn't know, read as assumed millimeters: `unit` says what was assumed.
+        assert_eq!(
+            run(
+                json!({ "unit": "furlong", "metersPerUnit": 0.001, "assumed": ["metersPerUnit"] }),
+                false
+            ),
+            json!({ "unit": "millimeter", "unitAsWritten": "furlong", "metersPerUnit": 0.001, "assumed": ["metersPerUnit"] })
+        );
+        // No length, or one with no common name: no `unit`.
+        assert_eq!(
+            run(json!({ "unit": "furlongs" }), false),
+            json!({ "unitAsWritten": "furlongs" })
+        );
+        assert_eq!(
+            run(json!({ "unit": "hand", "metersPerUnit": 0.1016 }), false),
+            json!({ "unitAsWritten": "hand", "metersPerUnit": 0.1016 })
+        );
+        assert_eq!(
+            run(json!({ "metersPerUnit": 0.0254 }), false),
+            json!({ "unit": "inch", "metersPerUnit": 0.0254 })
+        );
+        // An assumed frame rate goes when nothing is animated; a declared one stays.
+        assert_eq!(
+            run(json!({ "frameRate": 24.0, "assumed": ["upAxis", "frameRate"] }), false),
+            json!({ "assumed": ["upAxis"] })
+        );
+        assert_eq!(
+            run(json!({ "frameRate": 24.0, "assumed": ["frameRate"] }), false),
+            json!({})
+        );
+        assert_eq!(
+            run(json!({ "frameRate": 24.0, "assumed": ["frameRate"] }), true),
+            json!({ "frameRate": 24.0, "assumed": ["frameRate"] })
+        );
+        assert_eq!(run(json!({ "frameRate": 30.0 }), false), json!({ "frameRate": 30.0 }));
     }
 
     #[test]

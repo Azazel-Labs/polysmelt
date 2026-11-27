@@ -28,7 +28,7 @@
   "winding_matches_normals": true,
   "materials": [
     {
-      "name": "material 0",
+      "name": "material0",
       "color": [
         0.603827,
         0.318547,
@@ -40,7 +40,7 @@
       "textured": true
     },
     {
-      "name": "material 1",
+      "name": "material1",
       "color": [
         0.033105,
         0.033105,
@@ -59,7 +59,7 @@
     "source": {
       "format": "PMD",
       "version": "1.0",
-      "encoding": "Shift-JIS",
+      "textEncoding": "Shift-JIS",
       "title": "\u30e2\u30c7\u30eb",
       "englishName": "Model",
       "description": "\u30b3\u30e1\u30f3\u30c8",

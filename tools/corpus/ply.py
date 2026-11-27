@@ -406,7 +406,7 @@ case(FMT, "truncated", {"cut.ply": cut[:-10]},
 
 case(FMT, "no_end_header", {"bad.ply": b"ply\nformat ascii 1.0\nelement vertex 1\nproperty float x\n"},
      {"spec": SPEC + ": header without end_header", "source": SRC, "error": "end_header",
-      "error_kind": "Corrupt"})
+      "error_kind": "Truncated"})
 
 case(FMT, "no_format", {"bad.ply": b"ply\nelement vertex 0\nend_header\n"},
      {"spec": SPEC + ": header without a format line", "source": SRC, "error": "format",

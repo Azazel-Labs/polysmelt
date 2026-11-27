@@ -161,7 +161,8 @@ struct Ctx<'a> {
 struct Stats {
     hidden_faces: usize,
     dropped_textures: usize,
-    missing_files: usize,
+    /// The external references' files that weren't found, by the paths the file gives.
+    missing_files: Vec<String>,
     missing_instances: usize,
     cycles: usize,
     too_deep: usize,
@@ -216,11 +217,14 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         c.by_path.insert(dir.join(n), Some(0));
     }
     let scene = expand(&mut c)?;
-    ensure!(
-        !c.meshes.is_empty() || !c.lights.is_empty(),
-        Empty,
-        "this OpenFlight file has no geometry"
-    );
+    if c.meshes.is_empty() && c.lights.is_empty() {
+        let cut = c.files.iter().any(|f| f.db.truncated);
+        return Err(crate::Error::nothing_left(
+            cut,
+            "OpenFlight",
+            "this OpenFlight file has no geometry",
+        ));
+    }
     Ok(finish(c, scene))
 }
 
@@ -383,7 +387,9 @@ fn expand(c: &mut Ctx<'_>) -> Result<Scene> {
                 let (path, target) = (path.to_owned(), target.map(str::to_owned));
                 let flags = *flags;
                 let Some(ef) = external(c, it.file, &path) else {
-                    c.stats.missing_files += 1;
+                    if !c.stats.missing_files.contains(&path) {
+                        c.stats.missing_files.push(path);
+                    }
                     continue;
                 };
                 let key = u64::from(ef);
@@ -446,7 +452,7 @@ fn expand(c: &mut Ctx<'_>) -> Result<Scene> {
                     if sequence.is_some() {
                         // A frame node, shown in its turn.
                         let f = s.nodes.len();
-                        let mut j = json!({ "name": format!("frame {k}") });
+                        let mut j = json!({ "name": format!("frame{k}") });
                         if k > 0 {
                             j["scale"] = json!([0.0, 0.0, 0.0]);
                         }
@@ -1497,7 +1503,6 @@ fn finish(mut c: Ctx<'_>, mut s: Scene) -> Document {
     for (key, n) in [
         ("hiddenFaces", st.hidden_faces),
         ("droppedTextures", st.dropped_textures),
-        ("missingFiles", st.missing_files),
         ("missingInstances", st.missing_instances),
         ("cycles", st.cycles),
         ("tooDeep", st.too_deep),
@@ -1514,6 +1519,9 @@ fn finish(mut c: Ctx<'_>, mut s: Scene) -> Document {
         if n > 0 {
             source.insert(key.into(), json!(n));
         }
+    }
+    if !st.missing_files.is_empty() {
+        source.insert("missingFiles".into(), json!(st.missing_files));
     }
     if c.files.iter().any(|f| f.db.truncated) {
         source.insert("truncated".into(), json!(true));

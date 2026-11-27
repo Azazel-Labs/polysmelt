@@ -45,6 +45,9 @@ pub(super) struct Dom<'a> {
     /// The names of the folders the first document is in, the innermost last, so a path that steps
     /// out of its folder and back in (`../here/x.dae`) is known for the same as `x.dae`.
     home: Vec<String>,
+    /// Whether the first document stops before its XML does: elements still open at its end, or a tag the
+    /// file ends inside.
+    pub(super) cut: bool,
 }
 
 /// An attribute: its local name and its unescaped value.
@@ -89,6 +92,7 @@ impl<'a> Dom<'a> {
             ids: HashMap::new(),
             docs: Vec::new(),
             home: Vec::new(),
+            cut: false,
         };
         let mut reader = Reader::from_reader(bytes);
         let config = reader.config_mut();
@@ -100,7 +104,14 @@ impl<'a> Dom<'a> {
         let mut skipped = 0usize;
         loop {
             let event = match reader.read_event() {
-                Ok(Event::Eof) | Err(_) => break,
+                Ok(Event::Eof) => {
+                    dom.cut = !stack.is_empty() || skipped > 0;
+                    break;
+                }
+                Err(_) => {
+                    dom.cut = true;
+                    break;
+                }
                 Ok(e) => e,
             };
             match event {
@@ -278,7 +289,8 @@ impl<'a> Dom<'a> {
         self.els[e].text.trim_ascii()
     }
 
-    /// The trimmed text inside an element as a string (empty when it isn't UTF-8).
+    /// The trimmed text inside an element as a string. The document is UTF-8 by the time it's parsed
+    /// ([`crate::formats::xml::utf8`]).
     pub(super) fn string(&self, e: usize) -> &str {
         std::str::from_utf8(self.text(e)).unwrap_or("")
     }

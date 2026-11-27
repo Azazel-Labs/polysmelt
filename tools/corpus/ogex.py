@@ -295,7 +295,7 @@ case(FMT, "textured_material",
                "/materials/0/pbrMetallicRoughness/baseColorTexture/extensions/KHR_texture_transform/offset":
                    [0.5, -1.25],
                "/materials/0/normalTexture": None},
-      "document": {"source": {"missingTextures": 1}}})
+      "document": {"source": {"droppedTextures": 1}}})
 
 # --- nodes -----------------------------------------------------------------------------------------
 
@@ -587,7 +587,7 @@ case(FMT, "ddl_syntax", {"syntax.ogex": text},
 
 case(FMT, "unclosed_structure", {"bad.ogex": metrics() + "GeometryNode { ObjectRef { ref { $t } }\n" + triangle("t")},
      {"spec": "OpenDDL (the OpenDDL specification): a structure without its closing brace",
-      "source": SRC, "error": "isn't closed", "error_kind": "Corrupt"})
+      "source": SRC, "error": "isn't closed", "error_kind": "Truncated"})
 
 case(FMT, "no_geometry", {"empty.ogex": metrics() + 'Material $m { Name { string { "unused" } } }\n'},
      {"spec": SPEC + ": a file with no geometry node", "source": SRC, "error": "no geometry", "error_kind": "Empty"})
@@ -761,7 +761,7 @@ for name, folder in REAL.items():
             "assimp_empty_camera": "camera objects and no nodes, each placed under the root by itself",
             "assimp_lights_only": "light objects and no nodes, each placed under the root by itself"}[folder]
     if folder == "assimp_example":
-        expect["document"]["source"] = {"missingTextures": 1}
+        expect["document"]["source"] = {"droppedTextures": 1}
     case(FMT, folder, {name: real[name]},
          {"spec": f"{SPEC}: a real file, {what}", "source": "assimp test models (test/models/OpenGEX), BSD license, "
           "see ../LICENSE-assimp", **expect})

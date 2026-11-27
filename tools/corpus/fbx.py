@@ -1283,7 +1283,7 @@ case(FMT, "truncated", {"truncated.fbx": old[:len(old) // 2]},
 case(FMT, "not_fbx", {"not_fbx.fbx": "solid cube\nendsolid cube\n"},
      {"spec": f"{SPEC}: a text file that isn't FBX", "source": SRC, "error": "FBX", "error_kind": "UnknownFormat"})
 case(FMT, "empty_file", {"empty_file.fbx": b""},
-     {"spec": f"{SPEC}: an empty file", "source": SRC, "error": "FBX", "error_kind": "UnknownFormat"})
+     {"spec": f"{SPEC}: an empty file", "source": SRC, "error": "the file is empty", "error_kind": "Empty"})
 
 # --- the full material: texture layout, PBR slots, Stingray PBS and 3ds Max Physical ------------
 

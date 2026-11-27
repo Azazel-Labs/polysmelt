@@ -205,6 +205,12 @@ pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
     asset["extras"]["source"] = Value::Object(source);
 
     let counts = doc.counts();
+    // A tile or tileset that places nothing has nothing to convert, whatever tables it carries.
+    ensure!(
+        counts.triangles + counts.points + counts.lines > 0,
+        Empty,
+        "the tile is well formed but has nothing to convert: it draws nothing"
+    );
     let facts = &mut doc.facts;
     facts.insert("triangles".into(), json!(counts.triangles));
     if counts.points > 0 {

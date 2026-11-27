@@ -131,7 +131,7 @@ fn header_version(bytes: &[u8]) -> Option<String> {
         .copied()
         .take_while(|&b| b.is_ascii_digit() || b == b'.')
         .collect();
-    (ascii.get(open + 1 + inside.len()) == Some(&b'}')).then(|| String::from_utf8_lossy(&inside).into_owned())
+    (ascii.get(open + 1 + inside.len()) == Some(&b'}')).then(|| crate::bytes::text(&inside).into_owned())
 }
 
 /// The major version from the header's version string.

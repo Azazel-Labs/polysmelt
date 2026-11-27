@@ -5,7 +5,7 @@
   "area": 18,
   "materials": [
     {
-      "name": "color_1",
+      "name": "color1",
       "color": [
         1.0,
         0.0,
@@ -14,7 +14,7 @@
       ]
     },
     {
-      "name": "color_2",
+      "name": "color2",
       "color": [
         0.0,
         0.2159,
@@ -23,7 +23,7 @@
       ]
     },
     {
-      "name": "color_3",
+      "name": "color3",
       "color": [
         0.003,
         0.5776,

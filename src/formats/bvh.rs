@@ -162,7 +162,7 @@ struct Hierarchy {
 
 /// Up to 40 characters of `s`, for an error message.
 fn show(s: &[u8]) -> String {
-    String::from_utf8_lossy(s).chars().take(40).collect()
+    crate::bytes::text(s).chars().take(40).collect()
 }
 
 /// The next token of `s` and what follows it. A brace is a token of its own, wherever it is.
@@ -327,7 +327,7 @@ impl Hierarchy {
                 let name = if name.is_empty() {
                     format!("joint{}", self.joints.len())
                 } else {
-                    String::from_utf8_lossy(name).into_owned()
+                    crate::bytes::text(name).into_owned()
                 };
                 self.add(name, false)?;
             } else if is(b"End") {
@@ -698,6 +698,10 @@ pub(super) fn load(input: Input<'_>, keep: Keep) -> Result<Document> {
         }
         if let Some(n) = m.frames {
             source.insert("frames".into(), json!(n));
+            // Fewer rows than the file says it has: it is cut short.
+            if usize::try_from(n).is_ok_and(|n| n > m.kept.len() + usize::try_from(m.dropped).unwrap_or(usize::MAX)) {
+                source.insert("truncated".into(), json!(true));
+            }
         }
     }
     info.write(&mut source);

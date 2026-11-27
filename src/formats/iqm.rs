@@ -29,8 +29,8 @@
 //! extras (`loop`). The source info's `frameRate` is the first animation's rate that is a positive number (assumed 24
 //! when none is); when the animations' rates differ, each gives its own in its extras (`frameRate`).
 //!
-//! The format is Z up by its tools' convention, so the scene's roots are turned for glTF's Y up (the source info's
-//! `upAxis` is an assumed `+Z`, converted); units are kept unscaled, and their length unknown.
+//! The format is Z up and right-handed, so the scene's roots are turned for glTF's Y up (the source info's
+//! `upAxis` is a declared `+Z`, converted); units are kept unscaled, and their length unknown.
 //!
 //! A file cut short, a list past its end, a name outside the text block, an unknown number format, vertex arrays
 //! that don't all hold every vertex, a triangle naming a vertex outside its mesh, a weighted influence naming a
@@ -85,8 +85,8 @@ pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
     let mut scene = build(&file, &stem, &input, assets, keep)?;
     scene.info.format = Some("IQM".into());
     scene.info.version = Some("2".into());
-    scene.info.up_axis = Fact::Assumed(Axis::PosZ);
-    scene.info.handedness = Fact::Assumed(Handedness::Right);
+    scene.info.up_axis = Fact::Declared(Axis::PosZ);
+    scene.info.handedness = Fact::Declared(Handedness::Right);
     scene.info.comments.clone_from(&file.comments);
     // The first animation's rate that is one; with none, the rate frames are taken at.
     let rates = file.anims.iter().map(|a| a.rate);
@@ -850,7 +850,7 @@ mod tests {
         assert_eq!(info.frame_rate, Fact::Declared(10.0));
         assert_eq!(doc.json()["animations"][0]["extras"]["frameRate"], 10.0);
         assert_eq!(doc.json()["animations"][1]["extras"]["frameRate"], 24.0);
-        assert_eq!(info.up_axis, Fact::Assumed(Axis::PosZ));
+        assert_eq!(info.up_axis, Fact::Declared(Axis::PosZ));
         assert_eq!(info.meters_per_unit, Fact::Unknown);
         assert!(info.converted.up_axis);
     }

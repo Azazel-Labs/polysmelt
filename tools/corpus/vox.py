@@ -118,14 +118,14 @@ case(FMT, "default_palette_entries",
      {"row.vox": vox(size(len(DEFAULT) * 2, 1, 1), xyzi([(2 * i, 0, 0, c) for i, c in enumerate(DEFAULT)]))},
      {"spec": SPEC + ": colors from the default palette table", "source": SRC,
       "material_count": len(DEFAULT), "area": 6 * len(DEFAULT),
-      "materials": [{"name": f"color_{c}", "color": lin(rgb)} for c, rgb in DEFAULT.items()]})
+      "materials": [{"name": f"color{c}", "color": lin(rgb)} for c, rgb in DEFAULT.items()]})
 
 PAL = [(255, 0, 0, 255), (0, 128, 255, 255), (10, 200, 30, 255)]
 case(FMT, "palette_off_by_one",
      {"three.vox": vox(size(5, 1, 1), xyzi([(0, 0, 0, 1), (2, 0, 0, 2), (4, 0, 0, 3)]), rgba(PAL))},
      {"spec": SPEC + ": RGBA entry i is color index i + 1; colors are sRGB", "source": SRC,
       "material_count": 3, "area": 18,
-      "materials": [{"name": f"color_{i + 1}", "color": lin(c)} for i, c in enumerate(PAL)]})
+      "materials": [{"name": f"color{i + 1}", "color": lin(c)} for i, c in enumerate(PAL)]})
 
 case(FMT, "adjacent_faces_culled", {"two.vox": vox(size(2, 1, 1), xyzi([(0, 0, 0, 1), (1, 0, 0, 1)]))},
      {"spec": SPEC + ": the face between two voxels isn't drawn", "source": SRC, "area": 10,

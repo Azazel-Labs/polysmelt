@@ -10,7 +10,6 @@
   "json": {
     "/asset/extras/source/frameRate": 24.0,
     "/asset/extras/source/assumed": [
-      "upAxis",
       "frameRate"
     ]
   },

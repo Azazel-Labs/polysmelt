@@ -105,7 +105,8 @@ case(FMT, "binary_empty", {"empty.stl": binary([])},
      {"spec": BIN + ": zero facets", "source": SRC, "error": "no triangles", "error_kind": "Empty"})
 
 case(FMT, "binary_truncated", {"cut.stl": binary(CUBE_TRIS[:11], b"truncated", count=12)},
-     {"spec": BIN + ": fewer facets than the count says", "source": SRC, "error": "STL", "error_kind": "UnknownFormat"})
+     {"spec": BIN + ": fewer facets than the count says", "source": SRC, "error": "cut short",
+      "error_kind": "Truncated"})
 
 # Large coordinates (millimetres, far from the origin) keep their precision.
 far = [(n, [tuple(c * 25.4 + 1000.0 for c in v) for v in vs]) for n, vs in CUBE_TRIS]

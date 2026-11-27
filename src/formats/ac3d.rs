@@ -12,7 +12,7 @@
 //! folded flags, lights) stays in `extras`.
 //!
 //! AC3D works in OpenGL's space, Y up and right-handed, with polygons counterclockwise from the front, as glTF
-//! does: the source's up axis is +Y and its handedness right by that convention (assumed: a file doesn't say).
+//! does: the source's up axis is +Y and its handedness right (declared: the program's space is every file's).
 //! Its units are whatever the model's are, unknown, and lengths are kept as written. Colors are sRGB.
 
 use std::collections::HashMap;
@@ -181,10 +181,7 @@ fn clean(x: f32) -> Value {
 }
 
 fn text(b: &[u8]) -> String {
-    match std::str::from_utf8(b) {
-        Ok(s) => s.to_owned(),
-        Err(_) => b.iter().map(|&c| char::from(c)).collect(),
-    }
+    crate::bytes::text(b).into_owned()
 }
 
 /// A finite number.
@@ -341,7 +338,8 @@ fn parse(data: &[u8]) -> Result<Model> {
             }
         }
     }
-    m.truncated = owed.iter().any(|&(_, n)| n > 0);
+    // Children still owed, or an object whose `kids` line never came: the file stops early.
+    m.truncated = owed.iter().any(|&(_, n)| n > 0) || cur.is_some();
     Ok(m)
 }
 
@@ -778,7 +776,13 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         meshes.push(mesh);
         mesh_of[*oi] = Some(meshes.len() - 1);
     }
-    ensure!(!meshes.is_empty(), Empty, "this AC3D file has no geometry");
+    if meshes.is_empty() {
+        return Err(crate::Error::nothing_left(
+            m.truncated,
+            "AC3D",
+            "this AC3D file has no geometry",
+        ));
+    }
 
     // A plain world (no placement or surfaces of its own) gives way to its children.
     let plain = |i: usize| {
@@ -863,8 +867,8 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
     let info = SourceInfo {
         format: Some("AC3D".into()),
         version: m.version.map(|v| v.to_string()),
-        up_axis: Fact::Assumed(Axis::PosY),
-        handedness: Fact::Assumed(Handedness::Right),
+        up_axis: Fact::Declared(Axis::PosY),
+        handedness: Fact::Declared(Handedness::Right),
         ..SourceInfo::default()
     };
     info.write(&mut source);
@@ -1029,8 +1033,8 @@ mod tests {
         assert_eq!(doc.json()["asset"]["extras"]["source"]["droppedTextures"], 1);
         let info = doc.source_info();
         assert_eq!(info.format.as_deref(), Some("AC3D"));
-        assert_eq!(info.up_axis, Fact::Assumed(Axis::PosY));
-        assert_eq!(info.handedness, Fact::Assumed(Handedness::Right));
+        assert_eq!(info.up_axis, Fact::Declared(Axis::PosY));
+        assert_eq!(info.handedness, Fact::Declared(Handedness::Right));
         assert_eq!(info.meters_per_unit, Fact::Unknown);
         assert!(info.unit.is_none());
         assert_eq!(info.converted, crate::source::Converted::default());

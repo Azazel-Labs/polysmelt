@@ -17,8 +17,12 @@
   "tolerance": 1e-05,
   "document": {
     "source": {
-      "unit": "micron",
+      "unit": "micrometer",
       "metersPerUnit": 1e-06
     }
+  },
+  "json": {
+    "/asset/extras/source/unit": "micrometer",
+    "/asset/extras/source/unitAsWritten": "micron"
   }
 }

@@ -375,7 +375,7 @@ fn every_version_and_encoding_reads_the_same() {
     }
     let doc = read(&v4(true, true, true, 4));
     assert_eq!(source(&doc)["encoding"], "binary");
-    assert_eq!(source(&doc)["byteOrder"], "big-endian");
+    assert_eq!(source(&doc)["byteOrder"], "big");
     assert_eq!(source(&doc)["version"], "4.1");
     assert_eq!(source(&doc)["format"], "Gmsh");
 }

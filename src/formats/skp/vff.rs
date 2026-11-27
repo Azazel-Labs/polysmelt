@@ -114,7 +114,7 @@ fn entity_id(n: &Node<'_>) -> Option<Id> {
 }
 
 fn text(p: &[u8]) -> String {
-    String::from_utf8_lossy(p).into_owned()
+    crate::bytes::text(p).into_owned()
 }
 
 /// The positioned-texture matrices of a face's front and back, nested deep in the face's `DC05` payload: under
@@ -493,7 +493,7 @@ fn materials(zip: &Zip<'_>) -> HashMap<String, model::Material> {
         .filter(|n| n.starts_with("materials/") && n.ends_with("material.xml"))
     {
         let Some(Ok(bytes)) = zip.get(path) else { continue };
-        let xml = String::from_utf8_lossy(&bytes);
+        let xml = crate::bytes::text(&bytes);
         let Some(attrs) = element_attrs(&xml, "material") else {
             continue;
         };

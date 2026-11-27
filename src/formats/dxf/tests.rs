@@ -133,14 +133,14 @@ fn faces_turn_y_up_in_meters() {
     assert_eq!(triangles(&doc), 12);
     let src = source(&doc);
     assert_eq!(src["format"], "DXF");
-    assert_eq!(src["encoding"], "ASCII");
+    assert_eq!(src["encoding"], "ascii");
     assert_eq!(src["version"], "AC1027");
     assert!(src.get("units").is_none());
     assert!(src.get("truncated").is_none());
     let info = doc.source_info();
     assert_eq!(info.meters_per_unit, Fact::Declared(0.001));
     assert_eq!(info.unit.as_deref(), Some("millimeter"));
-    assert_eq!(info.up_axis, Fact::Assumed(Axis::PosZ));
+    assert_eq!(info.up_axis, Fact::Declared(Axis::PosZ));
     assert_eq!(info.handedness, Fact::Declared(Handedness::Right));
     assert!(info.converted.units && info.converted.up_axis);
     assert_eq!(doc.json()["nodes"][0]["name"], "RootNode");
@@ -366,8 +366,9 @@ fn nested_blocks_cycles_and_depth() {
         };
         write!(chain, "0 BLOCK 2 C{k} 0 INSERT 2 {inner} 0 ENDBLK ").unwrap();
     }
-    let doc = read(&text(&drawing(0, "", &chain, "0 INSERT 2 C39"), "\n"));
-    assert_eq!(triangles(&doc), 0);
+    let deep = "0 INSERT 2 C39 ".to_owned() + &face("8 0", &[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]);
+    let doc = read(&text(&drawing(0, "", &chain, &deep), "\n"));
+    assert_eq!(triangles(&doc), 1, "only the face beside the chain");
     assert!(source(&doc)["notes"].to_string().contains("too deep"));
 }
 
@@ -484,15 +485,19 @@ fn skipped_and_left_out() {
         + &face("8 0 67 1", &[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
         + "0 LINE 8 0 67 1 10 0 20 0 30 0 11 1 21 1 31 1 0 CIRCLE 67 1 40 1 \
            0 SPLINE 67 1 71 1 10 0 20 0 30 0 10 1 20 0 30 0";
+    // Nothing of it is drawn: a drawing with nothing to convert.
+    let err = read_bytes(text(&drawing(0, "", "", &entities), "\n").as_bytes(), usize::MAX).unwrap_err();
+    assert_eq!(err.kind(), crate::ErrorKind::Empty, "{err}");
+    // Beside a face in model space, what was skipped and left out is noted.
+    let entities = entities + " " + &face("8 0", &[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]);
     let doc = read(&text(&drawing(0, "", "", &entities), "\n"));
-    assert_eq!(triangles(&doc), 0);
+    assert_eq!(triangles(&doc), 1);
     let src = source(&doc);
     assert_eq!(
         src["skipped"],
         json!({ "3DSOLID": 1, "DIMENSION": 1, "HATCH": 1, "MTEXT": 1, "TEXT": 1 })
     );
     assert!(src["notes"].to_string().contains("paper space"));
-    assert!(doc.json()["scenes"][0].get("nodes").is_none());
 }
 
 #[test]
@@ -631,8 +636,15 @@ fn circles_and_arcs() {
         "{lo:?} {hi:?}"
     );
     // No radius, or one that isn't a number, draws nothing.
-    let doc = read(&text(&drawing(6, "", "", "0 CIRCLE 40 0 0 ARC 40 nan 51 90"), "\n"));
-    assert!(doc.flatten(Pose::Rest).unwrap().is_none_or(|m| m.lines() == 0));
+    let none = text(&drawing(6, "", "", "0 CIRCLE 40 0 0 ARC 40 nan 51 90"), "\n");
+    let err = read_bytes(none.as_bytes(), usize::MAX).unwrap_err();
+    assert_eq!(err.kind(), crate::ErrorKind::Empty, "{err}");
+    // Beside something drawn, they add nothing.
+    let doc = read(&text(
+        &drawing(6, "", "", "0 CIRCLE 40 0 0 ARC 40 nan 51 90 0 CIRCLE 40 1"),
+        "\n",
+    ));
+    assert_eq!(doc.flatten(Pose::Rest).unwrap().unwrap().lines(), 32);
 }
 
 #[test]

@@ -259,7 +259,8 @@ writes what its version writes, so `blender_export.py` can differ under another 
   hemisphere caps, tapered beams, balls, beam sets, colors blended along a beam, clipping
   inside and outside a mesh, and beams beside triangles. A build of only a volumetric level
   set fails with its own error. Also packaging variants and broken packages.
-- **FBX**: ASCII 6100 and 7300–7500, binary 7400–7700 (zlib-compressed arrays too). Covers
+- **FBX**: ASCII 7300–7500 and binary 7400–7700 (zlib-compressed arrays too); FBX 6.1, in either
+  encoding, is refused as unsupported. Covers
   axis systems and units, every rotation order, pivots, offsets and geometric transforms, and
   animation, including Euler keys baked past ±180° or flipped past straight up.
   Also every normal, UV and color mapping, materials, textures (embedded, external and
@@ -305,7 +306,7 @@ writes what its version writes, so `blender_export.py` can differ under another 
   2013 to 2020) and the ZIP container of 2021 on. Covers faces bounded by arcs beside a loose
   arc with no face, textured materials stored inline, groups and components nested inside
   each other, an instance scaled through its transform's last value, tags carrying line
-  styles (2019 and 2020 layouts), and files with nothing to draw (empty, guides only, materials only). Also annotations, scenes
+  styles (2019 and 2020 layouts), and files with nothing to draw (empty, guides only, materials only), which are `Empty` errors. Also annotations, scenes
   and an SDK-saved file beside what is drawn, and truncated, foreign and too-old files.
 - **BVH**: a skeleton and its motion, with no mesh. Covers six channels on every joint with
   positions and rotations interleaved, the ZXY, XYZ, YXZ and ZYX rotation orders, position
@@ -610,6 +611,31 @@ Each `materials` entry is matched by `name`, or by position when it has no name:
 | `pixel` | The base color texture's top-left pixel, as 8-bit RGB. |
 | `metal_rough_pixel` | The same, of the metallic-roughness texture. |
 | `occlusion_pixel` | The same, of the occlusion texture. |
+
+## What every format's cases expect alike
+
+Whatever the format, the same thing is expected the same way (`tests/kinds.rs` and
+`tests/uniform.rs` hold every reader to it, extension by extension):
+
+- **Errors.** A file with no bytes is `Empty`. A file that isn't the format it's read as (no
+  signature, no first words of its text) is `UnknownFormat`. A file cut short is `Truncated`, or,
+  where the reader keeps what came before the cut, loads with `document.source.truncated: true`.
+  A well-formed file with nothing to convert (nothing drawn, and no named node, hierarchy,
+  camera, light or skin) is `Empty`.
+- **Facts.** `facts.triangles` is always there, and `facts.points` and `facts.lines` when there
+  are any; they are what the document draws, counted one way for every reader.
+- **The source** (`document.source`, or `json` pointers under `/asset/extras/source`). The keys
+  are listed in `src/source.rs`. `unit` is the unit's usual name by its length (`millimeter`,
+  never `mm`), with the file's own word as `unitAsWritten` when it differs
+  (`common.unit_source` writes both). `assumed` lists only what the file could have said and
+  didn't, or what is guessed; what a format fixes for every file is declared. An assumed
+  `frameRate` is there only when the model is animated. `encoding` is `ascii` or `binary` (or a
+  format's own other way, in lower case), `byteOrder` is `little` or `big`, a text encoding is
+  `textEncoding`. Textures named and not in the document are counted as `droppedTextures`, and
+  files named and not found are listed as `missingFiles`.
+- **Names.** Text that isn't UTF-8 is Windows-1252. A thing with no name has no `name`, and a
+  name the reader makes up for something the format numbers is the kind and the number
+  together: `material3`, `object1`, `frame2`.
 
 ## Adding a case
 

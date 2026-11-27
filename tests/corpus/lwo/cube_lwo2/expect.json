@@ -34,6 +34,7 @@
     }
   ],
   "json": {
-    "/asset/extras/source/format": "LWO2"
+    "/asset/extras/source/format": "LWO",
+    "/asset/extras/source/version": "LWO2"
   }
 }

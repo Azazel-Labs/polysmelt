@@ -148,7 +148,8 @@ for name, tags, spec in [("sdk_saved_tag_line_styles_2020", 6, "six tags, four w
 # so a file without that name has no face at all: these are checked here before claiming no mesh.
 def faceless(name, spec):
     assert b"CFace" not in fixtures[name], name
-    fixture(name, spec + "; no faces (no CFace class in its object stream)", no_mesh=True)
+    fixture(name, spec + "; no faces (no CFace class in its object stream), so nothing to convert",
+            error="nothing to convert", error_kind="Empty")
 
 
 faceless("blank_v17", "a model with no materials, definitions or instances, only Layer0")
@@ -181,7 +182,7 @@ case(FMT, "truncated_legacy", {"cut.skp": v3[:len(v3) // 2]},
 vff = fixtures["nesting_2021"]
 case(FMT, "truncated_vff", {"cut.skp": vff[:len(vff) // 2]},
      {"spec": SPEC + ": a 2021+ file cut off halfway through its ZIP container", "source": GEN,
-      "error": "reading a SketchUp 2025 file", "error_kind": "Corrupt"})
+      "error": "reading a SketchUp 2025 file", "error_kind": "Truncated"})
 case(FMT, "header_only", {"header.skp": header("{15.0.9350}")},
      {"spec": SPEC + ": a SketchUp 2015 header with nothing after it", "source": GEN,
       "error": "reading a SketchUp 2015 file", "error_kind": "Corrupt"})
@@ -194,6 +195,6 @@ case(FMT, "no_version", {"bad.skp": header("{x}")},
 case(FMT, "not_sketchup", {"text.skp": "this is not a SketchUp file\n"},
      {"spec": "not a SketchUp file", "source": GEN, "error": "not a SketchUp file", "error_kind": "UnknownFormat"})
 case(FMT, "empty_file", {"empty.skp": b""},
-     {"spec": "an empty file", "source": GEN, "error": "not a SketchUp file", "error_kind": "UnknownFormat"})
+     {"spec": "an empty file", "source": GEN, "error": "the file is empty", "error_kind": "Empty"})
 
 print("skp corpus written")

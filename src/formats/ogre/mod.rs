@@ -282,7 +282,7 @@ pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
             convention(&mut scene, &skel.version);
             scene.source.insert("kind".into(), json!("skeleton"));
             if skel.big_endian {
-                scene.source.insert("byteOrder".into(), json!("big-endian"));
+                scene.source.insert("byteOrder".into(), json!("big"));
             }
             if let Some(m) = skel.blend_mode {
                 scene.source.insert("blendMode".into(), json!(m));
@@ -1063,7 +1063,7 @@ fn mesh_document(file: &MeshFile, stem: &str, input: &Input<'_>, assets: &dyn As
     // Source and facts.
     convention(&mut scene, &file.version);
     if file.big_endian {
-        scene.source.insert("byteOrder".into(), json!("big-endian"));
+        scene.source.insert("byteOrder".into(), json!("big"));
     }
     if let Some(s) = &file.skeleton {
         scene.source.insert("skeleton".into(), json!(s));

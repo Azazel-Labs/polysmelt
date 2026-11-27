@@ -180,7 +180,7 @@ fn f64_at(b: &[u8], at: usize) -> f64 {
 
 /// A fixed-size text field: up to its first NUL, trimmed.
 fn text(b: &[u8]) -> String {
-    String::from_utf8_lossy(bytes::until_nul(b)).trim().to_string()
+    crate::bytes::text(bytes::until_nul(b)).trim().to_string()
 }
 
 /// Where job `job`'s records start, or `None` past what a file can hold.
@@ -190,11 +190,8 @@ fn job_start(h: &Header, job: Job) -> Option<u64> {
 
 impl Header {
     fn parse(b: &[u8]) -> Result<Header> {
-        ensure!(
-            b.len() >= HEADER && b.starts_with(b"LASF"),
-            UnknownFormat,
-            "not a LAS file (no LASF header)"
-        );
+        ensure!(b.starts_with(b"LASF"), UnknownFormat, "not a LAS file (no LASF header)");
+        ensure!(b.len() >= HEADER, Truncated, "LAS header is cut short");
         let version = (b[24], b[25]);
         ensure!(
             version.0 == 1 && version.1 <= 4,

@@ -149,20 +149,10 @@ fn packed(d: &[u8], at: usize) -> [u8; 3] {
     [u8_at(d, at + 3), u8_at(d, at + 2), u8_at(d, at + 1)]
 }
 
-/// A fixed-size text field: up to its first NUL, Latin-1 where it isn't UTF-8.
+/// A fixed-size text field: up to its first NUL, without its padding, Windows-1252 where it isn't UTF-8.
 pub(super) fn text(d: &[u8], at: usize, len: usize) -> String {
     let end = at.saturating_add(len).min(d.len());
-    let b = d.get(at..end).unwrap_or_default();
-    let b = &b[..b.iter().position(|&c| c == 0).unwrap_or(b.len())];
-    match std::str::from_utf8(b) {
-        Ok(s) => s.trim_end().to_owned(),
-        Err(_) => b
-            .iter()
-            .map(|&c| char::from(c))
-            .collect::<String>()
-            .trim_end()
-            .to_owned(),
-    }
+    crate::bytes::name(d.get(at..end).unwrap_or_default())
 }
 
 /// A material palette entry.

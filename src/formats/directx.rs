@@ -36,10 +36,10 @@
 //! scene is mirrored through the XY plane, and faces (clockwise in front, as Direct3D draws them) keep facing out.
 //! Texture coordinates start at the top left, as glTF's do.
 //!
-//! The source info gives the header's version, Direct3D's left-handed, Y up convention (assumed: the file doesn't
-//! say), its handedness converted, and units of unknown length. Its `frameRate` is `AnimTicksPerSecond`, or an assumed
-//! 4800 when the file has animations and doesn't say. The encoding and float size are kept as `encoding` and
-//! `floatSize`.
+//! The source info gives the header's version, Direct3D's left-handedness (declared: the format is Direct3D's) and
+//! Y up (assumed: a convention the file doesn't state), its handedness converted, and units of unknown length. Its `frameRate` is `AnimTicksPerSecond`, or an assumed
+//! 4800 when the file has animations and doesn't say. The encoding (`ascii` or `binary`, with `compressed` beside it when it is) and float size
+//! are kept as `encoding` and `floatSize`.
 //!
 //! Nothing is allocated from a count the file gives without the data to back it, objects can nest only so deep,
 //! and inflating stops at the size the file declares and at a gigabyte. A file that doesn't parse is an error.
@@ -92,13 +92,16 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
     scene.info.format = Some("DirectX".into());
     scene.info.version = Some(file.version);
     scene.info.up_axis = Fact::Assumed(Axis::PosY);
-    scene.info.handedness = Fact::Assumed(Handedness::Left);
+    scene.info.handedness = Fact::Declared(Handedness::Left);
     scene.info.frame_rate = match ticks {
         Some(t) => Fact::Declared(t),
         None if animated => Fact::Assumed(DEFAULT_TICKS),
         None => Fact::Unknown,
     };
     scene.source.insert("encoding".into(), json!(file.encoding));
+    if file.compressed {
+        scene.source.insert("compressed".into(), json!(true));
+    }
     scene
         .source
         .insert("floatSize".into(), json!(if file.double { 64 } else { 32 }));
@@ -132,6 +135,8 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
 struct File {
     version: String,
     encoding: &'static str,
+    /// Whether the body is MSZIP-compressed (`tzip`, `bzip`).
+    compressed: bool,
     double: bool,
     objects: Vec<Obj>,
 }
@@ -156,10 +161,10 @@ fn parse_file(data: &[u8]) -> Result<File> {
     let format = data[8..12].to_ascii_lowercase();
     let double = &data[12..16] == b"0064";
     let (encoding, binary, compressed) = match &format[..] {
-        b"txt " => ("text", false, false),
+        b"txt " => ("ascii", false, false),
         b"bin " => ("binary", true, false),
-        b"tzip" => ("compressed text", false, true),
-        b"bzip" => ("compressed binary", true, true),
+        b"tzip" => ("ascii", false, true),
+        b"bzip" => ("binary", true, true),
         _ => bail!(Unsupported, "unknown .x encoding {:?}", scene::text(&data[8..12])),
     };
     let inflated;
@@ -181,6 +186,7 @@ fn parse_file(data: &[u8]) -> Result<File> {
     Ok(File {
         version,
         encoding,
+        compressed,
         double,
         objects,
     })

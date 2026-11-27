@@ -28,6 +28,7 @@
     "/asset/extras/source/upAxis": "-X",
     "/asset/extras/source/xScreen": "+Z",
     "/asset/extras/source/unit": "inch",
+    "/asset/extras/source/unitAsWritten": null,
     "/asset/extras/source/assumed": null
   },
   "rig": [

@@ -444,7 +444,7 @@ pub(crate) fn load(input: super::Input<'_>, keep: Keep) -> Result<Document> {
         let material = match *look {
             Look::Plain => Material::plain("default", GRAY).into(),
             Look::Color(c, finish) => {
-                let m = Full::from(Material::plain(&named(format!("color_{i}")), linear(c)));
+                let m = Full::from(Material::plain(&named(format!("color{i}")), linear(c)));
                 match finish {
                     Some(f) => f.full(m, scale),
                     None => m,
@@ -469,9 +469,9 @@ pub(crate) fn load(input: super::Input<'_>, keep: Keep) -> Result<Document> {
                             wrap: out.textures[t].1,
                             ..Tex::new(i)
                         }),
-                        ..Material::plain(&format!("texture_{t}"), [1.0; 4]).into()
+                        ..Material::plain(&format!("texture{t}"), [1.0; 4]).into()
                     },
-                    None => Material::plain(&format!("texture_{t}"), GRAY).into(),
+                    None => Material::plain(&format!("texture{t}"), GRAY).into(),
                 }
             }
         };
@@ -1311,7 +1311,7 @@ fn parse_part(r: impl Read, triangles: &mut usize, limit: usize) -> Result<Part>
                             && std::mem::take(&mut meta_seen)
                         {
                             part.metadata
-                                .push((name, String::from_utf8_lossy(&meta_text).trim().to_owned()));
+                                .push((name, crate::bytes::text(&meta_text).trim().to_owned()));
                         }
                         meta_text.clear();
                     }

@@ -5,8 +5,8 @@
 //! textures (gray channels combined into one image) with each triangle's texture coordinates, and
 //! constellations, placed as nodes wherever an instance puts them. The model's Z-up unit (millimeters
 //! when unsaid) turns into glTF's Y-up meters at a root node. The source's units are declared when the
-//! `unit` attribute names one the format knows, and millimeters assumed otherwise; its up axis is +Z
-//! by the format's convention (assumed). The model's metadata of the kinds the standard names (`name`,
+//! `unit` attribute names one the format knows, and millimeters assumed otherwise (a name the format doesn't
+//! know is kept as `unitAsWritten`); its up axis is +Z, the build direction the format fixes (declared). The model's metadata of the kinds the standard names (`name`,
 //! `description`, `author`, `cad`) and the common others (`copyright`, `license`, creation and
 //! modification dates) are the source's title, description, author, tool and so on; the rest stay in
 //! its `metadata`.
@@ -366,7 +366,7 @@ fn parse(r: impl BufRead, limit: usize) -> Result<Amf> {
 
 /// An attribute's value, references decoded and trimmed.
 fn attr(e: &BytesStart<'_>, name: &[u8]) -> Option<String> {
-    xml::attr(e, name).map(|v| String::from_utf8_lossy(&v).trim().to_owned())
+    xml::attr(e, name).map(|v| crate::bytes::text(&v).trim().to_owned())
 }
 
 /// A finite number.
@@ -375,7 +375,7 @@ fn number(text: &[u8]) -> Option<f32> {
 }
 
 fn text(t: &[u8]) -> String {
-    String::from_utf8_lossy(t).trim().to_owned()
+    crate::bytes::text(t).trim().to_owned()
 }
 
 fn open(a: &mut Amf, s: &mut State, t: Tag, e: &BytesStart<'_>) {
@@ -1014,7 +1014,13 @@ fn build(a: &Amf, zipped: bool) -> Result<Document> {
             mesh_of.push(Some(meshes.len() - 1));
         }
     }
-    ensure!(triangles > 0, Empty, "this AMF has no triangles");
+    if triangles == 0 {
+        return Err(crate::Error::nothing_left(
+            a.truncated,
+            "AMF",
+            "this AMF has no triangles",
+        ));
+    }
 
     let mut place = Place {
         a,
@@ -1063,7 +1069,7 @@ fn build(a: &Amf, zipped: bool) -> Result<Document> {
             _ => Fact::Assumed(scale),
         },
         unit: Some(unit),
-        up_axis: Fact::Assumed(Axis::PosZ),
+        up_axis: Fact::Declared(Axis::PosZ),
         ..SourceInfo::default()
     };
     info.converted.units = (scale - 1.0).abs() > f64::EPSILON;
@@ -1132,7 +1138,7 @@ fn full(
 ) -> Full {
     let m = material.map(|i| &a.materials[i]);
     let name = match m {
-        Some(m) => m.name.clone().unwrap_or_else(|| format!("material_{}", m.id)),
+        Some(m) => m.name.clone().unwrap_or_else(|| format!("material{}", m.id)),
         None if image.is_some() => "texture".to_owned(),
         None if own || color == [1.0; 4] => "color".to_owned(),
         None => "default".to_owned(),
@@ -1220,7 +1226,7 @@ impl Place<'_> {
             return None;
         }
         let o = &self.a.objects[i];
-        let mut node = json!({ "name": o.name.clone().unwrap_or_else(|| format!("object_{}", o.id)) });
+        let mut node = json!({ "name": o.name.clone().unwrap_or_else(|| format!("object{}", o.id)) });
         if let Some(m) = self.mesh_of[i] {
             node["mesh"] = json!(m);
         }
@@ -1253,7 +1259,7 @@ impl Place<'_> {
             children.extend(child);
         }
         self.path.pop();
-        let mut node = json!({ "name": c.name.clone().unwrap_or_else(|| format!("constellation_{}", c.id)) });
+        let mut node = json!({ "name": c.name.clone().unwrap_or_else(|| format!("constellation{}", c.id)) });
         if !children.is_empty() {
             node["children"] = json!(children);
         }
@@ -1352,7 +1358,7 @@ mod tests {
         assert_eq!(src["metersPerUnit"], 0.0254);
         let info = doc.source_info();
         assert_eq!(info.meters_per_unit, Fact::Declared(0.0254));
-        assert_eq!(info.up_axis, Fact::Assumed(Axis::PosZ));
+        assert_eq!(info.up_axis, Fact::Declared(Axis::PosZ));
         assert!(info.converted.units && info.converted.up_axis && !info.converted.handedness);
         assert_eq!(info.output_meters_per_unit(), Fact::Declared(1.0));
         assert_eq!(info.author.as_deref(), Some("A & B"));

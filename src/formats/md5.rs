@@ -37,8 +37,8 @@
 //! `bounds` are dropped. A mesh and its animations are separate files, each read on its own; both share the joint
 //! names that tie them together.
 //!
-//! The format is Z up by the engine's convention, so the scene's roots are turned for glTF's Y up (the source info's
-//! `upAxis` is an assumed `+Z`, converted); game units are kept unscaled, and their length unknown. The exporter's
+//! The format is Z up and right-handed, as the engine it belongs to is, so the scene's roots are turned for glTF's Y
+//! up (the source info's `upAxis` is a declared `+Z`, converted, and its `handedness` a declared `right`); game units are kept unscaled, and their length unknown. The exporter's
 //! `commandline` is kept as written.
 //!
 //! A file cut short, a number that isn't one, or an index past what its block holds (a vertex's weights, a weight's
@@ -59,7 +59,7 @@ use crate::images::Images;
 use crate::mesh::Material;
 use crate::num::{f32_of, u32_of};
 use crate::quat;
-use crate::source::{Axis, Fact};
+use crate::source::{Axis, Fact, Handedness};
 
 /// The frame rate taken when a file gives none that's usable: the engine's.
 const DEFAULT_RATE: f32 = 24.0;
@@ -86,7 +86,8 @@ pub(crate) fn load(input: Input<'_>, ext: &str, assets: &dyn Assets, keep: Keep)
     };
     scene.info.format = Some("MD5".into());
     scene.info.version = Some(file.version.to_string());
-    scene.info.up_axis = Fact::Assumed(Axis::PosZ);
+    scene.info.up_axis = Fact::Declared(Axis::PosZ);
+    scene.info.handedness = Fact::Declared(Handedness::Right);
     if !file.commandline.is_empty() {
         scene.source.insert("commandline".into(), json!(file.commandline));
     }
@@ -215,12 +216,12 @@ impl<'a> Lex<'a> {
         let w = self.word()?;
         f64_from(w)
             .filter(|v| v.is_finite())
-            .ok_or_else(|| self.err(&format!("{:?} isn't a number", String::from_utf8_lossy(w))))
+            .ok_or_else(|| self.err(&format!("{:?} isn't a number", crate::bytes::text(w))))
     }
 
     fn int(&mut self) -> Result<i64> {
         let w = self.word()?;
-        stream::int(w).ok_or_else(|| self.err(&format!("{:?} isn't a whole number", String::from_utf8_lossy(w))))
+        stream::int(w).ok_or_else(|| self.err(&format!("{:?} isn't a whole number", crate::bytes::text(w))))
     }
 
     /// A count or index: a whole number that isn't negative.
@@ -344,6 +345,12 @@ fn parse(data: &[u8]) -> Result<File> {
         version: lex.int()?,
         ..File::default()
     };
+    ensure!(
+        file.version == 10,
+        Unsupported,
+        "MD5Version {} isn't read, only version 10",
+        file.version
+    );
     while let Some(tok) = lex.next()? {
         let Tok::Word(key) = tok else {
             if tok == Tok::Sym(b'{') {
@@ -934,7 +941,7 @@ frame 1 {
         assert_eq!(info.version.as_deref(), Some("10"));
         assert_eq!(info.frame_rate, Fact::Declared(10.0));
         assert_eq!(info.meters_per_unit, Fact::Unknown);
-        assert_eq!(info.up_axis, Fact::Assumed(Axis::PosZ));
+        assert_eq!(info.up_axis, Fact::Declared(Axis::PosZ));
         assert!(info.converted.up_axis);
         let guessed = ANIM.replace("frameRate 10", "frameRate 0");
         let doc = read(guessed.as_bytes(), "walk.md5anim").unwrap();

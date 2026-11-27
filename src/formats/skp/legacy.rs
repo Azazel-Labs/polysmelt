@@ -250,7 +250,7 @@ impl<'a> Archive<'a> {
                 let _schema = self.r.u16()?;
                 let n = self.r.u16()?;
                 ensure!(n <= 40, Corrupt, "implausible legacy class name");
-                let name: Rc<str> = Rc::from(String::from_utf8_lossy(self.r.raw(usize::from(n))?).as_ref());
+                let name: Rc<str> = Rc::from(crate::bytes::text(self.r.raw(usize::from(n))?).as_ref());
                 let cs = self.alloc(Entry {
                     cls: true,
                     name: Rc::clone(&name),

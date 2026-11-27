@@ -265,14 +265,8 @@ pub(super) fn load(data: &[u8], head: &Header, elements: &[Element], max: usize)
     s.flip([1.0, -1.0, -1.0]);
 
     let mut source = Map::new();
-    source.insert(
-        "encoding".into(),
-        json!(if be {
-            "binary_big_endian"
-        } else {
-            "binary_little_endian"
-        }),
-    );
+    source.insert("encoding".into(), json!("binary"));
+    source.insert("byteOrder".into(), json!(if be { "big" } else { "little" }));
     source.insert("compressed".into(), json!(true));
     if !head.obj_info.is_empty() {
         source.insert("objInfo".into(), json!(head.obj_info));

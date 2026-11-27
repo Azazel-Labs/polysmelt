@@ -847,6 +847,11 @@ pub(crate) fn load(input: Input<'_>, ext: &str, assets: &dyn Assets, keep: Keep)
     }
     if amc {
         let (animation, motion) = parse_amc(&text, &sk, &rig, &scene);
+        ensure!(
+            motion.frames > 0 || motion.dropped + motion.unknown == 0,
+            UnknownFormat,
+            "not an AMC motion: none of its lines starts a frame"
+        );
         let facts = &mut scene.facts;
         facts.insert("frames".into(), json!(motion.frames));
         if motion.dropped > 0 {

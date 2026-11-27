@@ -224,7 +224,7 @@ fn pmx_materials_and_extras() {
     assert_eq!(info.format.as_deref(), Some("PMX"));
     assert_eq!(info.version.as_deref(), Some("2.0"));
     assert_eq!(info.meters_per_unit, Fact::Assumed(0.08));
-    assert_eq!(info.up_axis, Fact::Assumed(Axis::PosY));
+    assert_eq!(info.up_axis, Fact::Declared(Axis::PosY));
     assert_eq!(info.handedness, Fact::Declared(Handedness::Left));
     assert!(info.converted.units && info.converted.handedness && !info.converted.up_axis);
     let morphs = j["meshes"][0]["extras"]["morphs"].as_array().unwrap();

@@ -699,7 +699,7 @@ case(FMT, "quad_v1100", {"quad.mesh": mesh_binary(QUAD_MESH), "quad.material": Q
 case(FMT, "quad_big_endian", {"quad.mesh": mesh_binary(QUAD_MESH, be=True), "quad.material": QUAD_SCRIPT,
                               "quad.png": QUAD_PNG},
      quad_expect("the same quad written big-endian: every number and packed color word byte-swapped",
-                 ogre_source("MeshSerializer_v1.100", byteOrder="big-endian")))
+                 ogre_source("MeshSerializer_v1.100", byteOrder="big")))
 
 # ---------------------------------------------------------------------------------------------------------------
 # Old serializers.
@@ -744,7 +744,7 @@ case(FMT, "v120_big_endian", {
     "facts": {"submeshes": 1, "lod_levels": 2, "lod_usage": [100.0, 200.0], "edge_lists": 2,
               "missing_materials": ["Old"]},
     "document": {"attributes": ["TEXCOORD_0", "TEXCOORD_1", "COLOR_0"],
-                 "source": ogre_source("MeshSerializer_v1.20", byteOrder="big-endian")},
+                 "source": ogre_source("MeshSerializer_v1.20", byteOrder="big")},
     "json": {"/accessors/3/min": None},
     "materials": [{"name": "Old", "color": [1, 1, 1, 1]}],
 })
@@ -866,7 +866,7 @@ case(FMT, "element_types_big_endian", {
     "winding_matches_normals": True,
     "facts": {"submeshes": 1},
     "document": {"attributes": ["POSITION", "NORMAL", "TANGENT", "TEXCOORD_0", "TEXCOORD_1", "COLOR_0", "COLOR_1"],
-                 "source": ogre_source("MeshSerializer_v1.100", byteOrder="big-endian")},
+                 "source": ogre_source("MeshSerializer_v1.100", byteOrder="big")},
 })
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -996,7 +996,7 @@ case(FMT, "skeleton_only", {
               "missing_linked_skeletons": ["missing.skeleton"]},
     "document": {"nodes": 3, "animations": 1, "channels": 3, "node_names": ["hip", "knee", "foot"],
                  "source": {"format": "OGRE", "version": "Serializer_v1.80", "kind": "skeleton",
-                            "byteOrder": "big-endian"}},
+                            "byteOrder": "big"}},
     "rig": [
         {"node": "hip", "parent": None, "translation": [0, 1, 0], "rotation": rq(Y90), "scale": [1, 1, 1],
          "keys": {"translation": 2, "rotation": 2, "scale": [0, 1]}},

@@ -85,7 +85,7 @@ fn reads_the_header() {
     let source = &doc.json()["asset"]["extras"]["source"];
     assert_eq!(source["format"], "DirectX");
     assert_eq!(source["version"], "3.3");
-    assert_eq!(source["encoding"], "text");
+    assert_eq!(source["encoding"], "ascii");
     assert_eq!(source["floatSize"], 32);
     assert_eq!(doc.facts["triangles"], 12);
     let info = doc.source_info();
@@ -94,7 +94,7 @@ fn reads_the_header() {
     assert_eq!(info.up_axis, crate::source::Fact::Assumed(crate::source::Axis::PosY));
     assert_eq!(
         info.handedness,
-        crate::source::Fact::Assumed(crate::source::Handedness::Left)
+        crate::source::Fact::Declared(crate::source::Handedness::Left)
     );
     assert!(info.converted.handedness && !info.converted.up_axis && !info.converted.units);
     assert_eq!(info.meters_per_unit, crate::source::Fact::Unknown);
@@ -104,9 +104,11 @@ fn reads_the_header() {
 #[test]
 fn three_encodings_read_alike() {
     let text = mesh(&read_bytes(TEXT_CUBE, usize::MAX).unwrap());
-    for (bytes, encoding) in [(BINARY_CUBE, "binary"), (COMPRESSED_CUBE, "compressed binary")] {
+    for (bytes, compressed) in [(BINARY_CUBE, false), (COMPRESSED_CUBE, true)] {
         let doc = read_bytes(bytes, usize::MAX).unwrap();
-        assert_eq!(doc.json()["asset"]["extras"]["source"]["encoding"], encoding);
+        let source = &doc.json()["asset"]["extras"]["source"];
+        assert_eq!(source["encoding"], "binary");
+        assert_eq!(source.get("compressed").is_some(), compressed);
         let m = mesh(&doc);
         assert_eq!(m.triangles(), text.triangles());
         let (a, b) = (bounds(&m), bounds(&text));
@@ -124,7 +126,7 @@ fn doubles_read_like_floats() {
 
 #[test]
 fn refuses_what_isnt_a_x_file() {
-    assert!(error(b"").contains("not a DirectX"));
+    assert!(error(b"").contains("the file is empty"));
     assert!(error(b"xof 0303").contains("not a DirectX"));
     assert!(error(b"xif 0303txt 0032 Mesh {}").contains("not a DirectX"));
     assert!(error(b"xof 0303zip 0032 Mesh {}").contains("unknown .x encoding"));

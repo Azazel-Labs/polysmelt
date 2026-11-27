@@ -631,6 +631,14 @@ pub(crate) fn read_input(input: Input<'_>, ext: &str, assets: &dyn Assets, keep:
     } else {
         ext
     };
+    // A file with no bytes is empty, whatever format it was meant to be.
+    if input.len() == Some(0) {
+        let e = crate::Error::empty_file();
+        return Err(match EXTENSIONS.iter().find(|&&e| e == ext) {
+            Some(known) => e.in_format(feature_for(known)),
+            None => e,
+        });
+    }
     if ext == "xml" || !EXTENSIONS.contains(&ext) {
         let head = input.head(detect::HEAD)?;
         let found = if ext == "xml" {
@@ -645,39 +653,124 @@ pub(crate) fn read_input(input: Input<'_>, ext: &str, assets: &dyn Assets, keep:
         }
     }
     let limit = keep.triangles();
-    let mut doc = convert(Input { limit, ..input }, ext, assets, keep).map_err(|e| {
-        match EXTENSIONS.iter().find(|&&e| e == ext) {
-            Some(known) => e.in_format(feature_for(known)),
-            None => e,
-        }
-    })?;
+    let named = |e: crate::Error| match EXTENSIONS.iter().find(|&&e| e == ext) {
+        Some(known) => e.in_format(feature_for(known)),
+        None => e,
+    };
+    let mut doc = convert(Input { limit, ..input }, ext, assets, keep).map_err(|e| named(same_kind(e, input, ext)))?;
     doc.max_triangles = limit;
+    // What the file says of itself is spelled the same way whatever read it.
+    let animated = match &doc.tables {
+        Some(t) => !t.animations.is_empty(),
+        None => doc
+            .base
+            .get("animations")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|a| !a.is_empty()),
+    };
+    if doc
+        .base
+        .get("asset")
+        .and_then(|a| a.pointer("/extras/source"))
+        .is_some()
+        && let Some(serde_json::Value::Object(source)) = doc
+            .base_mut()
+            .get_mut("asset")
+            .and_then(|a| a.pointer_mut("/extras/source"))
+    {
+        crate::source::normalize(source, animated);
+    }
+    // Whether there is anything to convert is the file's, not what `keep` leaves of it.
+    let c = doc.counts();
+    if c.triangles + c.points + c.lines == 0 && !has_scene(&doc) && !has_geometry(&doc) {
+        let e = crate::Error::nothing_to_convert("the file is well formed but has nothing to convert");
+        return Err(named(same_kind(e, input, ext)));
+    }
     doc.prune(keep);
-    if matches!(
-        ext,
-        "gltf"
-            | "glb"
-            | "fbx"
-            | "3ds"
-            | "usd"
-            | "usda"
-            | "usdc"
-            | "usdz"
-            | "skp"
-            | "dae"
-            | "zae"
-            | "kmz"
-            | "vrm"
-            | "vrma"
-    ) {
-        let c = doc.counts();
-        for (key, n) in [("triangles", c.triangles), ("points", c.points), ("lines", c.lines)] {
-            if n > 0 || key == "triangles" {
-                doc.facts.insert(key.into(), json!(n));
-            }
+    // What the document draws is counted the same way whatever read it.
+    let c = doc.counts();
+    for (key, n) in [("triangles", c.triangles), ("points", c.points), ("lines", c.lines)] {
+        if n > 0 || key == "triangles" {
+            doc.facts.insert(key.into(), json!(n));
+        } else {
+            doc.facts.remove(key);
         }
     }
     Ok(doc)
+}
+
+/// Whether a document that draws nothing still has something to convert: a node that is named, has children, or
+/// carries a camera, a light, a skin or anything else but a mesh and a place to put it. Skeletons, motion, cameras
+/// and lights are all nodes like these. A document without one, drawing nothing, is
+/// [`Empty`](crate::ErrorKind::Empty) whatever read it.
+fn has_scene(doc: &Document) -> bool {
+    let nodes = doc.base.get("nodes").and_then(serde_json::Value::as_array);
+    nodes.into_iter().flatten().any(|n| {
+        n.as_object().is_some_and(|n| {
+            n.keys()
+                .any(|k| !matches!(k.as_str(), "mesh" | "translation" | "rotation" | "scale" | "matrix"))
+        })
+    })
+}
+
+/// Whether a document holds anything that could be drawn, placed in its scene or not: a primitive with at least
+/// one position. A glTF used as a library of meshes, with no node instancing them, has something to convert.
+/// Only asked of a document that draws nothing and has no scene, so the whole JSON is made at most then.
+fn has_geometry(doc: &Document) -> bool {
+    use serde_json::Value;
+    let json = doc.json();
+    let list = |k: &str| {
+        json.get(k)
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    };
+    let accessors = list("accessors");
+    list("meshes").iter().any(|m| {
+        m.get("primitives")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .any(|p| {
+                p.pointer("/attributes/POSITION")
+                    .and_then(Value::as_u64)
+                    .and_then(|a| accessors.get(usize::try_from(a).ok()?))
+                    .and_then(|a| a.get("count")?.as_u64())
+                    .is_some_and(|n| n > 0)
+            })
+    })
+}
+
+/// A reader's error, of the kind every reader gives the same failure. A file a reader couldn't read that has
+/// none of its format's signature isn't that format: [`UnknownFormat`](crate::ErrorKind::UnknownFormat),
+/// whether the reader called it corrupt, empty or cut short. A zip archive with no end record is cut short:
+/// [`Truncated`](crate::ErrorKind::Truncated), whichever of the zipped formats it holds.
+#[cold]
+fn same_kind(e: crate::Error, input: Input<'_>, ext: &str) -> crate::Error {
+    use crate::ErrorKind::{Corrupt, Empty, Truncated, UnknownFormat};
+    if !matches!(e.kind(), Corrupt | Empty | Truncated | UnknownFormat) {
+        return e;
+    }
+    let Ok(head) = input.head(detect::HEAD) else {
+        return e;
+    };
+    let zipped = matches!(ext, "3mf" | "usdz" | "usd" | "zae" | "kmz" | "dae" | "sog" | "amf");
+    if zipped && head.starts_with(b"PK\x03\x04") {
+        return match input.read() {
+            Ok(all) if detect::zip_cut_short(&all) && e.kind() != Truncated => {
+                e.of_kind(Truncated).within("the zip archive is cut short")
+            }
+            _ => e,
+        };
+    }
+    // A file of nothing but whitespace that a reader calls empty is empty, not some other format.
+    if e.kind() == Empty && head.iter().all(u8::is_ascii_whitespace) {
+        return e;
+    }
+    if e.kind() != UnknownFormat && detect::lacks_signature(ext, &head) {
+        return e.of_kind(UnknownFormat).within(format_args!("not a .{ext} file"));
+    }
+    e
 }
 
 fn convert(input: Input<'_>, ext: &str, assets: &dyn Assets, keep: Keep) -> Result<Document> {

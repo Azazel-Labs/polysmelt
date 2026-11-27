@@ -157,7 +157,7 @@ pub(super) fn read(ctx: &Ctx<'_>, data: &[u8], stats: &mut Stats) -> Result<Docu
         }
         0 => {
             let end = tile.body.iter().position(|&b| b == 0).unwrap_or(tile.body.len());
-            let uri = String::from_utf8_lossy(&tile.body[..end]);
+            let uri = crate::bytes::text(&tile.body[..end]);
             let uri = uri.trim();
             ensure!(!uri.is_empty(), Corrupt, "i3dm tile names no glTF");
             let path = reference(ctx, uri)?;

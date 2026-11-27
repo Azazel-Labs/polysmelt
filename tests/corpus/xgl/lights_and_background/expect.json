@@ -39,7 +39,7 @@
   },
   "rig": [
     {
-      "node": "light 0",
+      "node": "light0",
       "rotation": [
         -0.707107,
         0,

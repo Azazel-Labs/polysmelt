@@ -79,8 +79,8 @@ case(FMT, "trailing_bytes", {"scene.splat": data + b"\x01\x02\x03\x04\x05"},
       "error": "not a .splat file", "error_kind": "UnknownFormat"})
 
 case(FMT, "empty", {"scene.splat": b""},
-     {"spec": SPEC + ": an empty file holds no splat, so nothing says it is one", "source": SRC,
-      "error": "not a .splat file", "error_kind": "UnknownFormat"})
+     {"spec": SPEC + ": an empty file holds no splats", "source": SRC, "error": "the file is empty",
+      "error_kind": "Empty"})
 
 case(FMT, "not_splat", {"scene.splat": b"These are words, not gaussian splats.\n"},
      {"spec": SPEC + ": text of a length that isn't a whole number of splats", "source": SRC,

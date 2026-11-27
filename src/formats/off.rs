@@ -90,7 +90,7 @@ pub(crate) fn load(input: Input<'_>) -> Result<Document> {
     let triangles = m.tris.len();
     let mut source = Map::new();
     source.insert("header".into(), json!(keyword));
-    source.insert("encoding".into(), json!(if layout.binary { "binary" } else { "ASCII" }));
+    source.insert("encoding".into(), json!(if layout.binary { "binary" } else { "ascii" }));
     if m.short {
         source.insert("truncated".into(), json!(true));
     }
@@ -147,7 +147,7 @@ fn header<'a>(c: &mut Cursor<'a>) -> Result<(Layout, String, Option<&'a [u8]>)> 
         let rest = &t[3..];
         ensure!(rest.iter().all(u8::is_ascii_digit), UnknownFormat, "not an OFF file");
         (
-            String::from_utf8_lossy(&first[..first.len() - rest.len()]).into_owned(),
+            crate::bytes::text(&first[..first.len() - rest.len()]).into_owned(),
             (!rest.is_empty()).then_some(rest),
         )
     } else if stream::int::<i64>(first).is_some() {
@@ -877,6 +877,6 @@ mod tests {
         assert_eq!(info.meters_per_unit, crate::source::Fact::Unknown);
         assert_eq!(info.up_axis, crate::source::Fact::Unknown);
         assert_eq!(info.converted, crate::source::Converted::default());
-        assert_eq!(doc.json()["asset"]["extras"]["source"]["encoding"], "ASCII");
+        assert_eq!(doc.json()["asset"]["extras"]["source"]["encoding"], "ascii");
     }
 }

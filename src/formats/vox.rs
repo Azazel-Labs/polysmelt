@@ -1,4 +1,6 @@
-//! `MagicaVoxel` `.vox` (the format as documented in ephtracy/voxel-model, versions 150 and 200).
+//! `MagicaVoxel` `.vox` (the format as documented in ephtracy/voxel-model, which `MagicaVoxel` has written as
+//! versions 150 and 200). The header's version isn't checked: the chunks are the same in both, and a file that
+//! gives another number is read by its chunks all the same, its version reported as written.
 //!
 //! Each model becomes a mesh of the faces between a voxel and empty space, a primitive per
 //! palette color, in its own space: centered on its pivot, `floor(size / 2)`, when a scene graph
@@ -15,8 +17,8 @@
 //! transparency as `KHR_materials_transmission` alone: the material stays opaque to alpha, as the
 //! extension means it to be. The asset's `extras.source` keeps the palette, every material,
 //! the layers, render settings, cameras, notes and index map. Coordinates turn from Z-up to
-//! glTF's Y-up. The source info has Z up and right-handed, and the step animation's frame rate,
-//! all assumed; a voxel's size is unknown.
+//! glTF's Y-up. The source info has Z up and right-handed (declared: the editor's space is every
+//! file's), and an assumed frame rate when the file has a step animation; a voxel's size is unknown.
 
 use std::collections::HashMap;
 
@@ -123,14 +125,14 @@ impl Body<'_> {
         Ok(self.u32()?.cast_signed())
     }
 
-    fn string(&mut self) -> Result<&str> {
+    fn string(&mut self) -> Result<String> {
         let n = self.u32()? as usize;
         let s = self
             .b
             .get(self.at..self.at.saturating_add(n))
             .context(ErrorKind::Truncated, "VOX chunk is cut short")?;
         self.at += n;
-        Ok(std::str::from_utf8(s).unwrap_or(""))
+        Ok(crate::bytes::text(s).into_owned())
     }
 
     fn dict(&mut self) -> Result<HashMap<String, String>> {
@@ -138,8 +140,8 @@ impl Body<'_> {
         ensure!(n <= 4096, LimitExceeded, "VOX dictionary too large");
         let mut d = HashMap::new();
         for _ in 0..n {
-            let k = self.string()?.to_owned();
-            let v = self.string()?.to_owned();
+            let k = self.string()?;
+            let v = self.string()?;
             d.insert(k, v);
         }
         Ok(d)
@@ -318,7 +320,7 @@ pub(crate) fn vox(data: &[u8], keep: Keep) -> Result<Document> {
             })
             .collect();
         mesh_of.push(b.mesh(prims, colors.len()).map(|mut mesh| {
-            mesh["name"] = json!(format!("model_{m}"));
+            mesh["name"] = json!(format!("model{m}"));
             meshes.push(mesh);
             meshes.len() - 1
         }));
@@ -374,7 +376,7 @@ pub(crate) fn vox(data: &[u8], keep: Keep) -> Result<Document> {
             let rgba = palette[usize::from(c)];
             let [r, g, b] = [rgba[0], rgba[1], rgba[2]].map(|v| srgb_to_linear(f32::from(v) / 255.0));
             let x = matl.get(&u32::from(c));
-            let mut mat = Full::from(Material::plain(&format!("color_{c}"), [r, g, b, 1.0]));
+            let mut mat = Full::from(Material::plain(&format!("color{c}"), [r, g, b, 1.0]));
             if let Some(x) = x {
                 mat.metallic = x.metal;
                 if let Some(rough) = x.rough {
@@ -442,12 +444,12 @@ fn source(v: &Vox) -> Value {
     if !v.skipped.is_empty() {
         s.insert("skipped".into(), json!(v.skipped));
     }
-    // Z up and right-handed is the editor's convention, not the file's word; a voxel has no size.
+    // Z up and right-handed is the editor's space, the same in every file; a voxel has no size.
     let mut info = SourceInfo {
         format: Some("VOX".into()),
         version: Some(v.version.to_string()),
-        up_axis: Fact::Assumed(Axis::PosZ),
-        handedness: Fact::Assumed(Handedness::Right),
+        up_axis: Fact::Declared(Axis::PosZ),
+        handedness: Fact::Declared(Handedness::Right),
         frame_rate: if v.nodes.contains_key(&0) {
             Fact::Assumed(f64::from(FRAMES_PER_SECOND))
         } else {
@@ -616,7 +618,7 @@ fn read(data: &[u8], max_voxels: usize) -> Result<Vox> {
                     "VOX note is cut short: it lists more names than it holds"
                 );
                 for _ in 0..n {
-                    let note = b.string()?.to_owned();
+                    let note = b.string()?;
                     v.notes.push(note);
                 }
             }
@@ -628,7 +630,7 @@ fn read(data: &[u8], max_voxels: usize) -> Result<Vox> {
             }
             b"PACK" => {}
             _ => {
-                let name = String::from_utf8_lossy(id).into_owned();
+                let name = crate::bytes::text(id).into_owned();
                 if !v.skipped.contains(&name) {
                     v.skipped.push(name);
                 }
@@ -744,7 +746,7 @@ impl Walk<'_> {
                         && self.out.len() < MAX_NODES
                     {
                         self.out.push(json!({
-                            "name": format!("frame_{}", frame(d)),
+                            "name": format!("frame{}", frame(d)),
                             "mesh": mesh,
                             "extensions": { "KHR_node_visibility": { "visible": false } },
                             "extras": { "frame": frame(d), "model": m },
@@ -1662,8 +1664,8 @@ mod tests {
         let doc = vox(&file([1, 1, 1], &[[0, 0, 0, 1]], &extra), Keep::ALL).unwrap();
         let info = doc.source_info();
         assert_eq!(info.format.as_deref(), Some("VOX"));
-        assert_eq!(info.up_axis, Fact::Assumed(Axis::PosZ));
-        assert_eq!(info.handedness, Fact::Assumed(Handedness::Right));
+        assert_eq!(info.up_axis, Fact::Declared(Axis::PosZ));
+        assert_eq!(info.handedness, Fact::Declared(Handedness::Right));
         assert_eq!(info.meters_per_unit, Fact::Unknown);
         assert!(info.converted.up_axis && !info.converted.units);
         let materials = doc.json()["materials"].as_array().unwrap();
@@ -1691,7 +1693,7 @@ mod tests {
         let nodes = doc.json()["nodes"].as_array().unwrap();
         let shape = nodes.iter().find(|n| n.get("children").is_some()).unwrap();
         let alternate = &nodes[shape["children"][0].as_u64().unwrap() as usize];
-        assert_eq!(alternate["name"], "frame_3");
+        assert_eq!(alternate["name"], "frame3");
         assert_eq!(alternate["extensions"]["KHR_node_visibility"]["visible"], false);
         assert_ne!(alternate["mesh"], shape["mesh"]);
         assert_eq!(doc.facts["voxels"], 1);

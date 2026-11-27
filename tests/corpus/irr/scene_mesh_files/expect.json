@@ -16,10 +16,12 @@
     ]
   },
   "facts": {
-    "missing_files": [
-      "gone.irrmesh"
-    ],
     "nodes": 3
+  },
+  "json": {
+    "/asset/extras/source/missingFiles": [
+      "gone.irrmesh"
+    ]
   },
   "materials": [
     {

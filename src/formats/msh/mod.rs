@@ -384,9 +384,9 @@ pub(crate) fn load(input: Input<'_>) -> Result<Document> {
         r.end(name);
     }
     ensure!(!first, UnknownFormat, "not a Gmsh mesh: it has no sections");
-    source.insert("encoding".into(), json!(if r.binary { "binary" } else { "ASCII" }));
+    source.insert("encoding".into(), json!(if r.binary { "binary" } else { "ascii" }));
     if r.big {
-        source.insert("byteOrder".into(), json!("big-endian"));
+        source.insert("byteOrder".into(), json!("big"));
     }
     source.insert("nodes".into(), json!(r.node_tags.len()));
     source.insert("elements".into(), json!(r.el.len() + r.skipped));
@@ -551,7 +551,7 @@ impl<'a> Reader<'a> {
             bail!(
                 Unsupported,
                 "Gmsh files of version {} aren't read",
-                String::from_utf8_lossy(written)
+                crate::bytes::text(written)
             );
         };
         let kind = words.next().and_then(stream::int::<i64>);
@@ -587,7 +587,7 @@ impl<'a> Reader<'a> {
                 ),
             };
         }
-        Ok(String::from_utf8_lossy(written).into_owned())
+        Ok(crate::bytes::text(written).into_owned())
     }
 
     /// `$PhysicalNames`, text in every version: a dimension (from version 2.1), a tag and a quoted name a line.
@@ -610,7 +610,7 @@ impl<'a> Reader<'a> {
                 _ => continue,
             };
             if !name.is_empty() {
-                self.names.insert(key, String::from_utf8_lossy(name).into_owned());
+                self.names.insert(key, crate::bytes::text(name).into_owned());
             }
         }
         Ok(())
@@ -1069,7 +1069,7 @@ impl<'a> Reader<'a> {
                 "Gmsh file is cut short in its data"
             );
             if k == 0 {
-                let text = String::from_utf8_lossy(line);
+                let text = crate::bytes::text(line);
                 text.trim().trim_matches('"').clone_into(&mut name);
             }
         }

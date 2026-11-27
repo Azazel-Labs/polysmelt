@@ -21,7 +21,8 @@
   "json": {
     "/asset/extras/source/format": "HTR",
     "/asset/extras/source/upAxis": "+Z",
-    "/asset/extras/source/unit": "mm",
+    "/asset/extras/source/unit": "millimeter",
+    "/asset/extras/source/unitAsWritten": "mm",
     "/asset/extras/source/metersPerUnit": 0.001,
     "/asset/extras/source/frameRate": 60.0,
     "/asset/extras/source/assumed": null,

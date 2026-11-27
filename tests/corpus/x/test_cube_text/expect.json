@@ -27,7 +27,8 @@
     ]
   },
   "json": {
-    "/asset/extras/source/encoding": "text",
+    "/asset/extras/source/encoding": "ascii",
+    "/asset/extras/source/compressed": null,
     "/asset/extras/source/frameRate": 24
   }
 }

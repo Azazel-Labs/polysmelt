@@ -94,6 +94,22 @@ def psd(rgb, size=2):
     return head + sections + struct.pack(">H", 0) + planes
 
 
+# The usual name of a unit by its length in meters: what `asset.extras.source.unit` is, whatever the file calls it.
+UNIT_NAMES = {1e-9: "nanometer", 1e-6: "micrometer", 0.001: "millimeter", 0.01: "centimeter", 0.1: "decimeter",
+              1.0: "meter", 1000.0: "kilometer", 0.0254: "inch", 0.3048: "foot", 0.9144: "yard", 1609.344: "mile"}
+
+
+def unit_source(meters, written=None, prefix="/asset/extras/source/"):
+    """What `asset.extras.source` says of a unit `meters` long (None when its length is unknown) that the file calls
+    `written`: `unit`, its usual name (absent when the length is unknown or no common unit's), and `unitAsWritten`,
+    the file's own word when that isn't the usual name. Keyed by JSON pointer under `prefix`, or bare when `prefix`
+    is empty; None means the key must be absent."""
+    usual = UNIT_NAMES.get(meters)
+    out = {prefix + "unit": usual}
+    out[prefix + "unitAsWritten"] = written if written is not None and written != usual else None
+    return out
+
+
 def srgb_to_linear(c):
     return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
 

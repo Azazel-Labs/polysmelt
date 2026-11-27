@@ -536,6 +536,6 @@ case(FMT, "bad_frame_count", {"count.bvh": h + motion(TWO_ROWS, 0.04).replace("F
 case(FMT, "not_bvh", {"text.bvh": "this is not a BVH file\n"},
      {"spec": "not a BVH file", "source": SRC, "error": "not a BVH file", "error_kind": "UnknownFormat"})
 case(FMT, "empty_file", {"empty.bvh": b""},
-     {"spec": "an empty file", "source": SRC, "error": "not a BVH file", "error_kind": "Empty"})
+     {"spec": "an empty file", "source": SRC, "error": "the file is empty", "error_kind": "Empty"})
 
 print("bvh corpus written")

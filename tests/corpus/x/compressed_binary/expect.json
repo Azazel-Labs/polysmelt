@@ -68,6 +68,7 @@
     ]
   ],
   "json": {
-    "/asset/extras/source/encoding": "compressed binary"
+    "/asset/extras/source/encoding": "binary",
+    "/asset/extras/source/compressed": true
   }
 }

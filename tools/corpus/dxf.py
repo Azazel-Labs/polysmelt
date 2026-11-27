@@ -97,7 +97,7 @@ case(FMT, "cube_millimeters", {"cube.dxf": text(drawing(4, cube_faces("8 Walls",
       "facts": {"triangles": 12}, "material_count": 1,
       "materials": [{"name": "Walls", "color": [1, 1, 1, 1], "double_sided": True}],
       "document": {"node_names": ["RootNode"],
-                   "source": {"format": "DXF", "encoding": "ASCII", "version": "AC1027", "unit": "millimeter",
+                   "source": {"format": "DXF", "encoding": "ascii", "version": "AC1027", "unit": "millimeter",
                               "metersPerUnit": 0.001, "upAxis": "+Z"}}})
 
 case(FMT, "unitless", {"cube.dxf": text(drawing(0, cube_faces(size=5)))},

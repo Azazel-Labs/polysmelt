@@ -32,7 +32,7 @@
 //! `extras.source.skipped` counts them.
 //!
 //! The source info has the drawing's `$ACADVER` as its version, its `$INSUNITS` as declared
-//! units, Z up (assumed) and right-handed, `$LASTSAVEDBY` as its author, and its creation and
+//! units, Z up and right-handed (the world coordinate system's, declared), `$LASTSAVEDBY` as its author, and its creation and
 //! update dates (`$TDUCREATE` and `$TDUUPDATE` in UTC, else the local `$TDCREATE` and
 //! `$TDUPDATE`) in ISO 8601. `$MEASUREMENT` is kept as `measurement`, imperial or metric.
 
@@ -529,7 +529,7 @@ impl Model {
             return l;
         }
         self.layers.push(Layer {
-            name: String::from_utf8_lossy(name).into_owned(),
+            name: crate::bytes::text(name).into_owned(),
             rgb: WHITE,
             hidden: false,
         });
@@ -558,11 +558,9 @@ impl Model {
                 }
                 9 => var = v.text(),
                 70 if var == b"$INSUNITS" => self.units = v.int(),
-                1 if var == b"$ACADVER" => self.version = String::from_utf8_lossy(v.text()).into_owned(),
+                1 if var == b"$ACADVER" => self.version = crate::bytes::text(v.text()).into_owned(),
                 1 if var == b"$LASTSAVEDBY" => {
-                    String::from_utf8_lossy(v.text())
-                        .trim()
-                        .clone_into(&mut self.last_saved_by);
+                    crate::bytes::text(v.text()).trim().clone_into(&mut self.last_saved_by);
                 }
                 40 if var == b"$TDCREATE" => self.created = Some(v.real()),
                 40 if var == b"$TDUPDATE" => self.modified = Some(v.real()),
@@ -587,7 +585,7 @@ impl Model {
             version: Some(self.version.clone()).filter(|v| !v.is_empty()),
             meters_per_unit: units.map_or(Fact::Unknown, |(m, _)| Fact::Declared(m)),
             unit: units.map(|(_, name)| name.to_owned()),
-            up_axis: Fact::Assumed(Axis::PosZ),
+            up_axis: Fact::Declared(Axis::PosZ),
             handedness: Fact::Declared(Handedness::Right),
             author: Some(self.last_saved_by.clone()).filter(|a| !a.is_empty()),
             created: date(self.created_utc, self.created),
@@ -639,7 +637,7 @@ impl Model {
                     }
                     let key = f.name.to_ascii_uppercase();
                     self.spaces.push(Space {
-                        name: String::from_utf8_lossy(f.name).into_owned(),
+                        name: crate::bytes::text(f.name).into_owned(),
                         base: f.p[0],
                         ..Space::default()
                     });
@@ -1558,7 +1556,7 @@ impl Build {
             self.nodes.push(root);
             roots.push(self.nodes.len() - 1);
         }
-        let mut source = json!({ "encoding": if self.binary { "binary" } else { "ASCII" } });
+        let mut source = json!({ "encoding": if self.binary { "binary" } else { "ascii" } });
         if let Some(m) = self.m.measurement.filter(|m| matches!(m, 0 | 1)) {
             source["measurement"] = json!(if m == 0 { "imperial" } else { "metric" });
         }
@@ -1570,7 +1568,7 @@ impl Build {
                 .m
                 .skipped
                 .iter()
-                .map(|(k, &n)| (String::from_utf8_lossy(k).into_owned(), json!(n)))
+                .map(|(k, &n)| (crate::bytes::text(k).into_owned(), json!(n)))
                 .collect();
             source["skipped"] = Value::Object(skipped);
         }

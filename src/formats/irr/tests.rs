@@ -164,7 +164,7 @@ fn reads_a_scene() {
     assert_eq!(doc.counts().triangles, 12 + 80 + 12 + 2 + 3 + 2, "{facts:?}");
     assert_eq!(facts["unsupported_nodes"]["watersurface"], 1);
     assert_eq!(facts["hidden_nodes"], 1);
-    assert_eq!(facts["missing_files"][0], "nowhere.3ds");
+    assert_eq!(j["asset"]["extras"]["source"]["missingFiles"][0], "nowhere.3ds");
     assert_eq!(j["asset"]["extras"]["source"]["format"], "Irrlicht scene");
     assert_eq!(j["cameras"].as_array().unwrap().len(), 1);
     assert_eq!(j["cameras"][0]["perspective"]["yfov"], 1.0);

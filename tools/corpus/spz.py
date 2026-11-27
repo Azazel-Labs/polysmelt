@@ -192,5 +192,4 @@ case(FMT, "not_gzip", {"raw.spz": spz(3, ss, raw=True)},
       "error_kind": "UnknownFormat"})
 
 case(FMT, "empty", {"none.spz": spz(3, [])},
-     {"spec": SPEC + ": a file of no splats", "source": SRC, "no_mesh": True,
-      "facts": {"points": 0, "splats": 0}})
+     {"spec": SPEC + ": a file of no splats", "source": SRC, "error": "nothing to convert", "error_kind": "Empty"})

@@ -20,7 +20,7 @@
   "material_count": 2,
   "materials": [
     {
-      "name": "material 1",
+      "name": "material1",
       "color": [
         1.0,
         0.0,
@@ -36,7 +36,7 @@
       "alpha_mode": "OPAQUE"
     },
     {
-      "name": "material 2",
+      "name": "material2",
       "color": [
         0.033105,
         0.132868,

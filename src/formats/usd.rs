@@ -112,7 +112,47 @@ const MAX_NESTING: usize = 8;
 
 /// The stage as a document; one with nothing to show (a material library, a layer of overrides) has no nodes.
 pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document> {
-    load_capped(input, assets, keep, MAX_NODES)
+    load_capped(input, assets, keep, MAX_NODES).map_err(|e| {
+        if e.kind() == ErrorKind::Corrupt && input.read().is_ok_and(|b| cut_short(&b)) {
+            e.of_kind(ErrorKind::Truncated).within("USD file is cut short")
+        } else {
+            e
+        }
+    })
+}
+
+/// Whether a layer's bytes stop before the layer does, for a layer that didn't open. A crate file's header
+/// says where its table of contents is: past the end of a cut file. A text layer cut short ends inside
+/// something: more brackets opened than closed, or a string left open.
+fn cut_short(bytes: &[u8]) -> bool {
+    if bytes.starts_with(b"PXR-USDC") {
+        return crate::bytes::u64_at(bytes, 16).is_none_or(|toc| toc >= bytes.len() as u64);
+    }
+    if !bytes.trim_ascii_start().starts_with(b"#usda") {
+        return false;
+    }
+    let (mut depth, mut quote, mut escaped, mut comment) = (0i64, 0u8, false, false);
+    for &c in bytes {
+        if comment {
+            comment = c != b'\n';
+        } else if quote != 0 {
+            match c {
+                _ if escaped => escaped = false,
+                b'\\' => escaped = true,
+                _ if c == quote => quote = 0,
+                _ => {}
+            }
+        } else {
+            match c {
+                b'#' => comment = true,
+                b'"' | b'\'' => quote = c,
+                b'(' | b'[' | b'{' => depth += 1,
+                b')' | b']' | b'}' => depth -= 1,
+                _ => {}
+            }
+        }
+    }
+    depth > 0 || quote != 0
 }
 
 /// [`load`], making at most `max_nodes` nodes: past them the rest of the stage is left out, and
@@ -185,7 +225,10 @@ fn load_capped(input: Input<'_>, assets: &dyn Assets, keep: Keep, max_nodes: usi
     r.skin_meshes()?;
     r.pose_weights();
     if r.nodes.is_empty() {
-        return Ok(Document::empty(Map::new()));
+        bail!(
+            Empty,
+            "this USD stage has nothing to draw: no meshes, curves, points, cameras or lights"
+        );
     }
     let animations = if keep.animations {
         r.animations(tcps)
@@ -211,8 +254,9 @@ fn load_capped(input: Input<'_>, assets: &dyn Assets, keep: Keep, max_nodes: usi
 
     let mut source = Map::new();
     if r.truncated {
+        source.insert("truncated".into(), json!(true));
         source.insert(
-            "truncated".into(),
+            "truncatedBy".into(),
             json!(format!("over {max_nodes} nodes: the rest are left out")),
         );
     }
@@ -3695,7 +3739,8 @@ def Material \"Planks\"
 ",
         )
         .unwrap();
-        assert!(read(&path, dir.path()).is_none());
+        let err = load(Input::file(&path), &crate::assets::Folder::new(dir.path()), Keep::ALL).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::Empty, "{err}");
     }
 
     #[test]
@@ -4060,7 +4105,9 @@ def Xform "Root"
             d.json()["nodes"].as_array().unwrap().len() <= 5,
             "4 and a root for the units"
         );
-        assert!(d.json()["asset"]["extras"]["source"]["truncated"].is_string());
+        let source = &d.json()["asset"]["extras"]["source"];
+        assert_eq!(source["truncated"], true);
+        assert!(source["truncatedBy"].is_string());
         let mesh = d.flatten(Pose::Rest).unwrap().unwrap();
         assert_eq!(mesh.triangles(), 4 * 12, "what was made is kept");
     }

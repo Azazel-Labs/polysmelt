@@ -93,9 +93,11 @@ pub struct Document {
     pub(crate) full: OnceLock<Map<String, Value>>,
     /// Buffer `i`'s bytes, for each of the JSON's buffers.
     pub(crate) buffers: Vec<Blob>,
-    /// Facts worth recording about the source: `triangles`, and per format `points`, `lines`,
-    /// `vertices`, `voxels`, `voxel_size`, `models`, `objects`, `colors`, `application`, and for
-    /// motion capture `joints`, `channels`, `frames`, `frame_time` and `dropped_frames`.
+    /// Facts worth recording about the source. Every load sets `triangles`, and `points` and
+    /// `lines` when there are any, to what [`Document::counts`] counts, whatever the format. Per
+    /// format there are also `vertices`, `voxels`, `voxel_size`, `models`, `objects`, `colors`,
+    /// `application`, and for motion capture `joints`, `channels`, `frames`, `frame_time` and
+    /// `dropped_frames`.
     pub facts: Map<String, Value>,
     /// The images named but not read, by image index (see [`Document::images`]).
     pub(crate) refs: Refs,

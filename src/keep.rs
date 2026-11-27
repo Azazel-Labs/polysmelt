@@ -553,6 +553,13 @@ impl Document {
                 json.remove("animations");
             }
         }
+        // An assumed frame rate is a guess about the animations: it goes with the last of them, as a read
+        // that keeps no animations leaves it out.
+        if !keep.animations
+            && let Some(Value::Object(source)) = json.get_mut("asset").and_then(|a| a.pointer_mut("/extras/source"))
+        {
+            crate::source::drop_assumed_frame_rate(source);
+        }
         let mut after = BTreeSet::new();
         extensions_present(&root, &mut after);
         let Value::Object(json) = &mut root else { unreachable!() };

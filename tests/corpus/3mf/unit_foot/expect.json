@@ -20,5 +20,9 @@
       "unit": "foot",
       "metersPerUnit": 0.3048
     }
+  },
+  "json": {
+    "/asset/extras/source/unit": "foot",
+    "/asset/extras/source/unitAsWritten": null
   }
 }

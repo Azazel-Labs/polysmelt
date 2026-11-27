@@ -20,5 +20,9 @@
       "unit": "meter",
       "metersPerUnit": 1.0
     }
+  },
+  "json": {
+    "/asset/extras/source/unit": "meter",
+    "/asset/extras/source/unitAsWritten": null
   }
 }

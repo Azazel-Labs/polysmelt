@@ -227,7 +227,7 @@ case(FMT, "only_points_and_lines", {"model.obj": "v 0 0 0\nv 1 0 0\nv 1 1 0\nl 1
 })
 
 case(FMT, "empty", {"model.obj": ""}, {
-    "spec": OBJ_SPEC + ": an empty file", "source": SRC, "error": "no faces", "error_kind": "Empty",
+    "spec": OBJ_SPEC + ": an empty file", "source": SRC, "error": "the file is empty", "error_kind": "Empty",
 })
 
 # --- Vertex colors (MeshLab / ZBrush extension: v x y z r g b) ---------------------------------

@@ -459,7 +459,7 @@ case(FMT, "external_references", {"parent.flt": parent.bytes(), "child.flt": chi
       "file": "parent.flt", "source": SRC, "triangles": 4, "bounds": square_bounds([(0, 0, 10)], INCH),
       "area": 2 * (10 * INCH) ** 2,
       "materials": [{"name": "childred", "color": [1, 0, 0, 1]}, {"name": "parentblue", "color": [0, 0, 1, 1]}],
-      "document": {"meshes": 2, "source": {"missingFiles": 1, "files": 2}}})
+      "document": {"meshes": 2, "source": {"missingFiles": ["missing.flt"], "files": 2}}})
 
 # Wireframe faces, closed and open, and light points.
 w = Flt()

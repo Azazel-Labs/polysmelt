@@ -61,6 +61,7 @@ pub(crate) fn load(input: super::Input<'_>, ext: &str, assets: &dyn Assets, keep
 /// A mesh file on its own: one node, one mesh, a primitive per buffer.
 fn irrmesh(text: &str, input: &super::Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document> {
     let mesh = mesh::parse(text, input.limit)?;
+    ensure!(!mesh.buffers.is_empty(), Empty, "this Irrlicht mesh has no buffers");
     let dir = input.dir();
     let mut ctx = Ctx::new(assets, keep, dir);
     let stem = input
@@ -116,7 +117,7 @@ impl<'a> Ctx<'a> {
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| format!("material {index}"));
+            .unwrap_or_else(|| format!("material{index}"));
         let (mut out, mut patch) = material::convert(m, &name, &mut self.tex, dir, sets);
         match uniform {
             // Irrlicht lights and draws with the vertices' color in place of the diffuse; all white reads as

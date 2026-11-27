@@ -58,7 +58,14 @@ pub(super) fn parse(d: &[u8]) -> Graph {
                     p.close(f);
                 }
             }
-            Ok(Event::Eof) | Err(_) => break,
+            Ok(Event::Eof) => {
+                p.g.cut = !p.stack.is_empty();
+                break;
+            }
+            Err(_) => {
+                p.g.cut = true;
+                break;
+            }
             Ok(_) => {}
         }
     }
@@ -93,7 +100,7 @@ impl Parser {
         }
         let local = e.local_name();
         let kind = local.as_ref();
-        let text = |name: &[u8]| attr(e, name).map(|v| String::from_utf8_lossy(v.trim_ascii()).into_owned());
+        let text = |name: &[u8]| attr(e, name).map(|v| crate::bytes::text(v.trim_ascii()).into_owned());
         match (parent, kind) {
             (Some(Frame::Proto(i)), b"ProtoInterface") => return Frame::Interface(i),
             (Some(Frame::Proto(i)), b"ProtoBody") => return Frame::Body(i),
@@ -108,7 +115,7 @@ impl Parser {
                 let typ = text(b"type").unwrap_or_default();
                 let v = attr(e, b"value").map(|raw| match typ.as_str() {
                     "MFString" => Val::Strs(strings(raw.trim_ascii())),
-                    "SFString" => Val::Strs(vec![String::from_utf8_lossy(&raw).into_owned()]),
+                    "SFString" => Val::Strs(vec![crate::bytes::text(&raw).into_owned()]),
                     _ => value(name.as_bytes(), &raw),
                 });
                 if matches!(typ.as_str(), "SFString" | "MFString") {
@@ -145,7 +152,7 @@ impl Parser {
         match kind {
             b"X3D" => {
                 if let Some(v) = attr(e, b"version") {
-                    self.g.version = String::from_utf8_lossy(&v).into_owned();
+                    self.g.version = crate::bytes::text(&v).into_owned();
                 }
                 return Frame::Top;
             }
@@ -186,7 +193,7 @@ impl Parser {
                 return Frame::Skip;
             }
             b"ROUTE" | b"Script" | b"IMPORT" | b"EXPORT" => {
-                self.g.skip(&String::from_utf8_lossy(kind));
+                self.g.skip(&crate::bytes::text(kind));
                 return Frame::Skip;
             }
             _ => {}
@@ -199,7 +206,7 @@ impl Parser {
             };
             name
         } else {
-            String::from_utf8_lossy(kind).into_owned()
+            crate::bytes::text(kind).into_owned()
         };
         let mut container: Option<String> = None;
         let mut def: Option<Vec<u8>> = None;
@@ -215,18 +222,13 @@ impl Parser {
                     }
                     return Frame::Skip;
                 }
-                b"containerField" => container = Some(String::from_utf8_lossy(&unescape_bytes(&raw)).into_owned()),
+                b"containerField" => container = Some(crate::bytes::text(&unescape_bytes(&raw)).into_owned()),
                 b"class" | b"id" | b"style" | b"xmlns" => {}
                 b"name" if instance => {}
-                _ => fields.push((
-                    String::from_utf8_lossy(key).into_owned(),
-                    value(key, &unescape_bytes(&raw)),
-                )),
+                _ => fields.push((crate::bytes::text(key).into_owned(), value(key, &unescape_bytes(&raw)))),
             }
         }
-        let name = def
-            .as_ref()
-            .map(|d| String::from_utf8_lossy(d.trim_ascii()).into_owned());
+        let name = def.as_ref().map(|d| crate::bytes::text(d.trim_ascii()).into_owned());
         let id = self.g.add(&kind, name);
         self.g.nodes[id].fields = fields;
         if let Some(d) = def {
@@ -241,7 +243,7 @@ impl Parser {
         // `containerField` may come after `USE`.
         let container = container
             .map(str::to_owned)
-            .or_else(|| attr(e, b"containerField").map(|c| String::from_utf8_lossy(c.trim_ascii()).into_owned()));
+            .or_else(|| attr(e, b"containerField").map(|c| crate::bytes::text(c.trim_ascii()).into_owned()));
         match parent {
             Some(Frame::Node(p)) => {
                 let field = container.as_deref().unwrap_or_else(|| default_container(kind));
@@ -323,7 +325,7 @@ fn value(key: &[u8], text: &[u8]) -> Val {
         return Val::Strs(strings(t));
     }
     if matches!(key, b"title" | b"description" | b"name" | b"value") {
-        return Val::Strs(vec![String::from_utf8_lossy(t).into_owned()]);
+        return Val::Strs(vec![crate::bytes::text(t).into_owned()]);
     }
     let mut nums = Vec::new();
     let mut numeric = true;
@@ -359,7 +361,7 @@ fn value(key: &[u8], text: &[u8]) -> Val {
         .collect();
     match bools {
         Some(b) => Val::Bools(b),
-        None => Val::Strs(vec![String::from_utf8_lossy(t).into_owned()]),
+        None => Val::Strs(vec![crate::bytes::text(t).into_owned()]),
     }
 }
 
@@ -370,7 +372,7 @@ fn strings(t: &[u8]) -> Vec<String> {
         return if t.is_empty() {
             Vec::new()
         } else {
-            vec![String::from_utf8_lossy(t).into_owned()]
+            vec![crate::bytes::text(t).into_owned()]
         };
     }
     let mut out = Vec::new();
@@ -385,7 +387,7 @@ fn strings(t: &[u8]) -> Vec<String> {
             s.push(t[j]);
             j += 1;
         }
-        out.push(String::from_utf8_lossy(&s).into_owned());
+        out.push(crate::bytes::text(&s).into_owned());
         i = (j + 1).min(t.len());
     }
     out

@@ -212,7 +212,7 @@ fn a_header_that_lies_is_an_error() {
     let bare = tile(b"b3dm", &json!({ "BATCH_LENGTH": 0 }), &[], None, &[], &[]);
     assert_eq!(kind(&bare, "t.b3dm"), ErrorKind::Truncated);
     assert_eq!(kind(b"b3dm", "t.b3dm"), ErrorKind::Truncated);
-    assert_eq!(kind(b"nothing like a tile", "t.b3dm"), ErrorKind::Corrupt);
+    assert_eq!(kind(b"nothing like a tile", "t.b3dm"), ErrorKind::UnknownFormat);
     assert_eq!(kind(b"vctr\x01\0\0\0", "t.b3dm"), ErrorKind::Unsupported);
 }
 
@@ -1134,10 +1134,9 @@ fn a_tileset_that_cannot_be_read_says_why() {
         kind(br#"{"geometricError":1,"root":{"#, "tileset.json"),
         ErrorKind::Corrupt
     );
-    // A tileset with nothing to draw draws nothing.
-    let empty = read(&json!({ "geometricError": 1 })).unwrap();
-    assert_eq!(empty.facts["tiles"], 0);
-    assert!(empty.flatten(Pose::Rest).unwrap().is_none());
+    // A tileset with nothing to draw has nothing to convert.
+    let empty = read(&json!({ "geometricError": 1 })).unwrap_err();
+    assert_eq!(empty.kind(), ErrorKind::Empty, "{empty}");
 }
 
 // --- detection ---------------------------------------------------------------------------------

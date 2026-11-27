@@ -714,6 +714,6 @@ case(FMT, "not_3ds", {"text.3ds": "this is not a 3DS file\n"},
      {"spec": "not a 3DS chunk file", "source": SRC, "error": "not a 3DS", "error_kind": "UnknownFormat"})
 
 case(FMT, "empty_file", {"empty.3ds": b""},
-     {"spec": "an empty file", "source": SRC, "error": "not a 3DS", "error_kind": "UnknownFormat"})
+     {"spec": "an empty file", "source": SRC, "error": "the file is empty", "error_kind": "Empty"})
 
 print("3ds corpus written")

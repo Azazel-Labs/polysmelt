@@ -20,5 +20,9 @@
       "unit": "centimeter",
       "metersPerUnit": 0.01
     }
+  },
+  "json": {
+    "/asset/extras/source/unit": "centimeter",
+    "/asset/extras/source/unitAsWritten": null
   }
 }

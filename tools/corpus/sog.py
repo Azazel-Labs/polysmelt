@@ -229,8 +229,7 @@ def main():
 
     files, _, _ = sog([], version=2)
     case(FMT, "empty", {"none.sog": zipped(files)},
-         {"spec": f"{SPEC}: a file of no splats", "source": SRC, "no_mesh": True,
-          "facts": {"points": 0, "splats": 0}})
+         {"spec": f"{SPEC}: a file of no splats", "source": SRC, "error": "nothing to convert", "error_kind": "Empty"})
 
     # --- errors ---------------------------------------------------------------------------------
 
@@ -243,8 +242,8 @@ def main():
     error("no_meta", {"scene.sog": zipped({n: d for n, d in files.items() if n != "meta.json"}, list(less)[:2])},
           "a zip without meta.json", "no meta.json", "UnknownFormat")
     error("not_json", {"scene.sog": zipped({**files, "meta.json": b'{"version": 2, "count": 9, "means": {'})},
-          "a meta.json cut short", "isn't JSON", "Corrupt")
-    error("cut_zip", {"scene.sog": zipped(files)[:-40]}, "a zip without its directory", "can't be opened", "Corrupt")
+          "a meta.json cut short", "cut short", "Truncated")
+    error("cut_zip", {"scene.sog": zipped(files)[:-40]}, "a zip without its directory", "cut short", "Truncated")
 
     def with_meta(change):
         m = json.loads(json.dumps(meta))

@@ -21,7 +21,8 @@
   "json": {
     "/asset/extras/source/format": "HTR",
     "/asset/extras/source/upAxis": "+Y",
-    "/asset/extras/source/unit": "cm",
+    "/asset/extras/source/unit": "centimeter",
+    "/asset/extras/source/unitAsWritten": "cm",
     "/asset/extras/source/metersPerUnit": 0.01,
     "/asset/extras/source/frameRate": 60.0,
     "/asset/extras/source/assumed": null,

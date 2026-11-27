@@ -408,7 +408,7 @@ fn chunks(data: &[u8]) -> impl Iterator<Item = Result<([u8; 4], &[u8])>> {
             return Some(Err(err!(
                 Truncated,
                 "B3D {} chunk runs past the end of what holds it: it claims {size} bytes, and there is room for {}",
-                String::from_utf8_lossy(&tag),
+                crate::bytes::text(&tag),
                 rest.len() - 8
             )));
         };

@@ -17,7 +17,7 @@
 //!   `KHR_materials_common` lights become `KHR_lights_punctual` ones.
 //! - What 2.0 has no place for (techniques, programs, shaders, texture formats, the material's
 //!   own values, joint names) is kept in `extras.source`, beside the normalized source keys:
-//!   the 1.0 version as written, the meter declared, +Y up assumed, the generator as `tool`
+//!   the 1.0 version as written, the meter, +Y up and right-handedness declared (1.0 fixes them), the generator as `tool`
 //!   and the copyright.
 
 use std::collections::HashMap;
@@ -197,11 +197,11 @@ pub(crate) fn upgrade(mut v1: Map<String, Value>) -> Result<(Map<String, Value>,
     SourceInfo {
         format: Some("glTF".into()),
         version: Some(version),
-        // 1.0 fixes the meter; +Y up and right-handedness are the convention 2.0 made a rule.
+        // 1.0 fixes the meter, +Y up and right-handedness, as 2.0 does.
         meters_per_unit: Fact::Declared(1.0),
         unit: Some("meter".into()),
-        up_axis: Fact::Assumed(Axis::PosY),
-        handedness: Fact::Assumed(Handedness::Right),
+        up_axis: Fact::Declared(Axis::PosY),
+        handedness: Fact::Declared(Handedness::Right),
         tool: text("generator"),
         copyright: text("copyright"),
         ..SourceInfo::default()
@@ -1276,7 +1276,7 @@ mod tests {
         assert_eq!(info.version.as_deref(), Some("1.0.1"));
         assert_eq!(info.meters_per_unit, Fact::Declared(1.0));
         assert_eq!(info.unit.as_deref(), Some("meter"));
-        assert_eq!(info.up_axis, Fact::Assumed(Axis::PosY));
+        assert_eq!(info.up_axis, Fact::Declared(Axis::PosY));
         assert_eq!(info.tool.as_deref(), Some("Exporter 2"));
         assert_eq!(info.copyright.as_deref(), Some("Ann"));
         assert_eq!(info.converted, crate::source::Converted::default());

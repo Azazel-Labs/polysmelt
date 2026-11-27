@@ -437,7 +437,7 @@ fn external_references_with_units_and_palettes() {
     let c = corners(&m);
     assert!(c.iter().any(|&p| close(p, [0.3048, 0.0, -0.3048])), "{c:?}");
     let src = &doc.json()["asset"]["extras"]["source"];
-    assert_eq!(src["missingFiles"], 1);
+    assert_eq!(src["missingFiles"].as_array().map(Vec::len), Some(1), "{src}");
     assert_eq!(src["cycles"], 2);
     assert!(doc.to_glb().is_ok());
 }
@@ -591,7 +591,7 @@ fn animated_groups_take_turns() {
     assert_eq!(flat(&doc).triangles(), 6);
     let nodes = doc.json()["nodes"].as_array().unwrap();
     let frames: Vec<&Value> = (0..3)
-        .map(|k| nodes.iter().find(|n| n["name"] == format!("frame {k}")).unwrap())
+        .map(|k| nodes.iter().find(|n| n["name"] == format!("frame{k}")).unwrap())
         .collect();
     assert!(frames[0].get("scale").is_none());
     assert_eq!(frames[1]["scale"], json!([0.0, 0.0, 0.0]));

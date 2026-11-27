@@ -1189,9 +1189,9 @@ def synthetic():
               # One tile across the whole globe: single precision places an instance to within half a meter.
               reach=1.0)
     # No instances: nothing is drawn.
-    tile_case("i3dm_no_instances",
-              {"wedge.i3dm": instanced({"INSTANCES_LENGTH": 0, "POSITION": {"byteOffset": 0}}, b"")}, "wedge.i3dm",
-              "i3dm with an INSTANCES_LENGTH of 0")
+    error_case("i3dm_no_instances",
+               {"wedge.i3dm": instanced({"INSTANCES_LENGTH": 0, "POSITION": {"byteOffset": 0}}, b"")}, "wedge.i3dm",
+               "i3dm with an INSTANCES_LENGTH of 0: a tile of nothing", "nothing to convert", "Empty")
     # A URI with an escape, padded with NULs, in a folder.
     fbin = floats(1, 2, 3)
     ft = {"INSTANCES_LENGTH": 1, "POSITION": {"byteOffset": 0}}
@@ -1238,8 +1238,8 @@ def synthetic():
               "pnts with per-point properties: binary ones of each width, a JSON list of numbers, and a JSON "
               "list of strings",
               check=([-4, -6, -5], [1, 3, 0]), extra={"json": {"/nodes/0/translation": None}})
-    tile_case("pnts_no_points", {"points.pnts": make_tile(b"pnts", {"POINTS_LENGTH": 0, "POSITION": {"byteOffset": 0}})},
-              "points.pnts", "pnts with a POINTS_LENGTH of 0", wrapped=None)
+    error_case("pnts_no_points", {"points.pnts": make_tile(b"pnts", {"POINTS_LENGTH": 0, "POSITION": {"byteOffset": 0}})},
+               "points.pnts", "pnts with a POINTS_LENGTH of 0: a tile of nothing", "nothing to convert", "Empty")
 
     # --- cmpt ---
     points = make_tile(b"pnts", {"POINTS_LENGTH": 2, "POSITION": {"byteOffset": 0}}, floats(0, 0, 0, 1, 1, 1))
@@ -1249,7 +1249,8 @@ def synthetic():
                                  floats(100, 0, 0, 200, 0, 0))])
     tile_case("cmpt_of_each", {"all.cmpt": make_cmpt([points, batched, inner])}, "all.cmpt",
               "cmpt of a pnts, a b3dm and a cmpt holding an i3dm", check=([0, 0, -1], [202, 51, 3]))
-    tile_case("cmpt_empty", {"none.cmpt": make_cmpt([])}, "none.cmpt", "cmpt with no tiles")
+    error_case("cmpt_empty", {"none.cmpt": make_cmpt([])}, "none.cmpt", "cmpt with no tiles: a tile of nothing",
+               "nothing to convert", "Empty")
 
     # --- tilesets ---
     def box(extent):
@@ -1360,7 +1361,7 @@ def synthetic():
                "b3dm whose binary batch table property runs past its body", "runs past the binary body",
                "Truncated")
     error_case("error_not_a_tile", {"note.b3dm": b"These are not the tiles you are looking for.\n"}, "note.b3dm",
-               "a text file named .b3dm", "not a 3D Tiles tile", "Corrupt")
+               "a text file named .b3dm", "not a 3D Tiles tile", "UnknownFormat")
     error_case("error_vector_tile", {"roads.cmpt": make_cmpt([b"vctr" + struct.pack("<II", 1, 44) + bytes(32)])},
                "roads.cmpt", "cmpt holding a vector tile", "vector and geometry tiles", "Unsupported")
     implicit = {"asset": {"version": "1.1"}, "geometricError": 10,

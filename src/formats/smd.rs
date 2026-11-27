@@ -453,7 +453,7 @@ fn vertex_animation(scene: &mut Scene, shapes: Vec<Shape>, name: &str) -> Result
             t.normals.clear();
         }
         targets.push(t);
-        names.push(s.name.clone().unwrap_or_else(|| format!("frame {}", s.time)));
+        names.push(s.name.clone().unwrap_or_else(|| format!("frame{}", s.time)));
     }
     let n = positions.len();
     let prim = Primitive {
@@ -993,7 +993,7 @@ end
         let m = &j["meshes"][0];
         assert_eq!(m["primitives"][0]["mode"], json!(0));
         assert_eq!(m["primitives"][0]["targets"].as_array().unwrap().len(), 2);
-        assert_eq!(m["extras"]["targetNames"], json!(["smile", "frame 2"]));
+        assert_eq!(m["extras"]["targetNames"], json!(["smile", "frame2"]));
         assert_eq!(doc.facts["morph_targets"], json!(2));
         assert!(j.get("animations").is_none());
     }

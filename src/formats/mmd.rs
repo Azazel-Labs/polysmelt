@@ -25,8 +25,8 @@
 //! The format is left-handed and Y up with a unit of 8 cm, so the scene is mirrored through its XY plane and
 //! scaled by 0.08 into meters. Text is UTF-16 or UTF-8 in PMX, as its header says, and Shift-JIS in PMD and VMD.
 //!
-//! The source info has the handedness as declared (the format defines it) and converted, the up axis `+Y` assumed,
-//! and `metersPerUnit` an assumed 0.08 (the unit's length is the users' convention, not the format's), converted.
+//! The source info has the handedness and the up axis `+Y` as declared (the program's space is every file's), the
+//! handedness converted, and `metersPerUnit` an assumed 0.08 (the unit's length is the users' convention, not the format's), converted.
 //! A model's name is its `title` and its comment its `description`; the English name and comment stay as
 //! `englishName` and `englishComment`. A motion's `frameRate` is 30, the rate its frame numbers count at, and the
 //! model it was made for is kept as `model`.
@@ -191,6 +191,8 @@ struct Model {
     qdef: usize,
     /// Why the sections after the morphs weren't read to the end, if they weren't.
     unread: Option<String>,
+    /// Whether the file ends inside its later sections: what came before is kept.
+    cut: bool,
 }
 
 impl Model {
@@ -218,6 +220,7 @@ impl Model {
             sdef: 0,
             qdef: 0,
             unread: None,
+            cut: false,
         }
     }
 }
@@ -286,7 +289,7 @@ impl Reader<'_> {
         let n = self.b.count(u64::from(n.unsigned_abs()), 1)?;
         let b = self.b.bytes(n)?;
         Ok(if self.utf8 {
-            String::from_utf8_lossy(b).into_owned()
+            crate::bytes::text(b).into_owned()
         } else {
             let units: Vec<u16> = b.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
             String::from_utf16_lossy(&units)
@@ -737,7 +740,7 @@ fn pmd(data: &[u8]) -> Result<Model> {
             flags |= 0x10;
         }
         m.materials.push(Mat {
-            name: format!("material {i}"),
+            name: format!("material{i}"),
             english: String::new(),
             diffuse: [d[0], d[1], d[2], alpha],
             specular,
@@ -848,6 +851,7 @@ fn pmd(data: &[u8]) -> Result<Model> {
     }
 
     if let Err(e) = pmd_tail(&mut b, &mut m) {
+        m.cut = e.kind() == crate::ErrorKind::Truncated;
         m.unread = Some(e.to_string());
     }
     Ok(m)
@@ -903,7 +907,7 @@ fn pmd_tail(b: &mut Bin<'_>, m: &mut Model) -> Result<()> {
 /// A name, or what stands in for an empty one.
 fn name_of(name: &str, i: usize, what: &str) -> String {
     if name.trim().is_empty() {
-        format!("{what} {i}")
+        format!("{what}{i}")
     } else {
         name.to_owned()
     }
@@ -1431,7 +1435,10 @@ fn build(m: Model, input: &Input<'_>, stem: &str, assets: &dyn Assets, keep: Kee
     let text = |s: &str| (!s.is_empty()).then(|| s.to_owned());
     scene.info.title = text(&m.name);
     scene.info.description = text(&m.comment);
-    source.insert("encoding".into(), json!(m.encoding));
+    source.insert("textEncoding".into(), json!(m.encoding));
+    if m.cut {
+        source.insert("truncated".into(), json!(true));
+    }
     for (key, v) in [("englishName", &m.english_name), ("englishComment", &m.english_comment)] {
         if !v.is_empty() {
             source.insert(key.into(), json!(v));
@@ -1734,7 +1741,7 @@ fn motion(data: &[u8], stem: &str, keep: Keep) -> Result<Document> {
 fn convention(info: &mut SourceInfo) {
     // 0.08 as written, not the f32 widened (0.0799999982).
     info.meters_per_unit = Fact::Assumed(0.08);
-    info.up_axis = Fact::Assumed(Axis::PosY);
+    info.up_axis = Fact::Declared(Axis::PosY);
     info.handedness = Fact::Declared(Handedness::Left);
 }
 

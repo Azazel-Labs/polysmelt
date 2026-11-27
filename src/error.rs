@@ -30,7 +30,9 @@ struct Inner {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ErrorKind {
-    /// Neither the extension nor the bytes name a format any reader reads.
+    /// Neither the extension nor the bytes name a format any reader reads, or the bytes aren't the format
+    /// they were read as: its signature (magic bytes, or the first words of its text) isn't there. Every
+    /// reader reports a file that isn't its own this way.
     UnknownFormat,
     /// A reader for the format exists but this build was compiled without its Cargo feature,
     /// which the message names.
@@ -39,10 +41,12 @@ pub enum ErrorKind {
     Unsupported,
     /// The data is malformed or inconsistent: it doesn't parse, or it contradicts itself.
     Corrupt,
-    /// The data ends early, or an offset or count points past its end.
+    /// The data ends early, or an offset or count points past its end. A reader that can keep what came
+    /// before the cut returns that model instead, with `asset.extras.source.truncated` set to `true`.
     Truncated,
-    /// The file is empty, or well formed but holds nothing to convert: no geometry, points,
-    /// skeleton or motion.
+    /// The file has no bytes, or is well formed but holds nothing to convert: no geometry, points,
+    /// skeleton, motion, camera or light. The same in every reader: a document that draws nothing and has
+    /// no node that is named, has children, or carries a camera, light or skin.
     Empty,
     /// A file the model needs (a glTF buffer, a USD layer, a skeleton) isn't among the assets.
     /// Readers that can do without a file (most textures) skip it instead.
@@ -149,6 +153,38 @@ impl Error {
         Self::new(ErrorKind::Truncated, message)
     }
 
+    /// The file is the reader's format and ends before its data does, with nothing a reader could keep:
+    /// [`ErrorKind::Truncated`]. A reader that keeps what came before the cut sets
+    /// `asset.extras.source.truncated` instead.
+    #[allow(dead_code, reason = "which readers use it depends on the enabled features")]
+    pub(crate) fn cut_short(message: impl Into<Cow<'static, str>>) -> Self {
+        Self::new(ErrorKind::Truncated, message)
+    }
+
+    /// What a reader that keeps what came before a cut says when nothing whole came before it: the file is cut
+    /// short ([`ErrorKind::Truncated`]) when `cut`, and otherwise has nothing to convert ([`ErrorKind::Empty`],
+    /// saying `empty`).
+    #[cold]
+    #[allow(dead_code, reason = "which readers use it depends on the enabled features")]
+    pub(crate) fn nothing_left(cut: bool, format: &str, empty: &'static str) -> Self {
+        if cut {
+            Self::cut_short(format!("{format} file is cut short before anything whole to keep"))
+        } else {
+            Self::nothing_to_convert(empty)
+        }
+    }
+
+    /// The file has no bytes at all: [`ErrorKind::Empty`], whatever the format.
+    pub(crate) fn empty_file() -> Self {
+        Self::new(ErrorKind::Empty, "the file is empty")
+    }
+
+    /// The file is well formed and holds nothing to convert: [`ErrorKind::Empty`].
+    #[allow(dead_code, reason = "which readers use it depends on the enabled features")]
+    pub(crate) fn nothing_to_convert(message: impl Into<Cow<'static, str>>) -> Self {
+        Self::new(ErrorKind::Empty, message)
+    }
+
     /// A version or variant the reader doesn't read.
     #[allow(dead_code, reason = "which readers use it depends on the enabled features")]
     pub(crate) fn unsupported(message: impl Into<Cow<'static, str>>) -> Self {
@@ -221,6 +257,34 @@ impl Error {
         } else {
             format!("{what}: {}", inner.message)
         }));
+        self
+    }
+
+    /// JSON that didn't parse, of the same kind in every reader of a JSON format: text that doesn't start as
+    /// JSON at all isn't the format ([`ErrorKind::UnknownFormat`]), JSON that ends early is cut short
+    /// ([`ErrorKind::Truncated`]), and any other mistake is [`ErrorKind::Corrupt`]. `what` names the file's
+    /// kind (`"glTF JSON"`).
+    #[cold]
+    #[allow(dead_code, reason = "only readers of JSON formats use it")]
+    pub(crate) fn json(source: serde_json::Error, text: &[u8], what: &str) -> Self {
+        let starts = text
+            .trim_ascii_start()
+            .first()
+            .is_some_and(|c| matches!(c, b'{' | b'['));
+        if !starts {
+            Self::caused(ErrorKind::UnknownFormat, format!("not {what}"), source)
+        } else if source.is_eof() {
+            Self::caused(ErrorKind::Truncated, format!("{what} is cut short"), source)
+        } else {
+            Self::caused(ErrorKind::Corrupt, format!("{what} doesn't parse"), source)
+        }
+    }
+
+    /// The error as one of `kind`: its message, path and source stay.
+    #[cold]
+    #[must_use]
+    pub(crate) fn of_kind(mut self, kind: ErrorKind) -> Self {
+        self.0.kind = kind;
         self
     }
 
@@ -463,6 +527,19 @@ mod tests {
         assert_eq!(e.kind(), ErrorKind::Truncated);
         assert_eq!(e.to_string(), "m.3ds: reading mesh 2: chunk: eof");
         assert!(e.source().is_some());
+    }
+
+    #[test]
+    fn broken_json_is_not_the_format_cut_short_or_corrupt() {
+        let kind = |text: &[u8]| {
+            let e = serde_json::from_slice::<serde_json::Value>(text).unwrap_err();
+            Error::json(e, text, "glTF JSON").kind()
+        };
+        assert_eq!(kind(b"hello, not json"), ErrorKind::UnknownFormat);
+        assert_eq!(kind(b""), ErrorKind::UnknownFormat);
+        assert_eq!(kind(b"{\"asset\": {\"version\": \"2"), ErrorKind::Truncated);
+        assert_eq!(kind(b"  {\"a\": [1, 2"), ErrorKind::Truncated);
+        assert_eq!(kind(b"{\"a\": nope}"), ErrorKind::Corrupt);
     }
 
     #[test]

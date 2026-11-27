@@ -16,6 +16,56 @@ pub(crate) fn xml(head: &[u8]) -> Option<&'static str> {
     root(&narrow(head))
 }
 
+/// Whether `head`, the first bytes of a model read under extension `ext`, lacks the signature every file of
+/// that format starts with: its magic bytes, or the first character of the text or XML it's written in. `false`
+/// for a format with no signature of its own (OBJ, binary STL, text point clouds, `.splat`), where the bytes
+/// can't say. A file a reader fails on that has no such signature isn't that format at all, and
+/// [`read_input`](super::read_input) reports it as [`UnknownFormat`](crate::ErrorKind::UnknownFormat) whatever
+/// the reader made of it.
+pub(crate) fn lacks_signature(ext: &str, head: &[u8]) -> bool {
+    let starts = |magic: &[u8]| head.starts_with(magic);
+    // Text, past a byte order mark and leading whitespace; UTF-16 narrowed to its ASCII.
+    let narrowed = narrow(head);
+    let t = narrowed.trim_start_matches('\u{feff}').trim_start();
+    let zip = starts(b"PK\x03\x04") || starts(b"PK\x05\x06");
+    let gzip = starts(&[0x1F, 0x8B]);
+    let xml = t.starts_with('<');
+    let tile = starts(b"b3dm") || starts(b"i3dm") || starts(b"pnts") || starts(b"cmpt");
+    let ogre = {
+        let first = &head[..head.len().min(64)];
+        contains(first, b"[MeshSerializer_") || contains(first, b"[Serializer_")
+    };
+    let signed = match ext {
+        "ply" => t.starts_with("ply"),
+        "vox" => starts(b"VOX "),
+        "usda" => t.starts_with("#usda"),
+        "usdc" => starts(b"PXR-USDC"),
+        "usd" => t.starts_with("#usda") || starts(b"PXR-USDC") || zip,
+        "usdz" | "3mf" | "zae" | "kmz" => zip,
+        "glb" | "vrm" | "vrma" | "gltf" => starts(b"glTF") || t.starts_with('{'),
+        "dae" | "amf" => xml || zip,
+        "x3d" | "x3dv" | "x3dz" | "wrl" | "wrz" => xml || gzip || t.starts_with("#VRML") || t.starts_with("#X3D"),
+        "sog" => zip || t.starts_with('{'),
+        "e57" => starts(b"ASTM-E57"),
+        "mesh" | "skeleton" | "xml" => xml || ogre,
+        "irrmesh" | "irr" | "xgl" | "vtp" | "vtu" => xml,
+        "zgl" => {
+            xml || matches!(*head, [cmf, flg, ..] if cmf & 0x0F == 8 && (u16::from(cmf) << 8 | u16::from(flg)) % 31 == 0)
+        }
+        "b3dm" | "i3dm" | "pnts" | "cmpt" => tile || starts(b"glTF") || t.starts_with('{'),
+        _ => true,
+    };
+    !signed
+}
+
+/// Whether `bytes`, a whole file, is a zip archive cut short: it starts with an entry and has no end record,
+/// which a zip closes with and which is the first thing its reader looks for.
+pub(crate) fn zip_cut_short(bytes: &[u8]) -> bool {
+    // The end record is 22 bytes and a comment of up to 65,535.
+    let tail = &bytes[bytes.len().saturating_sub(22 + 65_535)..];
+    bytes.starts_with(b"PK\x03\x04") && !contains(tail, b"PK\x05\x06")
+}
+
 /// Formats with a binary signature.
 fn binary(head: &[u8], len: Option<u64>) -> Option<&'static str> {
     let starts = |magic: &[u8]| head.starts_with(magic);
@@ -417,6 +467,43 @@ mod tests {
         );
         assert_eq!(sniff(&zlib(b"<COLLADA>")[..9], None), None, "cut short, and not XGL");
         assert_eq!(sniff(&zlib(b"<scene>"), None), None);
+    }
+
+    #[test]
+    fn a_format_with_a_signature_knows_a_file_without_it() {
+        let text = b"hello this is not a model file at all\n";
+        for ext in [
+            "ply", "vox", "usda", "usdc", "usd", "usdz", "3mf", "zae", "kmz", "glb", "gltf", "dae", "x3d", "wrl",
+            "sog", "e57", "amf", "mesh", "skeleton", "xml", "irrmesh", "irr", "xgl", "zgl", "vtp", "vtu", "b3dm",
+            "cmpt",
+        ] {
+            assert!(lacks_signature(ext, text), "{ext}");
+        }
+        // Formats whose files start with anything can't be told.
+        for ext in ["obj", "stl", "xyz", "pts", "splat", "ogex"] {
+            assert!(!lacks_signature(ext, text), "{ext}");
+        }
+        assert!(!lacks_signature("ply", b"\xEF\xBB\xBFply\nformat ascii 1.0\n"));
+        assert!(!lacks_signature("usd", b"PXR-USDC\0\x08"));
+        assert!(!lacks_signature("x3d", b"<?xml version=\"1.0\"?><X3D>"));
+        assert!(!lacks_signature("wrl", b"#VRML V2.0 utf8\n"));
+        assert!(!lacks_signature("wrz", &[0x1F, 0x8B, 8, 0]));
+        assert!(!lacks_signature("mesh", b"\x00\x10[MeshSerializer_v1.100]\n"));
+        assert!(!lacks_signature("xgl", &utf16(b"<WORLD>")), "UTF-16 XML");
+        assert!(!lacks_signature("zgl", &[0x78, 0x9C, 1]));
+        assert!(!lacks_signature("cmpt", b"{\"asset\":{\"version\":\"1.0\"}}"));
+    }
+
+    #[test]
+    fn a_zip_without_its_end_record_is_cut_short() {
+        let mut zip = b"PK\x03\x04".to_vec();
+        zip.extend([0; 40]);
+        assert!(zip_cut_short(&zip));
+        zip.extend(b"PK\x05\x06");
+        zip.extend([0; 18]);
+        assert!(!zip_cut_short(&zip));
+        assert!(!zip_cut_short(b"not a zip"));
+        assert!(!zip_cut_short(b""));
     }
 
     #[test]

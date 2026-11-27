@@ -29,7 +29,7 @@ impl<'a> Zip<'a> {
         let eocd = (lowest..=d.len().saturating_sub(22))
             .rev()
             .find(|&i| u32_at(d, i) == Some(0x0605_4b50))
-            .context(ErrorKind::Corrupt, "ZIP container has no end record")?;
+            .context(ErrorKind::Truncated, "ZIP container is cut short: it has no end record")?;
         let count = u16_at(d, eocd + 10).context(ErrorKind::Truncated, "ZIP end record is cut short")?;
         let dir = u32_at(d, eocd + 16).context(ErrorKind::Truncated, "ZIP end record is cut short")? as usize;
         ensure!(dir != 0xffff_ffff, Unsupported, "ZIP64 containers are not supported");
@@ -52,7 +52,7 @@ impl<'a> Zip<'a> {
                 .get(p + 46..p + 46 + usize::from(name_len))
                 .context(ErrorKind::Truncated, "ZIP entry name is cut short")?;
             entries.push(Entry {
-                name: String::from_utf8_lossy(name).into_owned(),
+                name: crate::bytes::text(name).into_owned(),
                 method,
                 compressed: u64::from(compressed),
                 local_header,

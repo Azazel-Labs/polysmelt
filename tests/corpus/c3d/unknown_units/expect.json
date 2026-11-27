@@ -24,7 +24,8 @@
     ],
     "/animations/0/name": "motion",
     "/animations/0/samplers/0/interpolation": "LINEAR",
-    "/asset/extras/source/unit": "furlongs"
+    "/asset/extras/source/unit": null,
+    "/asset/extras/source/unitAsWritten": "furlongs"
   },
   "rig": [
     {

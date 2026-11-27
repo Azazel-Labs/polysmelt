@@ -197,6 +197,14 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document> {
     if start.is_finite() {
         source.insert("startTime".into(), json!(start));
     }
+    // Fewer rows than the header counts: the file is cut short.
+    #[allow(clippy::cast_precision_loss, reason = "frame counts are small")]
+    if get("numframes")
+        .and_then(|v| v.parse::<f64>().ok())
+        .is_some_and(|n| n.is_finite() && n > (frames + dropped) as f64)
+    {
+        source.insert("truncated".into(), json!(true));
+    }
     let facts = &mut scene.facts;
     facts.insert("markers".into(), json!(markers));
     facts.insert("frames".into(), json!(frames));

@@ -38,16 +38,23 @@ pub(crate) fn stl(input: Input<'_>) -> Result<Document> {
     let size = blocks.size_hint() as u64;
     let head = blocks.need(1024)?;
     let Some(n) = binary_count(head, size) else {
-        let solids: Vec<_> = ascii(blocks, input.limit)?
-            .into_iter()
-            .map(|(name, p)| (name, vec![p]))
-            .collect();
+        if let Some(n) = cut_binary_count(head, size) {
+            return Err(crate::Error::cut_short(format!(
+                "binary STL is cut short: its header counts {n} triangles and the file holds {}",
+                size.saturating_sub(84) / 50
+            )));
+        }
+        let (solids, cut) = ascii(blocks, input.limit)?;
+        let solids: Vec<_> = solids.into_iter().map(|(name, p)| (name, vec![p])).collect();
         let mut info = info();
         if let [(Some(name), _)] = solids.as_slice() {
             info.title = Some(name.clone());
         }
         let mut source = Map::new();
-        source.insert("encoding".into(), json!("ASCII"));
+        source.insert("encoding".into(), json!("ascii"));
+        if cut {
+            source.insert("truncated".into(), json!(true));
+        }
         info.write(&mut source);
         return Ok(document(solids, &single(Prim::default()), source));
     };
@@ -130,7 +137,7 @@ fn document(meshes: Vec<(Option<String>, Vec<Prim>)>, mesh: &Mesh, source: Map<S
 fn header_text(header: &[u8; 80]) -> Option<String> {
     let text = header.split(|&b| b == 0).next().unwrap_or_default().trim_ascii();
     (!text.is_empty() && text.iter().all(|&b| b == b' ' || b.is_ascii_graphic()))
-        .then(|| String::from_utf8_lossy(text).into_owned())
+        .then(|| crate::bytes::text(text).into_owned())
 }
 
 /// The facet count when the file is binary STL, from its first bytes and its size. The 80-byte
@@ -145,6 +152,14 @@ fn binary_count(head: &[u8], size: u64) -> Option<usize> {
     (need < size && !looks_ascii(head))
         .then(|| usize::try_from(n).ok())
         .flatten()
+}
+
+/// The triangle count of a binary STL that's cut short: one whose header counts more triangles than the file
+/// holds. A binary STL has no signature, so the count has to look like one: under 2^24, which leaves its top
+/// byte zero, as no text file's bytes there are.
+fn cut_binary_count(head: &[u8], size: u64) -> Option<u32> {
+    let n = u32::from_le_bytes(head.get(80..84)?.try_into().ok()?);
+    (n > 0 && n < 1 << 24 && u64::from(n) * 50 + 84 > size && !looks_ascii(head)).then_some(n)
 }
 
 /// Whether the file starts like ASCII STL: `solid`, then a `facet` or `endsolid` soon after.
@@ -249,7 +264,7 @@ fn binary(mut blocks: Blocks<'_>, n: usize, colors: Colors) -> Result<Option<Mes
             let [r, g, b] = c.map(|v| srgb_to_linear(f32::from(v) / 255.0));
             [r, g, b, 1.0]
         });
-        mesh.materials.push(Material::plain(&format!("color_{i}"), color));
+        mesh.materials.push(Material::plain(&format!("color{i}"), color));
     }
     Ok(Some(mesh))
 }
@@ -272,7 +287,11 @@ fn finite(t: &Tri) -> bool {
 /// (up to a `facet` keyword, for files written on one line). Otherwise only the `vertex` lines
 /// matter: a facet with more than three is a fan of triangles, and one with fewer, or a vertex
 /// line that doesn't read as three numbers, is dropped. A leading byte order mark is skipped.
-fn ascii(mut blocks: Blocks<'_>, limit: usize) -> Result<Vec<(Option<String>, Prim)>> {
+///
+/// Also whether the file is cut short: it ends inside a facet or a vertex line, or without the `endsolid` its
+/// last solid closes with. What came before the cut is kept.
+#[allow(clippy::type_complexity, reason = "the solids and one flag")]
+fn ascii(mut blocks: Blocks<'_>, limit: usize) -> Result<(Vec<(Option<String>, Prim)>, bool)> {
     if blocks.need(BOM.len())?.starts_with(BOM) {
         blocks.consume(BOM.len());
     }
@@ -302,6 +321,8 @@ fn ascii(mut blocks: Blocks<'_>, limit: usize) -> Result<Vec<(Option<String>, Pr
     // Whether `facet` keywords mark the facets (otherwise every three vertices are one), whether
     // this facet has a bad vertex line, and how many facets were dropped for one.
     let (mut marked, mut bad, mut dropped) = (false, false, 0usize);
+    // Whether a `facet` and a `solid` are still open: at the end of the file, the file is cut short.
+    let (mut in_facet, mut in_solid) = (false, false);
     while let Some(text) = blocks.text(stream::words)? {
         if !sized && w.triangles() > 0 {
             sized = true;
@@ -373,10 +394,18 @@ fn ascii(mut blocks: Blocks<'_>, limit: usize) -> Result<Vec<(Option<String>, Pr
             } else if word.len() == 5 && word.eq_ignore_ascii_case(b"facet") {
                 // Corners left over from a facet with fewer than three are dropped.
                 (corner, bad, marked) = (0, false, true);
+                in_facet = true;
             } else if word.len() == 7 && word.eq_ignore_ascii_case(b"endloop") {
                 (corner, bad) = (0, false);
+            } else if word.len() == 8 && word[0] | 0x20 == b'e' {
+                if word.eq_ignore_ascii_case(b"endfacet") {
+                    in_facet = false;
+                } else if word.eq_ignore_ascii_case(b"endsolid") {
+                    in_solid = false;
+                }
             } else if word.len() == 5 && word[0] | 0x20 == b's' && word.eq_ignore_ascii_case(b"solid") {
                 (corner, bad) = (0, false);
+                (in_facet, in_solid) = (false, true);
                 if seen {
                     finish_solid(&mut solids, &name, std::mem::replace(&mut w, Welder::with_capacity(0)));
                 }
@@ -386,8 +415,14 @@ fn ascii(mut blocks: Blocks<'_>, limit: usize) -> Result<Vec<(Option<String>, Pr
             }
         }
     }
+    let cut = want > 0 || in_facet || in_solid;
     dropped += usize::from(want > 0 && !bad);
     finish_solid(&mut solids, &name, w);
+    if solids.is_empty() && cut {
+        return Err(crate::Error::cut_short(
+            "ASCII STL is cut short before its first whole facet",
+        ));
+    }
     ensure!(
         !solids.is_empty(),
         Empty,
@@ -398,7 +433,7 @@ fn ascii(mut blocks: Blocks<'_>, limit: usize) -> Result<Vec<(Option<String>, Pr
             String::new()
         }
     );
-    Ok(solids)
+    Ok((solids, cut))
 }
 
 /// Reads a `solid` line's name from `text[*i..]` onto `name`, a word at a time: up to the end of
@@ -436,7 +471,7 @@ fn solid_name(text: &[u8], i: &mut usize, name: &mut Vec<u8>) -> bool {
 /// Adds a solid's triangles, if it has any, under its name.
 fn finish_solid(solids: &mut Vec<(Option<String>, Prim)>, name: &[u8], w: Welder) {
     if w.triangles() > 0 {
-        let name = (!name.is_empty()).then(|| String::from_utf8_lossy(name).into_owned());
+        let name = (!name.is_empty()).then(|| crate::bytes::text(name).into_owned());
         solids.push((name, w.finish()));
     }
 }
@@ -498,7 +533,7 @@ mod tests {
         assert!(nodes[1].get("name").is_none());
         assert_eq!(nodes[2]["children"], json!([0, 1]));
         assert_eq!(doc.json()["scenes"][0]["nodes"], json!([2]));
-        assert_eq!(doc.json()["asset"]["extras"]["source"]["encoding"], "ASCII");
+        assert_eq!(doc.json()["asset"]["extras"]["source"]["encoding"], "ascii");
         assert_eq!(doc.facts["triangles"], 2);
     }
 

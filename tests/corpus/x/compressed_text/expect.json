@@ -68,6 +68,7 @@
     ]
   ],
   "json": {
-    "/asset/extras/source/encoding": "compressed text"
+    "/asset/extras/source/encoding": "ascii",
+    "/asset/extras/source/compressed": true
   }
 }

@@ -10,6 +10,9 @@
 //!   document stands on its own. One that isn't found keeps its URI.
 //! - A texture whose images are all in a format Polysmelt doesn't decode (KTX2, AVIF) isn't
 //!   drawn: `asset.extras.source.droppedTextures` counts them.
+//! - `asset.extras.source` gets what every reader writes there: the format and version, and glTF's
+//!   meters, +Y up, +Z forward and right-handedness, declared. A file that has a source already (a
+//!   model Polysmelt converted, read back) keeps it.
 //! - glTF 1.0 (and its binary GLB, `KHR_binary_glTF`) is upgraded to 2.0 first; see
 //!   [`super::gltf1`].
 
@@ -23,6 +26,7 @@ use crate::document::{Blob, Document, Keep};
 use crate::gltf as container;
 use crate::images::{Location, Reference};
 use crate::num::usize_of;
+use crate::source::{Axis, Fact, Handedness, SourceInfo};
 use crate::{Bytes, Context as _, ErrorKind, Result};
 
 /// Reads the glTF or GLB `input`.
@@ -50,13 +54,16 @@ pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
     if version.starts_with('1') {
         // A 1.0 label on a 2.0 document: read as the 2.0 it is, the label kept as its source's.
         json["asset"]["version"] = "2.0".into();
-        source(&mut json)["version"] = version.into();
+        source(&mut json)["version"] = version.clone().into();
     } else {
         ensure!(
             version.starts_with("2."),
             Unsupported,
             "glTF version {version:?} isn't 1.x or 2.x"
         );
+    }
+    if fix.is_none() {
+        own_source(&mut json, &version);
     }
     let dropped = undecodable_textures(&json);
     if dropped > 0 {
@@ -121,6 +128,33 @@ fn source(json: &mut Map<String, Value>) -> &mut Value {
         *source = Value::Object(Map::new());
     }
     source
+}
+
+/// Writes what a glTF 2.0 file says of itself by being one into its `asset.extras.source`, as every reader
+/// does: the format and `version`, glTF's meters, +Y up, +Z forward and right-handedness (all declared: the
+/// specification fixes them), its `generator` as the tool and its `copyright`. A file that carries a source
+/// already (one Polysmelt converted from another format, read back) keeps it.
+fn own_source(json: &mut Map<String, Value>, version: &str) {
+    let asset = json.get("asset");
+    if asset.and_then(|a| a.pointer("/extras/source/format")).is_some() {
+        return;
+    }
+    let text = |k: &str| asset.and_then(|a| a.get(k)).and_then(Value::as_str).map(str::to_owned);
+    let info = SourceInfo {
+        format: Some("glTF".into()),
+        version: Some(version.to_owned()),
+        meters_per_unit: Fact::Declared(1.0),
+        unit: Some("meter".into()),
+        up_axis: Fact::Declared(Axis::PosY),
+        forward_axis: Fact::Declared(Axis::PosZ),
+        handedness: Fact::Declared(Handedness::Right),
+        tool: text("generator"),
+        copyright: text("copyright"),
+        ..SourceInfo::default()
+    };
+    if let Value::Object(source) = source(json) {
+        info.write(source);
+    }
 }
 
 /// How many textures have images, none in a format Polysmelt decodes: KTX2
@@ -362,7 +396,13 @@ fn gltf_json(bytes: &[u8]) -> Result<Map<String, Value>> {
     let text = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
     match crate::json::from_slice(text) {
         Ok(Value::Object(m)) => Ok(m),
-        _ => bail!(UnknownFormat, "not a glTF file: neither GLB nor glTF JSON"),
+        Ok(_) => bail!(UnknownFormat, "not a glTF file: neither GLB nor glTF JSON"),
+        Err(e) => match crate::Error::json(e, text, "glTF JSON") {
+            e if e.kind() == ErrorKind::UnknownFormat => {
+                bail!(UnknownFormat, "not a glTF file: neither GLB nor glTF JSON")
+            }
+            e => Err(e),
+        },
     }
 }
 
@@ -419,6 +459,22 @@ mod tests {
             let extras = asset.get_mut("extras").and_then(Value::as_object_mut);
             if let Some(source) = extras.and_then(|e| e.get_mut("source")?.as_object_mut()) {
                 source.remove("droppedTextures");
+                // What reading writes of the file itself.
+                if source.get("format") == Some(&serde_json::json!("glTF")) {
+                    for key in [
+                        "format",
+                        "version",
+                        "metersPerUnit",
+                        "unit",
+                        "upAxis",
+                        "forwardAxis",
+                        "handedness",
+                        "tool",
+                        "copyright",
+                    ] {
+                        source.remove(key);
+                    }
+                }
             }
             if asset.get("extras") == Some(&serde_json::json!({ "source": {} })) {
                 asset.remove("extras");
@@ -505,7 +561,7 @@ mod tests {
         std::fs::write(dir.path().join("j.png"), &jpeg).unwrap();
         images.push(serde_json::json!({ "uri": "j.png", "mimeType": "image/png" }));
         images.push(serde_json::json!({ "uri": "missing.png" }));
-        let gltf = serde_json::json!({ "asset": { "version": "2.0" }, "images": images });
+        let gltf = serde_json::json!({ "asset": { "version": "2.0" }, "images": images, "nodes": [{ "name": "n" }] });
         let path = dir.path().join("m.gltf");
         std::fs::write(&path, gltf.to_string()).unwrap();
         let doc = crate::formats::load(&path, "gltf", &Folder::new(dir.path()), Keep::ALL).unwrap();
@@ -600,7 +656,8 @@ mod tests {
 
     #[test]
     fn a_json_chunk_padded_with_zeros_reads() {
-        let mut json = br#"{"asset":{"version":"2.0"},"scene":0,"scenes":[{}]}"#.to_vec();
+        let mut json =
+            br#"{"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],"nodes":[{"name":"n"}]}"#.to_vec();
         json.resize(json.len().next_multiple_of(4) + 4, 0);
         let len = u32::try_from(json.len()).unwrap();
         let glb = [

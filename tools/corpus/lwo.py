@@ -123,7 +123,7 @@ case(FMT, "cube_lwo2", {"cube.lwo": form(b"LWO2", BASIC + [surf("Default", (0.5,
      {"spec": f"{SPEC}: an LWO2 cube; left-handed points and clockwise polygons turned into glTF's", "source": SRC,
       **CUBE, "uvs": False, "colors": False,
       "materials": [{"name": "Default", "color": lin((0.5, 0.25, 1.0), 0.8), "double_sided": False}],
-      "json": {"/asset/extras/source/format": "LWO2"}})
+      "json": {"/asset/extras/source/format": "LWO", "/asset/extras/source/version": "LWO2"}})
 
 # The same cube, its points written in glTF's axes directly: a mirror image, inside out, unless the
 # reader turns the polygons around. Here the check is the bounds: LightWave's z is glTF's -z.
@@ -215,7 +215,7 @@ lwob = form(b"LWOB", [pnts(CUBE_V), ck(b"SRFS", s0("Shell")), lwob_pols(QUADS, [
 case(FMT, "cube_lwob", {"cube.lwo": lwob},
      {"spec": f"{SPEC}: an LWOB cube, a surface of an 8-bit color and a fixed-point diffuse level", "source": SRC,
       **CUBE, "materials": [{"name": "Shell", "color": lin((200 / 255, 100 / 255, 50 / 255), 0.75)}],
-      "json": {"/asset/extras/source/format": "LWOB"}})
+      "json": {"/asset/extras/source/format": "LWO", "/asset/extras/source/version": "LWOB"}})
 
 case(FMT, "not_lwo", {"model.lwo": form(b"ILBM", [ck(b"BMHD", bytes(20))])},
      {"spec": f"{SPEC}: an IFF file of another kind", "source": SRC, "error": "not a LightWave object",
@@ -372,7 +372,7 @@ case(FMT, "lwo3_node_surfaces",
       "materials": [{"name": "Paint", "textured": True, "roughness": 0.25, "metallic": 0.75,
                      "emissive": [0.5, 0.0, 0.5]},
                     {"name": "Glass", "color": [0.0, 0.5, 0.0, 0.75], "alpha_mode": "BLEND"}],
-      "json": {"/asset/extras/source/format": "LWO3"}})
+      "json": {"/asset/extras/source/format": "LWO", "/asset/extras/source/version": "LWO3"}})
 
 
 # --- real files ---------------------------------------------------------------------------------

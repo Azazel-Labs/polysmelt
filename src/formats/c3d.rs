@@ -148,7 +148,7 @@ impl<'a> Params<'a> {
                 cut_short = true;
                 break;
             };
-            let name = String::from_utf8_lossy(name).trim().to_ascii_uppercase();
+            let name = crate::bytes::text(name).trim().to_ascii_uppercase();
             let body = at + 4 + len;
             if id < 0 {
                 groups.entry(id.unsigned_abs()).or_insert(name);
@@ -502,6 +502,10 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document> {
     info.tool = params.string("MANUFACTURER:SOFTWARE");
     let mut source = Map::new();
     source.insert("processor".into(), json!(rd.p.name()));
+    // Fewer frames than the header counts: the file is cut short in its data.
+    if missing_frames > 0 {
+        source.insert("truncated".into(), json!(true));
+    }
     source.insert("storage".into(), json!(if floats { "float" } else { "integer" }));
     if let Some(x) = &x_screen {
         source.insert("xScreen".into(), json!(x));

@@ -716,8 +716,7 @@ fn counts_the_file_cant_hold_are_refused() {
     cut(with(zlib, block(8)), "a.vtu");
     assert_eq!(got(&read(with(zlib, block(12)).as_bytes(), "a.vtu")).points, [0]);
     // An appended array's offset past the data.
-    let raw =
-        String::from_utf8_lossy(&Vtu::new(Mode::AppendedBase64).write()).replace("offset=\"0\"", "offset=\"999999\"");
+    let raw = crate::bytes::text(&Vtu::new(Mode::AppendedBase64).write()).replace("offset=\"0\"", "offset=\"999999\"");
     cut(raw, "a.vtu");
 }
 

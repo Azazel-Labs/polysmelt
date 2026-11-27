@@ -20,5 +20,9 @@
       "unit": "millimeter",
       "metersPerUnit": 0.001
     }
+  },
+  "json": {
+    "/asset/extras/source/unit": "millimeter",
+    "/asset/extras/source/unitAsWritten": null
   }
 }

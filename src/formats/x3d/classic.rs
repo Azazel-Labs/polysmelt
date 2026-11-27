@@ -127,11 +127,11 @@ fn unescape(s: &[u8]) -> String {
         out.push(s[i]);
         i += 1;
     }
-    String::from_utf8_lossy(&out).into_owned()
+    crate::bytes::text(&out).into_owned()
 }
 
 fn text(w: &[u8]) -> String {
-    String::from_utf8_lossy(w).into_owned()
+    crate::bytes::text(w).into_owned()
 }
 
 struct Parser<'d> {
@@ -386,7 +386,12 @@ impl<'d> Parser<'d> {
         self.depth += 1;
         loop {
             match self.lx.next() {
-                Tok::Close | Tok::End => break,
+                Tok::Close => break,
+                Tok::End => {
+                    // The file ends inside the node.
+                    self.g.cut = true;
+                    break;
+                }
                 Tok::Word(w) => {
                     if self.statement(w) {
                         continue;
@@ -462,7 +467,11 @@ impl<'d> Parser<'d> {
         loop {
             let at = self.lx.at;
             match self.lx.next() {
-                Tok::RBracket | Tok::End => break,
+                Tok::RBracket => break,
+                Tok::End => {
+                    self.g.cut = true;
+                    break;
+                }
                 Tok::Word(w) if numeric(w) => nums.push(number(w)),
                 Tok::Str(s) => strs.push(unescape(s)),
                 Tok::Word(b"TRUE") => bools.push(true),

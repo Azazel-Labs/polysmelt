@@ -39,7 +39,7 @@ pub(super) fn parse(data: &[u8]) -> Result<Tree<'_>> {
         src = rest;
     }
     let first = src.split(|&c| c == b'\n').next().unwrap_or_default();
-    let first = String::from_utf8_lossy(first);
+    let first = crate::bytes::text(first);
     let stated = first.trim_end_matches('\r').strip_prefix("; FBX ").map(|r| {
         let mut parts = r.split(['.', ' ']).map(|p| p.trim().parse::<u32>().ok());
         (parts.next().flatten(), parts.next().flatten())
@@ -256,7 +256,7 @@ impl<'a> Lexer<'a> {
                 }
             }
             _ => {
-                let c = String::from_utf8_lossy(&b[start..b.len().min(start + 4)])
+                let c = crate::bytes::text(&b[start..b.len().min(start + 4)])
                     .chars()
                     .next()
                     .unwrap_or('?');
@@ -370,7 +370,7 @@ enum Val<'a> {
 
 /// `Geometry::Rock` → binary FBX's `Rock\0\x01Geometry`.
 fn object_name(s: &[u8]) -> Cow<'_, str> {
-    let mut s = String::from_utf8_lossy(s);
+    let mut s = crate::bytes::text(s);
     if s.contains("&quot;") {
         s = Cow::Owned(s.replace("&quot;", "\""));
     }
@@ -536,7 +536,7 @@ fn attributes<'a>(name: &str, parent: &str, vals: &mut Vec<Val<'a>>, out: &mut V
                 Ty::F64 | Ty::Auto => Attr::F64(f),
             },
             Val::Str(s) => Attr::String(s),
-            Val::Raw(s) => Attr::String(String::from_utf8_lossy(s)),
+            Val::Raw(s) => Attr::String(crate::bytes::text(s)),
             Val::Bool(b) => Attr::Bool(b),
             Val::Arr(Values::I32(v)) => Attr::ArrI32(v.into()),
             Val::Arr(Values::I64(v)) => Attr::ArrI64(v.into()),

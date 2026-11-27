@@ -651,9 +651,9 @@ mod tests {
             for t in [&s[..], &s[..cut]] {
                 let (v, n) = leading_digits(t);
                 let (w, m) = slow(t);
-                assert_eq!(n, m, "{:?}", String::from_utf8_lossy(t));
+                assert_eq!(n, m, "{:?}", crate::bytes::text(t));
                 if n <= 19 {
-                    assert_eq!(v, w, "{:?}", String::from_utf8_lossy(t));
+                    assert_eq!(v, w, "{:?}", crate::bytes::text(t));
                 }
             }
         }

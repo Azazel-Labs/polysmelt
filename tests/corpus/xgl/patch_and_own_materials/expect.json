@@ -7,7 +7,7 @@
   "area": 1.5,
   "materials": [
     {
-      "name": "material 1",
+      "name": "material1",
       "color": [
         1.0,
         0.0,
@@ -16,7 +16,7 @@
       ]
     },
     {
-      "name": "material 9",
+      "name": "material9",
       "color": [
         0.0,
         1.0,

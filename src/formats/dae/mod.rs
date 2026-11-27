@@ -233,7 +233,11 @@ pub(super) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
     r.skin_meshes();
     r.morph_meshes();
     if r.nodes.is_empty() {
-        return Ok(Document::empty(Map::new()));
+        return Err(crate::Error::nothing_left(
+            dom.cut,
+            "COLLADA",
+            "this COLLADA document has nothing in its scene",
+        ));
     }
     let animations = if keep.animations { r.animations() } else { Vec::new() };
 
@@ -248,7 +252,10 @@ pub(super) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
     }
     scene_nodes.append(&mut r.skinned_roots);
 
-    let source = source_info(&dom, root, asset, meters, &up);
+    let mut source = source_info(&dom, root, asset, meters, &up);
+    if dom.cut {
+        source.insert("truncated".into(), json!(true));
+    }
     let mut asset_json = json!({});
     if let Some(c) = source.get("copyright") {
         asset_json["copyright"] = c.clone();
@@ -378,7 +385,7 @@ fn read_document(path: &str, archive: Option<&mut Archive<'_>>, assets: &dyn Ass
 fn source_info(dom: &Dom<'_>, root: usize, asset: Option<usize>, meters: f64, up: &str) -> Map<String, Value> {
     let text = |e: usize, name: &str| {
         dom.child(e, name)
-            .map(|c| String::from_utf8_lossy(dom.text(c)).trim().to_owned())
+            .map(|c| crate::bytes::text(dom.text(c)).trim().to_owned())
             .filter(|s| !s.is_empty())
     };
     let declared_unit = asset.and_then(|a| unit(dom, a)).is_some();
@@ -1604,7 +1611,7 @@ impl Reader<'_> {
                 for t in dom.children(extra) {
                     let key = dom
                         .attr(t, "profile")
-                        .map_or_else(|| String::from_utf8_lossy(dom.name(t)).into_owned(), str::to_owned);
+                        .map_or_else(|| crate::bytes::text(dom.name(t)).into_owned(), str::to_owned);
                     let v = extra_json(dom, t, 0, &mut budget);
                     out.insert(key, v);
                 }
@@ -1626,7 +1633,7 @@ fn extra_json(dom: &Dom<'_>, e: usize, depth: usize, budget: &mut usize) -> Valu
         }
         *budget -= 1;
         let v = extra_json(dom, c, depth + 1, budget);
-        let key = String::from_utf8_lossy(dom.name(c)).into_owned();
+        let key = crate::bytes::text(dom.name(c)).into_owned();
         match out.get_mut(&key) {
             Some(Value::Array(list)) => list.push(v),
             Some(old) => *old = json!([old.take(), v]),

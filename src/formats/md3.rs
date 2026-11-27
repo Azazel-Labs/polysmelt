@@ -26,8 +26,8 @@
 //! the model when there is one (`surface,texture` lines, as player models name theirs). Shader scripts, which can
 //! name a different texture for a shader, aren't read; frame bounds are dropped.
 //!
-//! The format is Z up by the engine's convention, so the scene's roots are turned for glTF's Y up (the source info's
-//! `upAxis` is an assumed `+Z`, converted); game units are kept unscaled, and their length unknown. With more than
+//! The format is Z up and right-handed, as the engine it belongs to is, so the scene's roots are turned for glTF's Y
+//! up (the source info's `upAxis` is a declared `+Z`, converted, and its `handedness` a declared `right`); game units are kept unscaled, and their length unknown. With more than
 //! one frame the assumed frame rate is recorded. The header's name (the model's path in the game's folders) is kept
 //! as `name`.
 //!
@@ -51,7 +51,7 @@ use crate::images::Images;
 use crate::mesh::Material;
 use crate::num::{f32_of, u32_of};
 use crate::quat;
-use crate::source::{Axis, Fact};
+use crate::source::{Axis, Fact, Handedness};
 
 /// Frames a second, as the format stores none.
 const RATE: f32 = 10.0;
@@ -193,7 +193,8 @@ pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
         // The model's path in the game's folders, not a title.
         scene.source.insert("name".into(), json!(file.name));
     }
-    scene.info.up_axis = Fact::Assumed(Axis::PosZ);
+    scene.info.up_axis = Fact::Declared(Axis::PosZ);
+    scene.info.handedness = Fact::Declared(Handedness::Right);
     if n_frames > 1 {
         scene.info.frame_rate = Fact::Assumed(f64::from(RATE));
     }
@@ -295,7 +296,12 @@ fn parse(data: &[u8], morphs: bool) -> Result<File> {
     let mut b = Bin::new(data, "MD3");
     b.skip(4)?;
     let version = b.i32()?;
-    let name = scene::text(b.fixed_str(64)?);
+    ensure!(
+        version == 15,
+        Unsupported,
+        "MD3 version {version} isn't read, only version 15"
+    );
+    let name = crate::bytes::name(b.fixed_str(64)?);
     let _flags = b.i32()?;
     let n_frames = size(b.i32()?, "frame count")?;
     let n_tags = size(b.i32()?, "tag count")?;
@@ -315,7 +321,7 @@ fn parse(data: &[u8], morphs: bool) -> Result<File> {
     let mut frame_names = Vec::with_capacity(b.count(n_frames as u64, 56)?);
     for _ in 0..n_frames {
         b.skip(40)?;
-        frame_names.push(scene::text(b.fixed_str(16)?));
+        frame_names.push(crate::bytes::name(b.fixed_str(16)?));
     }
 
     let mut tags: Vec<Tag> = Vec::new();
@@ -327,7 +333,7 @@ fn parse(data: &[u8], morphs: bool) -> Result<File> {
         b.count(total as u64, 112)?;
         for f in 0..n_frames {
             for t in 0..n_tags {
-                let name = scene::text(b.fixed_str(64)?);
+                let name = crate::bytes::name(b.fixed_str(64)?);
                 let origin = b.vec3()?;
                 let axes = [b.vec3()?, b.vec3()?, b.vec3()?];
                 // The axes are the rotation's columns, which is how the matrix is laid out.
@@ -379,7 +385,7 @@ fn surface(data: &[u8], start: usize, s: usize, keep: usize, budget: &mut usize)
         Corrupt,
         "MD3 surface {s} doesn't start with IDP3"
     );
-    let name = scene::text(b.fixed_str(64)?);
+    let name = crate::bytes::name(b.fixed_str(64)?);
     let _flags = b.i32()?;
     let n_frames = size(b.i32()?, "surface frame count")?;
     let n_shaders = size(b.i32()?, "shader count")?;
@@ -412,7 +418,7 @@ fn surface(data: &[u8], start: usize, s: usize, keep: usize, budget: &mut usize)
     if n_shaders > 0 {
         b.seek(ofs_shaders)?;
         b.count(n_shaders as u64, 68)?;
-        shader = scene::text(b.fixed_str(64)?);
+        shader = crate::bytes::name(b.fixed_str(64)?);
     }
     if n_tris == 0 || n_verts == 0 {
         return Ok((None, end));
@@ -595,7 +601,7 @@ mod tests {
         assert_eq!(info.format.as_deref(), Some("MD3"));
         assert_eq!(info.version.as_deref(), Some("15"));
         assert_eq!(info.meters_per_unit, Fact::Unknown);
-        assert_eq!(info.up_axis, Fact::Assumed(Axis::PosZ));
+        assert_eq!(info.up_axis, Fact::Declared(Axis::PosZ));
         assert_eq!(info.frame_rate, Fact::Assumed(10.0));
         assert!(info.converted.up_axis && !info.converted.units);
         assert_eq!(

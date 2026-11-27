@@ -130,6 +130,78 @@ pub(crate) fn until_nul(b: &[u8]) -> &[u8] {
     b.iter().position(|&c| c == 0).map_or(b, |end| &b[..end])
 }
 
+/// Windows-1252's characters for the bytes 0x80 to 0x9F, where it differs from Latin-1. The five bytes it leaves
+/// undefined stay the control characters Latin-1 has there, as browsers read them.
+const CP1252_HIGH: [char; 32] = [
+    '\u{20AC}', '\u{81}', '\u{201A}', '\u{192}', '\u{201E}', '\u{2026}', '\u{2020}', '\u{2021}', '\u{2C6}', '\u{2030}',
+    '\u{160}', '\u{2039}', '\u{152}', '\u{8D}', '\u{17D}', '\u{8F}', '\u{90}', '\u{2018}', '\u{2019}', '\u{201C}',
+    '\u{201D}', '\u{2022}', '\u{2013}', '\u{2014}', '\u{2DC}', '\u{2122}', '\u{161}', '\u{203A}', '\u{153}', '\u{9D}',
+    '\u{17E}', '\u{178}',
+];
+
+/// The character a byte is in Windows-1252: Latin-1's, but for 0x80 to 0x9F.
+#[inline]
+pub(crate) fn windows_1252_char(b: u8) -> char {
+    match b {
+        0x80..=0x9F => CP1252_HIGH[usize::from(b - 0x80)],
+        _ => char::from(b),
+    }
+}
+
+/// Bytes read as Windows-1252, each one a character.
+pub(crate) fn windows_1252(b: &[u8]) -> String {
+    b.iter().map(|&c| windows_1252_char(c)).collect()
+}
+
+/// Text from a file as a string, the one way every reader decodes text whose encoding its format doesn't state.
+///
+/// UTF-8 is taken as it is, without a byte order mark. UTF-16 that starts with a byte order mark is decoded (an
+/// unpaired surrogate becomes U+FFFD). Anything else is read as Windows-1252, which older tools wrote and which
+/// gives every byte a character: text that has bytes never comes out empty or as U+FFFD. Formats that state
+/// their encoding (`MikuMikuDance`'s Shift-JIS and UTF-16, an XML declaration) decode by it instead.
+pub(crate) fn text(b: &[u8]) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
+    let b = b.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(b);
+    let wide = match b {
+        [0xFF, 0xFE, rest @ ..] if rest.len() % 2 == 0 => Some((true, rest)),
+        [0xFE, 0xFF, rest @ ..] if rest.len() % 2 == 0 => Some((false, rest)),
+        _ => None,
+    };
+    if let Some((le, rest)) = wide {
+        let units = rest.as_chunks::<2>().0.iter().map(|&c| {
+            if le {
+                u16::from_le_bytes(c)
+            } else {
+                u16::from_be_bytes(c)
+            }
+        });
+        return Cow::Owned(
+            char::decode_utf16(units)
+                .map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER))
+                .collect(),
+        );
+    }
+    match std::str::from_utf8(b) {
+        Ok(s) => Cow::Borrowed(s),
+        Err(_) => Cow::Owned(windows_1252(b)),
+    }
+}
+
+/// [`text`] from bytes a reader owns.
+pub(crate) fn text_owned(b: Vec<u8>) -> String {
+    match String::from_utf8(b) {
+        Ok(s) if !s.starts_with('\u{FEFF}') => s,
+        Ok(s) => s.trim_start_matches('\u{FEFF}').to_owned(),
+        Err(e) => text(e.as_bytes()).into_owned(),
+    }
+}
+
+/// A name from a binary file's text field, the same for every reader: the bytes before the first NUL, as
+/// [`text`] reads them, without the spaces (or other whitespace) that pad its end.
+pub(crate) fn name(b: &[u8]) -> String {
+    text(until_nul(b)).trim_end().to_owned()
+}
+
 /// A reader over a file's bytes that checks every read against the end. A read past it fails
 /// with a [`Truncated`](crate::ErrorKind::Truncated) error that names the format and leaves the
 /// cursor where it was.
@@ -544,6 +616,42 @@ mod tests {
         assert_eq!(b.left(), 0);
         assert!(Bin::new(b"no end", "T").cstr().is_err());
         assert_eq!(until_nul(b"x\0y"), b"x");
+    }
+
+    #[test]
+    fn text_is_utf8_then_utf16_by_its_mark_then_windows_1252() {
+        assert_eq!(text(b"plain"), "plain");
+        assert_eq!(text("caf\u{e9} \u{65e5}".as_bytes()), "caf\u{e9} \u{65e5}");
+        assert_eq!(
+            text(b"\xEF\xBB\xBFmarked"),
+            "marked",
+            "a UTF-8 byte order mark is dropped"
+        );
+        assert_eq!(text(b"\xFF\xFEh\0i\0"), "hi");
+        assert_eq!(text(b"\xFE\xFF\0h\0i"), "hi");
+        // Not UTF-8: Windows-1252, where 0x80 to 0x9F aren't Latin-1's control characters.
+        assert_eq!(text(b"caf\xE9"), "caf\u{e9}");
+        assert_eq!(
+            text(b"\x80 5 \x93quoted\x94 \x99"),
+            "\u{20ac} 5 \u{201c}quoted\u{201d} \u{2122}"
+        );
+        assert_eq!(text(b"\x81\x8D\x8F\x90\x9D"), "\u{81}\u{8d}\u{8f}\u{90}\u{9d}");
+        // Every byte has a character: nothing comes out empty or replaced.
+        let all: Vec<u8> = (0x80..=0xFF).collect();
+        let s = text(&all);
+        assert_eq!(s.chars().count(), 128);
+        assert!(!s.contains('\u{FFFD}'));
+        assert_eq!(text_owned(b"caf\xE9".to_vec()), "caf\u{e9}");
+        assert_eq!(text_owned(b"\xEF\xBB\xBFok".to_vec()), "ok");
+    }
+
+    #[test]
+    fn names_stop_at_a_nul_and_lose_their_padding() {
+        assert_eq!(name(b"bone\0junk"), "bone");
+        assert_eq!(name(b"padded   \0\0"), "padded");
+        assert_eq!(name(b"  lead kept "), "  lead kept");
+        assert_eq!(name(b"t\xEAte\0"), "t\u{ea}te");
+        assert_eq!(name(b"\0"), "");
     }
 
     #[test]

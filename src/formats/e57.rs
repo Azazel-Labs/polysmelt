@@ -4,14 +4,14 @@
 //! Cartesian positions are used where they're valid, spherical ones (range, azimuth, elevation)
 //! turned Cartesian where they aren't; points with neither are left out and counted in the facts.
 //! Each scan's pose (a rotation and translation) is applied in double precision. E57 is in
-//! meters, right-handed and Z-up by convention, so positions turn Y-up. Colors are scaled by the
+//! meters, right-handed and Z-up, so positions turn Y-up. Colors are scaled by the
 //! scan's color limits (or the fields' own range) and taken as sRGB; a point whose color is
 //! marked invalid is transparent black. Normals from the `nor` extension are `NORMAL`.
 //! Intensity is `_INTENSITY`, as stored (the limits are in the extras); row and column indices,
 //! return index and count, time stamps and any other field are float custom attributes, up to
 //! [`COLUMNS`] of them. A file with several scans adds `_SCAN`, the scan's index.
 //!
-//! The source info has the format's meters (declared), right-handed, Z up (assumed), the library
+//! The source info has the format's meters, right-handed and Z up (all declared: the standard fixes them), the library
 //! that wrote the file as its tool, the file's creation time (GPS time) as its creation date in
 //! UTC, and the coordinate system the file names, if any, as its georeference. Each scan's
 //! metadata (names, sensor, pose, limits, bounds, acquisition times) and the images' names and
@@ -81,6 +81,17 @@ fn open<'a>(input: &Input<'a>) -> Result<(Reader<'a>, Rc<Meter>)> {
         since: Cell::new(0),
         limit: Cell::new(u64::MAX),
     });
+    // The header gives the file's length: a shorter file is cut short, whatever the library makes of it.
+    let head = input.head(24)?;
+    ensure!(head.starts_with(b"ASTM-E57"), UnknownFormat, "not an E57 file");
+    if let (Some(declared), Some(len)) = (crate::bytes::u64_at(&head, 16), input.len()) {
+        ensure!(
+            declared <= len,
+            Truncated,
+            "E57 file is cut short: its header gives {declared} bytes and the file holds {len}"
+        );
+    }
+    ensure!(head.len() >= 24, Truncated, "E57 header is cut short");
     let stream = input.seekable().context(ErrorKind::Corrupt, "reading the E57 file")?;
     let inner = BufReader::with_capacity(1 << 16, stream);
     let reader = E57Reader::new(Watched {
@@ -515,13 +526,13 @@ fn document(reader: &Reader<'_>, scans: &[PointCloud], parts: Vec<Part>) -> Resu
     let mut source = json!({ "scans": scan_list });
     let h = reader.header();
     source["guid"] = json!(reader.guid());
-    // Meters and right-handed by the standard; Z up by convention.
+    // Meters, right-handed and Z up (the axis its spherical coordinates rise from) by the standard.
     let mut info = SourceInfo {
         format: Some("E57".into()),
         version: Some(format!("{}.{}", h.major, h.minor)),
         meters_per_unit: Fact::Declared(1.0),
         unit: Some("meter".into()),
-        up_axis: Fact::Assumed(Axis::PosZ),
+        up_axis: Fact::Declared(Axis::PosZ),
         handedness: Fact::Declared(Handedness::Right),
         tool: reader
             .library_version()
@@ -824,7 +835,7 @@ mod tests {
         let info = doc.source_info();
         assert_eq!(info.version.as_deref(), Some("1.0"));
         assert_eq!(info.meters_per_unit, Fact::Declared(1.0));
-        assert_eq!(info.up_axis, Fact::Assumed(Axis::PosZ));
+        assert_eq!(info.up_axis, Fact::Declared(Axis::PosZ));
         assert_eq!(info.handedness, Fact::Declared(Handedness::Right));
         assert!(info.converted.up_axis && !info.converted.units);
         assert!(info.tool.as_deref().is_some_and(|t| t.starts_with("Rust E57 Library")));

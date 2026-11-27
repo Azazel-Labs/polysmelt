@@ -233,7 +233,7 @@ fn materials_and_textures() {
     // A high specular power is a smooth surface.
     assert!(pbr["roughnessFactor"].as_f64().unwrap() < 0.5);
     assert!(mat["emissiveFactor"][1].as_f64().unwrap() > 0.4);
-    assert_eq!(source(&doc)["missingTextures"], json!(1));
+    assert_eq!(source(&doc)["droppedTextures"], json!(1));
     // The second texture coordinate set is there for the texture, and the first padded.
     let prim = &j["meshes"][0]["primitives"][0];
     assert!(prim["attributes"]["TEXCOORD_1"].is_number());

@@ -21,7 +21,8 @@
   "json": {
     "/asset/extras/source/format": "HTR",
     "/asset/extras/source/upAxis": "+Y",
-    "/asset/extras/source/unit": "cubits",
+    "/asset/extras/source/unit": null,
+    "/asset/extras/source/unitAsWritten": "cubits",
     "/asset/extras/source/metersPerUnit": null,
     "/asset/extras/source/frameRate": 60.0,
     "/asset/extras/source/assumed": null,

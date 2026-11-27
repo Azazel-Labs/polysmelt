@@ -158,7 +158,7 @@ fn name(token: Option<&[u8]>) -> String {
             i += 1;
         }
     }
-    String::from_utf8_lossy(&out).into_owned()
+    crate::bytes::text(&out).into_owned()
 }
 
 /// Three numbers from a keyword's line.
@@ -183,11 +183,11 @@ pub(super) fn read(data: &[u8]) -> Result<Model> {
     let version = first
         .split_at_checked(START.len())
         .filter(|(start, _)| start.eq_ignore_ascii_case(START))
-        .map(|(_, version)| String::from_utf8_lossy(stream::trim(version)).into_owned())
+        .map(|(_, version)| crate::bytes::text(stream::trim(version)).into_owned())
         .context(ErrorKind::UnknownFormat, "not a VTK file")?;
     // The title is the very next line, blank or not.
     let title = stream::next_line(c.d, &mut c.at).unwrap_or_default();
-    let title = String::from_utf8_lossy(stream::trim(title)).into_owned();
+    let title = crate::bytes::text(stream::trim(title)).into_owned();
     let encoding = c.line().unwrap_or_default();
     let binary = encoding.eq_ignore_ascii_case(b"BINARY");
     ensure!(
@@ -221,7 +221,7 @@ pub(super) fn read(data: &[u8]) -> Result<Model> {
         let mut array = None;
         match key.as_slice() {
             b"DATASET" => {
-                dataset = String::from_utf8_lossy(words.next().unwrap_or_default()).to_ascii_uppercase();
+                dataset = crate::bytes::text(words.next().unwrap_or_default()).to_ascii_uppercase();
             }
             b"DIMENSIONS" => {
                 let mut d = [0u32; 3];
@@ -383,7 +383,7 @@ pub(super) fn read(data: &[u8]) -> Result<Model> {
                     }
                     _ => (1, Role::Other),
                 };
-                let what = String::from_utf8_lossy(&key).into_owned();
+                let what = crate::bytes::text(&key).into_owned();
                 let n = tuples(&what)?
                     .checked_mul(comps)
                     .with_context(ErrorKind::Corrupt, || format!("VTK {what} are too big"))?;
@@ -392,7 +392,7 @@ pub(super) fn read(data: &[u8]) -> Result<Model> {
             }
             b"METADATA" => r.skip_block(),
             _ => {
-                let word = String::from_utf8_lossy(&key[..key.len().min(32)]).into_owned();
+                let word = crate::bytes::text(&key[..key.len().min(32)]).into_owned();
                 model.source.insert("unread".into(), json!(word));
                 break;
             }
@@ -443,7 +443,7 @@ pub(super) fn read(data: &[u8]) -> Result<Model> {
     }
     model
         .source
-        .insert("encoding".into(), json!(if binary { "binary" } else { "ASCII" }));
+        .insert("encoding".into(), json!(if binary { "binary" } else { "ascii" }));
     model.source.insert("dataset".into(), json!(dataset));
     if !fields.is_empty() {
         model

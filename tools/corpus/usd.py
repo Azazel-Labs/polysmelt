@@ -800,7 +800,8 @@ write("point_instancer", layer(prim("Xform", "Root", prim(
 # --- files that aren't readable ------------------------------------------------------------
 
 case(FMT, "not_usd", {"not_usd.usda": "solid cube\nendsolid cube\n"},
-     {"spec": f"{SPEC}: a text file that isn't usda", "source": SRC, "error": "", "error_kind": "Corrupt"})
+     {"spec": f"{SPEC}: a text file that isn't usda", "source": SRC, "error": "not a .usda file",
+      "error_kind": "UnknownFormat"})
 crate_src = os.path.join(case_dir("truncated_usdc"), "full.usda")
 with open(crate_src, "w", encoding="utf-8") as f:
     f.write(simple)
@@ -810,7 +811,7 @@ with open(crate_src.replace(".usda", ".usdc"), "rb") as f:
 for f in os.listdir(os.path.dirname(crate_src)):
     os.remove(os.path.join(os.path.dirname(crate_src), f))
 case(FMT, "truncated_usdc", {"truncated_usdc.usdc": crate[:len(crate) // 2]},
-     {"spec": f"{SPEC}: a crate file cut in half", "source": SRC, "error": "", "error_kind": "Corrupt"})
+     {"spec": f"{SPEC}: a crate file cut in half", "source": SRC, "error": "cut short", "error_kind": "Truncated"})
 case(FMT, "empty_usdz", {"empty_usdz.usdz": b"PK\x05\x06" + b"\0" * 18},
      {"spec": f"{SPEC}: a usdz holding no layer", "source": SRC, "error": "", "error_kind": "Corrupt"})
 

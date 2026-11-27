@@ -7,7 +7,7 @@
 //! moves with its joint, or with up to four joints by the weights the format's later versions add. Keyframes, in
 //! seconds, turn and move a joint from where it stands at rest, in its rest frame (a move is turned by the rest
 //! rotation). `MilkShape` is Y up and right-handed, as glTF is
-//! (assumed in the source info, as the format's convention); its units' length is unknown. The model's comment is
+//! (declared in the source info: the program's space is every file's); its units' length is unknown. The model's comment is
 //! the source info's `comments`; the groups', materials' and joints' comments are skipped.
 
 use std::collections::HashMap;
@@ -288,8 +288,8 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
     let mut source = serde_json::Map::new();
     scene.info.format = Some("MS3D".into());
     scene.info.version = Some(m.version.to_string());
-    scene.info.up_axis = Fact::Assumed(Axis::PosY);
-    scene.info.handedness = Fact::Assumed(Handedness::Right);
+    scene.info.up_axis = Fact::Declared(Axis::PosY);
+    scene.info.handedness = Fact::Declared(Handedness::Right);
     if m.fps.is_finite() && m.fps > 0.0 {
         scene.info.frame_rate = Fact::Declared(f64::from(m.fps));
     }
@@ -346,7 +346,7 @@ fn weights(v: &Vertex, joints: usize, extra: bool) -> Vec<(u32, f32)> {
 
 /// A fixed-size name field as text.
 fn field(b: &mut Bin<'_>, n: usize) -> Result<String> {
-    Ok(scene::text(b.fixed_str(n)?).trim().to_owned())
+    Ok(crate::bytes::name(b.fixed_str(n)?).trim_start().to_owned())
 }
 
 /// Reads the file.
@@ -731,7 +731,7 @@ mod tests {
         assert_eq!(info.format.as_deref(), Some("MS3D"));
         assert_eq!(info.version.as_deref(), Some("4"));
         assert_eq!(info.frame_rate, Fact::Declared(24.0));
-        assert_eq!(info.up_axis, Fact::Assumed(Axis::PosY));
+        assert_eq!(info.up_axis, Fact::Declared(Axis::PosY));
         assert_eq!(info.meters_per_unit, Fact::Unknown);
         assert_eq!(info.comments, ["made by hand"]);
         assert_eq!(info.converted, crate::source::Converted::default());

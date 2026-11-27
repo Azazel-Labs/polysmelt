@@ -230,7 +230,7 @@ fn text_reads_its_elements_by_reference() {
     let volume = named.iter().find(|m| m["name"] == "Volume 1").unwrap();
     assert_eq!(volume["extras"], serde_json::json!({ "reference": 1, "dimension": 3 }));
     assert_eq!(source(&doc)["format"], "Medit");
-    assert_eq!(source(&doc)["encoding"], "ASCII");
+    assert_eq!(source(&doc)["encoding"], "ascii");
     assert_eq!(source(&doc)["version"], "2");
 }
 

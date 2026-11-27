@@ -346,7 +346,7 @@ case(FMT, "scene_mesh_files",
       "meshes/box.irrmesh": box_file},
      {"spec": f"{SPEC}: mesh nodes naming an Irrlicht mesh in a subfolder, placed twice, and one naming a missing "
       "file", "source": SRC, "triangles": 24, "area": 20.0, "bounds": bounds(placed),
-      "facts": {"missing_files": ["gone.irrmesh"], "nodes": 3}, "materials": [{"color": lin(0xFF336699)}],
+      "facts": {"nodes": 3}, "json": {"/asset/extras/source/missingFiles": ["gone.irrmesh"]}, "materials": [{"color": lin(0xFF336699)}],
       "document": {"meshes": 1}})
 
 # A mesh node's own materials replace the file's.

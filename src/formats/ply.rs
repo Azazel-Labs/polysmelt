@@ -346,14 +346,14 @@ fn header(data: &[u8]) -> Result<(Header, Vec<Element>, usize)> {
     let mut elements: Vec<Element> = Vec::new();
     let mut textures = Vec::new();
     let (mut comments, mut obj_info) = (Vec::new(), Vec::new());
-    let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
+    let text = |b: &[u8]| crate::bytes::text(b).into_owned();
     let mut at = 0;
     let mut first = true;
     loop {
         let rest = data
             .get(at..)
             .filter(|r| !r.is_empty())
-            .context(ErrorKind::Corrupt, "PLY header has no end_header")?;
+            .context(ErrorKind::Truncated, "PLY header is cut short: it has no end_header")?;
         let len = rest
             .iter()
             .position(|&c| c == b'\n' || c == b'\r')
@@ -392,7 +392,7 @@ fn header(data: &[u8]) -> Result<(Header, Vec<Element>, usize)> {
             [b"comment", ..] => comments.push(text(line[b"comment".len()..].trim_ascii())),
             [b"obj_info", ..] => obj_info.push(text(line[b"obj_info".len()..].trim_ascii())),
             [b"element", name, count] => elements.push(Element {
-                name: String::from_utf8_lossy(name).into_owned(),
+                name: crate::bytes::text(name).into_owned(),
                 count: std::str::from_utf8(count)
                     .ok()
                     .and_then(|c| c.parse().ok())
@@ -404,7 +404,7 @@ fn header(data: &[u8]) -> Result<(Header, Vec<Element>, usize)> {
                 .context(ErrorKind::Corrupt, "PLY property before element")?
                 .props
                 .push(Prop {
-                    name: String::from_utf8_lossy(name).into_owned(),
+                    name: crate::bytes::text(name).into_owned(),
                     ty: Ty::parse(i)?,
                     count: Some(Ty::parse(c)?),
                 }),
@@ -413,7 +413,7 @@ fn header(data: &[u8]) -> Result<(Header, Vec<Element>, usize)> {
                 .context(ErrorKind::Corrupt, "PLY property before element")?
                 .props
                 .push(Prop {
-                    name: String::from_utf8_lossy(name).into_owned(),
+                    name: crate::bytes::text(name).into_owned(),
                     ty: Ty::parse(ty)?,
                     count: None,
                 }),
@@ -733,13 +733,12 @@ pub(crate) fn ply(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<D
         Truncated,
         "PLY data is cut short: the file holds fewer items than its header counts"
     );
-    let mut source = json!({
-        "encoding": match head.format {
-            Format::Ascii => "ascii",
-            Format::Le => "binary_little_endian",
-            Format::Be => "binary_big_endian",
-        },
-    });
+    let mut source = json!({ "encoding": if matches!(head.format, Format::Ascii) { "ascii" } else { "binary" } });
+    match head.format {
+        Format::Ascii => {}
+        Format::Le => source["byteOrder"] = json!("little"),
+        Format::Be => source["byteOrder"] = json!("big"),
+    }
     if body.cut {
         source["truncated"] = json!(true);
     }
@@ -785,7 +784,14 @@ pub(crate) fn ply(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<D
         };
         let dir = path.parent().unwrap_or(Path::new(""));
         let mut images = Images::new(!keep.image_bytes, dir);
-        let (mesh, srcs) = build(&mut body, textures, path, assets, &mut images)?;
+        let cut = body.cut;
+        let (mesh, srcs) = build(&mut body, textures, path, assets, &mut images).map_err(|e| {
+            if cut && e.kind() == ErrorKind::Empty {
+                crate::Error::cut_short("PLY data is cut short before its first whole face")
+            } else {
+                e
+            }
+        })?;
         facts.insert("triangles".into(), json!(mesh.triangles()));
         facts.insert(
             "vertices".into(),

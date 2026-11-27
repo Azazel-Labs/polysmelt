@@ -133,12 +133,9 @@ struct MtlEntry {
     raw: Map<String, Value>,
 }
 
-/// Text as UTF-8 when it is, otherwise as Latin-1 (each byte one character).
+/// Text as every reader decodes it: UTF-8 when it is, otherwise Windows-1252.
 fn text(b: &[u8]) -> String {
-    match std::str::from_utf8(b) {
-        Ok(s) => s.to_owned(),
-        Err(_) => b.iter().map(|&c| char::from(c)).collect(),
-    }
+    crate::bytes::text(b).into_owned()
 }
 
 /// The first `\n` or `\r` in `rest`. Most bytes are past `\r`, so take one compare.
@@ -2886,11 +2883,15 @@ pub(crate) fn obj(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<D
         r.groups[g].points.extend(0..u32_of(r.v.len()));
         r.points = r.v.len();
     }
-    ensure!(
-        r.triangles + r.points + r.lines > 0,
-        Empty,
-        "OBJ has no faces or vertices"
-    );
+    if r.triangles + r.points + r.lines == 0 {
+        // Lines, and none of them a statement OBJ has: some other kind of text.
+        ensure!(
+            r.skipped.is_empty() || !r.v.is_empty(),
+            UnknownFormat,
+            "not an OBJ file: none of its lines is an OBJ statement"
+        );
+        bail!(Empty, "OBJ has no faces or vertices");
+    }
     ensure!(
         r.triangles <= r.limit,
         LimitExceeded,

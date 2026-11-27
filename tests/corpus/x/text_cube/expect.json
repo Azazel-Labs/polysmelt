@@ -70,7 +70,7 @@
   ],
   "vertices": 24,
   "json": {
-    "/asset/extras/source/encoding": "text",
+    "/asset/extras/source/encoding": "ascii",
     "/asset/extras/source/floatSize": 32,
     "/asset/extras/source/version": "3.3"
   },

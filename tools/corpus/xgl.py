@@ -150,9 +150,9 @@ mats = mat(1, red, emiss=(0.1, 0.2, 0.3), spec=(1, 1, 1), shine=64) + mat(2, blu
 case(FMT, "materials", {"cube.xgl": world(mats, mesh(cube_lists() + cube_faces(lambda f: 1 if f < 3 else 2)))},
      {"spec": f"{SPEC}: faces referring to materials by ID: diffuse, emissive, shininess, alpha", "source": SRC,
       **CUBE, "primitives": 2, "material_count": 2,
-      "materials": [{"name": "material 1", "color": lin(red), "emissive": lin((0.1, 0.2, 0.3))[:3],
+      "materials": [{"name": "material1", "color": lin(red), "emissive": lin((0.1, 0.2, 0.3))[:3],
                      "roughness": r((2 / 66) ** 0.25), "alpha_mode": "OPAQUE"},
-                    {"name": "material 2", "color": lin(blue, 0.5), "alpha_mode": "BLEND", "roughness": 0.85}]})
+                    {"name": "material2", "color": lin(blue, 0.5), "alpha_mode": "BLEND", "roughness": 0.85}]})
 
 own = face([{"PREF": 0}, {"PREF": 1}, {"PREF": 2}]).replace("<F>\n", "<F>\n" + mat(9, (0, 1, 0)))
 patch = "<PATCH>\n<MATREF>1</MATREF>\n" + face([{"PREF": 0}, {"PREF": 2}, {"PREF": 3}]) + "</PATCH>\n"
@@ -162,7 +162,7 @@ plist = "".join(f'<P ID="{i}">{v3(p)}</P>\n' for i, p in enumerate(pts))
 case(FMT, "patch_and_own_materials", {"tris.xgl": world(mat(1, red), mesh(plist + own + patch + plain))},
      {"spec": f"{SPEC}: a face's own <MAT>, a <PATCH>'s <MATREF> for the faces in it, and a face with neither",
       "source": SRC, "triangles": 3, "primitives": 3, "material_count": 3, "area": 1.5,
-      "materials": [{"name": "material 1", "color": lin(red)}, {"name": "material 9", "color": lin((0, 1, 0))},
+      "materials": [{"name": "material1", "color": lin(red)}, {"name": "material9", "color": lin((0, 1, 0))},
                     {"name": "default", "color": [1, 1, 1, 1]}]})
 
 # Texture coordinates, v flipped.
@@ -267,7 +267,7 @@ case(FMT, "lights_and_background",
                "/asset/extras/source/ambientLight": [0.125, 0.25, 0.5],
                "/asset/extras/source/backgroundColor": [0.25, 0.5, 1]},
       # A quarter turn about X takes the light's -Z to -Y.
-      "rig": [{"node": "light 0", "rotation": [r(-math.sqrt(0.5)), 0, 0, r(math.sqrt(0.5))]}]})
+      "rig": [{"node": "light0", "rotation": [r(-math.sqrt(0.5)), 0, 0, r(math.sqrt(0.5))]}]})
 
 case(FMT, "unsupported_tags",
      {"tex.xgl": world('<TEXTURE ID="1"><REPEAT>TRUE</REPEAT><IMAGE>a.png</IMAGE></TEXTURE>\n',

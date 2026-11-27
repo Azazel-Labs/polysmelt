@@ -1,7 +1,8 @@
 //! `OpenGEX` (`.ogex`), the Open Game Engine Exchange format: a scene written in `OpenDDL`, a
 //! tree of nodes (plain, bone, geometry, light and camera nodes) placed by transforms, the
-//! objects they reference (meshes, lights, cameras), materials, and animation tracks. Version
-//! 3.0 is read, and the earlier versions it extends.
+//! objects they reference (meshes, lights, cameras), materials, and animation tracks. The format
+//! is read as version 3.0 of its specification gives it, which extends the earlier ones; a file doesn't say
+//! which version it was written to, so none is checked or reported.
 //!
 //! Each node becomes a glTF node, placed by its node transforms (matrices, translations,
 //! rotations and scales, multiplied in order); its object transforms, which only its object
@@ -468,9 +469,39 @@ struct Stats {
     spectra: usize,
 }
 
+/// An `OpenDDL` parse error, of the kind other readers give the same failure: text with no structure in it (no
+/// brace at all) isn't `OpenGEX`, and a parse that ran into the end of the file with structures still open is a
+/// file cut short.
+fn same_failure(e: crate::Error, data: &[u8]) -> crate::Error {
+    if e.kind() != crate::ErrorKind::Corrupt {
+        return e;
+    }
+    if !data.contains(&b'{') {
+        return e.of_kind(crate::ErrorKind::UnknownFormat).within("not an OpenGEX file");
+    }
+    // Braces outside strings: more opened than closed means the file ends inside a structure.
+    let (mut depth, mut quoted, mut escaped) = (0i64, false, false);
+    for &c in data {
+        match c {
+            _ if escaped => escaped = false,
+            b'\\' if quoted => escaped = true,
+            b'"' => quoted = !quoted,
+            b'{' if !quoted => depth += 1,
+            b'}' if !quoted => depth -= 1,
+            _ => {}
+        }
+    }
+    if depth > 0 || quoted {
+        return e
+            .of_kind(crate::ErrorKind::Truncated)
+            .within("OpenGEX file is cut short");
+    }
+    e
+}
+
 pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document> {
     let data = input.read()?;
-    let t = Tree::parse(&data)?;
+    let t = Tree::parse(&data).map_err(|e| same_failure(e, &data))?;
     let dir = input.dir().to_path_buf();
     let mut c = Ctx {
         t: &t,
@@ -953,7 +984,7 @@ fn finish(mut c: Ctx<'_>) -> Document {
     for (key, n) in [
         ("missingObjects", st.missing_objects),
         ("missingMaterials", st.missing_materials),
-        ("missingTextures", st.missing_textures),
+        ("droppedTextures", st.missing_textures),
         ("droppedLevelsOfDetail", st.dropped_lods),
         ("badTransforms", st.bad_transforms),
         ("shearedTransforms", st.sheared_transforms),

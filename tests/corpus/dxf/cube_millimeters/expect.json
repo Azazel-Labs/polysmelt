@@ -38,7 +38,7 @@
     ],
     "source": {
       "format": "DXF",
-      "encoding": "ASCII",
+      "encoding": "ascii",
       "version": "AC1027",
       "unit": "millimeter",
       "metersPerUnit": 0.001,

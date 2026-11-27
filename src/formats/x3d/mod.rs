@@ -39,7 +39,7 @@
 //!
 //! The asset's `extras.source` records the encoding, the version and the length unit (meters
 //! unless `UNIT length` names another, a scene in another unit scaled to meters), +Y up as the
-//! convention, the first `WorldInfo`'s title and `info` strings (as comments), and the `META`
+//! standard has it, the first `WorldInfo`'s title and `info` strings (as comments), and the `META`
 //! statements (`meta` elements): `title`, `creator` or `author`, `generator` as the tool,
 //! `description`, `copyright` or `rights`, `license`, `created`, `modified` and `keywords` by
 //! their meanings, any other under `meta` as written.
@@ -144,6 +144,8 @@ pub(super) struct Graph {
     /// External prototypes declared: each one's name and URLs.
     pub externs: Vec<(String, Vec<String>)>,
     pub notes: BTreeSet<&'static str>,
+    /// Whether the file stops before its scene does: a node, list or element still open at its end.
+    pub cut: bool,
 }
 
 impl Graph {
@@ -293,6 +295,8 @@ pub(super) struct Info {
     format: &'static str,
     encoding: &'static str,
     gzip: bool,
+    /// Whether the file is cut short: its gzip stream or its scene ends early.
+    cut: bool,
 }
 
 /// A file's scene graph: inflated when gzipped, then by its first character the XML encoding
@@ -300,11 +304,13 @@ pub(super) struct Info {
 fn parse(bytes: &[u8]) -> Result<(Graph, Info)> {
     let mut inflated = Vec::new();
     let gzip = bytes.starts_with(&[0x1f, 0x8b]);
+    let mut cut = false;
     let bytes = if gzip {
         let mut r = flate2::read::MultiGzDecoder::new(bytes).take(MAX_INFLATED);
         // A file cut short reads as far as it inflates.
-        if r.read_to_end(&mut inflated).is_err() && inflated.is_empty() {
-            bail!(UnknownFormat, "not a gzipped X3D or VRML file");
+        if r.read_to_end(&mut inflated).is_err() {
+            ensure!(!inflated.is_empty(), UnknownFormat, "not a gzipped X3D or VRML file");
+            cut = true;
         }
         inflated.as_slice()
     } else {
@@ -326,8 +332,9 @@ fn parse(bytes: &[u8]) -> Result<(Graph, Info)> {
         let g = xml::parse(bytes);
         let info = Info {
             format: "X3D",
-            encoding: "XML",
+            encoding: "xml",
             gzip,
+            cut: cut || g.cut,
         };
         return Ok((g, info));
     }
@@ -337,7 +344,7 @@ fn parse(bytes: &[u8]) -> Result<(Graph, Info)> {
         .split(|b: &u8| b.is_ascii_whitespace() || *b == b',')
         .filter(|w| !w.is_empty());
     let (head, version) = (words.next().unwrap_or_default(), words.next().unwrap_or_default());
-    let version = String::from_utf8_lossy(version.strip_prefix(b"V").unwrap_or(version)).into_owned();
+    let version = crate::bytes::text(version.strip_prefix(b"V").unwrap_or(version)).into_owned();
     let format = match head {
         b"#VRML" if version.starts_with('1') => bail!(Unsupported, "VRML 1.0 isn't supported, only VRML97 and X3D"),
         b"#VRML" if version.starts_with('2') => "VRML97",
@@ -357,6 +364,7 @@ fn parse(bytes: &[u8]) -> Result<(Graph, Info)> {
         format,
         encoding: "classic",
         gzip,
+        cut: cut || g.cut,
     };
     Ok((g, info))
 }
@@ -402,6 +410,11 @@ pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
         && !roots.is_empty()
     {
         roots = vec![c.push_node(json!({ "name": "RootNode", "children": roots, "scale": [u, u, u] }))];
+    }
+    if roots.is_empty() && info.cut {
+        return Err(crate::Error::cut_short(
+            "X3D or VRML file is cut short before anything whole to keep",
+        ));
     }
     Ok(c.finish(&roots, &info))
 }
@@ -948,6 +961,9 @@ impl Convert<'_> {
         if info.gzip {
             source.insert("gzip".into(), json!(true));
         }
+        if info.cut {
+            source.insert("truncated".into(), json!(true));
+        }
         let main = &self.graphs[0];
         let unit = main.unit.filter(|u| u.is_finite() && *u > 0.0);
         let mut si = SourceInfo {
@@ -961,8 +977,8 @@ impl Convert<'_> {
                     .filter(|_| unit.is_some())
                     .unwrap_or_else(|| "meter".into()),
             ),
-            // +Y up is the default viewpoint's, a convention; the coordinates are right-handed.
-            up_axis: Fact::Assumed(Axis::PosY),
+            // The standard's coordinate system: right-handed, +Y straight up.
+            up_axis: Fact::Declared(Axis::PosY),
             handedness: Fact::Declared(Handedness::Right),
             converted: Converted {
                 units: unit.is_some_and(|u| (u - 1.0).abs() > 1e-12) && !roots.is_empty(),

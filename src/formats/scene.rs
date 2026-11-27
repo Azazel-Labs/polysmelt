@@ -1364,12 +1364,9 @@ pub(crate) const Z_UP_TO_Y_UP: [f32; 4] = [
     std::f32::consts::FRAC_1_SQRT_2,
 ];
 
-/// Text as Rust wants it: UTF-8 as it is, anything else read as Windows-1252/Latin-1 byte by byte.
+/// Text as every reader decodes it ([`crate::bytes::text`]): UTF-8 as it is, anything else as Windows-1252.
 pub(crate) fn text(b: &[u8]) -> String {
-    match std::str::from_utf8(b) {
-        Ok(s) => s.to_owned(),
-        Err(_) => b.iter().map(|&c| char::from(c)).collect(),
-    }
+    crate::bytes::text(b).into_owned()
 }
 
 /// Text in Shift-JIS (code page 932), as Japanese tools write it. A byte sequence that isn't Shift-JIS becomes

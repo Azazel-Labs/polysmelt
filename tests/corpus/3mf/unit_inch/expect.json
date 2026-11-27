@@ -20,5 +20,9 @@
       "unit": "inch",
       "metersPerUnit": 0.0254
     }
+  },
+  "json": {
+    "/asset/extras/source/unit": "inch",
+    "/asset/extras/source/unitAsWritten": null
   }
 }

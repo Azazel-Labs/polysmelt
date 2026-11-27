@@ -180,13 +180,13 @@ pub(crate) fn load(input: Input<'_>) -> Result<Document> {
         self::binary(&data, big, &mut mesh)?;
         source.insert("encoding".into(), json!("binary"));
         if big {
-            source.insert("byteOrder".into(), json!("big-endian"));
+            source.insert("byteOrder".into(), json!("big"));
         }
     } else {
         let data = data.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&data);
         ensure!(data.iter().any(|&b| !stream::space(b)), Empty, "Medit file is empty");
         text(data, &mut mesh)?;
-        source.insert("encoding".into(), json!("ASCII"));
+        source.insert("encoding".into(), json!("ascii"));
     }
     source.insert("dimension".into(), json!(mesh.dim));
     source.insert("vertices".into(), json!(mesh.el.points.len()));
@@ -264,7 +264,7 @@ fn text(data: &[u8], mesh: &mut Mesh) -> Result<()> {
             first = false;
         }
         let Some(&(_, _, kind)) = known else {
-            mesh.skip(String::from_utf8_lossy(word).into_owned());
+            mesh.skip(crate::bytes::text(word).into_owned());
             continue;
         };
         if matches!(kind, Kind::Version | Kind::Dimension) {

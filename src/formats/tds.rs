@@ -24,8 +24,8 @@
 //! faces wound inside out in world space; they are turned back. An opacity map that is the color map uses its alpha.
 //! 3DS is Z up; the data stays so under a root node that turns it to glTF's Y up.
 //!
-//! The source info has Z up and right-handed, and 30 frames a second when there is a keyframer, all assumed (the file
-//! says none of them), and no units: 3DS has none. The master scale isn't applied; it is kept as `masterScale`, beside
+//! The source info has Z up and right-handed, declared (3D Studio's space is every file's), 30 frames a second
+//! assumed when there is a keyframer (the file doesn't say), and no units: 3DS has none. The master scale isn't applied; it is kept as `masterScale`, beside
 //! the `meshVersion`, the `ambient` light and the `keyframer`'s name, revision, length and segment.
 
 use std::borrow::Cow;
@@ -155,7 +155,7 @@ fn vec3_at(d: &[u8], i: usize) -> Option<[f32; 3]> {
 fn cstr(d: &[u8]) -> (String, &[u8]) {
     let name = until_nul(d);
     (
-        String::from_utf8_lossy(name).into_owned(),
+        crate::bytes::text(name).trim_end().to_owned(),
         d.get(name.len() + 1..).unwrap_or_default(),
     )
 }
@@ -1352,7 +1352,12 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
     let Some(main) = main else {
         bail!(UnknownFormat, "not a 3DS file")
     };
+    // The main chunk's length is the file's: a file shorter than it is cut short, and what's whole is kept.
+    let cut = u32_at(&data, 2).is_some_and(|n| usize_of(u64::from(n)) > data.len());
     let mut source = Map::new();
+    if cut {
+        source.insert("truncated".into(), json!(true));
+    }
     let (mut editor, mut kf) = (&[][..], Keyframer::default());
     for (id, b) in chunks(main) {
         match id {
@@ -1510,14 +1515,18 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         prims_of.push(Some(prims).filter(|p| !p.is_empty()));
     }
     // A scene of cameras or lights alone is one still.
-    ensure!(
-        triangles > 0
-            || objects
-                .iter()
-                .any(|o| matches!(o.body, Body::Camera(_) | Body::Light(_))),
-        Empty,
-        "this 3DS file has no meshes, cameras or lights"
-    );
+    if triangles == 0
+        && !objects
+            .iter()
+            .any(|o| matches!(o.body, Body::Camera(_) | Body::Light(_)))
+    {
+        if cut {
+            return Err(crate::Error::cut_short(
+                "3DS file is cut short before its first whole mesh",
+            ));
+        }
+        bail!(Empty, "this 3DS file has no meshes, cameras or lights");
+    }
     let mut textured = vec![false; materials.len()];
     for p in prims_of.iter().flatten().flatten().filter(|p| !p.uvs.is_empty()) {
         textured[p.material] = true;
@@ -1594,7 +1603,12 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         if placed_by_kf.contains(&Some(i)) {
             continue;
         }
-        let mut node = json!({ "name": o.name });
+        // An object with no name has no name key.
+        let mut node = if o.name.is_empty() {
+            json!({})
+        } else {
+            json!({ "name": o.name })
+        };
         match &o.body {
             Body::Mesh(_) => {
                 meshes.left[i] += 1;
@@ -1722,7 +1736,12 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
             _ if n.instance.is_empty() => Cow::Borrowed(&n.name),
             _ => Cow::Borrowed(&n.instance),
         };
-        let mut node = json!({ "name": name.as_str() });
+        // A node with no name has no name key.
+        let mut node = if name.is_empty() {
+            json!({})
+        } else {
+            json!({ "name": name.as_str() })
+        };
         let (t, q, s) = rests[i];
         if t.iter().any(|&c| c != 0.0) {
             node["translation"] = cleans(&n.pos[0].value);
@@ -1903,8 +1922,8 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
     let mut info = SourceInfo {
         format: Some("3DS".into()),
         version: source.get("version").map(ToString::to_string),
-        up_axis: Fact::Assumed(Axis::PosZ),
-        handedness: Fact::Assumed(Handedness::Right),
+        up_axis: Fact::Declared(Axis::PosZ),
+        handedness: Fact::Declared(Handedness::Right),
         frame_rate: if animated {
             Fact::Assumed(f64::from(FRAMES_PER_SECOND))
         } else {
@@ -2247,8 +2266,8 @@ mod tests {
         assert_eq!(names, ["Floor", "Wall", "RootNode"]);
         let info = doc.source_info();
         assert_eq!(info.format.as_deref(), Some("3DS"));
-        assert_eq!(info.up_axis, Fact::Assumed(Axis::PosZ));
-        assert_eq!(info.handedness, Fact::Assumed(Handedness::Right));
+        assert_eq!(info.up_axis, Fact::Declared(Axis::PosZ));
+        assert_eq!(info.handedness, Fact::Declared(Handedness::Right));
         assert_eq!(info.meters_per_unit, Fact::Unknown);
         assert_eq!(info.frame_rate, Fact::Unknown, "no keyframer");
         assert!(info.converted.up_axis && !info.converted.units);

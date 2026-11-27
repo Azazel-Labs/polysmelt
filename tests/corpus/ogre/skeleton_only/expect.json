@@ -23,7 +23,7 @@
       "format": "OGRE",
       "version": "Serializer_v1.80",
       "kind": "skeleton",
-      "byteOrder": "big-endian"
+      "byteOrder": "big"
     }
   },
   "rig": [

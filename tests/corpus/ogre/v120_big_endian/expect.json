@@ -42,7 +42,7 @@
     "source": {
       "format": "OGRE",
       "version": "MeshSerializer_v1.20",
-      "byteOrder": "big-endian"
+      "byteOrder": "big"
     }
   },
   "json": {

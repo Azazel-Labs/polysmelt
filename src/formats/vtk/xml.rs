@@ -537,10 +537,9 @@ pub(super) fn read(data: &[u8]) -> Result<Model> {
     if let Some(encoding) = r.encoding {
         model.source.insert("encoding".into(), json!(encoding));
     }
-    model.source.insert(
-        "byteOrder".into(),
-        json!(if r.big { "BigEndian" } else { "LittleEndian" }),
-    );
+    model
+        .source
+        .insert("byteOrder".into(), json!(if r.big { "big" } else { "little" }));
     if let Some(c) = r.compressor {
         model.source.insert("compressor".into(), json!(c));
     }

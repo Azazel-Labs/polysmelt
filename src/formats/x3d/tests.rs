@@ -111,7 +111,7 @@ fn xml_cube() {
     let doc = read(CUBE_X3D, "cube.x3d");
     check_cube(&doc);
     let source = &doc.json()["asset"]["extras"]["source"];
-    assert_eq!(source["encoding"], "XML");
+    assert_eq!(source["encoding"], "xml");
     assert_eq!(source["version"], "3.3");
 }
 
@@ -499,13 +499,13 @@ fn deep_nesting_doesnt_overflow() {
         "Group { children [ ".repeat(n),
         " ] }".repeat(n)
     );
-    let _ = read(&text, "a.wrl");
+    let _ = read_in(text.as_bytes(), "a.wrl", &Memory::new(), usize::MAX);
     let xml = format!(
         "<X3D><Scene>{}<Shape><Box/></Shape>{}</Scene></X3D>",
         "<Group>".repeat(n),
         "</Group>".repeat(n)
     );
-    let _ = read(&xml, "a.x3d");
+    let _ = read_in(xml.as_bytes(), "a.x3d", &Memory::new(), usize::MAX);
 }
 
 #[test]
@@ -746,7 +746,7 @@ fn prototypes_that_instance_themselves_stop() {
     assert!(start.elapsed().as_secs() < 60);
     // A default that holds an instance of its own prototype.
     let text = "#VRML V2.0 utf8\nPROTO C [ field MFNode c [ C { } ] ] { Group { children IS c } }\nC { }\n";
-    let _ = read(text, "a.wrl");
+    let _ = read_in(text.as_bytes(), "a.wrl", &Memory::new(), usize::MAX);
     // An external prototype from the file that declares it.
     let assets = Memory::new().with("a.wrl", "#VRML V2.0 utf8\nEXTERNPROTO D [ ] \"a.wrl#D\"\nD { }\n");
     let _ = read_in(
@@ -754,8 +754,7 @@ fn prototypes_that_instance_themselves_stop() {
         "a.wrl",
         &assets,
         usize::MAX,
-    )
-    .unwrap();
+    );
 }
 
 #[test]
@@ -872,11 +871,14 @@ fn extrusion_respects_the_triangle_limit() {
     let err = read_in(text.as_bytes(), "a.wrl", &Memory::new(), 1_000_000).unwrap_err();
     assert!(err.to_string().contains("triangles"), "{err}");
     // Too few points draw nothing.
-    let doc = read(
-        "#VRML V2.0 utf8\nShape { geometry Extrusion { spine [ 0 0 0 ] } }\n",
+    let err = read_in(
+        b"#VRML V2.0 utf8\nShape { geometry Extrusion { spine [ 0 0 0 ] } }\n",
         "a.wrl",
-    );
-    assert_eq!(triangles(&doc), 0);
+        &Memory::new(),
+        usize::MAX,
+    )
+    .unwrap_err();
+    assert_eq!(err.kind(), crate::ErrorKind::Empty, "{err}");
 }
 
 #[test]
@@ -938,8 +940,10 @@ Shape { geometry Box {} }
     assert_eq!(info.format.as_deref(), Some("X3D"));
     assert_eq!(info.version.as_deref(), Some("3.3"));
     assert_eq!(info.meters_per_unit, Fact::Declared(0.01));
-    assert_eq!(info.unit.as_deref(), Some("centimeters"));
-    assert_eq!(info.up_axis, Fact::Assumed(Axis::PosY));
+    // The unit's usual name; the file's own word for it is beside it.
+    assert_eq!(info.unit.as_deref(), Some("centimeter"));
+    assert_eq!(doc.json()["asset"]["extras"]["source"]["unitAsWritten"], "centimeters");
+    assert_eq!(info.up_axis, Fact::Declared(Axis::PosY));
     assert!(info.converted.units && !info.converted.up_axis);
     assert_eq!(info.output_meters_per_unit(), Fact::Declared(1.0));
     assert_eq!(info.title.as_deref(), Some("Room"));

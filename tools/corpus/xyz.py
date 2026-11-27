@@ -131,7 +131,7 @@ case(FMT, "ptx_colors", {"scan.ptx": ptx_scan(2, 2, TURN, [[*g, *c] for g, c in 
      {"spec": f"{SPEC}: x y z intensity r g b", "source": SRC, "points": 4, "bounds": bounds(placed),
       "colors": True, "colors_include": [lin(c) for c in COLS[:4]]})
 case(FMT, "ptx_broken_header", {"scan.ptx": "3\n2\n0 0 0\n1 0 0\n"},
-     {"spec": f"{SPEC}: a scan header cut short", "source": SRC, "error": "header is broken", "error_kind": "Corrupt"})
+     {"spec": f"{SPEC}: a scan header cut short", "source": SRC, "error": "cut short", "error_kind": "Truncated"})
 
 # Esri ASCII rasters.
 GRID = "ncols 3\nnrows 2\nxllcorner 100\nyllcorner 200\ncellsize 10\nNODATA_value -9999\n1 2 3\n4 -9999 6\n"
