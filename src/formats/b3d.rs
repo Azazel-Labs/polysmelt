@@ -36,7 +36,7 @@ use crate::source::{Axis, Fact, Handedness};
 const MAX_DEPTH: usize = 256;
 /// The frame rate when the file gives none (no `ANIM` chunk, or an `fps` not above 0): the format's own default.
 /// Blitz Research's specification ("Blitz3d file format V0.01", `b3dfile_specs.txt`, the `ANIM` chunk) lists
-/// `float fps ;default=60`. Blitz3D itself reads and ignores `fps` (`blitz3d/loader_b3d.cpp`,
+/// `float fps ;default=60`. `Blitz3D` itself reads and ignores `fps` (`blitz3d/loader_b3d.cpp`,
 /// <https://github.com/blitz-research/blitz3d>), as its `Animate` command sets the speed. So 60, assumed, not the
 /// readers' shared 30.
 const DEFAULT_FPS: f32 = 60.0;

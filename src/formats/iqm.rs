@@ -865,7 +865,11 @@ mod tests {
         .unwrap();
         assert_eq!(doc.source_info().frame_rate, Fact::Assumed(30.0));
         let a = &doc.rig().unwrap().animations[0];
-        assert!((a.channels[0].times[1] - 1.0 / 30.0).abs() < 1e-6, "{:?}", a.channels[0].times);
+        assert!(
+            (a.channels[0].times[1] - 1.0 / 30.0).abs() < 1e-6,
+            "{:?}",
+            a.channels[0].times
+        );
     }
 
     #[test]

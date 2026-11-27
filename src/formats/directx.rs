@@ -71,7 +71,7 @@ const MAX_DEPTH: usize = 256;
 /// no default (<https://learn.microsoft.com/windows/win32/direct3d9/animtickspersecond>), so this is a convention,
 /// not a specification: 4800, 3ds Max's tick, which exporters write. Microsoft's own DirectX SDK sample
 /// `Media/Tiny/tiny.x` (<https://github.com/walbourn/directx-sdk-samples>) has no `AnimTicksPerSecond` and keys
-/// every 80 ticks, 60 a second at 4800, and ScummVM's reimplementation of the D3DX loader for Wintermute games
+/// every 80 ticks, 60 a second at 4800, and `ScummVM`'s reimplementation of the D3DX loader for Wintermute games
 /// takes 4800 (`kDefaultTicksPerSecond` in `engines/wintermute/base/gfx/xmodel.h`). So 4800, assumed, not the
 /// readers' shared 30, which would play such files 160 times too slowly.
 const DEFAULT_TICKS: f64 = 4800.0;

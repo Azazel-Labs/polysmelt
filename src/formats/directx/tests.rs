@@ -511,7 +511,11 @@ fn animation_keys_and_ticks() {
         let rig = doc.rig().unwrap();
         let span = rig.animations[0].span();
         assert!((span.1 - 1.0).abs() < 1e-6, "{ticks}{span:?}");
-        assert_eq!(doc.source_info().frame_rate, crate::source::Fact::Assumed(4800.0), "{ticks}");
+        assert_eq!(
+            doc.source_info().frame_rate,
+            crate::source::Fact::Assumed(4800.0),
+            "{ticks}"
+        );
     }
 }
 

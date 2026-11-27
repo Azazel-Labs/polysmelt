@@ -3865,7 +3865,9 @@ def Xform \"Moving\"
         let last_key = |d: &Document| {
             let j = d.json();
             let input = j["animations"][0]["samplers"][0]["input"].as_u64().unwrap();
-            j["accessors"][usize::try_from(input).unwrap()]["max"][0].as_f64().unwrap()
+            j["accessors"][usize::try_from(input).unwrap()]["max"][0]
+                .as_f64()
+                .unwrap()
         };
         for (meta, seconds, rate) in [
             // The time codes' own rate, authored.
@@ -3876,11 +3878,19 @@ def Xform \"Moving\"
             ("doc = \"nothing about time\"", 2.0, Fact::Assumed(24.0)),
             // A rate of 0 times nothing and is passed over, for `framesPerSecond` or for USD's 24.
             ("timeCodesPerSecond = 0", 2.0, Fact::Assumed(24.0)),
-            ("timeCodesPerSecond = 0
-    framesPerSecond = 16", 3.0, Fact::Declared(16.0)),
+            (
+                "timeCodesPerSecond = 0
+    framesPerSecond = 16",
+                3.0,
+                Fact::Declared(16.0),
+            ),
         ] {
             let d = doc(&moving(meta), &[]);
-            assert!((last_key(&d) - seconds).abs() < 1e-6, "{meta}: last key at {}", last_key(&d));
+            assert!(
+                (last_key(&d) - seconds).abs() < 1e-6,
+                "{meta}: last key at {}",
+                last_key(&d)
+            );
             assert_eq!(d.source_info().frame_rate, rate, "{meta}");
         }
     }

@@ -27,7 +27,7 @@ use crate::quat::normalize;
 pub(crate) const TIME_OFFSET: &str = "timeOffset";
 
 /// The frame rate a reader assumes when neither the file nor its format gives one: frames, keys or ticks a
-/// second. A format with a convention of its own keeps it (MD2, MD5, Blitz3D, DirectX, ASF/AMC, USD), and its
+/// second. A format with a convention of its own keeps it (MD2, MD5, `Blitz3D`, DirectX, ASF/AMC, USD), and its
 /// reader cites where the convention comes from.
 pub(crate) const ASSUMED_FRAME_RATE: f64 = 30.0;
 

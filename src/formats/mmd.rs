@@ -54,7 +54,7 @@ use crate::source::{Axis, Fact, Handedness, SourceInfo};
 
 /// Meters per MMD unit.
 const UNIT: f64 = 0.08;
-/// Frames per second of a motion's keys: MikuMikuDance's timeline runs at 30, so every VMD's frame numbers count at
+/// Frames per second of a motion's keys: `MikuMikuDance`'s timeline runs at 30, so every VMD's frame numbers count at
 /// 30 a second, declared, as the one program whose format it is fixes it. VMD has no published specification;
 /// readers agree, such as three.js's `MMDLoader` (`examples/jsm/loaders/MMDLoader.js`, frame number over 30).
 const FPS: f64 = 30.0;
