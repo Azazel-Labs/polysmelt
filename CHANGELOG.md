@@ -2,7 +2,7 @@
 
 Breaking changes are allowed in minor releases until 1.0.
 
-## Unreleased
+## 0.21.0
 
 - Every reader brings a file's axes and units to glTF's (+Y up, right-handed, meters) the
   same way, and gives the same shape of document, so nothing depends on the format, or on
