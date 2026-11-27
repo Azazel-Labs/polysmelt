@@ -1,4 +1,4 @@
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::assets::Memory;
 use crate::document::{Document, Keep, Pose};
@@ -164,7 +164,12 @@ fn reads_a_scene() {
     assert_eq!(doc.counts().triangles, 12 + 80 + 12 + 2 + 3 + 2, "{facts:?}");
     assert_eq!(facts["unsupported_nodes"]["watersurface"], 1);
     assert_eq!(facts["hidden_nodes"], 1);
-    assert_eq!(j["asset"]["extras"]["source"]["missingFiles"][0], "nowhere.3ds");
+    // The texture the scene's material names and the mesh file a node names, neither there.
+    assert_eq!(
+        j["asset"]["extras"]["source"]["missingFiles"],
+        json!(["wood.png", "nowhere.3ds"])
+    );
+    assert_eq!(j["asset"]["extras"]["source"]["droppedTextures"], 1);
     assert_eq!(j["asset"]["extras"]["source"]["format"], "Irrlicht scene");
     assert_eq!(j["cameras"].as_array().unwrap().len(), 1);
     assert_eq!(j["cameras"][0]["perspective"]["yfov"], 1.0);

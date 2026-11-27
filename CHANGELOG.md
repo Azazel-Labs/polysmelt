@@ -15,6 +15,22 @@ Breaking changes are allowed in minor releases until 1.0.
   blends four, and `Prim::skin_sets()` walks every set. `mesh::to_glb` writes each set, and
   `mesh::MAX_INFLUENCES` is public. Breaking: a `Prim` built with a struct literal needs the two
   new fields (or `..Prim::default()`).
+- Every reader counts `source.droppedTextures` the same way: each distinct texture once, however
+  many materials use it, with the names not found in `missingFiles`, each once (see
+  docs/consistency.md). AC3D, OpenFlight, LightWave, OpenGEX, AMF and glTF counted their own way:
+  - OpenFlight counted a texture once per palette entry and file naming it, and LightWave once
+    per surface; LightWave now also counts a missing normal map. Names that find the same file
+    that isn't an image are one texture in AC3D and OpenFlight too, and OpenGEX counts such a file.
+  - AC3D, OpenFlight, LightWave and OpenGEX now list missing textures in `missingFiles`. They
+    counted missing textures even in a read that keeps no textures or materials, which no other
+    reader does; such a read now reports none.
+  - AMF counted each set of channels that made no image, and each unreadable texture whether or not
+    a triangle uses it; now it counts each texture triangles name that no image has.
+  - glTF counted only textures in KTX2 or AVIF, once per texture object. Now an image file that
+    isn't found counts too, and is listed in `missingFiles`, and each image is counted once however
+    many textures use it. Only that report changes: the document's images and textures are as before.
+  - An Irrlicht scene that refers to a mesh file that isn't there kept the textures its materials
+    didn't find out of `missingFiles`; they're listed, and each missing file once.
 
 ## 0.21.0
 

@@ -669,8 +669,6 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
     let dir = input.dir();
     let mut images = Images::new(!keep.image_bytes, dir);
     let textures = keep.materials && keep.textures;
-    let mut image_of: HashMap<String, Option<usize>> = HashMap::new();
-    let mut dropped_textures = 0usize;
     let mut materials: Vec<Full> = Vec::new();
     let mut material_at: HashMap<MatKey, usize> = HashMap::new();
     let mut b = Builder::new(keep.crease_angle());
@@ -685,25 +683,13 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         if o.surfs.is_empty() && o.verts.is_empty() {
             continue;
         }
-        // A texture that isn't there is counted whether or not textures are kept, as a full read
-        // counts it.
-        let image = o.texture.as_ref().and_then(|name| {
-            *image_of.entry(name.clone()).or_insert_with(|| {
-                let Some(path) = assets.find(name, dir) else {
-                    dropped_textures += 1;
-                    return None;
-                };
-                let found = if textures {
-                    images.file(assets, path, name)
-                } else {
-                    None
-                };
-                if found.is_none() && textures {
-                    dropped_textures += 1;
-                }
-                found
-            })
-        });
+        // Looked up as every reader looks up a texture, which counts one that isn't there once, however many
+        // objects name it.
+        let image = o
+            .texture
+            .as_ref()
+            .filter(|_| textures)
+            .and_then(|name| images.find(assets, &[name], &[dir]));
         // Surfaces keep their own primitives without materials too: those are dropped afterward.
         let mut material_of = |mat: u32, flags: u32| -> usize {
             let mat = (mat as usize).lt(&m.mats.len()).then_some(mat);
@@ -875,7 +861,6 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
     let subdivided = m.objs.iter().filter(|o| o.subdiv.is_some_and(|s| s > 0)).count();
     for (key, n) in [
         (crate::geometry::DROPPED, bad_surfs),
-        ("droppedTextures", dropped_textures),
         ("lights", lights),
         ("subdividedObjects", subdivided),
         ("unknownLines", m.unknown_lines),

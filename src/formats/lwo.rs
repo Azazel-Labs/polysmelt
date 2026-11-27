@@ -1882,7 +1882,6 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
     // The materials and looks, a surface's by its index; tags naming no surface get LightWave's default.
     let mut materials: Vec<Full> = Vec::new();
     let mut looks: Vec<Look> = Vec::new();
-    let mut dropped_textures = 0usize;
     for s in &m.surfs {
         // The top enabled image layer on the color channel.
         let mut color_blocks: Vec<&Block> = s
@@ -1898,15 +1897,6 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
             .filter(|b| b.file.is_some())
             .or_else(|| color_blocks.last().copied());
         let image = block.and_then(|b| image_for(&clip_file(b)?));
-        // A missing image is counted whether or not textures are kept, as a full read counts it.
-        let missing = || {
-            block
-                .and_then(clip_file)
-                .is_none_or(|f| dirs.iter().all(|d| assets.find(&f, d).is_none()))
-        };
-        if block.is_some() && image.is_none() && (textures || missing()) {
-            dropped_textures += 1;
-        }
         // A block maps the mesh when its image is there: read, or, when textures aren't kept and nothing is read,
         // found among the assets. The texture coordinates are the mesh's, kept whether or not the texture is, so
         // they come out as a full read's do.
@@ -2163,7 +2153,6 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         (crate::geometry::DROPPED, m.bad_polys),
         ("droppedPolygons", m.other_polys),
         ("droppedEnvelopes", m.envelopes),
-        ("droppedTextures", dropped_textures),
     ] {
         if n > 0 {
             source[key] = json!(n);
@@ -2473,6 +2462,60 @@ mod tests {
         let red = srgb_to_linear(0.8);
         assert_eq!(m.materials[0].color, [red, 0.0, 0.0, 1.0]);
         assert_eq!(m.images.len(), 0);
+    }
+
+    #[test]
+    fn an_image_many_surfaces_map_is_counted_once_when_it_is_not_there() {
+        // Three surfaces, each mapping clip 1 (`skin.png`) as its color, the third as its bump too.
+        let names = ["A", "B", "C"];
+        let mut ptag = b"SURF".to_vec();
+        for i in 0..6 {
+            ptag.extend(cat(&[vx(i), u2(u16::try_from(i % 3).unwrap())]));
+        }
+        let mut txuv = cat(&[b"TXUV".to_vec(), u2(2), s0("uv")]);
+        for (i, p) in CUBE.iter().enumerate() {
+            txuv.extend(cat(&[vx(u32::try_from(i).unwrap()), f4(&[p[0], p[1]])]));
+        }
+        let blok = |chan: &[u8; 4]| {
+            let imap = cat(&[s0("\u{80}"), sub(*b"CHAN", chan), sub(*b"ENAB", &u2(1))]);
+            sub(
+                *b"BLOK",
+                &cat(&[
+                    sub(*b"IMAP", &imap),
+                    sub(*b"PROJ", &u2(5)),
+                    sub(*b"IMAG", &vx(1)),
+                    sub(*b"VMAP", &s0("uv")),
+                ]),
+            )
+        };
+        let mut chunks = vec![
+            ck(*b"TAGS", &names.iter().flat_map(|n| s0(n)).collect::<Vec<_>>()),
+            layr(0, [0.0; 3], "Box", None),
+            pnts(&CUBE),
+            pols(*b"FACE", &FACES),
+            ck(*b"PTAG", &ptag),
+            ck(*b"VMAP", &txuv),
+            ck(
+                *b"CLIP",
+                &cat(&[1u32.to_be_bytes().to_vec(), sub(*b"STIL", &s0("skin.png"))]),
+            ),
+        ];
+        for (i, n) in names.iter().enumerate() {
+            let mut surf = cat(&[s0(n), s0(""), blok(b"COLR")]);
+            if i == 2 {
+                surf.extend(blok(b"BUMP"));
+            }
+            chunks.push(ck(*b"SURF", &surf));
+        }
+        let bytes = file(*b"LWO2", &chunks);
+        let doc = read(&bytes, &Memory::new()).unwrap();
+        let source = &doc.json()["asset"]["extras"]["source"];
+        assert_eq!(source["droppedTextures"], 1, "{source}");
+        assert_eq!(source["missingFiles"], json!(["skin.png"]), "{source}");
+        // Found, it is one image the three surfaces share.
+        let doc = read(&bytes, &Memory::new().with("skin.png", png())).unwrap();
+        assert_eq!(flat(&doc).images.len(), 1);
+        assert!(doc.json()["asset"]["extras"]["source"].get("droppedTextures").is_none());
     }
 
     #[test]

@@ -20,7 +20,10 @@
     "lights": 0,
     "cameras": 0,
     "source": {
-      "droppedTextures": 1
+      "droppedTextures": 1,
+      "missingFiles": [
+        "texture/Concrete.tga"
+      ]
     }
   }
 }

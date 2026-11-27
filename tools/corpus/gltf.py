@@ -648,8 +648,22 @@ case(FMT, "texture_data_uri", {"cube.gltf": g.embedded()},
 g = G()
 textured(g, {"uri": "missing.png"})
 case(FMT, "texture_missing", {"cube.glb": g.glb()},
-     {"spec": SPEC + ": a texture file that isn't there leaves the material untextured", "source": SRC, **CUBE,
-      "materials": [{"textured": False}]})
+     {"spec": SPEC + ": a texture file that isn't there leaves the material untextured; it is counted as dropped "
+              "and named as missing, as every reader reports a texture it doesn't have", "source": SRC, **CUBE,
+      "materials": [{"textured": False}],
+      "json": {"/asset/extras/source/droppedTextures": 1, "/asset/extras/source/missingFiles": ["missing.png"]}})
+
+# One image that isn't there behind two textures (the base color and the normal map, each its own sampler): one
+# texture the document doesn't have, counted once and named once.
+g = G()
+textured(g, {"uri": "missing.png"}, {"uri": "missing.png"})
+g.j["images"].pop()
+g.j["textures"][1]["source"] = 0
+case(FMT, "texture_missing_shared", {"cube.glb": g.glb()},
+     {"spec": SPEC + ": two textures on one image file that isn't there: the image is counted once and named "
+              "once", "source": SRC, **CUBE, "materials": [{"textured": False}],
+      "json": {"/asset/extras/source/droppedTextures": 1, "/asset/extras/source/missingFiles": ["missing.png"],
+               "/textures/1/source": 0}})
 
 # EXT_texture_webp with a PNG fallback: the PNG is used.
 # A complete 1x1 lossless WebP, so the file validates; readers that don't embed WebP skip it.

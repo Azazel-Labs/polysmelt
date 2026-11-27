@@ -79,8 +79,16 @@ The document is in glTF's frame: +Y up, right-handed, meters.
 - **One lookup.** Every reader finds referenced files the same way: as written, then
   percent-decoded, with `file:` URIs understood, through the `Assets` you give the loader.
 - **Missing files are reported, not fatal.** Files a model refers to that weren't found are
-  listed in `asset.extras.source.missingFiles`, and textures the document doesn't have are
-  counted in `droppedTextures`.
+  listed in `asset.extras.source.missingFiles`, each once, by the name the model gives. Textures
+  the document doesn't have are counted in `droppedTextures`: each distinct texture once, however
+  many materials, objects or palette entries use it. A texture isn't there when no file is found
+  for its name, or when the file found isn't an image that can be embedded (known when images
+  are read, with `Keep::image_bytes`). The same name is the same texture, and so are names that
+  find the same file. In glTF, where materials share images through textures, each image is a
+  texture: an image a texture can't be drawn from (not found, or in a format Polysmelt doesn't
+  decode, such as KTX2) is counted once however many textures use it, and only when the texture
+  has no other image to draw. A read without textures or materials reports neither, as it
+  doesn't look.
 
 ## Errors
 

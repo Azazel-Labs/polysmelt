@@ -347,7 +347,7 @@ case(FMT, "textures", {"textures.flt": w.bytes(), "skin.rgba": SKIN, "paint.png"
                     {"textured": True, "alpha_mode": "OPAQUE", "pixel": [200, 100, 50]},
                     {"textured": True, "pixel": [10, 120, 30]}, {"textured": False}],
       "json": {"/materials/0/alphaMode": "BLEND", "/materials/1/alphaMode": None},
-      "document": {"source": {"droppedTextures": 1}}})
+      "document": {"source": {"droppedTextures": 1, "missingFiles": ["missing.png"]}}})
 
 # A base texture and two layers (multitexture): a bump map, the normal texture, and a detail
 # texture, each layer with its own coordinates (a UV list).

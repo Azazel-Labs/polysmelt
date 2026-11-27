@@ -92,36 +92,14 @@ fn uv_transform(m: &super::M4) -> (Option<UvTransform>, bool) {
     ((all_finite && !identity).then_some(t), shear)
 }
 
-/// The image of texture file `file`: `None` when it's missing or textures aren't kept. A missing
-/// file is counted whether or not textures are kept, as a full read counts it.
-fn image(c: &mut Ctx<'_>, file: String) -> Option<usize> {
-    if let Some(&i) = c.image_of.get(&file) {
-        return i;
+/// The image of texture file `file`: `None` when it's missing or textures aren't kept. It is looked up as every
+/// reader looks up a texture, which counts one that isn't there once, however many materials name it.
+fn image(c: &mut Ctx<'_>, file: &str) -> Option<usize> {
+    if !c.keep.textures {
+        return None;
     }
-    let i = match c.assets.find(&file, &c.dir) {
-        Some(path) if c.keep.textures => c.images.file(c.assets, path, &file),
-        Some(_) => None,
-        None => {
-            c.stats.missing_textures += 1;
-            None
-        }
-    };
-    c.image_of.insert(file, i);
-    i
-}
-
-/// Counts the missing texture files of material structure `m` when materials aren't kept, as
-/// a full read counts them.
-pub(super) fn count_missing(c: &mut Ctx<'_>, m: u32) {
-    let t = c.t;
-    if t.ident(m) != "Material" || !c.counted.insert(m) {
-        return;
-    }
-    for k in t.kids(m).filter(|&k| t.ident(k) == "Texture") {
-        if let Some(file) = t.string(k) {
-            image(c, file.to_owned());
-        }
-    }
+    let dir = c.dir.clone();
+    c.images.find(c.assets, &[file], &[&dir])
 }
 
 /// The texture structure `k`; `None` when its image is missing or textures aren't kept.
@@ -151,11 +129,7 @@ fn texture(c: &mut Ctx<'_>, k: u32, uvs: &mut usize, record: &mut Vec<Value>) ->
         }
     }
     record.push(e);
-    let image = image(c, file);
-    if !c.keep.textures {
-        return None;
-    }
-    let mut tex = Tex::new(image?);
+    let mut tex = Tex::new(image(c, &file)?);
     tex.uv = u32_of(texcoord);
     tex.transform = transform;
     tex.wrap = [wrap(t.prop_str(k, "x_address")), wrap(t.prop_str(k, "y_address"))];

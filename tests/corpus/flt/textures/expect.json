@@ -59,7 +59,10 @@
   },
   "document": {
     "source": {
-      "droppedTextures": 1
+      "droppedTextures": 1,
+      "missingFiles": [
+        "missing.png"
+      ]
     }
   }
 }
