@@ -2,7 +2,7 @@
 
 Breaking changes are allowed in minor releases until 1.0.
 
-## Unreleased
+## 0.22.0
 
 - A flattened `mesh::Prim` keeps up to 16 joints and weights a vertex, as documents do, instead
   of only the 4 strongest: so `Pose::Bind` meshes skinned on the GPU, and meshes written back out
