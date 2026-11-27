@@ -4,7 +4,18 @@ polysmelt reads more than sixty formats written over four decades by tools that 
 nothing. Its readers don't pass those differences on to you. Every reader follows the rules
 below, so code that works on a document from one format works on a document from any of them.
 
-glTF is the one exception: it is already the target, so a glTF file is passed through as it is.
+glTF 2.0 is the one exception: it is already the target, so a glTF 2.0 file (`.gltf` or `.glb`)
+is passed through as it is, with no `RootNode`, its compression kept and its animations, skins
+and names as the file has them.
+
+The readers that convert into glTF are not passed through, and follow these rules like any
+other: glTF 1.0, upgraded to 2.0 as it's read, and VRM avatars and animations each load under a
+`RootNode`, and have their animations, skins and names held to the rules below. 3D Tiles is held
+to the same animation, skin and name rules but has no `RootNode`: a tileset is Z up and centered
+on the earth while each tile's glTF is Y up, so there's no one frame of the file to keep under a
+root, and each tile is placed by the node over it. Tiles it can't find are listed in
+`missingFiles`, as every reader lists the files it can't find. In all three, only what breaks a
+rule is rewritten: a skin or an animation that already follows them is left as the file has it.
 
 ## Axes and units
 

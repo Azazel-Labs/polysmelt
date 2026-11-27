@@ -212,15 +212,7 @@ impl Writer {
         extras: Option<Value>,
         tracks: Vec<Track>,
     ) -> Option<f64> {
-        // The earliest key, and whether it is a single-precision time.
-        let (offset, single) = tracks
-            .iter()
-            .filter_map(|t| Some((t.times.first()?, matches!(t.times, Times::Single(_)))))
-            .fold(None, |a: Option<(f64, bool)>, t| match a {
-                Some(a) if a.0 <= t.0 => Some(a),
-                _ => Some(t),
-            })
-            .unwrap_or((0.0, false));
+        let (offset, single) = start(tracks.iter().map(|t| &t.times));
         let mut channels = Vec::new();
         let mut samplers = Vec::new();
         for mut t in tracks {
@@ -276,18 +268,8 @@ impl Writer {
             return None;
         }
         let mut extras = extras.filter(|_| self.extras);
-        #[allow(clippy::float_cmp, reason = "exactly zero: nothing was taken off")]
-        if self.extras && offset != 0.0 {
-            let e = extras.get_or_insert_with(|| Value::Object(Map::new()));
-            if let Some(o) = e.as_object_mut() {
-                // A single-precision time is noted as the number it was written as (1.2, not 1.2000000476837158).
-                let noted = if single {
-                    f32_of(offset).to_string().parse().unwrap_or(offset)
-                } else {
-                    offset
-                };
-                o.insert(TIME_OFFSET.into(), json!(noted));
-            }
+        if self.extras {
+            note_offset(&mut extras, offset, single);
         }
         b.animations.push(document::Animation {
             channels,
@@ -307,6 +289,244 @@ impl Writer {
             }
         }
     }
+}
+
+/// Where an animation whose tracks have `times` starts: its earliest key of all, and whether that is a
+/// single-precision time.
+fn start<'t>(times: impl IntoIterator<Item = &'t Times>) -> (f64, bool) {
+    times
+        .into_iter()
+        .filter_map(|t| Some((t.first()?, matches!(t, Times::Single(_)))))
+        .fold(None, |a: Option<(f64, bool)>, t| match a {
+            Some(a) if a.0 <= t.0 => Some(a),
+            _ => Some(t),
+        })
+        .unwrap_or((0.0, false))
+}
+
+/// Notes the `offset` seconds taken off an animation's keys in its `extras` as [`TIME_OFFSET`]; nothing when
+/// nothing was taken off.
+fn note_offset(extras: &mut Option<Value>, offset: f64, single: bool) {
+    #[allow(clippy::float_cmp, reason = "exactly zero: nothing was taken off")]
+    if offset == 0.0 {
+        return;
+    }
+    let e = extras.get_or_insert_with(|| Value::Object(Map::new()));
+    if let Some(o) = e.as_object_mut() {
+        // A single-precision time is noted as the number it was written as (1.2, not 1.2000000476837158).
+        let noted = if single {
+            f32_of(offset).to_string().parse().unwrap_or(offset)
+        } else {
+            offset
+        };
+        o.insert(TIME_OFFSET.into(), json!(noted));
+    }
+}
+
+/// What becomes of one sampler of a glTF animation held to the rules.
+#[cfg(feature = "gltf")]
+enum Kept {
+    /// Its keys are clean and start where the animation does: left as the file has them.
+    Same,
+    /// Its keys as they now are: times, and values with how many floats make one of the output's elements.
+    New(Vec<f32>, Vec<f32>, usize),
+    /// No key is left.
+    Gone,
+}
+
+/// A sampler of a glTF animation as [`conform`] rewrites it: `None` for one with no key left, else its new input
+/// and output accessors, or `None` for one left as it is.
+#[cfg(feature = "gltf")]
+type Rewritten = Option<Option<(usize, usize)>>;
+
+/// Holds the animations of a glTF document that a reader converts (glTF 1.0, VRM, 3D Tiles) to what [`Writer`]
+/// guarantees of every reader's animations: each starts at 0 as a whole, what was taken off noted in its
+/// `extras` as [`TIME_OFFSET`] when `extras` are kept, and its keys are clean. A sampler whose keys already are
+/// so is left as the file has it, and only the keys that change are written, to a new buffer. A channel whose
+/// sampler has no key left is dropped, and an animation with no channel left. An animation whose keys can't be
+/// read is left as it is.
+#[cfg(feature = "gltf")]
+pub(crate) fn conform(doc: &mut document::Document, extras: bool) {
+    let animations = doc
+        .json()
+        .get("animations")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    let mut plans: Vec<Option<(Vec<Kept>, f64)>> = Vec::with_capacity(animations);
+    for a in 0..animations {
+        plans.push(plan(doc, a));
+    }
+    if plans.iter().flatten().all(|(kept, offset)| {
+        #[allow(clippy::float_cmp, reason = "exactly zero: nothing to take off")]
+        let at_zero = *offset == 0.0;
+        at_zero && kept.iter().all(|k| matches!(k, Kept::Same))
+    }) {
+        return;
+    }
+    // The new keys, in a buffer of their own; times that are the same written once.
+    let mut added = document::Added::new(doc);
+    let mut inputs: HashMap<Vec<u32>, usize> = HashMap::new();
+    // Each changed animation: its index, its samplers and the seconds taken off.
+    let mut changed: Vec<(usize, Vec<Rewritten>, f64)> = Vec::new();
+    for (a, plan) in plans.into_iter().enumerate() {
+        let Some((kept, offset)) = plan else { continue };
+        let mut at = Vec::with_capacity(kept.len());
+        for k in kept {
+            at.push(match k {
+                Kept::Same => Some(None),
+                Kept::Gone => None,
+                Kept::New(times, values, n) => {
+                    let key: Vec<u32> = times.iter().map(|t| t.to_bits()).collect();
+                    let input = *inputs.entry(key).or_insert_with(|| {
+                        // Strictly increasing, so the first and last are the bounds.
+                        let bounds = (vec![times[0]], vec![times[times.len() - 1]]);
+                        added.floats(&times, "SCALAR", Some(bounds))
+                    });
+                    let kind = match n {
+                        3 => "VEC3",
+                        4 => "VEC4",
+                        _ => "SCALAR",
+                    };
+                    Some(Some((input, added.floats(&values, kind, None))))
+                }
+            });
+        }
+        changed.push((a, at, offset));
+    }
+    added.finish(doc);
+    let json = doc.json_mut();
+    let Some(Value::Array(list)) = json.get_mut("animations") else {
+        return;
+    };
+    let mut emptied = Vec::new();
+    for (a, at, offset) in changed {
+        let Some(anim) = list.get_mut(a) else { continue };
+        // The samplers kept, each at its new place.
+        let mut renumber: Vec<Option<usize>> = Vec::with_capacity(at.len());
+        let mut samplers = Vec::new();
+        let old = anim
+            .get("samplers")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        for (mut sampler, at) in old.into_iter().zip(at) {
+            let Some(new) = at else {
+                renumber.push(None);
+                continue;
+            };
+            if let Some((input, output)) = new {
+                sampler["input"] = json!(input);
+                sampler["output"] = json!(output);
+            }
+            renumber.push(Some(samplers.len()));
+            samplers.push(sampler);
+        }
+        let channels: Vec<Value> = anim
+            .get("channels")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|c| {
+                let s = c.get("sampler")?.as_u64().and_then(|s| usize::try_from(s).ok())?;
+                let to = (*renumber.get(s)?)?;
+                let mut c = c.clone();
+                c["sampler"] = json!(to);
+                Some(c)
+            })
+            .collect();
+        if channels.is_empty() {
+            emptied.push(a);
+            continue;
+        }
+        anim["samplers"] = Value::Array(samplers);
+        anim["channels"] = Value::Array(channels);
+        if extras {
+            let mut e = anim.get("extras").filter(|e| e.is_object()).cloned();
+            note_offset(&mut e, offset, true);
+            if let Some(e) = e {
+                anim["extras"] = e;
+            }
+        }
+    }
+    for a in emptied.into_iter().rev() {
+        list.remove(a);
+    }
+    if list.is_empty() {
+        json.remove("animations");
+    }
+}
+
+/// What becomes of each of animation `a`'s samplers held to the rules, and the seconds taken off its keys;
+/// `None` when a sampler's keys can't be read.
+#[cfg(feature = "gltf")]
+fn plan(doc: &document::Document, a: usize) -> Option<(Vec<Kept>, f64)> {
+    let anim = doc.json().get("animations")?.get(a)?;
+    let samplers = anim
+        .get("samplers")
+        .and_then(Value::as_array)
+        .map_or(&[][..], Vec::as_slice);
+    // What each sampler animates: the path of the first channel it drives.
+    let path_of = |s: usize| {
+        anim.get("channels")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .find(|c| c.get("sampler").and_then(Value::as_u64) == Some(s as u64))
+            .and_then(|c| c.pointer("/target/path")?.as_str())
+            .and_then(Path::of)
+    };
+    let index = |s: &Value, k: &str| s.get(k)?.as_u64().and_then(|i| usize::try_from(i).ok());
+    let mut tracks = Vec::with_capacity(samplers.len());
+    for (i, s) in samplers.iter().enumerate() {
+        let (_, times) = doc.read_floats(index(s, "input")?).ok()?;
+        let (n, values) = doc.read_floats(index(s, "output")?).ok()?;
+        let interp = match s.get("interpolation").and_then(Value::as_str) {
+            Some("STEP") => Interp::Step,
+            Some("CUBICSPLINE") => Interp::Cubic,
+            _ => Interp::Linear,
+        };
+        let per = if interp == Interp::Cubic { 3 } else { 1 };
+        // A path that isn't a node's own (a pointer) is cleaned as weights are: no turn to keep short.
+        let path = path_of(i).unwrap_or(Path::Weights);
+        let width = match path {
+            Path::Rotation => 4,
+            Path::Translation | Path::Scale => 3,
+            Path::Weights => (values.len() / (times.len() * per).max(1)).max(1),
+        };
+        let track = Track {
+            node: 0,
+            also: Vec::new(),
+            path,
+            interp,
+            times: Times::Single(times),
+            values,
+            width,
+        };
+        tracks.push((track, n));
+    }
+    let (offset, _) = start(tracks.iter().map(|(t, _)| &t.times));
+    let kept = tracks
+        .into_iter()
+        .map(|(t, n)| {
+            let Times::Single(was) = &t.times else {
+                unreachable!("read as single precision")
+            };
+            let (was_t, was_v) = (was.clone(), t.values.clone());
+            match clean(t, offset) {
+                None => Kept::Gone,
+                #[allow(clippy::float_cmp, reason = "exactly zero: nothing was taken off")]
+                Some((times, values))
+                    if offset == 0.0
+                        && times.iter().map(|x| x.to_bits()).eq(was_t.iter().map(|x| x.to_bits()))
+                        && values.iter().map(|x| x.to_bits()).eq(was_v.iter().map(|x| x.to_bits())) =>
+                {
+                    Kept::Same
+                }
+                Some((times, values)) => Kept::New(times, values, n),
+            }
+        })
+        .collect();
+    Some((kept, offset))
 }
 
 /// A track's keys as glTF wants them, `offset` seconds earlier: finite, times strictly increasing (a key at or

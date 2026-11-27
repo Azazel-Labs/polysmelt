@@ -15,7 +15,7 @@
 //!   error are refined first and the rest are drawn unrefined, which the `unrefined_tiles`
 //!   fact says.
 //! - Content that isn't among the assets (or is named by an absolute URL) is left out and
-//!   listed in `asset.extras.source.missingTiles`; when none of it is there, that's an error.
+//!   listed in `asset.extras.source.missingFiles`; when none of it is there, that's an error.
 //! - `asset.gltfUpAxis` (`X`, `Y` or `Z`, from before 1.0) says which way is up in the glTF
 //!   of the tileset's tiles.
 //!

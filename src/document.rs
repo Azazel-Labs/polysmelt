@@ -1337,6 +1337,100 @@ fn blend_vertex_alpha(json: &mut Map<String, Value>, translucent: &[usize]) {
     }
 }
 
+/// Data added to a document that holds its buffers already, as a reader that converts a glTF document adds what
+/// it rewrites: accessors on views of one new buffer, written into the document by [`Added::finish`]. The indices
+/// it gives are those the accessors have once written.
+#[cfg(feature = "gltf")]
+pub(crate) struct Added {
+    bytes: Vec<u8>,
+    /// Each view's offset, length and target.
+    views: Vec<(usize, usize, Option<u32>)>,
+    accessors: Vec<Value>,
+    first_view: usize,
+    first_accessor: usize,
+}
+
+#[cfg(feature = "gltf")]
+impl Added {
+    /// Nothing added yet to `doc`.
+    pub fn new(doc: &Document) -> Added {
+        let count = |k: &str| list(doc.json(), k).len();
+        Added {
+            bytes: Vec::new(),
+            views: Vec::new(),
+            accessors: Vec::new(),
+            first_view: count("bufferViews"),
+            first_accessor: count("accessors"),
+        }
+    }
+
+    /// An accessor of `count` elements of `kind` and `component_type` over `bytes`, on a view of its own (for
+    /// `target`, when given); returns the accessor's index.
+    pub fn accessor(
+        &mut self,
+        bytes: &[u8],
+        component_type: u32,
+        count: usize,
+        kind: &str,
+        target: Option<u32>,
+    ) -> usize {
+        while !self.bytes.len().is_multiple_of(4) {
+            self.bytes.push(0);
+        }
+        self.views.push((self.bytes.len(), bytes.len(), target));
+        self.bytes.extend_from_slice(bytes);
+        self.accessors.push(json!({
+            "bufferView": self.first_view + self.views.len() - 1,
+            "componentType": component_type,
+            "count": count,
+            "type": kind,
+        }));
+        self.first_accessor + self.accessors.len() - 1
+    }
+
+    /// A float accessor of `v`, `kind` elements, with its `min` and `max` when `bounds` are given; returns its
+    /// index.
+    pub fn floats(&mut self, v: &[f32], kind: &str, bounds: Option<(Vec<f32>, Vec<f32>)>) -> usize {
+        let width = match kind {
+            "VEC2" => 2,
+            "VEC3" => 3,
+            "VEC4" => 4,
+            "MAT4" => 16,
+            _ => 1,
+        };
+        let bytes: Vec<u8> = v.iter().flat_map(|x| x.to_le_bytes()).collect();
+        let a = self.accessor(&bytes, 5126, v.len() / width, kind, None);
+        if let Some((min, max)) = bounds {
+            let acc = &mut self.accessors[a - self.first_accessor];
+            acc["min"] = json!(min);
+            acc["max"] = json!(max);
+        }
+        a
+    }
+
+    /// Writes what was added into `doc`: the buffer, its views and the accessors. Nothing, when nothing was.
+    pub fn finish(self, doc: &mut Document) {
+        if self.accessors.is_empty() {
+            return;
+        }
+        let buffer = doc.push_buffer(self.bytes);
+        for (offset, len, target) in self.views {
+            let mut view = json!({ "buffer": buffer, "byteOffset": offset, "byteLength": len });
+            if let Some(t) = target {
+                view["target"] = json!(t);
+            }
+            doc.push_view(view);
+        }
+        let list = doc.json_mut().entry("accessors").or_insert_with(|| json!([]));
+        if !list.is_array() {
+            *list = json!([]);
+        }
+        if let Value::Array(list) = list {
+            list.extend(self.accessors);
+        }
+    }
+}
+
 /// Builds a document's one buffer from typed arrays, with a view and an accessor for each.
 pub(crate) struct Builder {
     pub parts: Parts,

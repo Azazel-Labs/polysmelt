@@ -37,12 +37,12 @@ cases.
 | 3MF | 63 | 55 | none |
 | FBX | 136 | 118 | 18 |
 | USD | 141 | 121 | 20 |
-| glTF | 102 | 69 | 15 |
+| glTF | 104 | 71 | 15 |
 | SketchUp | 31 | 7 | none |
 | BVH | 42 | 41 | none |
 | COLLADA | 92 | 79 | none |
 | OFF | 26 | 24 | none |
-| VRM | 7 | 7 | none |
+| VRM | 9 | 9 | none |
 | X3D | 55 | 55 | none |
 | DXF | 38 | 34 | none |
 | Gaussian splats (`.splat`) | 8 | 8 | none |

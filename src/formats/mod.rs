@@ -110,7 +110,8 @@ mod irr;
     feature = "bvh",
     feature = "dae",
     feature = "flt",
-    feature = "ogex"
+    feature = "ogex",
+    feature = "gltf"
 ))]
 #[cfg_attr(
     not(all(
@@ -137,7 +138,8 @@ mod irr;
         feature = "bvh",
         feature = "dae",
         feature = "flt",
-        feature = "ogex"
+        feature = "ogex",
+        feature = "gltf"
     )),
     allow(dead_code, reason = "each reader uses the parts its format needs")
 )]
@@ -183,6 +185,8 @@ mod ply;
     feature = "tiles"
 ))]
 mod points;
+#[cfg(feature = "gltf")]
+mod rules;
 #[cfg(any(
     feature = "mmd",
     feature = "directx",

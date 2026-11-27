@@ -35,6 +35,25 @@ Breaking changes are allowed in minor releases until 1.0.
   `framesPerSecond`, as USD does when it isn't authored, then for USD's 24, which is now
   reported as assumed. It was reported as a declared 24, and a `framesPerSecond` beside it was
   ignored for timing keys.
+- glTF 1.0, VRM and 3D Tiles, which convert their glTF rather than pass it through, follow
+  the animation, skin and name rules every other reader does. glTF 2.0 read as itself is
+  unchanged, as before. What already follows the rules is left as the file has it:
+  - An animation whose keys don't start at 0 starts at 0, what was taken off kept as its
+    `extras.timeOffset`, and its keys are cleaned (increasing times, unit rotations that turn
+    the short way).
+  - A skinned primitive with more than 16 influences on a vertex, a joint named twice, weights
+    that don't sum to 1 or a vertex no joint weights has its joints and weights rewritten: the
+    16 strongest kept, duplicates merged, weights normalized, and an unweighted vertex bound to
+    the node that draws the mesh (added to the skin as a joint, its inverse bind matrix the
+    identity) rather than to the skin's first joint. Every skin's `skeleton` is its joints'
+    common root.
+  - A `name` of `""` is taken away.
+- A glTF 1.0 file loads under a `RootNode` with no transform, as every format with a scene
+  does. The node is the last in the list, so the file's nodes keep their indices. (A glTF 1.0
+  inside a 3D Tiles tile has none, as 3D Tiles has no `RootNode`.)
+- **Breaking:** a tileset lists the tiles it couldn't find in
+  `asset.extras.source.missingFiles`, the key every reader uses, rather than `missingTiles`.
+  `Document::facts` still counts them as `missing_tiles`.
 
 ## 0.21.0
 

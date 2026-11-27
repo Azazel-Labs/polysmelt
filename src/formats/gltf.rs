@@ -19,7 +19,9 @@
 //!   meters, +Y up, +Z forward and right-handedness, declared. A file that has a source already (a
 //!   model Polysmelt converted, read back) keeps it.
 //! - glTF 1.0 (and its binary GLB, `KHR_binary_glTF`) is upgraded to 2.0 first; see
-//!   [`super::gltf1`].
+//!   [`super::gltf1`]. An upgraded document is converted, not passed through, so it follows the rules every
+//!   converting reader does ([`super::rules`]): it hangs from a `RootNode`, its animations start at 0 and its
+//!   skins follow the one skinning rule. A glTF 2.0 file is left as it is.
 
 use std::path::{Component, Path};
 
@@ -34,8 +36,20 @@ use crate::num::usize_of;
 use crate::source::{Axis, Fact, Handedness, SourceInfo};
 use crate::{Bytes, Context as _, ErrorKind, Result};
 
-/// Reads the glTF or GLB `input`.
+/// Reads the glTF or GLB file `input`: a glTF 2.0 one as it is, and a glTF 1.0 one upgraded and held to the
+/// reader rules, under a `RootNode`.
 pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document> {
+    let (mut doc, upgraded) = read(input, assets, keep)?;
+    if upgraded {
+        super::frame::root(&mut doc, super::frame::Frame::IDENTITY);
+        super::rules::conform(&mut doc, keep);
+    }
+    Ok(doc)
+}
+
+/// Reads the glTF or GLB `input` (glTF 1.0 upgraded to 2.0) as it is, for a reader that has its own use for
+/// it; and whether it was upgraded.
+pub(crate) fn read(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<(Document, bool)> {
     let (json, mut bin) = match input.bytes() {
         Some(b) if b.starts_with(b"glTF") => glb_in_memory(b, |part| input.share(part))?,
         Some(b) => (gltf_json(b)?, None),
@@ -106,6 +120,7 @@ pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
         }
         doc.buffers.push(blob);
     }
+    let upgraded = fix.is_some();
     if let Some(fix) = fix {
         gltf1::finish(&mut doc, &fix)?;
     }
@@ -125,7 +140,7 @@ pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
             doc.refs = refs;
         }
     }
-    Ok(doc)
+    Ok((doc, upgraded))
 }
 
 /// The asset's `extras.source`, made if it isn't there. `json` has its `asset`.

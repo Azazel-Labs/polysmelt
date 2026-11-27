@@ -42,6 +42,14 @@
 //! i3dm, and a point's `_BATCHID` in a pnts; a point cloud without batch ids has per-point
 //! properties, which become custom attributes instead.
 //!
+//! # The reader rules
+//!
+//! What the tiles place is converted, so it follows the rules every converting reader does
+//! ([`super::rules`]): the glTF's animations start at 0, its skins follow the one skinning rule, nothing has an
+//! empty name, and tile contents that aren't there are listed in `missingFiles`. There is no `RootNode`: tile
+//! space is Z up and a tile's glTF Y up, so no one frame is the file's to keep under it, and positions on the
+//! globe are placed in double precision by the nodes over each tile, turned Y up where they are.
+//!
 //! Not read: 3D Tiles 1.1 implicit tiling and its `.subtree` files, the vector and geometry tile
 //! formats (`.vctr`, `.geom`), and metadata schemas, which are refused or left out as each
 //! module says.
@@ -171,11 +179,14 @@ pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
     };
     let mut stats = Stats::default();
     let mut doc = content(&ctx, &data, &mut stats)?;
+    // What the tiles place is converted, not passed through: its animations and skins follow every reader's rules.
+    super::rules::conform(&mut doc, keep);
 
     let mut source = Map::new();
     source.insert("content".into(), json!(stats.kinds));
     if !stats.missing.is_empty() {
-        source.insert("missingTiles".into(), json!(stats.missing));
+        // Named as every reader names the files a model refers to and that weren't found.
+        source.insert("missingFiles".into(), json!(stats.missing));
     }
     let asset = doc.json().get("asset");
     let tool = asset
@@ -379,7 +390,7 @@ fn model(ctx: &Ctx<'_>, bytes: &[u8]) -> Result<(Document, [f64; 3])> {
         limit: ctx.input.limit,
         ..Input::shared(&shared, ctx.input.path)
     };
-    let mut doc = gltf::load(sub, ctx.assets, ctx.keep)?;
+    let (mut doc, _) = gltf::read(sub, ctx.assets, ctx.keep)?;
     let json = doc.json_mut();
     let mut center = [0.0; 3];
     let three = |v: &Value| -> Option<[f64; 3]> {

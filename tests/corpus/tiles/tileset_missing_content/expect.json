@@ -25,7 +25,7 @@
     "source": {
       "format": "3D Tiles",
       "version": "1.0",
-      "missingTiles": [
+      "missingFiles": [
         "gone.b3dm",
         "https://example.com/far.b3dm"
       ]

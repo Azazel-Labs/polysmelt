@@ -1,5 +1,5 @@
 //! What every reader does the same way with skins, animations and the textures a model names: the same
-//! two-joint skinned strip, turning through the same three keys, written in six formats, and the same texture
+//! two-joint skinned strip, turning through the same three keys, written in nine formats, and the same texture
 //! named three awkward ways in five.
 #![cfg(feature = "default")]
 
@@ -8,7 +8,7 @@ use polysmelt::document::Pose;
 use polysmelt::rig::{Rig, Trs};
 use polysmelt::source::Fact;
 use polysmelt::{Document, Loader};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 fn read(bytes: &[u8], name: &str) -> Document {
     polysmelt::read(bytes.to_vec(), name).unwrap_or_else(|e| panic!("{name}: {e}"))
@@ -419,6 +419,219 @@ fn weights(doc: &Document) -> Vec<Weighted> {
     out
 }
 
+// The strip as glTF, which readers that convert a glTF (glTF 1.0, VRM, a 3D Tiles tile) hold to the same rules,
+// and glTF 2.0 read as itself keeps as the file has it. Its weights are written untidily: the bottom row's root
+// weight is 2, the middle row names root twice at a quarter each, and the top row's tip weight is 3. With `bare`
+// the top row has no weight at all, and the keys turn `root` rather than `tip`.
+
+/// The strip's binary data, laid out the same for glTF 1.0 and 2.0: positions, indices, joints as bytes (2.0)
+/// and as floats (1.0), weights, inverse bind matrices, key times and key rotations; and each part's place.
+fn strip_bin(bare: bool) -> (Vec<u8>, [(usize, usize); 8]) {
+    let floats = |v: &[f32]| -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() };
+    let positions: Vec<f32> = STRIP.iter().flat_map(|(p, _)| *p).collect();
+    let indices: Vec<u8> = [0u16, 1, 3, 0, 3, 2, 2, 3, 5, 2, 5, 4]
+        .iter()
+        .flat_map(|i| i.to_le_bytes())
+        .collect();
+    let joints: [[u8; 4]; 6] = [[0; 4], [0; 4], [0, 0, 1, 0], [0, 0, 1, 0], [1, 0, 0, 0], [1, 0, 0, 0]];
+    let top = if bare { 0.0 } else { 3.0 };
+    let weights: [[f32; 4]; 6] = [
+        [2.0, 0.0, 0.0, 0.0],
+        [2.0, 0.0, 0.0, 0.0],
+        [0.25, 0.25, 0.5, 0.0],
+        [0.25, 0.25, 0.5, 0.0],
+        [top, 0.0, 0.0, 0.0],
+        [top, 0.0, 0.0, 0.0],
+    ];
+    let ibms = [
+        1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, //
+        1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, -1.0, 0.0, 1.0,
+    ];
+    let turn = |deg: f32| {
+        let (s, c) = (deg / 2.0).to_radians().sin_cos();
+        [0.0, 0.0, s, c]
+    };
+    let rotations: Vec<f32> = [0.0, 45.0, 90.0].into_iter().flat_map(turn).collect();
+    let parts: [Vec<u8>; 8] = [
+        floats(&positions),
+        indices,
+        joints.iter().flatten().copied().collect(),
+        floats(&joints.iter().flatten().map(|&j| f32::from(j)).collect::<Vec<_>>()),
+        floats(&weights.concat()),
+        floats(&ibms),
+        floats(&[1.0, 1.5, 2.0]),
+        floats(&rotations),
+    ];
+    let mut bin = Vec::new();
+    let mut at = [(0, 0); 8];
+    for (k, part) in parts.iter().enumerate() {
+        at[k] = (bin.len(), part.len());
+        bin.extend(part);
+    }
+    (bin, at)
+}
+
+/// The strip as glTF 2.0: `root`, `tip` under it, and `body` drawing the strip with their skin.
+fn strip_gltf(bare: bool) -> (Value, Vec<u8>) {
+    let (bin, at) = strip_bin(bare);
+    let view = |k: usize| json!({ "buffer": 0, "byteOffset": at[k].0, "byteLength": at[k].1 });
+    let turns = usize::from(!bare);
+    let json = json!({
+        "asset": { "version": "2.0" },
+        "scene": 0,
+        "scenes": [{ "nodes": [0, 2] }],
+        "nodes": [
+            { "name": "root", "children": [1] },
+            { "name": "tip", "translation": [0.0, 1.0, 0.0] },
+            { "name": "body", "mesh": 0, "skin": 0 },
+        ],
+        "meshes": [{ "primitives": [{
+            "attributes": { "POSITION": 0, "JOINTS_0": 2, "WEIGHTS_0": 3 }, "indices": 1 }] }],
+        "skins": [{ "joints": [0, 1], "inverseBindMatrices": 4 }],
+        "animations": [{
+            "samplers": [{ "input": 5, "output": 6 }],
+            "channels": [{ "sampler": 0, "target": { "node": turns, "path": "rotation" } }] }],
+        "accessors": [
+            { "bufferView": 0, "componentType": 5126, "count": 6, "type": "VEC3",
+              "min": [0.0, 0.0, 0.0], "max": [1.0, 2.0, 0.0] },
+            { "bufferView": 1, "componentType": 5123, "count": 12, "type": "SCALAR" },
+            { "bufferView": 2, "componentType": 5121, "count": 6, "type": "VEC4" },
+            { "bufferView": 4, "componentType": 5126, "count": 6, "type": "VEC4" },
+            { "bufferView": 5, "componentType": 5126, "count": 2, "type": "MAT4" },
+            { "bufferView": 6, "componentType": 5126, "count": 3, "type": "SCALAR", "min": [1.0], "max": [2.0] },
+            { "bufferView": 7, "componentType": 5126, "count": 3, "type": "VEC4" },
+        ],
+        "bufferViews": (0..8).map(view).collect::<Vec<_>>(),
+        "buffers": [{ "byteLength": bin.len() }],
+    });
+    (json, bin)
+}
+
+/// The strip as glTF 1.0: objects keyed by ID, joints found by `jointName`, float `JOINT` indices.
+fn strip_gltf1(bare: bool) -> (Value, Vec<u8>) {
+    let (bin, at) = strip_bin(bare);
+    let view = |k: usize| json!({ "buffer": "binary_glTF", "byteOffset": at[k].0, "byteLength": at[k].1 });
+    let acc = |view: &str, component: u32, count: usize, kind: &str| {
+        json!({ "bufferView": view, "byteOffset": 0, "byteStride": 0, "componentType": component,
+                "count": count, "type": kind })
+    };
+    let turns = if bare { "root" } else { "tip" };
+    let json = json!({
+        "asset": { "version": "1.0" },
+        "extensionsUsed": ["KHR_binary_glTF"],
+        "buffers": { "binary_glTF": { "byteLength": bin.len(), "type": "arraybuffer", "uri": "data:," } },
+        "bufferViews": { "positions": view(0), "indices": view(1), "joints": view(3), "weights": view(4),
+                         "ibms": view(5), "times": view(6), "rotations": view(7) },
+        "accessors": {
+            "position": acc("positions", 5126, 6, "VEC3"),
+            "index": acc("indices", 5123, 12, "SCALAR"),
+            "joint": acc("joints", 5126, 6, "VEC4"),
+            "weight": acc("weights", 5126, 6, "VEC4"),
+            "ibm": acc("ibms", 5126, 2, "MAT4"),
+            "time": acc("times", 5126, 3, "SCALAR"),
+            "rotation": acc("rotations", 5126, 3, "VEC4"),
+        },
+        "meshes": { "strip": { "primitives": [{
+            "attributes": { "POSITION": "position", "JOINT": "joint", "WEIGHT": "weight" },
+            "indices": "index", "mode": 4 }] } },
+        "skins": { "skin": { "bindShapeMatrix": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+                             "inverseBindMatrices": "ibm", "jointNames": ["root", "tip"] } },
+        "nodes": {
+            "root": { "jointName": "root", "children": ["tip"] },
+            "tip": { "jointName": "tip", "translation": [0.0, 1.0, 0.0] },
+            "body": { "meshes": ["strip"], "skin": "skin", "skeletons": ["root"] },
+        },
+        "animations": { "turn": {
+            "parameters": { "TIME": "time", "rotation": "rotation" },
+            "samplers": { "s": { "input": "TIME", "output": "rotation", "interpolation": "LINEAR" } },
+            "channels": [{ "sampler": "s", "target": { "id": turns, "path": "rotation" } }] } },
+        "scenes": { "scene": { "nodes": ["root", "body"] } },
+        "scene": "scene",
+    });
+    (json, bin)
+}
+
+/// `json` padded with spaces to a multiple of four bytes.
+fn padded(json: &Value) -> Vec<u8> {
+    let mut text = json.to_string().into_bytes();
+    while !text.len().is_multiple_of(4) {
+        text.push(b' ');
+    }
+    text
+}
+
+fn le32(n: usize) -> [u8; 4] {
+    u32::try_from(n).unwrap().to_le_bytes()
+}
+
+/// A binary glTF 2.0 file.
+fn glb(json: &Value, bin: &[u8]) -> Vec<u8> {
+    let text = padded(json);
+    let mut bin = bin.to_vec();
+    while !bin.len().is_multiple_of(4) {
+        bin.push(0);
+    }
+    let mut out = b"glTF".to_vec();
+    out.extend(2u32.to_le_bytes());
+    out.extend(le32(28 + text.len() + bin.len()));
+    out.extend(le32(text.len()));
+    out.extend(b"JSON");
+    out.extend(&text);
+    out.extend(le32(bin.len()));
+    out.extend(b"BIN\0");
+    out.extend(&bin);
+    out
+}
+
+/// A binary glTF 1.0 file (`KHR_binary_glTF`): a 20-byte header, the JSON, the body.
+fn glb1(json: &Value, bin: &[u8]) -> Vec<u8> {
+    let text = padded(json);
+    let mut out = b"glTF".to_vec();
+    out.extend(1u32.to_le_bytes());
+    out.extend(le32(20 + text.len() + bin.len()));
+    out.extend(le32(text.len()));
+    out.extend(0u32.to_le_bytes());
+    out.extend(&text);
+    out.extend(bin);
+    out
+}
+
+/// A VRM 1.0 avatar: the glTF 2.0 with a humanoid whose hips are `root`.
+fn vrm(mut json: Value, bin: &[u8]) -> Vec<u8> {
+    json["extensionsUsed"] = json!(["VRMC_vrm"]);
+    json["extensions"] = json!({ "VRMC_vrm": {
+        "specVersion": "1.0",
+        "meta": { "name": "strip", "authors": ["polysmelt"], "licenseUrl": "https://vrm.dev/licenses/1.0/" },
+        "humanoid": { "humanBones": { "hips": { "node": 0 } } } } });
+    glb(&json, bin)
+}
+
+/// A Batched 3D Model tile of a binary glTF, with no batches and nothing to place.
+fn b3dm(glb: &[u8]) -> Vec<u8> {
+    let mut table = br#"{"BATCH_LENGTH":0}"#.to_vec();
+    while !(28 + table.len()).is_multiple_of(8) {
+        table.push(b' ');
+    }
+    let mut out = b"b3dm".to_vec();
+    for n in [1, 28 + table.len() + glb.len(), table.len(), 0, 0, 0] {
+        out.extend(le32(n));
+    }
+    out.extend(&table);
+    out.extend(glb);
+    out
+}
+
+/// The strip in each format that converts a glTF.
+fn strip_glbs(bare: bool) -> Vec<(&'static str, Vec<u8>)> {
+    let (json, bin) = strip_gltf(bare);
+    let (json1, bin1) = strip_gltf1(bare);
+    vec![
+        ("strip1.glb", glb1(&json1, &bin1)),
+        ("strip.vrm", vrm(json.clone(), &bin)),
+        ("strip.b3dm", b3dm(&glb(&json, &bin))),
+    ]
+}
+
 #[test]
 fn the_same_skinned_strip_reads_the_same_from_every_format() {
     let cases: Vec<(&str, Vec<u8>, f64)> = vec![
@@ -429,6 +642,10 @@ fn the_same_skinned_strip_reads_the_same_from_every_format() {
         ("strip.ogex", OGEX.into(), 1.0),
         ("strip.md5mesh", MD5_MESH.into(), 0.0),
     ];
+    let cases: Vec<(&str, Vec<u8>, f64)> = cases
+        .into_iter()
+        .chain(strip_glbs(false).into_iter().map(|(n, b)| (n, b, 1.0)))
+        .collect();
     // What the file says of the strip, worked out from `STRIP`.
     let mut want: Vec<Weighted> = STRIP
         .iter()
@@ -484,6 +701,20 @@ fn the_same_skinned_strip_reads_the_same_from_every_format() {
     assert_eq!(rig.animations[0].span(), (0.0, 1.0));
     assert!(doc.json()["animations"][0].get("extras").is_none());
     assert!(near(carried(&rig, 0.5, [0.0, 2.0, 0.0]), posed(4, 45.0)));
+}
+
+#[test]
+fn a_gltf_2_file_is_kept_as_it_is() {
+    // The strip's untidy weights and late keys as glTF 2.0: read as itself, nothing is held to the rules.
+    let (json, bin) = strip_gltf(false);
+    let doc = read(&glb(&json, &bin), "strip.glb");
+    for key in ["meshes", "skins", "animations", "nodes", "accessors", "bufferViews"] {
+        assert_eq!(doc.json()[key], json[key], "{key}");
+    }
+    let (_, weights) = doc.read_floats(3).unwrap();
+    assert_eq!(weights[..4], [2.0, 0.0, 0.0, 0.0]);
+    let rig = doc.rig().unwrap();
+    assert_eq!(rig.animations[0].span(), (1.0, 2.0));
 }
 
 #[test]
@@ -577,8 +808,9 @@ fn a_vertex_no_joint_moves_stays_with_its_mesh_and_not_with_the_first_joint() {
             "  Name { string { \"root\" } }\n  Rotation %rr (kind = \"z\") { float { 0 } }\n  Animation { Track (target = %rr) { Time { Key { float { 0, 1 } } } Value { Key { float { 0, 1.5707963267948966 } } } } }\n",
         )
         .replace("    Animation { Track (target = %rz)", "    Animation (clip = 1) { Track (target = %rz)");
-    for (name, text) in [("strip.dae", dae), ("strip.ogex", ogex)] {
-        let doc = read(text.as_bytes(), name);
+    let files = [("strip.dae", dae.into_bytes()), ("strip.ogex", ogex.into_bytes())];
+    for (name, bytes) in files.into_iter().chain(strip_glbs(true)) {
+        let doc = read(&bytes, name);
         let rig = doc.rig().unwrap();
         let joints: Vec<_> = rig.skins[0]
             .joints

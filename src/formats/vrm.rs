@@ -12,8 +12,12 @@
 //! The asset's `extras.source` says which version the file is and whether it was turned, with
 //! glTF's frame declared (a 0.x avatar's forward is -Z) and the avatar's meta: its name or
 //! title, authors, copyright and license (the license URL in 1.0; in 0.x the license name, or
-//! the other license's URL), with its own version, contact and references kept as details. The
-//! rest of the glTF is passed through as it is.
+//! the other license's URL), with its own version, contact and references kept as details.
+//!
+//! Being converted rather than passed through, a VRM follows the rules every converting reader does
+//! ([`super::rules`]): its animations start at 0 (a `.vrma` exported from a timeline often doesn't), its skins
+//! follow the one skinning rule and nothing has an empty name. What a file already has right is left as it is;
+//! the rest of the glTF, its extensions among it, is passed through.
 
 use serde_json::{Map, Value, json};
 
@@ -30,7 +34,7 @@ fn vrm_extension(name: &str) -> bool {
 }
 
 pub(crate) fn load<'a>(input: Input<'a>, assets: &'a dyn Assets, keep: Keep) -> Result<Document> {
-    let mut doc = super::gltf::load(input, assets, keep)?;
+    let (mut doc, _) = super::gltf::read(input, assets, keep)?;
     let json = doc.json_mut();
     if let Some(Value::Array(required)) = json.get_mut("extensionsRequired") {
         required.retain(|e| !e.as_str().is_some_and(vrm_extension));
@@ -124,6 +128,8 @@ pub(crate) fn load<'a>(input: Input<'a>, assets: &'a dyn Assets, keep: Keep) -> 
         Frame::IDENTITY
     };
     frame::root(&mut doc, frame);
+    // VRM is converted, not passed through: its animations and skins follow every reader's rules.
+    super::rules::conform(&mut doc, keep);
     Ok(doc)
 }
 
