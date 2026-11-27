@@ -3,8 +3,10 @@
 //! the stream has no record lengths and skipping them by size would lose alignment.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::rc::Rc;
 
+use crate::assets::Assets;
 use crate::{Context, ErrorKind, Result};
 
 use super::model::{self, Model};
@@ -1509,7 +1511,7 @@ fn find_start(data: &[u8], ver: u32) -> Result<(usize, u32)> {
     Ok((start, 0))
 }
 
-pub(crate) fn parse(data: &[u8], ver: u32) -> Result<Model> {
+pub(crate) fn parse(data: &[u8], ver: u32, assets: &dyn Assets) -> Result<Model> {
     let (start, mc) = find_start(data, ver)?;
     let bases = if mc >= 2 {
         vec![bootstrap_two_materials(data, ver, start)?]
@@ -1517,15 +1519,24 @@ pub(crate) fn parse(data: &[u8], ver: u32) -> Result<Model> {
         probe_layer_anchor_bases(data, ver, start, mc)?
     };
     let walk = walk_with_bases(data, ver, start, mc, &bases)?;
-    Ok(to_model(data, &walk))
+    Ok(to_model(data, &walk, assets))
 }
 
-fn to_model(data: &[u8], walk: &Walk<'_>) -> Model {
+fn to_model(data: &[u8], walk: &Walk<'_>, assets: &dyn Assets) -> Model {
     let slots = &walk.ar.slots;
     let mut model = Model::default();
+    // The images that didn't make a texture, by where they are: one image many materials use is one texture.
+    let mut bad = std::collections::HashSet::new();
     for m in &walk.materials {
         if let Some(Value::Material(rec)) = m.v.as_deref() {
-            model.materials.insert(m.slot, material(data, slots, rec));
+            let (mat, lost) = material(data, slots, rec, assets);
+            match lost {
+                // Its image isn't in the file, where a legacy file keeps its textures, without their names.
+                Some(None) => model.missed.dropped += 1,
+                Some(Some(at)) if bad.insert(at) => model.missed.dropped += 1,
+                _ => {}
+            }
+            model.materials.insert(m.slot, mat);
         }
     }
     for (&slot, e) in slots {
@@ -1543,29 +1554,44 @@ fn to_model(data: &[u8], walk: &Walk<'_>) -> Model {
     model
 }
 
-fn material(data: &[u8], slots: &HashMap<u64, Entry>, rec: &MatRec) -> model::Material {
+/// A material, and when it has a texture that isn't kept, where its image is (`None` when that isn't in the file).
+#[allow(
+    clippy::option_option,
+    reason = "no texture lost, and one lost without its image, differ"
+)]
+fn material(
+    data: &[u8],
+    slots: &HashMap<u64, Entry>,
+    rec: &MatRec,
+    assets: &dyn Assets,
+) -> (model::Material, Option<Option<(usize, usize)>>) {
+    let mut lost = None;
     let texture = rec.tex.as_ref().and_then(|t| {
-        let (start, len) = match t.inline {
-            Some(range) => range,
-            None => match slots.get(&t.dib?)?.v.as_deref()? {
-                Value::Dib { start, len } => (*start, *len),
-                _ => return None,
+        let range = match t.inline {
+            Some(range) => Some(range),
+            None => match t.dib.and_then(|d| slots.get(&d)).and_then(|e| e.v.as_deref()) {
+                Some(Value::Dib { start, len }) => Some((*start, *len)),
+                _ => None,
             },
         };
-        let bytes = data.get(start..start.checked_add(len)?)?;
+        let bytes = range.and_then(|(start, len)| data.get(start..start.checked_add(len)?));
+        lost = Some(range.filter(|_| bytes.is_some()));
+        let bytes = super::image::embeddable(bytes?, Path::new(""), assets)?;
+        lost = None;
         Some(model::Texture {
-            bytes: super::image::embeddable(bytes)?,
+            bytes,
             tile: t.tile,
             average: Some(t.average),
         })
     });
-    model::Material {
+    let m = model::Material {
         name: rec.name.clone(),
         rgb: [rec.rgba[0], rec.rgba[1], rec.rgba[2]],
         alpha: legacy_alpha(rec),
         colorize: rec.tex.as_ref().is_some_and(|t| t.colorize),
         texture,
-    }
+    };
+    (m, lost)
 }
 
 /// The color's own alpha times the material's opacity. The opacity field only counts when the flag after it

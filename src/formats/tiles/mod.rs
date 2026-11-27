@@ -184,9 +184,27 @@ pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
 
     let mut source = Map::new();
     source.insert("content".into(), json!(stats.kinds));
-    if !stats.missing.is_empty() {
+    // What the tiles' glTF missed, each texture and file once across them all, as grafting them gathered it.
+    let theirs = doc.json().get("asset").and_then(|a| a.pointer("/extras/source"));
+    let dropped = theirs.and_then(|s| s.get("droppedTextures")).cloned();
+    let mut missing = stats.missing.clone();
+    for f in theirs
+        .and_then(|s| s.get("missingFiles"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+    {
+        if !missing.iter().any(|m| m == f) {
+            missing.push(f.to_owned());
+        }
+    }
+    if let Some(dropped) = dropped {
+        source.insert("droppedTextures".into(), dropped);
+    }
+    if !missing.is_empty() {
         // Named as every reader names the files a model refers to and that weren't found.
-        source.insert("missingFiles".into(), json!(stats.missing));
+        source.insert("missingFiles".into(), json!(missing));
     }
     let asset = doc.json().get("asset");
     let tool = asset

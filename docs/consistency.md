@@ -104,11 +104,15 @@ The document is in glTF's frame: +Y up, right-handed, meters.
   the document doesn't have are counted in `droppedTextures`: each distinct texture once, however
   many materials, objects or palette entries use it. A texture isn't there when no file is found
   for its name, or when the file found isn't an image that can be embedded (known when images
-  are read, with `Keep::image_bytes`). The same name is the same texture, and so are names that
-  find the same file. In glTF, where materials share images through textures, each image is a
-  texture: an image a texture can't be drawn from (not found, or in a format Polysmelt doesn't
-  decode, such as KTX2) is counted once however many textures use it, and only when the texture
-  has no other image to draw. A read without textures or materials reports neither, as it
+  are read, with `Keep::image_bytes`). A texture embedded in the file, or packed in its archive,
+  that isn't an image is counted the same way, once, after the file it names (where it names one)
+  is looked for in its place; only a name looked up and not found is listed as missing. The same
+  name is the same texture, and so are names that find the same file. In glTF, where materials
+  share images through textures, each image is a texture: an image a texture can't be drawn from
+  (not found, or in a format Polysmelt doesn't decode, such as KTX2) is counted once however many
+  textures use it, and only when the texture has no other image to draw. A scene or tileset that
+  places other files (Irrlicht, 3D Tiles) reports what they missed as its own: a name counted and
+  listed once across all of them. A read without textures or materials reports neither, as it
   doesn't look.
 
 ## Errors

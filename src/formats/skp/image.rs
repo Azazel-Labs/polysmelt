@@ -1,8 +1,13 @@
 //! Texture images in a form glTF can embed. `SketchUp` keeps each texture as the file it was made from: PNG and JPEG
-//! pass through as they are, and uncompressed BMP and TGA (plain or run-length) are decoded and written out as
-//! PNG. Anything else is dropped, and the face keeps its material's color.
+//! pass through as they are, uncompressed BMP and TGA (plain or run-length) are decoded and written out as PNG, and
+//! anything else goes to the [`Assets`], which turn GIF, TIFF and the other formats with features of their names
+//! into PNG as they do every reader's textures. What none of these makes an image of is dropped, and the face keeps
+//! its material's color.
+
+use std::path::Path;
 
 use super::glb::image_mime;
+use crate::assets::Assets;
 use crate::bytes::{u16_at, u32_at};
 use crate::images::MAX_PIXELS;
 
@@ -10,13 +15,16 @@ use crate::images::MAX_PIXELS;
 const MAX_SIDE: usize = 16_384;
 
 /// `bytes` as a PNG or JPEG file: unchanged when it already is one, re-encoded as PNG when it is a BMP or TGA this
-/// can decode, `None` otherwise.
-pub(crate) fn embeddable(bytes: &[u8]) -> Option<Vec<u8>> {
+/// can decode, or as `assets` turn the texture file `name` into one ([`Assets::image`]). `None` otherwise.
+pub(crate) fn embeddable(bytes: &[u8], name: &Path, assets: &dyn Assets) -> Option<Vec<u8>> {
     if image_mime(bytes).is_some() {
         return Some(bytes.to_vec());
     }
-    let image = bmp(bytes).or_else(|| tga(bytes))?;
-    image.png()
+    if let Some(png) = bmp(bytes).or_else(|| tga(bytes)).and_then(|image| image.png()) {
+        return Some(png);
+    }
+    let image = assets.image(bytes, name)?;
+    image_mime(&image.bytes).map(|_| image.bytes.to_vec())
 }
 
 /// Decoded pixels, RGBA, top row first.
@@ -298,6 +306,15 @@ fn tga(d: &[u8]) -> Option<Rgba> {
 mod tests {
     use super::*;
 
+    fn embed(bytes: &[u8]) -> Option<Vec<u8>> {
+        embeddable(bytes, Path::new(""), &crate::assets::Memory::new())
+    }
+
+    /// What this module's own decoders make of `bytes`, without the shared image path behind them.
+    fn own(bytes: &[u8]) -> Option<Vec<u8>> {
+        bmp(bytes).or_else(|| tga(bytes)).and_then(|image| image.png())
+    }
+
     /// The size, color type and pixels of a PNG this module wrote.
     fn unpng(png: &[u8]) -> (u32, u32, u8, Vec<u8>) {
         assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
@@ -336,13 +353,10 @@ mod tests {
     #[test]
     fn passes_png_and_jpeg_through() {
         let png = b"\x89PNG\r\n\x1a\nrest".to_vec();
-        assert_eq!(embeddable(&png), Some(png));
-        assert_eq!(
-            embeddable(&[0xff, 0xd8, 0xff, 0xe0]),
-            Some(vec![0xff, 0xd8, 0xff, 0xe0])
-        );
-        assert_eq!(embeddable(b"GIF89a"), None);
-        assert_eq!(embeddable(b""), None);
+        assert_eq!(embed(&png), Some(png));
+        assert_eq!(embed(&[0xff, 0xd8, 0xff, 0xe0]), Some(vec![0xff, 0xd8, 0xff, 0xe0]));
+        assert_eq!(embed(b"GIF89a"), None);
+        assert_eq!(embed(b""), None);
     }
 
     #[test]
@@ -350,7 +364,7 @@ mod tests {
         // two rows of two pixels, bottom row first, each row padded to four bytes: blue, green / red, white
         let rows = [255, 0, 0, 0, 255, 0, 0, 0, 0, 0, 255, 255, 255, 255, 0, 0];
         for file_header in [true, false] {
-            let png = embeddable(&bmp_file(24, 2, &[], &rows, file_header)).unwrap();
+            let png = embed(&bmp_file(24, 2, &[], &rows, file_header)).unwrap();
             let (w, h, kind, px) = unpng(&png);
             assert_eq!((w, h, kind), (2, 2, 2));
             assert_eq!(px, [255, 0, 0, 255, 255, 255, 0, 0, 255, 0, 255, 0]);
@@ -362,7 +376,7 @@ mod tests {
         let palette = [0, 0, 0, 0, 0, 0, 255, 0];
         // 1 bit a pixel: top row black, red; bottom row red, black
         let rows = [0b0100_0000, 0, 0, 0, 0b1000_0000, 0, 0, 0];
-        let (w, h, _, px) = unpng(&embeddable(&bmp_file(1, -2, &palette, &rows, true)).unwrap());
+        let (w, h, _, px) = unpng(&embed(&bmp_file(1, -2, &palette, &rows, true)).unwrap());
         assert_eq!((w, h), (2, 2));
         assert_eq!(px, [0, 0, 0, 255, 0, 0, 255, 0, 0, 0, 0, 0]);
     }
@@ -370,10 +384,10 @@ mod tests {
     #[test]
     fn keeps_bitmap_alpha_only_when_used() {
         let opaque = [1, 2, 3, 0, 4, 5, 6, 0];
-        let (_, _, kind, px) = unpng(&embeddable(&bmp_file(32, 1, &[], &opaque, true)).unwrap());
+        let (_, _, kind, px) = unpng(&embed(&bmp_file(32, 1, &[], &opaque, true)).unwrap());
         assert_eq!((kind, px), (2, vec![3, 2, 1, 6, 5, 4]));
         let cutout = [1, 2, 3, 255, 4, 5, 6, 0];
-        let (_, _, kind, px) = unpng(&embeddable(&bmp_file(32, 1, &[], &cutout, true)).unwrap());
+        let (_, _, kind, px) = unpng(&embed(&bmp_file(32, 1, &[], &cutout, true)).unwrap());
         assert_eq!((kind, px), (6, vec![3, 2, 1, 255, 6, 5, 4, 0]));
     }
 
@@ -390,11 +404,11 @@ mod tests {
     fn decodes_truecolor_targas() {
         // bottom-left origin: the first row stored is the bottom one
         let body = [255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255];
-        let (w, h, kind, px) = unpng(&embeddable(&tga_file(2, 24, 0, 2, 2, &body)).unwrap());
+        let (w, h, kind, px) = unpng(&embed(&tga_file(2, 24, 0, 2, 2, &body)).unwrap());
         assert_eq!((w, h, kind), (2, 2, 2));
         assert_eq!(px, [255, 0, 0, 255, 255, 255, 0, 0, 255, 0, 255, 0]);
         let top_left = tga_file(2, 24, 0x20, 2, 2, &body);
-        let (_, _, _, px) = unpng(&embeddable(&top_left).unwrap());
+        let (_, _, _, px) = unpng(&embed(&top_left).unwrap());
         assert_eq!(px, [0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255]);
     }
 
@@ -402,7 +416,7 @@ mod tests {
     fn decodes_run_length_targas_with_alpha() {
         // a run of three translucent red pixels, then one raw opaque blue
         let body = [0x82, 0, 0, 255, 128, 0x00, 255, 0, 0, 255];
-        let (w, h, kind, px) = unpng(&embeddable(&tga_file(10, 32, 0x28, 4, 1, &body)).unwrap());
+        let (w, h, kind, px) = unpng(&embed(&tga_file(10, 32, 0x28, 4, 1, &body)).unwrap());
         assert_eq!((w, h, kind), (4, 1, 6));
         assert_eq!(px, [255, 0, 0, 128, 255, 0, 0, 128, 255, 0, 0, 128, 0, 0, 255, 255]);
     }
@@ -410,11 +424,13 @@ mod tests {
     #[test]
     fn rejects_implausible_and_oversized_images() {
         // a run-length header claiming a huge image from a few bytes
-        assert!(embeddable(&tga_file(10, 24, 0, 16_000, 16_000, &[0xff, 1, 2, 3])).is_none());
-        assert!(embeddable(&tga_file(7, 24, 0, 2, 2, &[0; 12])).is_none());
-        assert!(embeddable(&tga_file(2, 24, 0, 2, 2, &[0; 11])).is_none());
-        assert!(embeddable(&bmp_file(24, 2, &[], &[0; 15], true)).is_none());
-        assert!(embeddable(&bmp_file(24, 0, &[], &[], true)).is_none());
+        assert!(own(&tga_file(10, 24, 0, 16_000, 16_000, &[0xff, 1, 2, 3])).is_none());
+        assert!(own(&tga_file(7, 24, 0, 2, 2, &[0; 12])).is_none());
+        assert!(own(&tga_file(2, 24, 0, 2, 2, &[0; 11])).is_none());
+        assert!(own(&bmp_file(24, 2, &[], &[0; 15], true)).is_none());
+        assert!(own(&bmp_file(24, 0, &[], &[], true)).is_none());
+        // and the shared image path behind them makes no image of a huge one either
+        assert!(embed(&tga_file(10, 24, 0, 16_000, 16_000, &[0xff, 1, 2, 3])).is_none());
     }
 
     #[test]
@@ -433,13 +449,13 @@ mod tests {
         ];
         for file in files {
             for len in 0..file.len() {
-                let _ = embeddable(&file[..len]);
+                let _ = embed(&file[..len]);
             }
             let mut file = file;
             for i in 0..file.len() {
                 for x in [0x01, 0x80, 0xff] {
                     file[i] ^= x;
-                    let _ = embeddable(&file);
+                    let _ = embed(&file);
                     file[i] ^= x;
                 }
             }

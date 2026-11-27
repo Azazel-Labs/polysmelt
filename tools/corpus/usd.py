@@ -552,10 +552,23 @@ mat_case("texture_in_usdz", "a texture packaged in the usdz", [], textured,
          textures=[("diffuseColor", "./red.png", "rgb", "color3f")], files={"red.png": RED}, enc="usdz")
 mat_case("texture_udim", "a UDIM texture path: tile 1001", [], textured,
          textures=[("diffuseColor", "./red.<UDIM>.png", "rgb", "color3f")], files={"red.1001.png": RED})
-mat_case("texture_missing", "a texture that isn't there: untextured",
+# A texture the document hasn't got counts once in droppedTextures; a file not found is listed in missingFiles
+# (docs/consistency.md, Textures).
+untextured = {"materials": [{"name": "Mat", "textured": False}], "image_count": 0}
+mat_case("texture_missing", "a texture that isn't there: untextured, counted, and the file listed",
          ["color3f inputs:diffuseColor = (0.3, 0.3, 0.3)"],
-         {"materials": [{"name": "Mat", "textured": False}], "image_count": 0},
+         {**untextured, "json": {"/asset/extras/source/droppedTextures": 1,
+                                 "/asset/extras/source/missingFiles": ["nowhere.png"]}},
          textures=[("diffuseColor", "./nowhere.png", "rgb", "color3f")])
+mat_case("texture_udim_missing", "a UDIM texture none of whose tiles is there: one texture, listed as named", [],
+         {**untextured, "json": {"/asset/extras/source/droppedTextures": 1,
+                                 "/asset/extras/source/missingFiles": ["gone.<UDIM>.png"]}},
+         textures=[("diffuseColor", "./gone.<UDIM>.png", "rgb", "color3f")])
+mat_case("texture_in_usdz_not_an_image", "a texture packaged in the usdz that isn't an image: counted, and no file "
+         "is missing", [],
+         {**untextured, "json": {"/asset/extras/source/droppedTextures": 1,
+                                 "/asset/extras/source/missingFiles": None}},
+         textures=[("diffuseColor", "./junk.png", "rgb", "color3f")], files={"junk.png": b"not an image"}, enc="usdz")
 mat_case("normal_map", "a diffuse texture and a normal map", [],
          {"image_count": 2, "materials": [{"name": "Mat", "textured": True, "normal_map": True}]},
          textures=[("diffuseColor", "./red.png", "rgb", "color3f"), ("normal", "./flat_n.png", "rgb", "normal3f")],

@@ -627,8 +627,10 @@ def join(folder, uri):
 def tileset(name, files):
     """The tileset at its finest: a tile that refines by REPLACE gives way to its children, one
     that refines by ADD is drawn with them. A tile's transform is its parent's times its own,
-    and takes its content from the tile's space to the tileset's."""
-    out, placements, missing = Drawn(), [], []
+    and takes its content from the tile's space to the tileset's. A glTF tile's textures whose image
+    files aren't there are the tileset's too: each image name counted once across the tiles
+    (docs/consistency.md, Textures)."""
+    out, placements, missing, textures = Drawn(), [], [], []
 
     def load(name, outer):
         folder = name.rpartition("/")[0]
@@ -653,6 +655,14 @@ def tileset(name, files):
                         load(path, m)
                         continue
                     here = path.rpartition("/")[0]
+                    if path.endswith(".gltf"):
+                        g = json.loads(data)
+                        images = g.get("images", [])
+                        for t in g.get("textures", []):
+                            uri = images[t["source"]].get("uri", "") if "source" in t else ""
+                            if uri and not uri.startswith("data:") and join(here, unquote(uri)) not in files \
+                                    and uri not in textures:
+                                textures.append(uri)
                     beside = {k[len(here) + 1 if here else 0:]: v for k, v in files.items()}
                     drawn, _ = content(data, beside, axis)
                     place = chain(Z_TO_Y, m, Y_TO_Z)
@@ -665,8 +675,10 @@ def tileset(name, files):
 
     load(name, IDENTITY)
     reference = {"kind": "tileset", "placements": placements}
-    if missing:
-        reference["missing"] = missing
+    if missing or textures:
+        reference["missing"] = missing + [t for t in textures if t not in missing]
+    if textures:
+        reference["droppedTextures"] = len(textures)
     return out, reference
 
 
@@ -1056,8 +1068,10 @@ def tile_case(name, files, model, what, spec=SPEC, check=None, extra=None, wrapp
         e = expectations(drawn, reference)
         e["document"] = {"source": {"format": "3D Tiles", "version": json.loads(data)["asset"]["version"]}}
         if "missing" in reference:
-            e["facts"]["missing_tiles"] = len(reference["missing"])
+            e["facts"]["missing_tiles"] = len(reference["missing"]) - reference.get("droppedTextures", 0)
             e["document"]["source"]["missingFiles"] = reference["missing"]
+        if "droppedTextures" in reference:
+            e.setdefault("json", {})["/asset/extras/source/droppedTextures"] = reference["droppedTextures"]
     else:
         drawn, reference = content(data, files)
         if reference["kind"] == "pnts" and drawn.cloud:
@@ -1308,6 +1322,33 @@ def synthetic():
     tile_case("tileset_missing_content", {"tileset.json": json.dumps(doc, indent=1), "here.b3dm": b},
               "tileset.json", "tileset.json two of whose three tiles have content that isn't there",
               check=([0, 0, 0], [2, 1, 3]))
+    # Two glTF tiles whose textures name one image file that isn't there, and a tile that isn't there: the
+    # texture counts once across the tiles, and each name is listed once.
+    g, body = read_glb(wedge)
+    g["buffers"][0]["uri"] = "wedge.bin"
+    g["images"] = [{"uri": "gone.png"}]
+    g["textures"] = [{"source": 0}]
+    g["materials"] = [{"pbrMetallicRoughness": {"baseColorTexture": {"index": 0}}}]
+    for mesh in g["meshes"]:
+        for prim in mesh["primitives"]:
+            # Texture coordinates, all (0, 0), for the texture to be drawn with.
+            count = g["accessors"][prim["attributes"]["POSITION"]]["count"]
+            g["bufferViews"].append({"buffer": 0, "byteOffset": len(body), "byteLength": 8 * count})
+            g["accessors"].append({"bufferView": len(g["bufferViews"]) - 1, "componentType": 5126, "count": count,
+                                   "type": "VEC2"})
+            body += bytes(8 * count)
+            prim["attributes"]["TEXCOORD_0"] = len(g["accessors"]) - 1
+            prim["material"] = 0
+    g["buffers"][0]["byteLength"] = len(body)
+    doc = {"asset": {"version": "1.1"}, "geometricError": 10,
+           "root": {"boundingVolume": box(4), "geometricError": 5, "refine": "ADD",
+                    "children": [leaf("tiles/a.gltf", (0, 0, 0)), leaf("tiles/b.gltf", (0, 0, 10)),
+                                 leaf("tiles/c.gltf", (0, 0, 20))]}}
+    tile_case("tileset_missing_texture", {"tileset.json": json.dumps(doc, indent=1),
+                                          "tiles/a.gltf": json.dumps(g, indent=1),
+                                          "tiles/b.gltf": json.dumps(g, indent=1), "tiles/wedge.bin": body},
+              "tileset.json", "tileset.json of two glTF tiles whose textures name one image that isn't there, "
+              "and a tile that isn't there", spec="3D Tiles 1.1 (OGC 22-025r4)")
 
     # --- errors ---
     good = make_tile(b"b3dm", {"BATCH_LENGTH": 0}, body=wedge)

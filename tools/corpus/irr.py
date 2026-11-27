@@ -368,6 +368,21 @@ case(FMT, "scene_mesh_files",
       "facts": {"nodes": 3}, "json": {"/asset/extras/source/missingFiles": ["gone.irrmesh"]}, "materials": [{"color": lin(0xFF336699)}],
       "document": {"meshes": 1}})
 
+# Two mesh files whose materials name one texture that isn't there, and a mesh file that isn't there: the scene
+# reports what the files it places missed, a name once across them (docs/consistency.md, Textures).
+gone = plain + [("texture", "Texture1", "gone.png")]
+gone_file = irrmesh(buffer(v, i, mat=gone))
+case(FMT, "scene_mesh_files_missing_texture",
+     {"room.irr": scene(node("mesh", "a", extra=[("string", "Mesh", "a.irrmesh")]),
+                        node("mesh", "b", (5, 0, 0), extra=[("string", "Mesh", "meshes/b.irrmesh")]),
+                        node("mesh", "c", extra=[("string", "Mesh", "nowhere.irrmesh")])),
+      "a.irrmesh": gone_file, "meshes/b.irrmesh": gone_file},
+     {"spec": f"{SPEC}: two mesh files naming one texture that isn't there, and a mesh file that isn't there: the "
+      "texture counts once, and each name is listed once", "source": SRC, "file": "room.irr", "triangles": 24,
+      "facts": {"nodes": 3}, "image_count": 0,
+      "json": {"/asset/extras/source/droppedTextures": 1,
+               "/asset/extras/source/missingFiles": ["gone.png", "nowhere.irrmesh"]}})
+
 # A mesh node's own materials replace the file's.
 case(FMT, "scene_node_materials",
      {"room.irr": scene(node("mesh", "a", extra=[("string", "Mesh", "box.irrmesh")],

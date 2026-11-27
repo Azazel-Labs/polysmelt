@@ -379,6 +379,7 @@ pub(crate) fn load(input: super::Input<'_>, keep: Keep) -> Result<Document> {
         order: Vec::new(),
         names: HashMap::new(),
         textures: Vec::new(),
+        written: HashMap::new(),
         distinct: HashSet::new(),
         b: Builder::new(keep.crease_angle()),
         meshes: Vec::new(),
@@ -438,7 +439,8 @@ pub(crate) fn load(input: super::Input<'_>, keep: Keep) -> Result<Document> {
     }
 
     let mut images = Images::new(!keep.image_bytes, std::path::Path::new(""));
-    let mut image_of: HashMap<usize, Option<usize>> = HashMap::new();
+    // By part: one part is one texture, whatever wraps it is drawn with.
+    let mut image_of: HashMap<String, Option<usize>> = HashMap::new();
     let mut materials: Vec<Full> = Vec::new();
     for (i, look) in out.order.iter().enumerate() {
         let named = |fallback: String| out.names.get(look).cloned().unwrap_or(fallback);
@@ -453,16 +455,34 @@ pub(crate) fn load(input: super::Input<'_>, keep: Keep) -> Result<Document> {
             }
             Look::Vertex => Material::plain("vertex_colors", [1.0; 4]).into(),
             Look::Texture(t) => {
-                let image = *image_of.entry(t).or_insert_with(|| {
+                let part = &out.textures[t].0;
+                let image = *image_of.entry(part.clone()).or_insert_with(|| {
                     // A texture that would only be dropped isn't unzipped.
                     if !(keep.materials && keep.textures) {
                         return None;
                     }
-                    let real = names.get(&out.textures[t].0)?;
+                    let written = out.written.get(part).map_or(part.as_str(), String::as_str);
+                    let Some(real) = names.get(part) else {
+                        // Named as the model wrote it, as every reader names a file it didn't find.
+                        if written.trim().is_empty() {
+                            images.drop(written);
+                        } else {
+                            images.miss(written);
+                        }
+                        return None;
+                    };
                     let mut bytes = Vec::new();
-                    zip.by_name(real).ok()?.take(MAX_PART).read_to_end(&mut bytes).ok()?;
+                    let read = zip
+                        .by_name(real)
+                        .ok()
+                        .and_then(|f| f.take(MAX_PART).read_to_end(&mut bytes).ok());
+                    if read.is_none() {
+                        // There, and not readable: a texture the document doesn't have.
+                        images.drop(written);
+                        return None;
+                    }
                     let location = Location::Archive(real.clone());
-                    images.bytes(bytes.into(), &out.textures[t].0, location, Image::png_or_jpeg)
+                    images.bytes(bytes.into(), written, location, Image::png_or_jpeg)
                 });
                 match image {
                     Some(i) => Full {
@@ -581,6 +601,8 @@ struct Emit<'a> {
     names: HashMap<Look, String>,
     /// The zip parts of the textures used, and their wraps.
     textures: Vec<(String, [u32; 2])>,
+    /// Each texture's part as the model first wrote it, by its part.
+    written: HashMap<String, String>,
     /// The colors shown, for the facts.
     distinct: HashSet<[u8; 3]>,
     b: Builder,
@@ -1148,6 +1170,7 @@ impl Emit<'_> {
                     return plain;
                 };
                 let key = (norm(&path.0), path.1);
+                self.written.entry(key.0.clone()).or_insert_with(|| path.0.clone());
                 let t = if let Some(t) = self.textures.iter().position(|k| *k == key) {
                     t
                 } else {

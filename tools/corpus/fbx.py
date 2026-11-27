@@ -811,11 +811,25 @@ tex_case("texture_backslashes", "a Windows relative path with backslashes", "tex
 tex_case("texture_absolute_elsewhere", "an absolute path from the artist's machine; the file is beside the model",
          "D:/Projects/Character/Textures/skin.png", {"skin.png": RED}, relative="..\\..\\Textures\\skin.png",
          expect=textured)
-tex_case("texture_missing", "a texture that isn't there: the material keeps its color",
-         "nowhere.png", expect={"materials": [{"name": "Skin", "textured": False,
-                                               "color": lin3((0.2, 0.7, 0.2)) + [1]}], "image_count": 0})
+# A texture the document hasn't got counts once in droppedTextures, and a file named and not found is listed in
+# missingFiles (docs/consistency.md, Textures).
+untextured = {"materials": [{"name": "Skin", "textured": False, "color": lin3((0.2, 0.7, 0.2)) + [1]}],
+              "image_count": 0}
+tex_case("texture_missing", "a texture that isn't there: the material keeps its color, and the file is listed",
+         "nowhere.png", expect={**untextured, "json": {"/asset/extras/source/droppedTextures": 1,
+                                                       "/asset/extras/source/missingFiles": ["nowhere.png"]}})
 tex_case("texture_empty_content", "an empty embedded Content, with the file beside the model", "skin.png",
          {"skin.png": RED}, content=b"", expect=textured)
+# Embedded bytes that aren't an image: the file the texture names is looked for in their place.
+tex_case("texture_embedded_not_an_image", "an embedded Content that isn't an image, naming a file that isn't "
+         "there: counted once, and the file listed", "C:/Art/skin.png", content=b"not an image",
+         expect={**untextured, "json": {"/asset/extras/source/droppedTextures": 1,
+                                        "/asset/extras/source/missingFiles": ["C:/Art/skin.png"]}})
+tex_case("texture_embedded_not_an_image_beside", "an embedded Content that isn't an image, with the file it "
+         "names beside the model: that file is drawn, and nothing is counted", "skin.png", {"skin.png": RED},
+         content=b"not an image",
+         expect={**textured, "json": {"/asset/extras/source/droppedTextures": None,
+                                      "/asset/extras/source/missingFiles": None}})
 tex_case("normal_map", "a color texture and a NormalMap texture", "skin.png",
          {"skin.png": RED, "skin_n.png": png((128, 128, 255), 4)}, second=("skin_n.png", "NormalMap"),
          expect={"materials": [{"name": "Skin", "textured": True, "normal_map": True}], "image_count": 2})

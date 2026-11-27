@@ -183,6 +183,15 @@ vff = fixtures["nesting_2021"]
 case(FMT, "truncated_vff", {"cut.skp": vff[:len(vff) // 2]},
      {"spec": SPEC + ": a 2021+ file cut off halfway through its ZIP container", "source": GEN,
       "error": "reading a SketchUp 2025 file", "error_kind": "Truncated"})
+# The SketchUp 3 file with its PNG's signature zeroed: the texture isn't an image, so the face is drawn untextured
+# and the texture counted once in droppedTextures, with no file missing (docs/consistency.md, Textures).
+png_at = v3.index(b"\x89PNG\r\n\x1a\n")
+case(FMT, "texture_not_an_image_legacy",
+     {"painted.skp": v3[:png_at] + bytes(8) + v3[png_at + 8:]},
+     {"spec": SPEC + ": a SketchUp 3 file whose inline texture isn't an image", "source": GEN,
+      "triangles": 2, "area": 20 * 20 * INCH * INCH, "image_count": 0,
+      "materials": [{"name": "Checker", "textured": False}],
+      "json": {"/asset/extras/source/droppedTextures": 1, "/asset/extras/source/missingFiles": None}})
 case(FMT, "header_only", {"header.skp": header("{15.0.9350}")},
      {"spec": SPEC + ": a SketchUp 2015 header with nothing after it", "source": GEN,
       "error": "reading a SketchUp 2015 file", "error_kind": "Corrupt"})

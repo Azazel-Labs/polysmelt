@@ -669,8 +669,9 @@ write("texture_file_uri", {
 write("texture_missing", {
     "cube.dae": mat_doc([effect("fx", "lambert", tex("diffuse", "img"))], [material("M", "fx", "Missing")],
                         [("mat", "M")], images=image("img", "nowhere.png"))},
-      f"{SPEC}: an image file that isn't there: the model still loads", triangles=12,
-      materials=[{"name": "Missing", "textured": False}])
+      f"{SPEC}: an image file that isn't there: the model still loads, the texture counted and the file listed",
+      triangles=12, materials=[{"name": "Missing", "textured": False}],
+      json={"/asset/extras/source/droppedTextures": 1, "/asset/extras/source/missingFiles": ["nowhere.png"]})
 
 write("texture_embedded_hex", {
     "cube.dae": mat_doc([effect("fx", "lambert", tex("diffuse", "s"),
@@ -680,6 +681,18 @@ write("texture_embedded_hex", {
                                "</init_from></image>").replace(NS14, NS15).replace('"1.4.1"', '"1.5.0"')},
       f"{SPEC15}: an image embedded as <hex> data", image_count=1,
       materials=[{"name": "Embedded", "textured": True, "pixel": list(GREEN)}])
+
+# Embedded bytes that aren't an image: a texture the document hasn't got, counted once in droppedTextures, and
+# no file is missing (docs/consistency.md, Textures).
+write("texture_embedded_hex_not_an_image", {
+    "cube.dae": mat_doc([effect("fx", "lambert", tex("diffuse", "s"),
+                                newparams='<newparam sid="s"><sampler2D><instance_image url="#img"/></sampler2D>'
+                                          "</newparam>")], [material("M", "fx", "Embedded")], [("mat", "M")],
+                        images=f'<image id="img"><init_from><hex format="PNG">{b"not an image".hex().upper()}</hex>'
+                               "</init_from></image>").replace(NS14, NS15).replace('"1.4.1"', '"1.5.0"')},
+      f"{SPEC15}: an image embedded as <hex> data that isn't an image: counted, and no file is missing",
+      image_count=0, materials=[{"name": "Embedded", "textured": False}],
+      json={"/asset/extras/source/droppedTextures": 1, "/asset/extras/source/missingFiles": None})
 
 write("bump_normal_map", {
     "cube.dae": mat_doc([effect("fx", "phong", color("diffuse", (1, 1, 1, 1)),

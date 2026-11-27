@@ -13,6 +13,8 @@ pub(crate) struct Model {
     pub(crate) hidden_layers: Vec<Id>,
     pub(crate) definitions: HashMap<Id, Definition>,
     pub(crate) root: Definition,
+    /// The textures the materials name that aren't images glTF can embed, or aren't in the file.
+    pub(crate) missed: crate::images::Missed,
 }
 
 #[derive(Debug, Clone)]

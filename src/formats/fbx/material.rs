@@ -708,7 +708,9 @@ fn texture_tex(id: i64, objs: &Objects<'_>, image: usize) -> Tex {
     t
 }
 
-/// A texture's pixels: embedded in a connected `Video`'s `Content`, or the file it names, found in the pack.
+/// A texture's pixels: embedded in a connected `Video`'s `Content`, or the file it names, found in the pack. One
+/// that gives neither is counted once as a texture the document doesn't have, and the file listed when it wasn't
+/// found.
 fn texture_image(id: i64, objs: &Objects<'_>, dir: &Path, assets: &dyn Assets, images: &mut Images) -> Option<usize> {
     let (node, _) = objs.nodes.get(&id)?;
     let names: Vec<String> = ["RelativeFilename", "FileName"]
@@ -716,6 +718,7 @@ fn texture_image(id: i64, objs: &Objects<'_>, dir: &Path, assets: &dyn Assets, i
         .filter_map(|k| child_attr(*node, k).and_then(string).map(str::to_owned))
         .filter(|s| !s.is_empty())
         .collect();
+    let mut embedded = false;
     for (vid, _) in objs.children.get(&id).cloned().unwrap_or_default() {
         if let Some((video, _)) = objs.nodes.get(&vid)
             && video.name() == "Video"
@@ -731,11 +734,21 @@ fn texture_image(id: i64, objs: &Objects<'_>, dir: &Path, assets: &dyn Assets, i
                 Some(part) => assets.image_shared(part, &hint),
                 None => assets.image(b, &hint),
             };
-            if let Some(i) = images.bytes(Cow::Borrowed(&bytes[..]), &name, Location::Embedded, convert) {
+            // Not an image: the file it was made from may be.
+            if let Some(i) = images.try_bytes(Cow::Borrowed(&bytes[..]), &name, Location::Embedded, convert) {
                 return Some(i);
             }
+            embedded = true;
         }
     }
+    if names.is_empty() {
+        // Embedded, not an image, and naming no file to look for in its place.
+        if embedded {
+            images.drop("");
+        }
+        return None;
+    }
+    // Counted here when it isn't found, or isn't an image.
     images.find(assets, &names, &[dir])
 }
 

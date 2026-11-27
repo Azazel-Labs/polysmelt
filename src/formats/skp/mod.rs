@@ -12,8 +12,10 @@
 //!   `KHR_node_visibility`, when the triangle budget leaves room for them.
 //! - Normals are averaged across smooth edges and split at hard ones. A face painted differently on
 //!   its back gets single-sided front and back faces; otherwise it is one double-sided face.
-//! - BMP and TGA textures are re-encoded as PNG; GIF and TIFF textures are dropped. A texture with
-//!   an alpha channel is cut out at a half, as `SketchUp` draws it.
+//! - BMP and TGA textures are re-encoded as PNG, and GIF, TIFF and other formats as the [`Assets`] turn every
+//!   reader's textures into PNG (GIF and TIFF with the `gif` and `tiff` features, on by default). A texture with an
+//!   alpha channel is cut out at a half, as `SketchUp` draws it. One that isn't an image glTF can embed is counted
+//!   in `droppedTextures`, and one not in the file listed in `missingFiles`, as every reader reports them.
 //! - Unpainted faces take the default material every reader gives faces with none.
 //! - The model stays in its own inches and Z up: the document's `RootNode`, over the model's node, turns it to
 //!   glTF's Y up and scales it to meters.
@@ -33,15 +35,15 @@ use serde_json::{Map, json};
 
 use super::Input;
 use super::frame::{self, Frame};
-use crate::assets::Memory;
+use crate::assets::{Assets, Memory};
 use crate::document::{Document, Keep};
 use crate::source::{Axis, Fact, Handedness, SourceInfo};
 use crate::{Result, Within as _};
 
 /// Reads the `SketchUp` model `input`, with what it holds in a glTF document.
-pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document> {
+pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document> {
     let bytes = input.read()?;
-    let (glb, major) = convert(&bytes, input.limit)?;
+    let (glb, major, missed) = convert(&bytes, input.limit, assets)?;
     // An empty model, or one of only edges, guides and text, has nothing to draw.
     let mut doc = match glb {
         Some(glb) => {
@@ -52,6 +54,11 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document> {
     };
     let mut source = Map::new();
     source_info(&bytes, major).write(&mut source);
+    // A read that keeps no textures doesn't report them.
+    if keep.materials && keep.textures && !missed.is_empty() {
+        missed.write(&mut source);
+        doc.missed = Some(Box::new((missed, true)));
+    }
     doc.base_mut()
         .entry("asset")
         .or_insert_with(|| json!({ "version": "2.0" }))["extras"] = json!({ "source": source });
@@ -86,12 +93,13 @@ fn is_skp(bytes: &[u8]) -> bool {
 }
 
 /// Converts a `SketchUp` file to a GLB file in meters with Y up (`None` when nothing in it is
-/// visible), with the file's major version; `limit` is the most triangles it may draw.
+/// visible), with the file's major version and the textures it couldn't keep; `limit` is the most
+/// triangles it may draw, and `assets` turn texture formats it doesn't decode itself into PNG.
 ///
 /// # Errors
 /// When the bytes are not a `SketchUp` file, come from a version this reader doesn't know, or
 /// are damaged.
-fn convert(bytes: &[u8], limit: usize) -> Result<(Option<Vec<u8>>, u32)> {
+fn convert(bytes: &[u8], limit: usize, assets: &dyn Assets) -> Result<(Option<Vec<u8>>, u32, crate::images::Missed)> {
     if !is_skp(bytes) {
         bail!(UnknownFormat, "not a SketchUp file");
     }
@@ -106,11 +114,11 @@ fn convert(bytes: &[u8], limit: usize) -> Result<(Option<Vec<u8>>, u32)> {
                 "SketchUp {major} files are not supported (SketchUp 3 is the oldest this reader knows)"
             );
         }
-        legacy::parse(bytes, major).with_within(reading)?
+        legacy::parse(bytes, major, assets).with_within(reading)?
     } else {
-        vff::parse(bytes).with_within(reading)?
+        vff::parse(bytes, assets).with_within(reading)?
     };
-    Ok((glb::write(&model, limit)?, major))
+    Ok((glb::write(&model, limit)?, major, model.missed))
 }
 
 /// `SketchUp`'s marketing name for a major version: 3 to 8 kept the number, 13 to 2020 became years.
@@ -179,11 +187,11 @@ mod tests {
 
     #[test]
     fn rejects_what_it_cannot_read() {
-        assert!(convert(b"hello", MAX_TRIANGLES).is_err());
-        assert!(convert(&header("{2.0.1}"), MAX_TRIANGLES).is_err());
-        assert!(convert(&header("{15.0.9350}"), MAX_TRIANGLES).is_err());
-        assert!(convert(&header("{23.0.1}"), MAX_TRIANGLES).is_err());
-        assert!(convert(&MAGIC, MAX_TRIANGLES).is_err());
+        assert!(convert(b"hello", MAX_TRIANGLES, &Memory::new()).is_err());
+        assert!(convert(&header("{2.0.1}"), MAX_TRIANGLES, &Memory::new()).is_err());
+        assert!(convert(&header("{15.0.9350}"), MAX_TRIANGLES, &Memory::new()).is_err());
+        assert!(convert(&header("{23.0.1}"), MAX_TRIANGLES, &Memory::new()).is_err());
+        assert!(convert(&MAGIC, MAX_TRIANGLES, &Memory::new()).is_err());
     }
 
     #[test]
@@ -201,10 +209,10 @@ mod tests {
         ))
         .unwrap();
         for len in (0..data.len()).step_by(7) {
-            let _ = convert(&data[..len], MAX_TRIANGLES);
+            let _ = convert(&data[..len], MAX_TRIANGLES, &Memory::new());
         }
         for len in (0..vff.len()).step_by(7) {
-            let _ = convert(&vff[..len], MAX_TRIANGLES);
+            let _ = convert(&vff[..len], MAX_TRIANGLES, &Memory::new());
         }
         // Tags with line styles, in the 2019 layout.
         let styles = std::fs::read(concat!(
@@ -212,9 +220,9 @@ mod tests {
             "/tests/corpus/skp/sdk_saved_tag_line_styles_2019/sdk_saved_tag_line_styles_2019.skp"
         ))
         .unwrap();
-        assert!(convert(&styles, MAX_TRIANGLES).is_ok());
+        assert!(convert(&styles, MAX_TRIANGLES, &Memory::new()).is_ok());
         for len in (0..styles.len()).step_by(7) {
-            let _ = convert(&styles[..len], MAX_TRIANGLES);
+            let _ = convert(&styles[..len], MAX_TRIANGLES, &Memory::new());
         }
     }
 }

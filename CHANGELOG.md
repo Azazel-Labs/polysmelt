@@ -17,6 +17,23 @@ Breaking changes are allowed in minor releases until 1.0.
   This is the convention for any animation's own assumed rate (see docs/consistency.md).
 - USD conformance cases for the frame-rate rule (`timeCodesPerSecond`, then `framesPerSecond`,
   then 24): each alone, both, a `timeCodesPerSecond` of 0, and neither.
+- SketchUp decodes GIF and TIFF textures through the shared image path (with the `gif` and `tiff`
+  features, on by default), as every other reader does, instead of dropping them silently. A
+  texture it still can't make into an image is counted in `source.droppedTextures`, and one a
+  2021+ file names but doesn't hold is counted and listed in `missingFiles`, by the rule in
+  docs/consistency.md.
+- 3MF counts a texture whose part isn't in the package in `droppedTextures` and lists the path, as
+  the model writes it, in `missingFiles`; a part that isn't an image is counted too. Two textures
+  of one part (tiled two ways) are one texture. An image reference's name (with
+  `Keep::image_bytes` off) is the path as written rather than lowercased.
+- FBX, COLLADA and USD count an embedded or packaged texture that isn't an image once, after
+  looking for the file it names in its place, where they counted it only when that file was
+  missing, or not at all (COLLADA's `<hex>` and `data:` images, a `.usdz`'s entries). Only names
+  looked up and not found are listed in `missingFiles`. A UDIM texture none of whose tiles is
+  found is counted once and listed by its pattern.
+- Irrlicht scenes and 3D Tiles tilesets report the `droppedTextures` and `missingFiles` of the
+  files they place as their own, a name counted and listed once across all of them; before, a
+  scene kept only its own and a tileset only its missing tiles.
 
 ## 0.22.0
 

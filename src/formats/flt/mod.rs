@@ -1043,12 +1043,12 @@ fn texture_image(c: &mut Ctx<'_>, file: u32, index: i16) -> Option<Found> {
                 let png = sgi::png(w, h, channels, &px)?;
                 let i = c
                     .images
-                    .bytes(Cow::Owned(png), &name, Location::File(path.clone()), Image::png_or_jpeg)?;
+                    .try_bytes(Cow::Owned(png), &name, Location::File(path.clone()), Image::png_or_jpeg)?;
                 Some((Some(i), alpha))
             });
             if sgi.is_none() {
                 // Found, and not an image: [`Images::file`] counts the others so.
-                c.images.list.missed.dropped += 1;
+                c.images.drop(&name);
             }
             sgi
         } else {

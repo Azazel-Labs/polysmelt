@@ -898,7 +898,7 @@ fn convert(input: Input<'_>, ext: &str, assets: &dyn Assets, keep: Keep) -> Resu
         #[cfg(feature = "gltf")]
         "gltf" | "glb" => gltf::load(input, assets, keep),
         #[cfg(feature = "skp")]
-        "skp" => skp::load(input, keep),
+        "skp" => skp::load(input, assets, keep),
         #[cfg(feature = "bvh")]
         "bvh" => bvh::load(input, keep),
         #[cfg(feature = "dae")]

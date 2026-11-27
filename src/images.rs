@@ -149,6 +149,10 @@ pub(crate) struct Missed {
     pub dropped: usize,
     /// The names, as the model wrote them, of those that weren't found.
     pub files: Vec<String>,
+    /// The names of the dropped textures the reader knows by name, found or not, each once: so that a texture
+    /// the documents a reader loads as parts of one (the mesh files a scene places, a tileset's tiles) all miss is
+    /// counted once across them.
+    pub names: Vec<String>,
 }
 
 impl Missed {
@@ -157,9 +161,28 @@ impl Missed {
         self.dropped == 0 && self.files.is_empty()
     }
 
-    /// Takes in what another list of images missed.
+    /// Counts a texture the document doesn't have, known by `name` (none when empty): named twice, it is counted
+    /// once.
+    pub fn drop(&mut self, name: &str) {
+        let name = name.trim();
+        if name.is_empty() {
+            self.dropped += 1;
+        } else if !self.names.iter().any(|n| n == name) {
+            self.names.push(name.to_owned());
+            self.dropped += 1;
+        }
+    }
+
+    /// Takes in what another list of images, or another document, missed: a texture both know by the same name
+    /// is counted once.
     pub fn add(&mut self, other: Missed) {
-        self.dropped += other.dropped;
+        let shared = other.names.iter().filter(|n| self.names.contains(n)).count();
+        self.dropped += other.dropped.saturating_sub(shared);
+        for n in other.names {
+            if !self.names.contains(&n) {
+                self.names.push(n);
+            }
+        }
         for f in other.files {
             if !self.files.contains(&f) {
                 self.files.push(f);
@@ -314,7 +337,7 @@ impl Images {
         let i = self.read_file(assets, path.clone(), reference);
         if i.is_none() {
             // Found, and not an image that can be embedded.
-            self.list.missed.dropped += 1;
+            self.list.missed.drop(reference);
         }
         self.files.insert(path, i);
         i
@@ -355,8 +378,18 @@ impl Images {
         let name = reference.trim();
         if !name.is_empty() && !self.list.missed.files.iter().any(|f| f == name) {
             self.list.missed.files.push(name.to_owned());
-            self.list.missed.dropped += 1;
+            self.list.missed.drop(name);
         }
+    }
+
+    #[cfg_attr(
+        not(any(feature = "fbx", feature = "usd", feature = "3mf", feature = "dae", feature = "flt")),
+        allow(dead_code, reason = "only readers that read their textures themselves use it")
+    )]
+    /// Counts a texture the model names as `reference` (or holds itself, under that name) that isn't an image
+    /// that can be embedded: for a reader that reads its textures itself. Named twice, it is counted once.
+    pub fn drop(&mut self, reference: &str) {
+        self.list.missed.drop(reference);
     }
 
     #[cfg_attr(
@@ -437,12 +470,37 @@ impl Images {
     }
 
     #[cfg_attr(
-        not(any(feature = "fbx", feature = "usd", feature = "3mf")),
+        not(any(feature = "3mf", feature = "dae")),
         allow(dead_code, reason = "only readers of archives and embedded textures use it")
     )]
     /// A texture the model holds itself, at `location`: `convert` makes the image when it's
-    /// read now. Its index, or `None` when `convert` makes none.
+    /// read now. Its index, or `None` when `convert` makes none, which counts it as a texture the
+    /// document doesn't have: call this once for each texture.
     pub fn bytes(
+        &mut self,
+        bytes: Cow<'_, [u8]>,
+        reference: &str,
+        location: Location,
+        convert: impl FnOnce(&[u8]) -> Option<Image>,
+    ) -> Option<usize> {
+        // The name of an archive's entry or a file is the texture's; one embedded may be made up.
+        let named = !matches!(location, Location::Embedded);
+        let i = self.try_bytes(bytes, reference, location, convert);
+        if i.is_none() {
+            let missed = &mut self.list.missed;
+            missed.dropped += 1;
+            let name = reference.trim();
+            if named && !name.is_empty() && !missed.names.iter().any(|n| n == name) {
+                missed.names.push(name.to_owned());
+            }
+        }
+        i
+    }
+
+    /// [`bytes`](Self::bytes) without counting a texture `convert` makes no image of: for a reader
+    /// that has somewhere else to look for it (a file of the name an embedded texture gives), and
+    /// counts it with [`drop`](Self::drop) when that gives none either.
+    pub fn try_bytes(
         &mut self,
         bytes: Cow<'_, [u8]>,
         reference: &str,

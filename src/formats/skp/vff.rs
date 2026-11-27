@@ -3,7 +3,10 @@
 //! path, keeping only geometry, instances, materials and tags.
 
 use std::collections::HashMap;
+use std::path::Path;
 
+use crate::assets::Assets;
+use crate::images::Missed;
 use crate::{Context, ErrorKind, Result};
 
 use super::model::{self, Id, Model};
@@ -456,12 +459,13 @@ fn top_level(d: &[u8]) -> Result<Vec<&[u8]>> {
     Ok(out)
 }
 
-pub(crate) fn parse(data: &[u8]) -> Result<Model> {
+pub(crate) fn parse(data: &[u8], assets: &dyn Assets) -> Result<Model> {
     let off = (0..data.len().min(4096))
         .find(|&i| data.get(i..i + 4) == Some(b"PK\x03\x04"))
         .context(ErrorKind::Corrupt, "no ZIP container found")?;
     let zip = Zip::open(&data[off..])?;
-    let by_name = materials(&zip);
+    let mut missed = Missed::default();
+    let by_name = materials(&zip, assets, &mut missed);
     let dat = zip
         .get("model.dat")
         .context(ErrorKind::Corrupt, "model.dat not found in the ZIP container")??;
@@ -472,6 +476,7 @@ pub(crate) fn parse(data: &[u8]) -> Result<Model> {
     let mut model = Model {
         hidden_layers: c.layers_hidden,
         definitions: c.definitions,
+        missed,
         ..Model::default()
     };
     model.root = c.root.context(ErrorKind::Corrupt, "model.dat has no model record")?;
@@ -484,8 +489,9 @@ pub(crate) fn parse(data: &[u8]) -> Result<Model> {
 }
 
 /// Every `materials/<folder>/material.xml`, keyed both by material name and by folder, which is what the
-/// model's material records name.
-fn materials(zip: &Zip<'_>) -> HashMap<String, model::Material> {
+/// model's material records name. The textures that aren't kept are counted in `missed`, those not in the file
+/// listed by the name the material gives.
+fn materials(zip: &Zip<'_>, assets: &dyn Assets, missed: &mut Missed) -> HashMap<String, model::Material> {
     let mut out = HashMap::new();
     let names: Vec<String> = zip.names().map(str::to_owned).collect();
     for path in names
@@ -512,7 +518,17 @@ fn materials(zip: &Zip<'_>) -> HashMap<String, model::Material> {
         let texture = element_attrs(&xml, "texture").and_then(|t| {
             let file = attr(t, "textureFilename").unwrap_or_default();
             let scale = |k: &str| attr(t, k).and_then(|v| v.trim().parse::<f64>().ok()).unwrap_or(0.0);
-            let bytes = texture_bytes(zip, &names, path, &folder, &file)?;
+            let bytes = match texture_bytes(zip, &names, path, &folder, &file, assets) {
+                Ok(bytes) => bytes,
+                Err(found) => {
+                    let name = file.trim();
+                    if !found && !name.is_empty() && !missed.files.iter().any(|f| f == name) {
+                        missed.files.push(name.to_owned());
+                    }
+                    missed.drop(name);
+                    return None;
+                }
+            };
             Some(model::Texture {
                 bytes,
                 tile: [scale("xScale"), scale("yScale")],
@@ -540,7 +556,15 @@ fn materials(zip: &Zip<'_>) -> HashMap<String, model::Material> {
 }
 
 /// The image a material uses: the file it names in its folder, or failing that the folder's only other file.
-fn texture_bytes(zip: &Zip<'_>, names: &[String], xml_path: &str, folder: &str, file: &str) -> Option<Vec<u8>> {
+/// `Err` says whether any file was there.
+fn texture_bytes(
+    zip: &Zip<'_>,
+    names: &[String],
+    xml_path: &str,
+    folder: &str,
+    file: &str,
+    assets: &dyn Assets,
+) -> std::result::Result<Vec<u8>, bool> {
     let base = file.rsplit(['/', '\\']).next().unwrap_or(file);
     let prefix = format!("materials/{folder}/");
     let candidates = [format!("{prefix}{file}"), format!("{prefix}{base}")];
@@ -550,10 +574,16 @@ fn texture_bytes(zip: &Zip<'_>, names: &[String], xml_path: &str, folder: &str, 
             .is_some_and(|e| e.eq_ignore_ascii_case("xml"));
         n.starts_with(&prefix) && n.as_str() != xml_path && !is_xml
     });
+    let mut found = false;
     candidates
         .into_iter()
         .chain(others.cloned())
-        .find_map(|n| super::image::embeddable(&zip.get(&n)?.ok()?))
+        .find_map(|n| {
+            let bytes = zip.get(&n)?;
+            found = true;
+            super::image::embeddable(&bytes.ok()?, Path::new(&n), assets)
+        })
+        .ok_or(found)
 }
 
 /// The attribute text of the first `<name ...>` element, allowing a namespace prefix.
@@ -713,7 +743,7 @@ mod tests {
 
     #[test]
     fn reads_a_painted_face_on_a_hidden_tag() {
-        let m = parse(&triangle_file()).unwrap();
+        let m = parse(&triangle_file(), &crate::assets::Memory::new()).unwrap();
         assert_eq!(m.root.faces.len(), 1);
         let f = &m.root.faces[0];
         assert_eq!(f.loops, [vec![[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [0.0, 10.0, 0.0]]]);
@@ -754,12 +784,12 @@ mod tests {
     fn damaged_files_fail_cleanly() {
         let data = triangle_file();
         for len in 0..data.len() {
-            let _ = parse(&data[..len]);
+            let _ = parse(&data[..len], &crate::assets::Memory::new());
         }
         let mut data = triangle_file();
         for i in (0..data.len()).step_by(5) {
             data[i] ^= 0x5a;
-            let _ = parse(&data);
+            let _ = parse(&data, &crate::assets::Memory::new());
             data[i] ^= 0x5a;
         }
     }

@@ -256,6 +256,9 @@ fn report_dropped(doc: &mut Document, undecodable: &[bool], lacks: impl Fn(usize
             if !dropped.insert(uri.ok_or(i)) {
                 continue;
             }
+            if let Some(uri) = uri {
+                missed.names.push(uri.to_owned());
+            }
             if let Some(uri) = uri.filter(|_| lacks(i) == Some(true)) {
                 missed.files.push(uri.to_owned());
             }

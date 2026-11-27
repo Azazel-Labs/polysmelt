@@ -3409,7 +3409,7 @@ impl Reader<'_> {
         if let Some(&i) = self.image_of.get(asset) {
             return i;
         }
-        let i = if asset.contains("<UDIM>") || asset.contains("<udim>") {
+        let found = if asset.contains("<UDIM>") || asset.contains("<udim>") {
             // A tiled texture, as its first tile there is.
             (1001..=1010).find_map(|tile| {
                 let tile = tile.to_string();
@@ -3418,26 +3418,39 @@ impl Reader<'_> {
         } else {
             self.find_image(asset)
         };
+        // Not found: missed once, by the name the model gives (a tiled texture's, not each tile's).
+        let i = found.unwrap_or_else(|| {
+            self.images.miss(asset.trim_start_matches("./"));
+            None
+        });
         self.image_of.insert(asset.to_owned(), i);
         i
     }
 
-    /// An image by its asset path, read when found.
-    fn find_image(&mut self, reference: &str) -> Option<usize> {
+    /// An image by its asset path, read when found: `None` when it isn't, and `Some(None)` when what was found
+    /// isn't an image that can be embedded, which counts it as a texture the document doesn't have.
+    #[allow(clippy::option_option, reason = "not found and not an image differ")]
+    fn find_image(&mut self, reference: &str) -> Option<Option<usize>> {
         let reference = reference.trim_start_matches("./");
         let assets = self.assets;
-        self.usdz
-            .as_mut()
-            .and_then(|z| z.read(reference))
-            .and_then(|(entry, bytes)| {
-                let convert = |b: &[u8]| assets.image(b, Path::new(reference));
-                self.images
-                    .bytes(bytes.into(), reference, Location::Archive(entry), convert)
-            })
-            .or_else(|| {
-                let dir = self.file.parent().unwrap_or(Path::new(""));
-                self.images.find(assets, &[reference], &[dir])
-            })
+        let dir = self.file.parent().unwrap_or(Path::new("")).to_path_buf();
+        let beside = || assets.find(reference, &dir);
+        let Some((entry, bytes)) = self.usdz.as_mut().and_then(|z| z.read(reference)) else {
+            return beside().map(|p| self.images.file(assets, p, reference));
+        };
+        let convert = |b: &[u8]| assets.image(b, Path::new(reference));
+        if let Some(i) = self
+            .images
+            .try_bytes(bytes.into(), reference, Location::Archive(entry), convert)
+        {
+            return Some(Some(i));
+        }
+        // In the archive and not an image: a file of its name beside the model may be. Either way it was found.
+        if let Some(p) = beside() {
+            return Some(self.images.file(assets, p, reference));
+        }
+        self.images.drop(reference);
+        Some(None)
     }
 }
 

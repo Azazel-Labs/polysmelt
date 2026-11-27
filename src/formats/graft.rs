@@ -13,6 +13,69 @@ use serde_json::{Map, Value, json};
 
 use crate::document::Document;
 
+/// Takes into `doc`'s report what `part`, a document read as part of it (a mesh file a scene places, a tile's
+/// content), reported in its `asset.extras.source`: the files it didn't find, each once, and its dropped
+/// textures, a texture both name the same way counted once ([`crate::images::Missed::add`]). Its dropped
+/// textures count as `doc`'s own, which a prune of `doc`'s textures takes away with the files among them that
+/// are textures.
+pub(super) fn report(doc: &mut Document, part: &Document) {
+    let source = |d: &Document| {
+        d.json()
+            .get("asset")
+            .and_then(|a| a.pointer("/extras/source"))
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default()
+    };
+    let theirs = source(part);
+    let dropped = theirs.get("droppedTextures").and_then(Value::as_u64).unwrap_or(0) as usize;
+    let files: Vec<String> = theirs
+        .get("missingFiles")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|f| f.as_str().map(str::to_owned))
+        .collect();
+    if dropped == 0 && files.is_empty() {
+        return;
+    }
+    // What the part counted, whichever way it did; the names it knows its textures by, to count each once.
+    let mut more = part.missed.as_ref().map(|m| m.0.clone()).unwrap_or_default();
+    more.dropped = dropped;
+    more.files.retain(|f| files.contains(f));
+    more.names.truncate(dropped);
+    let mine = source(doc);
+    let (mut missed, _) = doc.missed.take().map(|m| *m).unwrap_or_default();
+    missed.dropped = mine.get("droppedTextures").and_then(Value::as_u64).unwrap_or(0) as usize;
+    missed.names.truncate(missed.dropped);
+    missed.add(more);
+    let json = doc.base_mut();
+    let asset = json.entry("asset").or_insert_with(|| json!({ "version": "2.0" }));
+    if !asset.get("extras").is_some_and(Value::is_object) {
+        asset["extras"] = json!({});
+    }
+    if !asset["extras"].get("source").is_some_and(Value::is_object) {
+        asset["extras"]["source"] = json!({});
+    }
+    let Some(out) = asset["extras"]["source"].as_object_mut() else {
+        return;
+    };
+    if missed.dropped > 0 {
+        out.insert("droppedTextures".into(), json!(missed.dropped));
+    }
+    if !files.is_empty() {
+        let list = out.entry("missingFiles").or_insert_with(|| json!([]));
+        if let Some(list) = list.as_array_mut() {
+            for f in files {
+                if !list.iter().any(|v| v.as_str() == Some(f.as_str())) {
+                    list.push(Value::from(f));
+                }
+            }
+        }
+    }
+    doc.missed = Some(Box::new((missed, true)));
+}
+
 /// Where a graft's nodes went, so a static one can be placed again sharing its meshes.
 pub(super) struct Placed {
     first: usize,
@@ -175,8 +238,10 @@ fn adopt(json: &mut Map<String, Value>, parent: usize, children: &[usize]) {
 }
 
 /// Grafts `src` into `dst` under node `parent`. With `materials`, a list as long as the grafted document's
-/// materials, its primitives use those of `dst` in their place.
+/// materials, its primitives use those of `dst` in their place. What `src` reported missing is reported by `dst`
+/// (see [`report`]).
 pub(super) fn graft(dst: &mut Document, mut src: Document, parent: usize, materials: Option<&[usize]>) -> Placed {
+    report(dst, &src);
     let o = Offsets::of(dst.json());
     let mut s = std::mem::take(src.json_mut());
     let Document {

@@ -325,23 +325,46 @@ QUAD_T = [(0, 1, 2), (0, 2, 3)]
 COORDS = [(0, 0), (0.5, 0), (0.5, 0.25), (0, 0.25)]
 
 
-def textured(name, path, files, ok=True, spec=""):
+def textured(name, path, files, ok=True, spec="", json=None, shared=False):
+    """A quad drawn with the texture at `path`. `shared`: a second texture of the same part, tiled another
+    way, draws the second triangle; the two are one image, and one texture the document hasn't got."""
+    coords = "".join(f'<m:tex2coord u="{u}" v="{v}"/>' for u, v in COORDS)
     tex = (f'<m:texture2d id="10" path="{path}" contenttype="image/png"/>'
-           '<m:texture2dgroup id="11" texid="10">' +
-           "".join(f'<m:tex2coord u="{u}" v="{v}"/>' for u, v in COORDS) + "</m:texture2dgroup>")
-    body = mesh(QUAD, QUAD_T, lambda i: ' pid="11" p1="{}" p2="{}" p3="{}"'.format(*QUAD_T[i]))
+           f'<m:texture2dgroup id="11" texid="10">{coords}</m:texture2dgroup>')
+    if shared:
+        tex += (f'<m:texture2d id="20" path="{path}" contenttype="image/png" tilestyleu="clamp"/>'
+                f'<m:texture2dgroup id="21" texid="20">{coords}</m:texture2dgroup>')
+    body = mesh(QUAD, QUAD_T, lambda i: ' pid="{}" p1="{}" p2="{}" p3="{}"'.format(
+        21 if shared and i else 11, *QUAD_T[i]))
     want = {"textured": ok}
     if ok:
         want["pixel"] = TEAL
+    expect = {"spec": MAT + spec, "source": SRC, "triangles": 2, "uvs": True,
+              "uvs_include": [[u, 1 - v] for u, v in COORDS], "materials": [want] * (2 if shared else 1)}
+    if shared:
+        expect["primitives"] = 2
+    if json:
+        expect["json"] = json
     case(FMT, name, {"quad.3mf": package({"3D/3dmodel.model": model(tex + obj(1, body), item(1)), **files})},
-         {"spec": MAT + spec, "source": SRC, "triangles": 2, "uvs": True,
-          "uvs_include": [[u, 1 - v] for u, v in COORDS], "materials": [want]})
+         expect)
 
 
 textured("texture", "/3D/Textures/teal.png", {"3D/Textures/teal.png": png(TEAL)},
          spec=": a 2D texture and its coordinates (origin bottom-left, so V flips)")
+# A texture the document hasn't got counts once in droppedTextures; a part that isn't in the package is also
+# listed in missingFiles, as the model writes its path (docs/consistency.md, Textures).
 textured("texture_missing", "/3D/Textures/gone.png", {}, ok=False,
-         spec=": a texture whose part isn't in the package")
+         spec=": a texture whose part isn't in the package: counted and listed as written",
+         json={"/asset/extras/source/droppedTextures": 1,
+               "/asset/extras/source/missingFiles": ["/3D/Textures/gone.png"]})
+textured("texture_missing_shared", "/3D/Textures/gone.png", {}, ok=False, shared=True,
+         spec=": two textures of one part that isn't in the package (tiled two ways): one texture, counted and "
+              "listed once",
+         json={"/asset/extras/source/droppedTextures": 1,
+               "/asset/extras/source/missingFiles": ["/3D/Textures/gone.png"]})
+textured("texture_not_an_image", "/3D/Textures/junk.png", {"3D/Textures/junk.png": b"not an image"}, ok=False,
+         spec=": a texture whose part is there but isn't an image: counted, and no file is missing",
+         json={"/asset/extras/source/droppedTextures": 1, "/asset/extras/source/missingFiles": None})
 
 # --- display properties: how base materials look beyond their color ----------------------------
 

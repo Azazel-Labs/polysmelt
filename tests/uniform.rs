@@ -881,6 +881,15 @@ fn one_missing_texture_used_three_times() -> Vec<(&'static str, Vec<u8>)> {
         x3d_shape("0 1 0"),
         x3d_shape("0 0 1")
     );
+    let usda = format!(
+        "#usda 1.0\ndef Xform \"W\"\n{{\n{}{}{}{}{}{}}}\n",
+        usd_triangle("a", "/W/Ma"),
+        usd_triangle("b", "/W/Mb"),
+        usd_triangle("c", "/W/Mc"),
+        usd_material("Ma", "diffuseColor", "gone.png"),
+        usd_material("Mb", "diffuseColor", "gone.png"),
+        usd_material("Mc", "normal", "./gone.png")
+    );
     vec![
         ("pack/model.obj", obj.into()),
         ("pack/model.ac", ac.into_bytes()),
@@ -888,7 +897,35 @@ fn one_missing_texture_used_three_times() -> Vec<(&'static str, Vec<u8>)> {
         ("pack/model.gltf", gltf.into()),
         ("pack/model.dae", dae.into_bytes()),
         ("pack/model.x3d", x3d.into_bytes()),
+        ("pack/model.usda", usda.into_bytes()),
     ]
+}
+
+/// A USD triangle with texture coordinates, bound to the material at `material`.
+fn usd_triangle(name: &str, material: &str) -> String {
+    format!(
+        "    def Mesh \"{name}\" (prepend apiSchemas = [\"MaterialBindingAPI\"])\n    {{\n        \
+         int[] faceVertexCounts = [3]\n        int[] faceVertexIndices = [0, 1, 2]\n        \
+         point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]\n        \
+         texCoord2f[] primvars:st = [(0, 0), (1, 0), (0, 1)] (interpolation = \"vertex\")\n        \
+         rel material:binding = <{material}>\n    }}\n"
+    )
+}
+
+/// A USD preview material under `/W` whose `input` is drawn from the texture file `file`.
+fn usd_material(name: &str, input: &str, file: &str) -> String {
+    let (kind, output) = if input == "normal" {
+        ("normal3f", "rgb")
+    } else {
+        ("color3f", "rgb")
+    };
+    format!(
+        "    def Material \"{name}\"\n    {{\n        token outputs:surface.connect = </W/{name}/S.outputs:surface>\n        \
+         def Shader \"S\"\n        {{\n            uniform token info:id = \"UsdPreviewSurface\"\n            \
+         {kind} inputs:{input}.connect = </W/{name}/T.outputs:{output}>\n            token outputs:surface\n        }}\n        \
+         def Shader \"T\"\n        {{\n            uniform token info:id = \"UsdUVTexture\"\n            \
+         asset inputs:file = @{file}@\n            float3 outputs:{output}\n        }}\n    }}\n"
+    )
 }
 
 #[test]
@@ -979,5 +1016,442 @@ fn a_texture_the_document_cannot_draw_is_counted_once_however_many_use_it() {
         // Only the report: the textures and images are the file's.
         assert_eq!(doc.json()["textures"].as_array().unwrap().len(), 3);
         assert_eq!(doc.json()["images"].as_array().unwrap().len(), 3);
+    }
+}
+
+/// A zip of `entries`, stored, each aligned as a `.usdz`'s must be.
+fn zip_of(entries: &[(&str, &[u8])]) -> Vec<u8> {
+    use std::io::Write as _;
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    for (name, body) in entries {
+        let stored = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored)
+            .with_alignment(64);
+        zip.start_file(*name, stored).unwrap();
+        zip.write_all(body).unwrap();
+    }
+    zip.finish().unwrap().into_inner()
+}
+
+/// A small image in `format`.
+fn image_file(format: image::ImageFormat) -> Vec<u8> {
+    let mut out = Vec::new();
+    image::RgbImage::from_pixel(2, 2, image::Rgb([200, 40, 20]))
+        .write_to(&mut std::io::Cursor::new(&mut out), format)
+        .unwrap();
+    out
+}
+
+/// Bytes no image decoder reads.
+const NOT_AN_IMAGE: &[u8] = b"not an image, whatever its name says";
+
+fn read_with(bytes: &[u8], name: &str, assets: Memory, keep: Keep) -> Document {
+    Loader::new()
+        .keep(keep)
+        .assets(assets)
+        .read(bytes.to_vec(), name)
+        .unwrap_or_else(|e| panic!("{name}: {e}"))
+}
+
+/// What a document reports of the textures it doesn't have: `droppedTextures` (0 without it) and `missingFiles`
+/// in name order (empty without it).
+fn report(doc: &Document) -> (u64, Vec<String>) {
+    let src = source(doc);
+    let dropped = src.get("droppedTextures").map_or(0, |v| v.as_u64().unwrap());
+    let mut files: Vec<String> = src
+        .get("missingFiles")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|v| v.as_str().unwrap().to_owned())
+        .collect();
+    files.sort();
+    (dropped, files)
+}
+
+fn strings(names: &[&str]) -> Vec<String> {
+    names.iter().map(|s| (*s).to_owned()).collect()
+}
+
+/// A 3MF of three triangles drawn with two textures (tiled two ways) of the one part `path`, and these other parts.
+fn threemf_textured(path: &str, parts: &[(&str, &[u8])]) -> Vec<u8> {
+    let group = |id: u32, tex: u32| {
+        format!(
+            r#"<m:texture2dgroup id="{id}" texid="{tex}"><m:tex2coord u="0" v="0"/><m:tex2coord u="1" v="0"/><m:tex2coord u="0" v="1"/></m:texture2dgroup>"#
+        )
+    };
+    let model = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?><model unit="millimeter" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02" xmlns:m="http://schemas.microsoft.com/3dmanufacturing/material/2015/02"><resources>
+<m:texture2d id="10" path="{path}" contenttype="image/png"/><m:texture2d id="20" path="{path}" contenttype="image/png" tilestyleu="clamp"/>{}{}
+<object id="1" type="model"><mesh><vertices><vertex x="0" y="0" z="0"/><vertex x="10" y="0" z="0"/><vertex x="0" y="10" z="0"/><vertex x="10" y="10" z="0"/></vertices><triangles>
+<triangle v1="0" v2="1" v3="2" pid="11" p1="0" p2="1" p3="2"/><triangle v1="1" v2="3" v3="2" pid="21" p1="0" p2="1" p3="2"/><triangle v1="0" v2="2" v3="1" pid="11" p1="0" p2="2" p3="1"/>
+</triangles></mesh></object></resources><build><item objectid="1"/></build></model>"#,
+        group(11, 10),
+        group(21, 20)
+    );
+    let types = r#"<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/><Default Extension="png" ContentType="image/png"/></Types>"#;
+    let rels = r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Target="/3D/3dmodel.model" Id="rel0" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/></Relationships>"#;
+    let mut entries: Vec<(&str, &[u8])> = vec![
+        ("[Content_Types].xml", types.as_bytes()),
+        ("_rels/.rels", rels.as_bytes()),
+        ("3D/3dmodel.model", model.as_bytes()),
+    ];
+    entries.extend_from_slice(parts);
+    zip_of(&entries)
+}
+
+#[test]
+fn a_3mf_texture_whose_part_is_missing_or_not_an_image_is_counted_once() {
+    let path = "/3D/Textures/gone.png";
+    // Two textures of one part that isn't in the package, used by three triangles: one texture, named as
+    // written.
+    let missing = threemf_textured(path, &[]);
+    for image_bytes in [true, false] {
+        let doc = read_with(
+            &missing,
+            "m.3mf",
+            Memory::new(),
+            Keep::ALL.with_image_bytes(image_bytes),
+        );
+        assert_eq!(report(&doc), (1, strings(&[path])), "image bytes {image_bytes}");
+        let none = read_with(&missing, "m.3mf", Memory::new(), Keep::ALL.with_textures(false));
+        assert_eq!(report(&none), (0, vec![]));
+    }
+    // The part is there and isn't an image: known when images are read.
+    let broken = threemf_textured(path, &[("3D/Textures/gone.png", NOT_AN_IMAGE)]);
+    let doc = read_with(&broken, "m.3mf", Memory::new(), Keep::ALL);
+    assert_eq!(report(&doc), (1, vec![]));
+    // And one that is an image is drawn, once.
+    let png = image_file(image::ImageFormat::Png);
+    let good = threemf_textured(path, &[("3D/Textures/gone.png", &png)]);
+    let doc = read_with(&good, "m.3mf", Memory::new(), Keep::ALL);
+    assert_eq!(report(&doc), (0, vec![]));
+    assert_eq!(doc.json()["images"].as_array().map(Vec::len), Some(1));
+}
+
+/// An ASCII FBX of three models on one triangle, each with its own material, whose diffuse colors are drawn from
+/// `textures` (`(id, RelativeFilename)`, each with its own video holding `content`) by `uses` (material index to
+/// texture id).
+fn fbx_textured(textures: &[(i64, Option<&str>)], content: &[u8], uses: [i64; 3]) -> String {
+    use base64::Engine as _;
+    let content = base64::engine::general_purpose::STANDARD.encode(content);
+    let mut objects = String::from(
+        "\tGeometry: 10, \"Geometry::Tri\", \"Mesh\" {\n\t\tVertices: *9 {\n\t\t\ta: 0,0,0,1,0,0,0,1,0\n\t\t}\n\t\t\
+         PolygonVertexIndex: *3 {\n\t\t\ta: 0,1,-3\n\t\t}\n\t\tLayerElementUV: 0 {\n\t\t\tMappingInformationType: \
+         \"ByPolygonVertex\"\n\t\t\tReferenceInformationType: \"Direct\"\n\t\t\tUV: *6 {\n\t\t\t\ta: 0,0,1,0,0,1\n\t\t\t}\n\t\t}\n\t}\n",
+    );
+    let mut links = String::new();
+    for (m, texture) in uses.into_iter().enumerate() {
+        objects += &format!("\tModel: {}, \"Model::M{m}\", \"Mesh\" {{\n\t}}\n", 20 + m);
+        objects += &format!(
+            "\tMaterial: {}, \"Material::Mat{m}\", \"\" {{\n\t\tProperties70:  {{\n\t\t\tP: \"DiffuseColor\", \"Color\", \"\", \"A\",0.5,0.5,0.5\n\t\t}}\n\t}}\n",
+            30 + m
+        );
+        links += &format!(
+            "\tC: \"OO\",10,{0}\n\tC: \"OO\",{0},0\n\tC: \"OO\",{1},{0}\n\tC: \"OP\",{2},{1}, \"DiffuseColor\"\n",
+            20 + m,
+            30 + m,
+            texture
+        );
+    }
+    for &(id, file) in textures {
+        let file = file.map_or_else(String::new, |f| format!("\t\tRelativeFilename: \"{f}\"\n"));
+        objects += &format!("\tTexture: {id}, \"Texture::T{id}\", \"\" {{\n{file}\t}}\n");
+        objects += &format!(
+            "\tVideo: {}, \"Video::V{id}\", \"Clip\" {{\n\t\tContent: , \"{content}\"\n\t}}\n",
+            id + 100
+        );
+        links += &format!("\tC: \"OO\",{},{id}\n", id + 100);
+    }
+    format!(
+        "; FBX 7.4.0 project file\nFBXHeaderExtension:  {{\n\tFBXHeaderVersion: 1003\n\tFBXVersion: 7400\n}}\n\
+         GlobalSettings:  {{\n\tVersion: 1000\n\tProperties70:  {{\n\t\tP: \"UnitScaleFactor\", \"double\", \"Number\", \"\",100\n\t}}\n}}\n\
+         Objects:  {{\n{objects}}}\nConnections:  {{\n{links}}}\n"
+    )
+}
+
+#[test]
+fn an_embedded_texture_that_is_not_an_image_is_counted_once_after_its_file_is_looked_for() {
+    let png = image_file(image::ImageFormat::Png);
+    // Three textures naming one file, each with a video that isn't an image: the file the model names is looked
+    // for in their place, and counts once whatever it gives.
+    let textures = [(40, Some("gone.png")), (41, Some("gone.png")), (42, Some("gone.png"))];
+    let named = fbx_textured(&textures, NOT_AN_IMAGE, [40, 41, 42]);
+    let doc = read_with(named.as_bytes(), "pack/m.fbx", Memory::new(), Keep::ALL);
+    assert_eq!(report(&doc), (1, strings(&["gone.png"])), "no file");
+    let with_png = Memory::new().with("pack/gone.png", png.clone());
+    let doc = read_with(named.as_bytes(), "pack/m.fbx", with_png, Keep::ALL);
+    assert_eq!(report(&doc), (0, vec![]), "a file that is an image");
+    assert_eq!(doc.json()["images"].as_array().map(Vec::len), Some(1));
+    let with_junk = Memory::new().with("pack/gone.png", NOT_AN_IMAGE);
+    let doc = read_with(named.as_bytes(), "pack/m.fbx", with_junk, Keep::ALL);
+    assert_eq!(report(&doc), (1, vec![]), "a file that isn't an image either");
+    // One texture naming no file, used by all three materials: nothing to look for, and nothing missing.
+    let unnamed = fbx_textured(&[(40, None)], NOT_AN_IMAGE, [40, 40, 40]);
+    let doc = read_with(unnamed.as_bytes(), "pack/m.fbx", Memory::new(), Keep::ALL);
+    assert_eq!(report(&doc), (1, vec![]), "no file named");
+    // Without reading images, an embedded texture isn't known not to be one.
+    let doc = read_with(
+        named.as_bytes(),
+        "pack/m.fbx",
+        Memory::new(),
+        Keep::ALL.with_image_bytes(false),
+    );
+    assert_eq!(report(&doc), (0, vec![]));
+    // And a read without textures reports none.
+    let doc = read_with(
+        named.as_bytes(),
+        "pack/m.fbx",
+        Memory::new(),
+        Keep::ALL.with_textures(false),
+    );
+    assert_eq!(report(&doc), (0, vec![]));
+
+    // COLLADA holds images as hex: one that isn't an image, used by three effects, counts once and names no file.
+    let effect = |id: &str| {
+        format!(
+            r#"<effect id="{id}"><profile_COMMON><newparam sid="surf"><surface type="2D"><init_from>i1</init_from></surface></newparam>
+<newparam sid="samp"><sampler2D><source>surf</source></sampler2D></newparam>
+<technique sid="t"><lambert><diffuse><texture texture="samp" texcoord="UV"/></diffuse></lambert></technique></profile_COMMON></effect>"#
+        )
+    };
+    let node = |id: &str, mat: &str| {
+        format!(
+            r##"<node id="{id}"><instance_geometry url="#g"><bind_material><technique_common><instance_material symbol="m" target="#{mat}"/></technique_common></bind_material></instance_geometry></node>"##
+        )
+    };
+    let hex: String = NOT_AN_IMAGE.iter().map(|b| format!("{b:02X}")).collect();
+    let dae = format!(
+        r##"{DAE_HEAD}<library_images><image id="i1"><init_from><hex format="PNG">{hex}</hex></init_from></image></library_images>
+<library_effects>{}{}{}</library_effects>
+<library_materials><material id="ma"><instance_effect url="#fa"/></material><material id="mb"><instance_effect url="#fb"/></material><material id="mc"><instance_effect url="#fc"/></material></library_materials>
+{}<library_visual_scenes><visual_scene id="s">{}{}{}</visual_scene></library_visual_scenes><scene><instance_visual_scene url="#s"/></scene></COLLADA>"##,
+        effect("fa"),
+        effect("fb"),
+        effect("fc"),
+        DAE_GEOMETRY.replace("<triangles count", r#"<triangles material="m" count"#),
+        node("na", "ma"),
+        node("nb", "mb"),
+        node("nc", "mc")
+    );
+    let doc = read_with(dae.as_bytes(), "m.dae", Memory::new(), Keep::ALL);
+    assert_eq!(report(&doc), (1, vec![]), "COLLADA");
+}
+
+#[test]
+fn a_usdz_texture_that_is_not_an_image_is_counted_once_and_a_tiled_one_named_once() {
+    let png = image_file(image::ImageFormat::Png);
+    let usda = format!(
+        "#usda 1.0\ndef Xform \"W\"\n{{\n{}{}{}{}{}{}}}\n",
+        usd_triangle("a", "/W/Ma"),
+        usd_triangle("b", "/W/Mb"),
+        usd_triangle("c", "/W/Mc"),
+        usd_material("Ma", "diffuseColor", "tex/bad.png"),
+        usd_material("Mb", "diffuseColor", "tex/bad.png"),
+        usd_material("Mc", "diffuseColor", "tex/bad.png")
+    );
+    let usdz = zip_of(&[("model.usda", usda.as_bytes()), ("tex/bad.png", NOT_AN_IMAGE)]);
+    // In the package, and not an image: found, so not missing, whatever is beside the package.
+    let doc = read_with(&usdz, "pack/m.usdz", Memory::new(), Keep::ALL);
+    assert_eq!(report(&doc), (1, vec![]));
+    // A file of its name beside the package that is an image is drawn in its place.
+    let doc = read_with(
+        &usdz,
+        "pack/m.usdz",
+        Memory::new().with("pack/tex/bad.png", png),
+        Keep::ALL,
+    );
+    assert_eq!(report(&doc), (0, vec![]));
+    assert_eq!(doc.json()["images"].as_array().map(Vec::len), Some(1));
+    // A tiled texture none of whose tiles is there is one texture, named as the model names it.
+    let tiled = format!(
+        "#usda 1.0\ndef Xform \"W\"\n{{\n{}{}}}\n",
+        usd_triangle("a", "/W/Ma"),
+        usd_material("Ma", "diffuseColor", "t.<UDIM>.png")
+    );
+    let doc = read_with(tiled.as_bytes(), "pack/m.usda", Memory::new(), Keep::ALL);
+    assert_eq!(report(&doc), (1, strings(&["t.<UDIM>.png"])));
+}
+
+/// A `SketchUp` material folder: its name, the texture file name its `material.xml` gives, and its other files.
+type SkpMaterial<'a> = (&'a str, &'a str, &'a [(&'a str, &'a [u8])]);
+
+/// A `SketchUp` 2021 model of one triangle painted with material `Brick`, and these materials: each a folder,
+/// the texture file name its `material.xml` gives, and the folder's other files.
+fn skp_painted(materials: &[SkpMaterial<'_>]) -> Vec<u8> {
+    fn rec(tag: u16, payload: &[u8]) -> Vec<u8> {
+        let mut out = tag.to_be_bytes().to_vec();
+        out.extend((payload.len() as u32).to_le_bytes());
+        out.extend(payload);
+        out
+    }
+    let id = |tag: u16, v: u8| rec(tag, &[v]);
+    let mut geometry = Vec::new();
+    for (n, p) in [(1, [0.0f64, 0.0, 0.0]), (2, [10.0, 0.0, 0.0]), (3, [0.0, 10.0, 0.0])] {
+        let xyz: Vec<u8> = p.iter().flat_map(|v| v.to_le_bytes()).collect();
+        geometry.extend(rec(0xC409, &[id(0xDE05, n), rec(0xC509, &xyz)].concat()));
+    }
+    for (n, a, b) in [(11, 1, 2), (12, 2, 3), (13, 3, 1)] {
+        let edge = [
+            id(0xDE05, n),
+            id(0xB90B, a),
+            id(0xBA0B, b),
+            rec(0xD007, &id(0xD307, 0x06)),
+        ];
+        geometry.extend(rec(0xB80B, &edge.concat()));
+    }
+    let co_edges: Vec<u8> = (11..=13)
+        .flat_map(|e| rec(0xA00F, &[id(0xA10F, e), id(0xA20F, 0)].concat()))
+        .collect();
+    let normal: Vec<u8> = [0.0f64, 0.0, 1.0].iter().flat_map(|v| v.to_le_bytes()).collect();
+    let face = [
+        id(0xDE05, 20),
+        rec(0xAD0D, &normal),
+        rec(0xAE0D, &rec(0x9411, &co_edges)),
+        rec(0xD007, &id(0xD107, 5)),
+    ]
+    .concat();
+    geometry.extend(rec(0xAC0D, &face));
+    let material = rec(0xC832, &[rec(0xDC05, &[5]), rec(0xCC32, b"Brick")].concat());
+    let dat = rec(0xF401, &[material, rec(0xF601, &geometry)].concat());
+    let xmls: Vec<(String, String)> = materials
+        .iter()
+        .map(|(folder, file, _)| {
+            (
+                format!("materials/{folder}/material.xml"),
+                format!(
+                    r#"<material name="{folder}"><texture textureFilename="{file}" xScale="10" yScale="10"/></material>"#
+                ),
+            )
+        })
+        .collect();
+    let others: Vec<(String, &[u8])> = materials
+        .iter()
+        .flat_map(|(folder, _, files)| files.iter().map(move |(n, b)| (format!("materials/{folder}/{n}"), *b)))
+        .collect();
+    let mut entries: Vec<(&str, &[u8])> = vec![("model.dat", &dat)];
+    entries.extend(xmls.iter().map(|(n, x)| (n.as_str(), x.as_bytes())));
+    entries.extend(others.iter().map(|(n, b)| (n.as_str(), *b)));
+    let mut out = vec![0xff, 0xfe, 0xff, 0x0e];
+    out.extend("SketchUp Model".encode_utf16().flat_map(u16::to_le_bytes));
+    out.extend([0xff, 0xfe, 0xff, 10]);
+    out.extend("{21.0.339}".encode_utf16().flat_map(u16::to_le_bytes));
+    out.extend(zip_of(&entries));
+    out
+}
+
+#[test]
+fn a_sketchup_texture_is_decoded_as_every_readers_are_or_counted() {
+    // GIF and TIFF are decoded by the shared image path, with their features.
+    let gif = image_file(image::ImageFormat::Gif);
+    let doc = read(&skp_painted(&[("Brick", "brick.gif", &[("brick.gif", &gif)])]), "m.skp");
+    assert_eq!(report(&doc), (0, vec![]));
+    assert_eq!(doc.json()["images"].as_array().map(Vec::len), Some(1));
+    assert_eq!(doc.json()["images"][0]["mimeType"], "image/png");
+    let tiff = image_file(image::ImageFormat::Tiff);
+    let doc = read(
+        &skp_painted(&[("Brick", "brick.tif", &[("brick.tif", &tiff)])]),
+        "m.skp",
+    );
+    assert_eq!(report(&doc), (0, vec![]));
+    assert_eq!(doc.json()["images"].as_array().map(Vec::len), Some(1));
+    // A texture that isn't an image is counted; one not in the file is counted and named as the material names
+    // it, once for the two materials that name it.
+    let doc = read(
+        &skp_painted(&[("Brick", "brick.png", &[("brick.png", NOT_AN_IMAGE)])]),
+        "m.skp",
+    );
+    assert_eq!(report(&doc), (1, vec![]));
+    let gone = r"C:\textures\gone.png";
+    let model = skp_painted(&[("Brick", gone, &[]), ("Stone", gone, &[])]);
+    let doc = read(&model, "m.skp");
+    assert_eq!(report(&doc), (1, strings(&[gone])));
+    let none = read_with(&model, "m.skp", Memory::new(), Keep::ALL.with_materials(false));
+    assert_eq!(report(&none), (0, vec![]));
+}
+
+/// A glTF triangle whose material draws its color from the image file `image`.
+fn gltf_textured(image: &str) -> String {
+    format!(
+        r#"{{"asset":{{"version":"2.0"}},"scene":0,"scenes":[{{"nodes":[0]}}],"nodes":[{{"mesh":0}}],
+"meshes":[{{"primitives":[{{"attributes":{{"POSITION":0,"TEXCOORD_0":1}},"material":0}}]}}],
+"materials":[{{"pbrMetallicRoughness":{{"baseColorTexture":{{"index":0}}}}}}],"textures":[{{"source":0}}],"images":[{{"uri":"{image}"}}],
+"accessors":[{{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]}},
+{{"bufferView":1,"componentType":5126,"count":3,"type":"VEC2"}}],
+"bufferViews":[{{"buffer":0,"byteLength":36}},{{"buffer":0,"byteOffset":36,"byteLength":24}}],
+"buffers":[{{"byteLength":60,"uri":"data:application/octet-stream;base64,AAAAAAAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAgD8AAAAAAAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/"}}]}}"#
+    )
+}
+
+#[test]
+fn a_scene_reports_what_the_files_it_places_missed_a_name_once_across_them() {
+    // Two OBJ meshes an Irrlicht scene places, each of whose materials names one texture that isn't there, and a
+    // mesh file that isn't there either.
+    let node = |name: &str, mesh: &str| {
+        format!(
+            r#"<node type="mesh"><attributes><string name="Name" value="{name}" /><string name="Mesh" value="{mesh}" /></attributes></node>"#
+        )
+    };
+    let scene = format!(
+        "<?xml version=\"1.0\"?><irr_scene>{}{}{}</irr_scene>",
+        node("a", "a.obj"),
+        node("b", "meshes/b.obj"),
+        node("c", "nowhere.obj")
+    );
+    let obj = |mtl: &str| {
+        format!(
+            "mtllib {mtl}\nv 0 0 0\nv 1 0 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 0 1\nusemtl x\nf 1/1 2/2 3/3\nusemtl y\nf 1/1 3/3 2/2\n"
+        )
+    };
+    let mtl = "newmtl x\nmap_Kd gone.png\nnewmtl y\nmap_Kd gone.png\nmap_bump gone.png\n";
+    for image_bytes in [true, false] {
+        let assets = Memory::new()
+            .with("pack/a.obj", obj("a.mtl"))
+            .with("pack/a.mtl", mtl)
+            .with("pack/meshes/b.obj", obj("b.mtl"))
+            .with("pack/meshes/b.mtl", mtl);
+        let doc = read_with(
+            scene.as_bytes(),
+            "pack/scene.irr",
+            assets,
+            Keep::ALL.with_image_bytes(image_bytes),
+        );
+        assert_eq!(
+            report(&doc),
+            (1, strings(&["gone.png", "nowhere.obj"])),
+            "image bytes {image_bytes}"
+        );
+    }
+    let assets = Memory::new().with("pack/a.obj", obj("a.mtl")).with("pack/a.mtl", mtl);
+    let doc = read_with(
+        scene.as_bytes(),
+        "pack/scene.irr",
+        assets,
+        Keep::ALL.with_textures(false),
+    );
+    assert_eq!(report(&doc).0, 0);
+
+    // A tileset of two glTF tiles naming one image that isn't there, and a tile that isn't there.
+    let leaf = |uri: &str| json!({ "boundingVolume": { "box": [0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1] }, "geometricError": 0, "content": { "uri": uri } });
+    let tileset = json!({
+        "asset": { "version": "1.1" }, "geometricError": 10,
+        "root": { "boundingVolume": { "box": [0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1] }, "geometricError": 5, "refine": "ADD",
+                  "children": [leaf("tiles/a.gltf"), leaf("tiles/b.gltf"), leaf("tiles/c.gltf")] }
+    });
+    for image_bytes in [true, false] {
+        let assets = Memory::new()
+            .with("pack/tiles/a.gltf", gltf_textured("gone.png"))
+            .with("pack/tiles/b.gltf", gltf_textured("gone.png"));
+        let doc = read_with(
+            tileset.to_string().as_bytes(),
+            "pack/tileset.json",
+            assets,
+            Keep::ALL.with_image_bytes(image_bytes),
+        );
+        assert_eq!(
+            report(&doc),
+            (1, strings(&["gone.png", "tiles/c.gltf"])),
+            "image bytes {image_bytes}"
+        );
     }
 }

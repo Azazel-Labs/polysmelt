@@ -349,7 +349,11 @@ impl super::Reader<'_> {
         let name = dom.attr(el, "name").or_else(|| dom.attr(el, "id")).unwrap_or("image");
         let init = dom.child(el, "init_from");
         if let Some(hex) = init.and_then(|i| dom.child(i, "hex")).or_else(|| dom.child(el, "data")) {
-            let bytes = crate::formats::xml::from_hex(dom.text(hex))?;
+            let Some(bytes) = crate::formats::xml::from_hex(dom.text(hex)) else {
+                // Held in the file, and not even bytes.
+                self.images.drop("");
+                return None;
+            };
             let format = dom.attr(hex, "format").unwrap_or("png").to_ascii_lowercase();
             let file = format!("{name}.{format}");
             let assets = self.assets;
@@ -377,7 +381,10 @@ impl super::Reader<'_> {
     fn uri_image(&mut self, uri: &str) -> Option<usize> {
         let assets = self.assets;
         if uri.starts_with("data:") {
-            let (mime, bytes) = crate::gltf::data_uri(uri).ok()?;
+            let Ok((mime, bytes)) = crate::gltf::data_uri(uri) else {
+                self.images.drop("");
+                return None;
+            };
             let ext = mime.as_deref().and_then(|m| m.strip_prefix("image/")).unwrap_or("png");
             let file = format!("image.{ext}");
             return self.images.bytes(Cow::Owned(bytes), &file, Location::Embedded, |b| {
@@ -446,12 +453,16 @@ impl super::Reader<'_> {
             .ok()
             .and_then(|f| f.take(super::MAX_ENTRY).read_to_end(&mut bytes).ok());
         let assets = self.assets;
-        let i = read.and_then(|_| {
+        let i = if read.is_some() {
             self.images
                 .bytes(Cow::Owned(bytes), &name, Location::Archive(name.clone()), |b| {
                     assets.image(b, Path::new(&name))
                 })
-        });
+        } else {
+            // There, and not readable.
+            self.images.drop(&name);
+            None
+        };
         self.archive_images.insert(entry.to_owned(), i);
         Some(i)
     }

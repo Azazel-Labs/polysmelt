@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<irr_scene>
+<attributes>
+</attributes>
+<node type="mesh">
+<attributes>
+<string name="Name" value="a" />
+<string name="Mesh" value="a.irrmesh" />
+</attributes>
+</node>
+<node type="mesh">
+<attributes>
+<string name="Name" value="b" />
+<vector3d name="Position" value="5, 0, 0" />
+<string name="Mesh" value="meshes/b.irrmesh" />
+</attributes>
+</node>
+<node type="mesh">
+<attributes>
+<string name="Name" value="c" />
+<string name="Mesh" value="nowhere.irrmesh" />
+</attributes>
+</node>
+</irr_scene>
