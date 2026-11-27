@@ -177,7 +177,7 @@ def skinned():
     joints = [(0, 0, 0, 0)] * len(pos)
     weights = [(0.25, 0.25, 0.0, 0.0)] * half + [(0.0, 0.0, 0.0, 0.0)] * (len(pos) - half)
     parts = [b"".join(struct.pack("<3f", *p) for p in pos), b"".join(struct.pack("<3f", *n) for n in nrm),
-             b"".join(struct.pack("<H", i) for i in idx) + b"\0\0",
+             b"".join(struct.pack("<H", i) for i in idx),
              b"".join(struct.pack("<4B", *j) for j in joints), b"".join(struct.pack("<4f", *w) for w in weights),
              struct.pack("<2f", 0.0, 1.0), struct.pack("<6f", 0, 0, 0, 2, 0, 0)]
     views, offset = [], 0
@@ -186,9 +186,8 @@ def skinned():
         if target:
             v["target"] = target
         views.append(v)
-        offset += len(part)
-    binary = b"".join(parts)
-    views[2]["byteLength"] -= 2
+        offset += len(part) + -len(part) % 4
+    binary = b"".join(part + bytes(-len(part) % 4) for part in parts)
     doc = {
         "asset": {"version": "2.0", "generator": SRC},
         "scene": 0,
