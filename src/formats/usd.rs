@@ -1,8 +1,12 @@
 //! USD (`.usd`, `.usda`, `.usdc`, `.usdz`) as a glTF document, read with the pure-Rust `openusd` crate. The composed
 //! stage (references, payloads, variants and instances resolved) becomes the node hierarchy, each prim a node with its
 //! local transform. Meshes are in their prim's own space and shared between instances; a point instancer places its
-//! prototypes under a node per instance. The stage's up axis and units become a root node that carries them to glTF's
-//! Y-up meters, and are recorded in `asset.extras.source`.
+//! prototypes under a node per instance. The stage stays in its own up axis and units under the document's one top-level node,
+//! `RootNode`, which is always there and carries the turn to glTF's Y up and the scale to meters (no transform when
+//! the stage needs none); skinned meshes are under it with everything else. The up axis and units are recorded in `asset.extras.source` (see [`crate::source`]; USD's 0.01 meters and Y up are
+//! assumed when the stage doesn't say), with its frame rate (`framesPerSecond`, else `timeCodesPerSecond`), its `doc`
+//! as the description and its `comment`. `startTimeCode`, `endTimeCode`, `defaultPrim` and `customLayerData` are
+//! kept as the stage gives them, and `timeCodesPerSecond` when the frame rate is `framesPerSecond`.
 //!
 //! Meshes keep their polygons' outlines (concave faces are ear-clipped, `holeIndices` faces left out) and their
 //! normals, texture coordinates and display colors in any interpolation; with no normals a subdivision surface is
@@ -32,13 +36,13 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
-use std::io::{self, Read as _};
+use std::io;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::{Context as _, Result};
+use crate::{Context as _, ErrorKind, Result};
 use openusd::usd::SchemaBase as _;
 use openusd::{ar, gf, sdf, tf, usd};
 use openusd_schemas::geom::{
@@ -49,13 +53,20 @@ use openusd_schemas::shade::{self, MaterialBindingAPI};
 use serde_json::{Map, Value, json};
 
 use super::Input;
-use super::xform::{IDENTITY, M4, Trs, decompose, inverse, mul, scale, set_transform, translate};
+use super::frame::{self, Frame};
+use super::keys;
+use super::xform::{
+    IDENTITY, M4, Trs, decompose, from_column_major, inverse, mul, rotation, scale, set_transform, translate,
+};
 use crate::assets::{Assets, memory_key};
 use crate::document::{Builder, Document, Keep, Part};
 use crate::images::{Images, Location, gray};
 use crate::material::{self, Alpha, Clearcoat, Factor, Full, Specular, Tex, UvTransform};
 use crate::mesh::{GRAY, Material, Prim, triangulate};
 use crate::num::f32_of;
+use crate::quat;
+use crate::source::{Axis, Fact, Handedness, SourceInfo};
+use crate::vec3::{self, cross, dot};
 
 /// Prim types that are no node: shading networks, and what the prims using them read (subsets, blend shapes,
 /// skeletal animations).
@@ -84,10 +95,7 @@ const GPRIMS: &[&str] = &[
 /// The steps each segment of a cubic curve is sampled at.
 const CURVE_STEPS: u16 = 8;
 
-/// The most points sampled curves add to a stage: each control point is a few bytes of the file but
-/// [`CURVE_STEPS`] points drawn, so this bounds what a stage of curves costs. Past it, a curve is drawn through its
-/// control points.
-const MAX_CURVE_POINTS: usize = 1 << 22;
+use super::nurbs::MAX_CURVE_POINTS;
 
 /// The highest order of NURBS curve sampled, where its control points' weights still fit a [`Sample`]: degree
 /// seven, past the cubics nearly every curve is. Higher orders are drawn through their control points.
@@ -97,8 +105,7 @@ const MAX_ORDER: usize = 8;
 /// a bound on what a file with thousands of primvars costs.
 const MAX_SETS: usize = 8;
 
-/// The longest turn between two animation samples, in degrees: longer ones are cut into steps.
-const MAX_STEP_DEGREES: f64 = 10.0;
+use super::xform::MAX_STEP_DEGREES;
 
 /// The most nodes a stage makes: point instancers can place millions of instances.
 const MAX_NODES: usize = 1 << 20;
@@ -107,13 +114,53 @@ const MAX_NODES: usize = 1 << 20;
 const MAX_NESTING: usize = 8;
 
 /// The stage as a document; one with nothing to show (a material library, a layer of overrides) has no nodes.
-pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document<'static>> {
-    load_capped(input, assets, keep, MAX_NODES)
+pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document> {
+    load_capped(input, assets, keep, MAX_NODES).map_err(|e| {
+        if e.kind() == ErrorKind::Corrupt && input.read().is_ok_and(|b| cut_short(&b)) {
+            e.of_kind(ErrorKind::Truncated).within("USD file is cut short")
+        } else {
+            e
+        }
+    })
+}
+
+/// Whether a layer's bytes stop before the layer does, for a layer that didn't open. A crate file's header
+/// says where its table of contents is: past the end of a cut file. A text layer cut short ends inside
+/// something: more brackets opened than closed, or a string left open.
+fn cut_short(bytes: &[u8]) -> bool {
+    if bytes.starts_with(b"PXR-USDC") {
+        return crate::bytes::u64_at(bytes, 16).is_none_or(|toc| toc >= bytes.len() as u64);
+    }
+    if !bytes.trim_ascii_start().starts_with(b"#usda") {
+        return false;
+    }
+    let (mut depth, mut quote, mut escaped, mut comment) = (0i64, 0u8, false, false);
+    for &c in bytes {
+        if comment {
+            comment = c != b'\n';
+        } else if quote != 0 {
+            match c {
+                _ if escaped => escaped = false,
+                b'\\' => escaped = true,
+                _ if c == quote => quote = 0,
+                _ => {}
+            }
+        } else {
+            match c {
+                b'#' => comment = true,
+                b'"' | b'\'' => quote = c,
+                b'(' | b'[' | b'{' => depth += 1,
+                b')' | b']' | b'}' => depth -= 1,
+                _ => {}
+            }
+        }
+    }
+    depth > 0 || quote != 0
 }
 
 /// [`load`], making at most `max_nodes` nodes: past them the rest of the stage is left out, and
 /// `asset.extras.source` says so.
-fn load_capped(input: Input<'_>, assets: &dyn Assets, keep: Keep, max_nodes: usize) -> Result<Document<'static>> {
+fn load_capped(input: Input<'_>, assets: &dyn Assets, keep: Keep, max_nodes: usize) -> Result<Document> {
     let path = input.path;
     let (stage, paths) = match input.bytes() {
         Some(bytes) => open_in_memory(bytes, input, assets)?,
@@ -121,8 +168,8 @@ fn load_capped(input: Input<'_>, assets: &dyn Assets, keep: Keep, max_nodes: usi
         None => {
             let stage = usd::Stage::builder()
                 .schema_registry(openusd_schemas::schema_registry())
-                .open(path.to_str().context("the path isn't UTF-8")?)
-                .map_err(|e| invalid!("{e}"))?;
+                .open(path.to_str().context(ErrorKind::Corrupt, "the path isn't UTF-8")?)
+                .context(ErrorKind::Corrupt, "opening the USD stage")?;
             let paths = prim_paths(&stage)?;
             (stage, paths)
         }
@@ -153,7 +200,7 @@ fn load_capped(input: Input<'_>, assets: &dyn Assets, keep: Keep, max_nodes: usi
         time,
         meters,
         usdz: Usdz::open(input),
-        b: Builder::default(),
+        b: Builder::new(keep.crease_angle()),
         nodes: Vec::new(),
         meshes: Vec::new(),
         mesh_triangles: Vec::new(),
@@ -171,6 +218,7 @@ fn load_capped(input: Input<'_>, assets: &dyn Assets, keep: Keep, max_nodes: usi
         pending: Vec::new(),
         morphed: Vec::new(),
         skinned_roots: Vec::new(),
+        unbound_meshes: std::collections::HashSet::new(),
         drawn: 0,
         curve_points: 0,
         limit: input.limit,
@@ -181,13 +229,14 @@ fn load_capped(input: Input<'_>, assets: &dyn Assets, keep: Keep, max_nodes: usi
     r.skin_meshes()?;
     r.pose_weights();
     if r.nodes.is_empty() {
-        return Ok(Document::empty(Map::new()));
+        bail!(
+            Empty,
+            "this USD stage has nothing to draw: no meshes, curves, points, cameras or lights"
+        );
     }
-    let animations = if keep.animations {
-        r.animations(tcps)
-    } else {
-        Vec::new()
-    };
+    if keep.animations {
+        r.animations(tcps);
+    }
 
     let mut basis = if z_up {
         [[1., 0., 0., 0.], [0., 0., 1., 0.], [0., -1., 0., 0.], [0., 0., 0., 1.]]
@@ -195,45 +244,49 @@ fn load_capped(input: Input<'_>, assets: &dyn Assets, keep: Keep, max_nodes: usi
         IDENTITY
     };
     basis = mul(&basis, &scale([meters; 3]));
+    // The stage's up axis and unit are the root node's; skinned meshes go under it with everything else.
+    let (frame, _) = Frame::of(&basis);
     let mut scene_nodes = roots;
-    #[allow(clippy::float_cmp, reason = "only the exact identity needs no root")]
-    if basis != IDENTITY {
-        let mut root = json!({ "name": "RootNode", "children": scene_nodes });
-        set_transform(&mut root, &basis);
-        r.nodes.push(root);
-        scene_nodes = vec![r.nodes.len() - 1];
-    }
     scene_nodes.append(&mut r.skinned_roots);
 
-    let mut source = json!({
-        "format": "USD",
-        "upAxis": if z_up { "Z" } else { "Y" },
-        "metersPerUnit": meters,
-        "timeCodesPerSecond": tcps,
-    });
+    let mut source = Map::new();
     if r.truncated {
-        source["truncated"] = json!(format!("over {max_nodes} nodes: the rest are left out"));
+        source.insert("truncated".into(), json!(true));
+        source.insert(
+            "truncatedBy".into(),
+            json!(format!("over {max_nodes} nodes: the rest are left out")),
+        );
     }
     if stage.has_authored_time_code_range() {
-        source["startTimeCode"] = json!(stage.start_time_code());
-        source["endTimeCode"] = json!(stage.end_time_code());
+        source.insert("startTimeCode".into(), json!(stage.start_time_code()));
+        source.insert("endTimeCode".into(), json!(stage.end_time_code()));
     }
     if let Some(p) = stage.default_prim() {
-        source["defaultPrim"] = json!(p.as_str());
+        source.insert("defaultPrim".into(), json!(p.as_str()));
+    }
+    if authored(&stage, "framesPerSecond") {
+        // The frame rate is the frames', and time codes count at their own rate.
+        source.insert("timeCodesPerSecond".into(), json!(tcps));
+    }
+    stage_info(&stage, z_up, meters, tcps).write(&mut source);
+    if let Some(Value::Object(data)) = stage_metadata_json(&stage, "customLayerData") {
+        source.insert("customLayerData".into(), Value::Object(data));
     }
     let mut json = Map::new();
-    json.insert("asset".into(), json!({ "extras": { "source": source } }));
+    let mut asset = json!({ "extras": { "source": source } });
+    if let Some(c) = asset["extras"]["source"].get("copyright").cloned() {
+        asset["copyright"] = c;
+    }
+    json.insert("asset".into(), asset);
     json.insert("scene".into(), json!(0));
     json.insert("scenes".into(), json!([{ "nodes": scene_nodes }]));
+    crate::skin::set_skeletons(&r.nodes, &mut r.skins);
     json.insert("nodes".into(), Value::Array(std::mem::take(&mut r.nodes)));
     if !r.meshes.is_empty() {
         json.insert("meshes".into(), Value::Array(std::mem::take(&mut r.meshes)));
     }
     if !r.skins.is_empty() {
         json.insert("skins".into(), Value::Array(std::mem::take(&mut r.skins)));
-    }
-    if !animations.is_empty() {
-        json.insert("animations".into(), Value::Array(animations));
     }
     if !r.cameras.is_empty() {
         json.insert("cameras".into(), Value::Array(std::mem::take(&mut r.cameras)));
@@ -248,7 +301,66 @@ fn load_capped(input: Input<'_>, assets: &dyn Assets, keep: Keep, max_nodes: usi
     let (materials, images) = (std::mem::take(&mut r.materials), std::mem::take(&mut r.images));
     let mut b = r.b;
     b.materials(&materials, images.list, &mut json);
-    Ok(b.finish(json, Map::new()))
+    let mut doc = b.finish(json, Map::new());
+    frame::root(&mut doc, frame);
+    Ok(doc)
+}
+
+/// Whether the stage's root or session layer authors the metadata `field`.
+fn authored(stage: &usd::Stage, field: &str) -> bool {
+    let has = |layer: &sdf::Layer| layer.pseudo_root().is_some_and(|r| r.has_field(field));
+    has(&stage.root_layer()) || stage.session_layer().is_some_and(|l| has(&l))
+}
+
+/// The stage metadata `field` as JSON, when it's authored.
+fn stage_metadata_json(stage: &usd::Stage, field: &str) -> Option<Value> {
+    if !authored(stage, field) {
+        return None;
+    }
+    let value = stage.stage_metadata(field).ok().flatten()?;
+    json_of(&value)
+}
+
+/// What the stage says of itself: its up axis (USD's Y when it doesn't say), its `metersPerUnit` (0.01 when it
+/// doesn't), its frame rate (`framesPerSecond`, else `timeCodesPerSecond`, else USD's 24), its `doc` as the
+/// description and its `comment`.
+fn stage_info(stage: &usd::Stage, z_up: bool, meters: f64, tcps: f64) -> SourceInfo {
+    let fact = |field: &str, v: f64| {
+        if authored(stage, field) {
+            Fact::Declared(v)
+        } else {
+            Fact::Assumed(v)
+        }
+    };
+    let up = if z_up { Axis::PosZ } else { Axis::PosY };
+    let up_given = matches!(stage.stage_metadata("upAxis"), Ok(Some(v)) if matches!(v.as_str(), Some("Y" | "Z")));
+    let text = |field: &str| match stage_metadata_json(stage, field) {
+        Some(Value::String(s)) if !s.trim().is_empty() => Some(s.trim().to_owned()),
+        _ => None,
+    };
+    let fps = Some(stage.frames_per_second()).filter(|f| f.is_finite() && *f > 0.0);
+    let mut info = SourceInfo {
+        format: Some("USD".into()),
+        meters_per_unit: fact("metersPerUnit", meters),
+        unit: crate::source::unit_name(meters).map(str::to_owned),
+        up_axis: if up_given && authored(stage, "upAxis") {
+            Fact::Declared(up)
+        } else {
+            Fact::Assumed(up)
+        },
+        // USD's coordinate system is right-handed by definition.
+        handedness: Fact::Declared(Handedness::Right),
+        frame_rate: match fps {
+            Some(f) if authored(stage, "framesPerSecond") => Fact::Declared(f),
+            _ => fact("timeCodesPerSecond", tcps),
+        },
+        description: text("documentation").or_else(|| text("doc")),
+        comments: text("comment").into_iter().collect(),
+        ..SourceInfo::default()
+    };
+    info.converted.units = (meters - 1.0).abs() > 1e-12;
+    info.converted.up_axis = z_up;
+    info
 }
 
 /// The paths of the stage's prims, composed (which reads the layers they reference), parents before children.
@@ -258,7 +370,7 @@ fn prim_paths(stage: &usd::Stage) -> Result<Vec<sdf::Path>> {
         .traverse(usd::PrimPredicate::DEFAULT.with_instance_proxies(true), |p| {
             paths.push(p.clone());
         })
-        .map_err(|e| invalid!("{e}"))?;
+        .context(ErrorKind::Corrupt, "composing the USD stage")?;
     Ok(paths)
 }
 
@@ -280,45 +392,17 @@ fn leaf(path: &str) -> &str {
 
 /// A USD matrix (row vectors) as an [`M4`] (column vectors): its transpose.
 fn m4(m: &gf::Matrix4d) -> M4 {
-    std::array::from_fn(|i| std::array::from_fn(|j| m.0[j * 4 + i]))
-}
-
-/// The rotation for a unit quaternion (x, y, z, w).
-fn rotation([x, y, z, w]: [f64; 4]) -> M4 {
-    [
-        [
-            1.0 - 2.0 * (y * y + z * z),
-            2.0 * (x * y - w * z),
-            2.0 * (x * z + w * y),
-            0.0,
-        ],
-        [
-            2.0 * (x * y + w * z),
-            1.0 - 2.0 * (x * x + z * z),
-            2.0 * (y * z - w * x),
-            0.0,
-        ],
-        [
-            2.0 * (x * z - w * y),
-            2.0 * (y * z + w * x),
-            1.0 - 2.0 * (x * x + y * y),
-            0.0,
-        ],
-        [0.0, 0.0, 0.0, 1.0],
-    ]
+    from_column_major(&m.0)
 }
 
 /// A quaternion (w, x, y, z), as USD lists one, as glTF's unit (x, y, z, w); `None` when it has no length.
 fn unit_quaternion([w, x, y, z]: [f32; 4]) -> Option<[f64; 4]> {
-    let q = [x, y, z, w].map(f64::from);
-    let len = q.iter().map(|c| c * c).sum::<f64>().sqrt();
-    (len > 0.0 && len.is_finite()).then(|| q.map(|c| c / len))
+    quat::unit_above([x, y, z, w].map(f64::from), 0.0)
 }
 
 /// The angle between two unit quaternions' rotations, in degrees.
 fn turn(a: &[f64; 4], b: &[f64; 4]) -> f64 {
-    let dot: f64 = (0..4).map(|k| a[k] * b[k]).sum();
-    2.0 * dot.abs().min(1.0).acos().to_degrees()
+    quat::angle(*a, *b).to_degrees()
 }
 
 /// Times sorted, without repeats or ones that aren't finite.
@@ -420,6 +504,8 @@ struct Reader<'a> {
     morphed: Vec<(usize, usd::Prim)>,
     /// Nodes for skinned meshes, at the scene's root: glTF places a skinned mesh by its joints alone.
     skinned_roots: Vec<usize>,
+    /// The skinned meshes with a point no joint moves: their skins take the surface's own node as a joint.
+    unbound_meshes: std::collections::HashSet<usize>,
     /// Triangles drawn, every instance counted.
     drawn: usize,
     /// Points sampled on curves, up to [`MAX_CURVE_POINTS`].
@@ -805,7 +891,12 @@ impl Reader<'_> {
             return Ok(());
         };
         self.drawn += self.mesh_triangles[mesh];
-        ensure!(self.drawn <= self.limit, "too many triangles (over {})", self.limit);
+        ensure!(
+            self.drawn <= self.limit,
+            LimitExceeded,
+            "too many triangles (over {})",
+            self.limit
+        );
         if let Some((skeleton, _)) = skin {
             self.pending.push(Pending {
                 node,
@@ -1058,12 +1149,17 @@ impl Reader<'_> {
                 // Mesh space to skeleton space at bind time, then to the joint's: row vectors, whose layout is
                 // glTF's column-major one for column vectors.
                 let ibm = geom_bind * skel.binds[j].inverse().unwrap_or(gf::Matrix4d::IDENTITY);
-                ibms.extend(ibm.0.map(f32_of));
+                ibms.extend(crate::skin::inverse_bind(ibm.0));
+            }
+            // A point no joint moves stays with the surface's own prim: its node is a joint too, after the
+            // skeleton's, and the point keeps its place in the prim's own space.
+            if self.unbound_meshes.contains(&p.mesh) {
+                joints.push(p.node);
+                ibms.extend(crate::skin::inverse_bind(gf::Matrix4d::IDENTITY.0));
             }
             let acc = self.b.floats(ibms, "MAT4", false);
             let name = self.nodes[p.node]["name"].clone();
-            self.skins
-                .push(json!({ "joints": joints, "inverseBindMatrices": acc, "skeleton": skel.nodes[0] }));
+            self.skins.push(json!({ "joints": joints, "inverseBindMatrices": acc }));
             let Some(n) = self.push_node(json!({ "name": name, "skin": self.skins.len() - 1 })) else {
                 continue;
             };
@@ -1110,8 +1206,9 @@ impl Reader<'_> {
         )
     }
 
-    /// One animation: animated transforms, skeletal animations and blend shape weights.
-    fn animations(&mut self, tcps: f64) -> Vec<Value> {
+    /// One animation: animated transforms, skeletal animations and blend shape weights. It has no name, as a stage
+    /// has none for it, and starts at time 0 ([`keys::Writer`]).
+    fn animations(&mut self, tcps: f64) {
         let mut channels = Vec::new();
         for (node, prim) in std::mem::take(&mut self.animated) {
             self.transform_channels(node, &prim, &mut channels);
@@ -1144,12 +1241,7 @@ impl Reader<'_> {
                 let mut r: Vec<[f64; 4]> = Vec::with_capacity(times.len());
                 let mut s = Vec::with_capacity(times.len() * 3);
                 for sample in &samples {
-                    let (tv, mut rv, sv) = sample.trs(k, &rest);
-                    if let Some(prev) = r.last()
-                        && (0..4).map(|c| prev[c] * rv[c]).sum::<f64>() < 0.0
-                    {
-                        rv = rv.map(|c| -c);
-                    }
+                    let (tv, rv, sv) = sample.trs(k, &rest);
                     t.extend(tv);
                     r.push(rv);
                     s.extend(sv);
@@ -1176,32 +1268,25 @@ impl Reader<'_> {
         for (node, prim) in self.morphed.clone() {
             self.weight_channel(node, &prim, &mut channels);
         }
-        if channels.is_empty() {
-            return Vec::new();
-        }
-        let shift = channels.iter().map(|c| c.times[0]).fold(0.0, f64::min);
-        let mut inputs: HashMap<Vec<u64>, usize> = HashMap::new();
-        let (mut samplers, mut out) = (Vec::new(), Vec::new());
-        for c in channels {
-            let key: Vec<u64> = c.times.iter().map(|t| t.to_bits()).collect();
-            let input = if let Some(&i) = inputs.get(&key) {
-                i
-            } else {
-                let secs = c.times.iter().map(|&t| f32_of((t - shift) / tcps)).collect();
-                let i = self.b.floats(secs, "SCALAR", true);
-                inputs.insert(key, i);
-                i
-            };
-            let kind = match c.path {
-                "translation" | "scale" => "VEC3",
-                "rotation" => "VEC4",
-                _ => "SCALAR",
-            };
-            let output = self.b.floats(c.values.into_iter().map(f32_of).collect(), kind, false);
-            samplers.push(json!({ "input": input, "output": output, "interpolation": "LINEAR" }));
-            out.push(json!({ "sampler": samplers.len() - 1, "target": { "node": c.node, "path": c.path } }));
-        }
-        vec![json!({ "channels": out, "samplers": samplers })]
+        let tracks = channels
+            .into_iter()
+            .filter_map(|c| {
+                let path = keys::Path::of(c.path)?;
+                let width = c.values.len().checked_div(c.times.len())?;
+                Some(keys::Track {
+                    width,
+                    ..keys::Track::linear(
+                        c.node,
+                        path,
+                        c.times.iter().map(|t| t / tcps).collect::<Vec<f64>>(),
+                        c.values.into_iter().map(f32_of).collect(),
+                    )
+                })
+            })
+            .collect();
+        let mut writer = keys::Writer::new(true);
+        writer.animation(&mut self.b, None, None, tracks);
+        writer.finish(&mut self.b);
     }
 
     /// Translation, rotation and scale channels for a node whose prim's transform is animated: its local transform
@@ -1841,18 +1926,6 @@ fn empty_sets<T: Clone>(n: usize) -> Vec<Vec<T>> {
     if n > 1 { vec![Vec::new(); n] } else { Vec::new() }
 }
 
-fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-
-fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
-}
-
 impl Reader<'_> {
     fn primvar<T>(
         &self,
@@ -2101,16 +2174,24 @@ impl Reader<'_> {
         for (face, &n) in counts.iter().enumerate() {
             let n = usize::try_from(n).unwrap_or(0);
             let end = start.saturating_add(n);
-            let ok = n >= 3
-                && end <= corners.len()
-                && !shape.hole.get(face).copied().unwrap_or(false)
+            let hole = shape.hole.get(face).copied().unwrap_or(false);
+            let whole = end <= corners.len()
                 && corners[start..end]
                     .iter()
                     .all(|&c| usize::try_from(c).is_ok_and(|c| c < points.len()));
-            if ok {
+            // A face naming a point that isn't there is left out, and counted.
+            if n >= 3 && !hole && !whole {
+                self.b.dropped += 1;
+            }
+            if n >= 3 && whole && !hole {
                 faces.push((face, start, n));
                 triangles += n - 2;
-                ensure!(triangles <= self.limit, "too many triangles (over {})", self.limit);
+                ensure!(
+                    triangles <= self.limit,
+                    LimitExceeded,
+                    "too many triangles (over {})",
+                    self.limit
+                );
             }
             start = end;
         }
@@ -2198,14 +2279,17 @@ impl Reader<'_> {
             }
             let part = &mut parts[i];
             let prim = &mut part.prim;
-            let first = u32::try_from(prim.positions.len()).context("too many vertices")?;
+            let first = u32::try_from(prim.positions.len()).context(ErrorKind::LimitExceeded, "too many vertices")?;
             for (c, &corner) in corners.iter().enumerate().skip(start).take(n) {
                 #[allow(clippy::cast_sign_loss, reason = "faces keep only corners in 0..points.len()")]
                 let point = corner as usize;
                 prim.positions.push(points[point]);
                 part.points.push(point);
                 let normal = match (&shape.normals, flat) {
-                    (Some(nv), _) => nv.at(face, point, c).map(|v| unit(v.map(f64::from), false)),
+                    // One with no length stays zero, and takes its faces' as the primitive is written.
+                    (Some(nv), _) => nv
+                        .at(face, point, c)
+                        .map(|v| vec3::unit_or(v.map(f64::from), [0.0; 3]).map(f32_of)),
                     (None, Some(f)) => Some(f),
                     (None, None) => point_normals.get(point).copied(),
                 };
@@ -2259,9 +2343,7 @@ impl Reader<'_> {
         }
 
         let influences = joints.and_then(|j| self.influences(prim, points.len(), j));
-        let joint_sets = influences.as_ref().map_or(0, |inf| {
-            inf.iter().map(|v| v.len().div_ceil(4)).max().unwrap_or(0).min(4)
-        });
+        let mut unbound = false;
         let targets = if self.keep.morph_targets {
             self.blend_shapes(prim, points.len(), shape.normals.is_some())
         } else {
@@ -2275,22 +2357,13 @@ impl Reader<'_> {
             drawn += p.indices.len() / 3;
             let Some(mut json) = self.b.primitive(p) else { continue };
             json["material"] = json!(material);
-            if let Some(inf) = &influences {
-                for set in 0..joint_sets {
-                    let mut js = Vec::with_capacity(points.len() * 4);
-                    let mut ws = Vec::with_capacity(points.len() * 4);
-                    for &pt in &points {
-                        for k in set * 4..set * 4 + 4 {
-                            let (j, w) = inf[pt].get(k).copied().unwrap_or((0, 0.0));
-                            js.push(j);
-                            ws.push(w);
-                        }
-                    }
-                    let n = points.len();
-                    let j = self.b.accessor(Part::u16(js), 5123, n, "VEC4", Some(34962));
-                    let w = self.b.accessor(Part::f32(ws), 5126, n, "VEC4", Some(34962));
-                    json["attributes"][format!("JOINTS_{set}")] = json!(j);
-                    json["attributes"][format!("WEIGHTS_{set}")] = json!(w);
+            if let (Some(inf), Some(count)) = (&influences, joints) {
+                let sets = crate::skin::sets(points.len(), count, crate::num::u32_of(count), |i, list| {
+                    list.extend_from_slice(&inf[points[i]]);
+                });
+                unbound |= sets.unbound;
+                for (key, a) in sets.write(&mut self.b, count + 1) {
+                    json["attributes"][key] = json!(a);
                 }
             }
             if !targets.is_empty() {
@@ -2325,12 +2398,15 @@ impl Reader<'_> {
         }
         self.meshes.push(mesh);
         self.mesh_triangles.push(drawn);
+        if unbound {
+            self.unbound_meshes.insert(self.meshes.len() - 1);
+        }
         Ok(Some(self.meshes.len() - 1))
     }
 
-    /// A skinned surface's joint influences per point: (joint, weight), heaviest first, up to 16, summing to one.
-    /// A point no joint weighs follows the first joint.
-    fn influences(&self, prim: &usd::Prim, points: usize, joints: usize) -> Option<Vec<Vec<(u16, f32)>>> {
+    /// A skinned surface's joint influences per point, (joint, weight) as the surface lists them: the shared
+    /// writer keeps the strongest and makes them sum to one ([`crate::skin`]).
+    fn influences(&self, prim: &usd::Prim, points: usize, joints: usize) -> Option<Vec<Vec<(u32, f32)>>> {
         let ji = prim.attribute("primvars:skel:jointIndices");
         let index = ints(self.value(&ji));
         let weight = floats(self.value(&prim.attribute("primvars:skel:jointWeights"))?)?;
@@ -2348,23 +2424,13 @@ impl Reader<'_> {
         let mut out = Vec::with_capacity(points);
         for p in 0..points {
             let base = if constant { 0 } else { p * size };
-            let mut inf: Vec<(u16, f32)> = (base..base + size)
+            let inf: Vec<(u32, f32)> = (base..base + size)
                 .filter_map(|k| {
                     let j = usize::try_from(*index.get(k)?).ok().filter(|&j| j < joints)?;
                     let w = *weight.get(k)?;
-                    (w > 0.0 && w.is_finite()).then(|| Some((u16::try_from(j).ok()?, w)))?
+                    (w > 0.0 && w.is_finite()).then(|| Some((u32::try_from(j).ok()?, w)))?
                 })
                 .collect();
-            inf.sort_by(|a, b| b.1.total_cmp(&a.1));
-            inf.truncate(16);
-            let sum: f32 = inf.iter().map(|x| x.1).sum();
-            if sum > 0.0 {
-                for x in &mut inf {
-                    x.1 /= sum;
-                }
-            } else {
-                inf = vec![(0, 1.0)];
-            }
             out.push(inf);
         }
         Some(out)
@@ -2667,8 +2733,6 @@ impl Reader<'_> {
         match self.images.list.get(image) {
             Some(crate::images::Source::Image(i)) => gray(&i.bytes),
             Some(crate::images::Source::Ref(r, _)) => r.bytes.as_deref().is_some_and(gray),
-            #[cfg(feature = "fs")]
-            Some(crate::images::Source::File(f, _)) => f.read_all().is_ok_and(|b| gray(&b)),
             None => false,
         }
     }
@@ -3167,29 +3231,13 @@ fn instance_matrix(s: [f32; 3], q: [f32; 4], t: [f32; 3]) -> gf::Matrix4d {
     } else {
         [1.0, 0.0, 0.0, 0.0]
     };
-    // The rotation for column vectors; row vectors take its transpose.
-    let r = [
-        [
-            1.0 - 2.0 * (y * y + z * z),
-            2.0 * (x * y - w * z),
-            2.0 * (x * z + w * y),
-        ],
-        [
-            2.0 * (x * y + w * z),
-            1.0 - 2.0 * (x * x + z * z),
-            2.0 * (y * z - w * x),
-        ],
-        [
-            2.0 * (x * z - w * y),
-            2.0 * (y * z + w * x),
-            1.0 - 2.0 * (x * x + y * y),
-        ],
-    ];
+    // The rotation for column vectors, column-major; row vectors take its transpose.
+    let r = quat::matrix([x, y, z, w]);
     let mut m = gf::Matrix4d::IDENTITY;
     for row in 0..3 {
         // USD matrices are row vectors, so row `row` of the transform is column `row` of `r`.
-        for (col, r_col) in r.iter().enumerate() {
-            m.0[row * 4 + col] = f64::from(s[row]) * r_col[row];
+        for col in 0..3 {
+            m.0[row * 4 + col] = f64::from(s[row]) * r[row * 3 + col];
         }
         m.0[12 + row] = f64::from(t[row]);
     }
@@ -3225,24 +3273,13 @@ fn smooth_normals(points: &[[f32; 3]], corners: &[i32], faces: &[(usize, usize, 
 
 /// A polygon's normal (Newell's), unit length.
 fn polygon_normal(poly: &[[f32; 3]], flip: bool) -> [f32; 3] {
-    let mut n = [0f64; 3];
-    for (i, a) in poly.iter().enumerate() {
-        let (a, b) = (a.map(f64::from), poly[(i + 1) % poly.len()].map(f64::from));
-        n[0] += (a[1] - b[1]) * (a[2] + b[2]);
-        n[1] += (a[2] - b[2]) * (a[0] + b[0]);
-        n[2] += (a[0] - b[0]) * (a[1] + b[1]);
-    }
-    unit(n, flip)
+    unit(vec3::newell(poly.iter().map(|a| a.map(f64::from))), flip)
 }
 
+/// `n` at unit length, reversed when `flip`; up when it has no length.
 fn unit(n: [f64; 3], flip: bool) -> [f32; 3] {
-    let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
-    let s = if flip { -1.0 } else { 1.0 };
-    if len > 0.0 {
-        n.map(|x| f32_of(s * x / len))
-    } else {
-        [0.0, 1.0, 0.0]
-    }
+    let n = if flip { n.map(|x| -x) } else { n };
+    vec3::unit_or(n, [0.0, 1.0, 0.0]).map(f32_of)
 }
 
 fn vec3s(v: sdf::Value) -> Option<Vec<[f32; 3]>> {
@@ -3384,7 +3421,7 @@ impl Reader<'_> {
             })
             .or_else(|| {
                 let dir = self.file.parent().unwrap_or(Path::new(""));
-                self.images.file(assets, assets.find(reference, dir)?, reference)
+                self.images.find(assets, &[reference], &[dir])
             })
     }
 }
@@ -3413,9 +3450,10 @@ impl<'a> Usdz<'a> {
                 .iter()
                 .find(|n| n.rsplit('/').next().is_some_and(|f| f.to_lowercase() == name))
         })?;
-        let mut f = self.0.by_name(entry).ok()?;
-        let mut bytes = Vec::new();
-        f.read_to_end(&mut bytes).ok()?;
+        // Entries are meant to be stored, but one deflated is read too, as far as is plausible.
+        let f = self.0.by_name(entry).ok()?;
+        let packed = f.compressed_size();
+        let bytes = super::inflate_capped(f, packed, entry).ok()?;
         Some((entry.clone(), bytes))
     }
 }
@@ -3447,7 +3485,7 @@ fn open_in_memory(bytes: &[u8], input: Input<'_>, assets: &dyn Assets) -> Result
             .schema_registry(openusd_schemas::schema_registry())
             .resolver(resolver)
             .open(&root)
-            .map_err(|e| invalid!("{e}"))?;
+            .context(ErrorKind::Corrupt, "opening the USD stage")?;
         let paths = prim_paths(&stage)?;
         round += 1;
         let mut found = false;
@@ -3671,7 +3709,8 @@ def Material \"Planks\"
 ",
         )
         .unwrap();
-        assert!(read(&path, dir.path()).is_none());
+        let err = load(Input::file(&path), &crate::assets::Folder::new(dir.path()), Keep::ALL).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::Empty, "{err}");
     }
 
     #[test]
@@ -3709,13 +3748,74 @@ def Material \"Planks\"
         (dir, path)
     }
 
-    fn doc(usda: &str, images: &[(&str, bool)]) -> Document<'static> {
+    fn doc(usda: &str, images: &[(&str, bool)]) -> Document {
         let (dir, path) = stage(usda, images);
         load(Input::file(&path), &crate::assets::Folder::new(dir.path()), Keep::ALL).unwrap()
     }
 
     fn flat(usda: &str, images: &[(&str, bool)]) -> crate::mesh::Mesh {
         doc(usda, images).flatten(Pose::Rest).unwrap().unwrap()
+    }
+
+    #[test]
+    fn what_the_stage_says_of_itself() {
+        use crate::source::{Axis, Fact, Handedness};
+        let mesh = "def Mesh \"Quad\"
+{
+    point3f[] points = [(0, 0, 0), (1, 0, 0), (1, 1, 0)]
+    int[] faceVertexCounts = [3]
+    int[] faceVertexIndices = [0, 1, 2]
+}
+";
+        let usda = format!(
+            "#usda 1.0
+(
+    doc = \"A crate\"
+    comment = \"first pass\"
+    upAxis = \"Z\"
+    metersPerUnit = 0.0254
+    framesPerSecond = 30
+    timeCodesPerSecond = 60
+    customLayerData = {{
+        string creator = \"someone\"
+    }}
+)
+
+{mesh}"
+        );
+        let d = doc(&usda, &[]);
+        let info = d.source_info();
+        assert_eq!(info.format.as_deref(), Some("USD"));
+        assert_eq!(info.meters_per_unit, Fact::Declared(0.0254));
+        assert_eq!(info.unit.as_deref(), Some("inch"));
+        assert_eq!(info.up_axis, Fact::Declared(Axis::PosZ));
+        assert_eq!(info.handedness, Fact::Declared(Handedness::Right));
+        assert_eq!(info.frame_rate, Fact::Declared(30.0));
+        assert!(info.converted.units && info.converted.up_axis);
+        assert_eq!(info.description.as_deref(), Some("A crate"));
+        assert_eq!(info.comments, ["first pass"]);
+        assert_eq!(
+            d.json()["asset"]["extras"]["source"]["customLayerData"]["creator"],
+            "someone"
+        );
+        assert_eq!(d.json()["asset"]["extras"]["source"]["timeCodesPerSecond"], 60.0);
+
+        // A stage that says nothing: USD's centimeters, Y up and 24 time codes a second, assumed.
+        let d = doc(
+            &format!(
+                "#usda 1.0
+
+{mesh}"
+            ),
+            &[],
+        );
+        let info = d.source_info();
+        assert_eq!(info.meters_per_unit, Fact::Assumed(0.01));
+        assert_eq!(info.unit.as_deref(), Some("centimeter"));
+        assert_eq!(info.up_axis, Fact::Assumed(Axis::PosY));
+        assert_eq!(info.frame_rate, Fact::Assumed(24.0));
+        assert!(info.converted.units && !info.converted.up_axis);
+        assert_eq!(info.description, None);
     }
 
     fn close<const N: usize>(a: [f32; N], b: [f32; N]) -> bool {
@@ -3880,7 +3980,7 @@ def Material \"Planks\"
 "#,
         );
         let d = doc(&usda, &[("glow.png", false), ("ao.png", true)]);
-        let m = &d.json["materials"][0];
+        let m = &d.json()["materials"][0];
         assert!(m.get("emissiveTexture").is_some(), "the emissive texture: {m}");
         assert_eq!(m["emissiveFactor"], json!([1.0, 1.0, 1.0]));
         assert!(
@@ -3947,8 +4047,8 @@ def Xform "Root"
         }
         usda.push_str("}\n");
         let d = doc(&usda, &[]);
-        assert_eq!(d.json["meshes"].as_array().unwrap().len(), 1);
-        let held = d.json["nodes"]
+        assert_eq!(d.json()["meshes"].as_array().unwrap().len(), 1);
+        let held = d.json()["nodes"]
             .as_array()
             .unwrap()
             .iter()
@@ -3972,10 +4072,12 @@ def Xform "Root"
         )
         .unwrap();
         assert!(
-            d.json["nodes"].as_array().unwrap().len() <= 5,
+            d.json()["nodes"].as_array().unwrap().len() <= 5,
             "4 and a root for the units"
         );
-        assert!(d.json["asset"]["extras"]["source"]["truncated"].is_string());
+        let source = &d.json()["asset"]["extras"]["source"];
+        assert_eq!(source["truncated"], true);
+        assert!(source["truncatedBy"].is_string());
         let mesh = d.flatten(Pose::Rest).unwrap().unwrap();
         assert_eq!(mesh.triangles(), 4 * 12, "what was made is kept");
     }
@@ -3986,7 +4088,7 @@ def Xform "Root"
             "#usda 1.0\ndef Cube \"C\"\n{\n}\ndef Sphere \"S\"\n{\n}\ndef Cylinder \"Y\"\n{\n}\ndef Plane \"P\"\n{\n}\n",
             &[],
         );
-        assert!(!mesh.prims.is_empty());
+        assert_ne!(mesh.prims.len(), 0);
         for prim in &mesh.prims {
             assert_eq!(prim.uvs.len(), prim.positions.len());
             assert!(prim.uvs.iter().flatten().all(|v| (0.0..=1.0).contains(v)));
@@ -4000,7 +4102,7 @@ def Xform "Root"
             "#usda 1.0\ndef DomeLight \"Sky\"\n{\n    asset inputs:texture:file = @sky.hdr@\n    float inputs:intensity = 2\n}\n",
             &[],
         );
-        let sky = d.json["nodes"]
+        let sky = d.json()["nodes"]
             .as_array()
             .unwrap()
             .iter()
@@ -4056,7 +4158,7 @@ def Xform "Root"
         )
         .replace("MaterialBindingAPI", "SkelBindingAPI");
         let d = doc(&usda, &[]);
-        let target = &d.json["meshes"][0]["primitives"][0]["targets"][0];
+        let target = &d.json()["meshes"][0]["primitives"][0]["targets"][0];
         assert!(
             target.get("POSITION").is_some() && target.get("NORMAL").is_some(),
             "{target}"
@@ -4283,7 +4385,7 @@ def HermiteCurves "Wave"
 "#,
         );
         let d = doc(&usda, &[]);
-        assert_eq!(d.json["meshes"].as_array().unwrap().len(), 2);
+        assert_eq!(d.json()["meshes"].as_array().unwrap().len(), 2);
         let m = d.flatten(Pose::Rest).unwrap().unwrap();
         assert_eq!((m.triangles(), m.lines()), (0, 16));
         // The arc lies on the unit circle; the Hermite segment rises and falls between its points.
@@ -4369,5 +4471,32 @@ def HermiteCurves "Wave"
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_usdz_texture_that_inflates_implausibly_far_is_left_out() {
+        use std::io::Write as _;
+        // 64 MiB of zeros deflates to about 64 KB: a thousand times over, past any real texture.
+        let mut zip = zip::ZipWriter::new(io::Cursor::new(Vec::new()));
+        let deflated = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        let stored = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        zip.start_file("bomb.png", deflated).unwrap();
+        let zeros = vec![0u8; 1 << 20];
+        for _ in 0..64 {
+            zip.write_all(&zeros).unwrap();
+        }
+        zip.start_file("small.png", deflated).unwrap();
+        zip.write_all(&zeros[..4096]).unwrap();
+        zip.start_file("plain.png", stored).unwrap();
+        zip.write_all(b"not really a png").unwrap();
+        let bytes = zip.finish().unwrap().into_inner();
+        let stream: Box<dyn super::super::ReadSeek> = Box::new(io::Cursor::new(bytes));
+        let mut usdz = Usdz(zip::ZipArchive::new(stream).unwrap());
+        assert!(usdz.read("bomb.png").is_none());
+        assert_eq!(usdz.read("textures/small.png").map(|(_, b)| b.len()), Some(4096));
+        assert_eq!(
+            usdz.read("plain.png"),
+            Some(("plain.png".to_owned(), b"not really a png".to_vec()))
+        );
     }
 }

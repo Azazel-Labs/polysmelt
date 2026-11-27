@@ -1,0 +1,19 @@
+{
+  "spec": "OGRE mesh and skeleton serializers (OgreMeshSerializerImpl, OgreSkeletonSerializer) and material scripts: a real file, an XML mesh of 2656 triangles",
+  "source": "assimp/assimp at 711b4e9bbde2, test/models/Ogre/TheThing/Mesh.mesh.xml (BSD-3-Clause, see ../LICENSE-assimp); expectations measured with assimp 6.0.5 (assimp-py 1.2.0)",
+  "triangles": 2656,
+  "bounds": {
+    "min": [
+      0.007491,
+      0.023206,
+      0.011509
+    ],
+    "max": [
+      0.995221,
+      0.481105,
+      0.469407
+    ]
+  },
+  "area": 1.346776,
+  "position_set": "positions.f32"
+}

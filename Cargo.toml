@@ -1,29 +1,28 @@
 [package]
 name = "polysmelt"
-version = "0.15.2"
+version = "0.21.0"
 edition = "2024"
 # MIT-0, except the SketchUp reader (src/formats/skp), which is MIT: see its LICENSE-openskp.
 license = "MIT-0 AND MIT"
-# 1.88 for edition 2024's let chains (and `zip` 9). The `usd` feature, on by default, needs
-# 1.96 because `openusd` 0.8 does; CI checks both.
-rust-version = "1.88"
+# 1.96 because `openusd` 0.8 (the `usd` feature, on by default) needs it; CI checks it.
+rust-version = "1.96"
 description = "Pure-Rust 3D asset interchange: glTF/GLB reading and writing, meshopt compression, and readers for common mesh formats, SketchUp included"
 keywords = ["gltf", "glb", "meshopt", "3d", "mesh"]
 categories = ["graphics", "game-development", "parser-implementations", "encoding"]
 repository = "https://github.com/Azazel-Labs/polysmelt"
 readme = "README.md"
 # One crate on crates.io: the library alone. The corpus, its tools and the benchmarks stay in the repository.
-include = ["/src", "/examples", "/README.md", "/LICENSE", "/Cargo.toml"]
+include = ["/src", "/examples", "/README.md", "/CHANGELOG.md", "/LICENSE", "/Cargo.toml"]
 
 [package.metadata.docs.rs]
 all-features = true
 
 [features]
-default = ["minimal", "fbx", "3mf", "usd", "draco", "webp", "skp", "dae", "x3d", "tga", "bmp", "gif", "tiff", "psd", "dds", "spz", "laz", "e57", "amf"]
+default = ["minimal", "fbx", "3mf", "usd", "draco", "webp", "skp", "dae", "x3d", "tga", "bmp", "gif", "tiff", "psd", "dds", "spz", "sog", "laz", "e57", "amf", "vtk"]
 # The readers with no dependencies, and file access: `default-features = false, features = ["minimal"]`.
-minimal = ["fs", "stl", "ply", "vox", "obj", "3ds", "gltf", "bvh", "off", "dxf", "splat", "mmd", "directx", "md2", "md3", "md5", "iqm", "smd", "ms3d", "b3d", "asf", "c3d", "trc", "htr", "las", "pcd", "xyz", "lwo", "ac3d", "ogre", "flt", "ogex"]
-# Reading from the file system: `formats::load`, `assets::Folder` and `gltf::files_in`. Without
-# it (for wasm, say), models load from memory with `formats::load_bytes` and `assets::Memory`.
+minimal = ["fs", "stl", "ply", "vox", "obj", "3ds", "gltf", "bvh", "off", "dxf", "splat", "mmd", "directx", "md2", "md3", "md5", "iqm", "smd", "ms3d", "b3d", "asf", "c3d", "trc", "htr", "las", "pcd", "xyz", "lwo", "ac3d", "ogre", "flt", "ogex", "irr", "xgl", "tiles", "msh", "medit"]
+# Reading from the file system: `open`, `Loader::open`, `assets::Folder` and `gltf::files_in`.
+# Without it (for wasm, say), models load from memory with `read`, `Loader::read` and `assets::Memory`.
 fs = []
 stl = []
 ply = []
@@ -70,7 +69,10 @@ htr = []
 splat = []
 # Gaussian splats in gzipped `.spz`, versions 1 to 3 (KHR_gaussian_splatting).
 spz = ["dep:flate2"]
-fbx =["dep:base64", "dep:flate2"]
+# Gaussian splats in SOG, versions 1 to 3: a zipped `.sog`, or a `meta.json` beside its WebP images
+# (KHR_gaussian_splatting).
+sog = ["dep:zip", "dep:image-webp"]
+fbx =["dep:flate2"]
 3mf = ["dep:zip", "dep:quick-xml"]
 # COLLADA `.dae`, and `.zae` and `.kmz` archives holding one.
 dae = ["dep:zip", "dep:quick-xml"]
@@ -79,17 +81,17 @@ usd = ["dep:openusd", "dep:openusd-schemas", "dep:zip"]
 draco = ["gltf", "dep:draco-core"]
 # WebP textures (`EXT_texture_webp`, or a `.webp` file a model names) re-encoded as PNG for
 # the flat mesh, which embeds only PNG and JPEG.
-webp = ["dep:image-webp", "dep:flate2"]
+webp = ["dep:image-webp", "dep:flate2", "dep:fdeflate"]
 # Texture formats glTF can't embed, decoded and re-encoded as PNG the same way: TGA, BMP, a GIF's
 # first frame, TIFF, a PSD's merged image, and DDS (BC1 to BC5, or uncompressed).
-tga = ["dep:flate2"]
-bmp = ["dep:flate2"]
-gif = ["dep:flate2"]
-tiff = ["dep:flate2"]
-psd = ["dep:flate2"]
-dds = ["dep:flate2"]
+tga = ["dep:flate2", "dep:fdeflate"]
+bmp = ["dep:flate2", "dep:fdeflate"]
+gif = ["dep:flate2", "dep:fdeflate"]
+tiff = ["dep:flate2", "dep:fdeflate"]
+psd = ["dep:flate2", "dep:fdeflate"]
+dds = ["dep:flate2", "dep:fdeflate"]
 # SketchUp `.skp`, from SketchUp 3 to the latest, converted through glTF.
-skp = ["gltf", "dep:flate2"]
+skp = ["gltf", "dep:flate2", "dep:fdeflate"]
 # X3D and VRML97 meshes: classic (`.wrl`, `.x3dv`), XML (`.x3d`) and gzipped (`.wrz`, `.x3dz`).
 x3d = ["dep:quick-xml", "dep:flate2"]
 # LAS lidar point clouds, versions 1.0 to 1.4, point formats 0 to 10.
@@ -103,7 +105,7 @@ xyz = []
 # E57 scans: point clouds with their poses, colors and intensity.
 e57 = ["dep:e57"]
 # AMF (Additive Manufacturing File), plain or zipped.
-amf = ["dep:quick-xml", "dep:zip", "dep:base64", "dep:flate2"]
+amf = ["dep:quick-xml", "dep:zip", "dep:flate2", "dep:fdeflate"]
 # LightWave objects (`.lwo`: LWOB, LWO2 and LWO3).
 lwo = []
 # AC3D `.ac` models.
@@ -112,23 +114,38 @@ ac3d = []
 flt = []
 # OpenGEX `.ogex` scenes.
 ogex = []
+# Irrlicht scenes (`.irr`) and meshes (`.irrmesh`).
+irr = []
+# XGL and zipped XGL (`.xgl`, `.zgl`).
+xgl = []
+# VTK meshes: legacy `.vtk`, and XML `.vtp` and `.vtu`, zlib-compressed or not.
+vtk = ["dep:flate2"]
+# OGC 3D Tiles: `.b3dm`, `.i3dm`, `.pnts` and `.cmpt` tiles, and a `tileset.json` of them. Draco point
+# clouds (`3DTILES_draco_point_compression`) need `draco` too.
+tiles = ["gltf", "draco-core?/point_cloud_decode"]
+# Gmsh meshes (`.msh`), versions 1 to 4.1, ASCII and binary.
+msh = []
+# Medit (INRIA) meshes: `.mesh` as text and `.meshb` as binary.
+medit = []
 
 [dependencies]
 serde_json = "1"
 # Typed vertex data viewed as the bytes a GLB stores, without copying (unsafe is forbidden here).
 bytemuck = "1"
-thiserror = "2"
 # Shared, sliceable bytes: images in a mesh point at the buffer they were read into rather than copying it.
 bytes = { version = "1.10", default-features = false }
-base64 = { version = "0.22", optional = true }
+# Base64 text: data URIs (glTF, COLLADA), AMF textures and ASCII FBX content.
+base64 = "0.22"
 zip = { version = "9", default-features = false, features = ["deflate"], optional = true }
 quick-xml = { version = "0.41", optional = true }
 openusd = { version = "0.8", optional = true }
 openusd-schemas = { version = "0.8", features = ["geom", "shade"], optional = true }
 image-webp = { version = "0.2", optional = true }
-# zip already brings flate2 on the zlib-rs backend; the PNG writer shares it. Runtime detection lets inflate use
+# zip already brings flate2 on the zlib-rs backend; PNG checksums and reads share it. Runtime detection lets inflate use
 # the CPU's wider instructions (FBX arrays are mostly zlib).
 flate2 = { version = "1.1", default-features = false, features = ["zlib-rs", "runtime_detection"], optional = true }
+# The PNG writer's deflate: made for filtered rows, and much faster than flate2 at its fastest.
+fdeflate = { version = "0.3.7", optional = true }
 laz = { version = "0.14", default-features = false, optional = true }
 e57 = { version = "0.11", default-features = false, optional = true }
 draco-core = { version = "2.3", default-features = false, features = ["decoder", "edgebreaker_valence_decode", "legacy_bitstream_decode"], optional = true }
@@ -137,13 +154,29 @@ draco-core = { version = "2.3", default-features = false, features = ["decoder",
 # The FBX reader's tests check its tree against this independent reader, and write FBX with it.
 fbxcel = { version = "0.9", features = ["tree", "writer"] }
 tempfile = "3"
-image = { version = "0.25", default-features = false, features = ["png"] }
+# PNG to read back what's written; the other formats, `psd` and `image_dds` as independent decoders the texture
+# decoders are compared with.
+image = { version = "0.25", default-features = false, features = ["png", "tga", "bmp", "gif", "tiff"] }
+psd = "0.3"
+image_dds = { version = "0.7", default-features = false, features = ["ddsfile"] }
+# The LZW encoder `image` writes GIF and TIFF with, for the files those comparisons decode.
+weezl = "0.1"
 # The glTF reader downstream tools render with: decompressed and decoded output must load in it
 # (`extras` for custom `_ATTRIBUTES`, as Farthing reads them).
 gltf = { version = "1.4", default-features = false, features = ["allow_empty_texture", "extras", "utils"] }
+# The robustness test counts what a load of a damaged file allocates.
+peak_alloc = "0.3"
 
 [[example]]
 name = "meshopt"
+required-features = ["fs"]
+
+[[example]]
+name = "convert"
+required-features = ["fs"]
+
+[[example]]
+name = "inspect"
 required-features = ["fs"]
 
 [lints.rust]

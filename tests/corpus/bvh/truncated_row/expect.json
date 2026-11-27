@@ -6,11 +6,10 @@
     "joints": 2,
     "channels": 9,
     "frames": 3,
-    "frame_time": 0.04,
     "dropped_frames": 1
   },
   "document": {
-    "nodes": 3,
+    "nodes": 4,
     "animations": 1,
     "channels": 3,
     "node_names": [
@@ -22,16 +21,29 @@
   "json": {
     "/asset/extras/source/format": "BVH",
     "/scenes/0/nodes": [
-      0
+      3
     ],
-    "/animations/0/name": "motion",
+    "/nodes/3": {
+      "name": "RootNode",
+      "children": [
+        0
+      ]
+    },
+    "/nodes/3/rotation": null,
+    "/nodes/3/scale": null,
+    "/asset/extras/source/converted": null,
+    "/asset/extras/source/frameRate": 25.0,
+    "/asset/extras/source/assumed": [
+      "upAxis"
+    ],
+    "/animations/0/name": "truncated_row",
     "/animations/0/samplers/0/interpolation": "LINEAR",
     "/asset/extras/source/frames": 4
   },
   "rig": [
     {
       "node": "Hips",
-      "parent": null,
+      "parent": "RootNode",
       "translation": [
         0,
         90,

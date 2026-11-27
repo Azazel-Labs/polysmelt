@@ -97,7 +97,7 @@ fn main() {
         "time-file" => time_one(&pos, &opts),
         "info" => println!(
             "{}",
-            json!({ "assimp": loaders::assimp_version(), "polysmelt_extensions": polysmelt::formats::EXTENSIONS })
+            json!({ "assimp": loaders::assimp_version(), "polysmelt_extensions": loaders::polysmelt_extensions() })
         ),
         _ => {
             eprintln!("unknown command {cmd}");
@@ -208,7 +208,7 @@ fn run_one(loader: &Loader, file: &Path, glb_out: Option<&Path>) -> Result<(load
     match loader.name {
         loaders::POLYSMELT_GLB => {
             let l = (loader.run)(&src)?;
-            type Doc = (polysmelt::document::Document<'static>, Vec<u8>);
+            type Doc = (polysmelt::Document, Vec<u8>);
             let glb = &l.result.downcast_ref::<Doc>().ok_or("unexpected result")?.1;
             std::fs::write(out, glb).map_err(|e| e.to_string())?;
             let k = glb.len() as u64;

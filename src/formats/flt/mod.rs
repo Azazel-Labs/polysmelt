@@ -7,7 +7,7 @@
 //!
 //! Each node of the tree becomes a glTF node, its faces one mesh, a primitive for each
 //! material. A face's material is its material palette entry (diffuse as the base color,
-//! emissive, shininess as roughness, alpha), its texture, whether it has two sides (its draw
+//! emissive, specular color and shininess as the highlight, alpha), its texture, whether it has two sides (its draw
 //! type), its transparency and whether it's lit (its light mode); the face's color, or its
 //! vertices' colors, go in `COLOR_0`, which glTF multiplies with the base color as `OpenFlight`
 //! does. Wireframe faces are drawn as lines, light points as points. Texture layers have
@@ -22,9 +22,13 @@
 //! the children its current mask shows; an animated group shows its children in turn, each
 //! scaled to nothing when it's not its turn. Light sources become `KHR_lights_punctual` lights.
 //!
-//! `OpenFlight` is Z up, counterclockwise from the front, in the header's units: the scene's root
-//! turns it Y up and scales it to meters. What has no glTF slot (the header's placement on the
+//! `OpenFlight` is Z up, counterclockwise from the front, in the header's units: the document's
+//! `RootNode`, over the header's node, turns it Y up and scales it to meters. What has no glTF slot (the header's placement on the
 //! earth, ranges, comments, record kinds) stays in `extras`.
+//!
+//! The asset's `extras.source` records the version, the header's units, Z up, what was
+//! converted, the header's date as `created`, and, when the header places the database on the
+//! earth, its origin, corners, projection and ellipsoid as the `georeference`.
 
 mod parse;
 mod sgi;
@@ -36,13 +40,21 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value, json};
 
+use super::frame::{self, Frame};
+use super::keys::{self, Interp, Track};
+use super::xform::col::{self, IDENTITY, mul, scaling, translation};
+use super::xform::set_trs;
 use crate::Result;
 use crate::assets::Assets;
-use crate::document::{Builder, Document, Keep, Part};
+use crate::document::{Builder, Document, Keep};
 use crate::images::{Images, Location};
+use crate::legacy_material::{self, Phong, Rgb, Transparency};
 use crate::material::{Alpha, Full, Tex};
-use crate::mesh::{FastMap, Image, Prim, srgb_to_linear};
+use crate::mesh::{FastMap, Image, Prim, linear_u8, srgb_to_linear};
 use crate::num::{f32_of, u32_of};
+use crate::quat;
+use crate::source::{Axis, Converted, Fact, Handedness, SourceInfo};
+use crate::vec3::{self, cross, dot, sub, unit};
 use parse::{Db, F_HIDDEN, F_PACKED, Face, Kind, Shape, V_INDEX, V_NORMAL, V_PACKED, V_UV};
 
 /// The most glTF nodes a scene expands to (instances and references multiply them).
@@ -152,7 +164,8 @@ struct Ctx<'a> {
 struct Stats {
     hidden_faces: usize,
     dropped_textures: usize,
-    missing_files: usize,
+    /// The external references' files that weren't found, by the paths the file gives.
+    missing_files: Vec<String>,
     missing_instances: usize,
     cycles: usize,
     too_deep: usize,
@@ -163,7 +176,7 @@ struct Stats {
     faces: usize,
 }
 
-pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document<'static>> {
+pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document> {
     let data = input.read()?;
     let db = parse::parse(&data)?;
     drop(data);
@@ -174,7 +187,7 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
     let mut lut = [0.0f32; 256];
     for (k, v) in lut.iter_mut().enumerate() {
-        *v = srgb_to_linear(f32::from(u8::try_from(k).unwrap_or(0)) / 255.0);
+        *v = linear_u8(u8::try_from(k).unwrap_or(0));
     }
     let mut c = Ctx {
         assets,
@@ -186,7 +199,7 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
             name,
         }],
         by_path: FastMap::default(),
-        b: Builder::default(),
+        b: Builder::new(keep.crease_angle()),
         images: Images::new(!keep.image_bytes, &dir),
         image_of: FastMap::default(),
         materials: Vec::new(),
@@ -207,10 +220,14 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         c.by_path.insert(dir.join(n), Some(0));
     }
     let scene = expand(&mut c)?;
-    ensure!(
-        !c.meshes.is_empty() || !c.lights.is_empty(),
-        "this OpenFlight file has no geometry"
-    );
+    if c.meshes.is_empty() && c.lights.is_empty() {
+        let cut = c.files.iter().any(|f| f.db.truncated);
+        return Err(crate::Error::nothing_left(
+            cut,
+            "OpenFlight",
+            "this OpenFlight file has no geometry",
+        ));
+    }
     Ok(finish(c, scene))
 }
 
@@ -300,19 +317,11 @@ fn expand(c: &mut Ctx<'_>) -> Result<Scene> {
         let mut m = local_matrix(node, it.copy);
         if let Kind::Light { pos, yaw, pitch, .. } = node.kind {
             let d = light_direction(yaw, pitch);
-            let r = quat_matrix(from_to([0.0, 0.0, -1.0], d));
+            let r = col::rotation(from_to([0.0, 0.0, -1.0], d));
             m = mul(&m, &mul(&translation(pos), &r));
         }
-        if top {
-            // The scene's root: Z up to Y up, and the file's units to meters.
-            let h = std::f64::consts::FRAC_1_SQRT_2;
-            let u = c.files[0].db.meters();
-            j["rotation"] = json!([-h, 0.0, 0.0, h]);
-            if (u - 1.0).abs() > 0.0 {
-                j["scale"] = json!([u, u, u]);
-            }
-            j["name"] = json!(if node.name.is_empty() { "RootNode" } else { &node.name });
-        } else {
+        // The header stands where the file's space does: the root node over it turns and scales that.
+        if !top {
             if (it.scale - 1.0).abs() > 0.0 {
                 m = mul(&m, &scaling([it.scale; 3]));
             }
@@ -373,7 +382,9 @@ fn expand(c: &mut Ctx<'_>) -> Result<Scene> {
                 let (path, target) = (path.to_owned(), target.map(str::to_owned));
                 let flags = *flags;
                 let Some(ef) = external(c, it.file, &path) else {
-                    c.stats.missing_files += 1;
+                    if !c.stats.missing_files.contains(&path) {
+                        c.stats.missing_files.push(path);
+                    }
                     continue;
                 };
                 let key = u64::from(ef);
@@ -436,7 +447,7 @@ fn expand(c: &mut Ctx<'_>) -> Result<Scene> {
                     if sequence.is_some() {
                         // A frame node, shown in its turn.
                         let f = s.nodes.len();
-                        let mut j = json!({ "name": format!("frame {k}") });
+                        let mut j = json!({ "name": format!("frame{k}") });
                         if k > 0 {
                             j["scale"] = json!([0.0, 0.0, 0.0]);
                         }
@@ -699,34 +710,6 @@ fn light_direction(yaw: f32, pitch: f32) -> [f64; 3] {
 
 // Matrices are column-major, as glTF's: `m[col * 4 + row]`.
 
-const IDENTITY: [f64; 16] = [
-    1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
-];
-
-fn mul(a: &[f64; 16], b: &[f64; 16]) -> [f64; 16] {
-    let mut m = [0.0; 16];
-    for col in 0..4 {
-        for row in 0..4 {
-            m[col * 4 + row] = (0..4).map(|k| a[k * 4 + row] * b[col * 4 + k]).sum();
-        }
-    }
-    m
-}
-
-fn translation(t: [f64; 3]) -> [f64; 16] {
-    let mut m = IDENTITY;
-    m[12..15].copy_from_slice(&t);
-    m
-}
-
-fn scaling(s: [f64; 3]) -> [f64; 16] {
-    let mut m = IDENTITY;
-    m[0] = s[0];
-    m[5] = s[1];
-    m[10] = s[2];
-    m
-}
-
 /// A rotation of `deg` degrees about axis `axis` (0 x, 1 y, 2 z).
 fn rotation(axis: usize, deg: f64) -> [f64; 16] {
     let (s, c) = deg.to_radians().sin_cos();
@@ -741,29 +724,6 @@ fn rotation(axis: usize, deg: f64) -> [f64; 16] {
     m[b * 4 + a] = -s;
     m[b * 4 + b] = c;
     m
-}
-
-/// The rotation matrix of a unit quaternion `[x, y, z, w]`.
-fn quat_matrix(q: [f64; 4]) -> [f64; 16] {
-    let [x, y, z, w] = q;
-    [
-        1.0 - 2.0 * (y * y + z * z),
-        2.0 * (x * y + z * w),
-        2.0 * (x * z - y * w),
-        0.0,
-        2.0 * (x * y - z * w),
-        1.0 - 2.0 * (x * x + z * z),
-        2.0 * (y * z + x * w),
-        0.0,
-        2.0 * (x * z + y * w),
-        2.0 * (y * z - x * w),
-        1.0 - 2.0 * (x * x + y * y),
-        0.0,
-        0.0,
-        0.0,
-        0.0,
-        1.0,
-    ]
 }
 
 /// The shortest rotation taking unit vector `a` to `b`, as a quaternion.
@@ -788,27 +748,6 @@ fn from_to(a: [f64; 3], b: [f64; 3]) -> [f64; 4] {
     let q = [x[0], x[1], x[2], 1.0 + d];
     let l = q.iter().map(|v| v * v).sum::<f64>().sqrt();
     q.map(|v| v / l)
-}
-
-fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-
-fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
-}
-
-fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-
-fn unit(v: [f64; 3]) -> Option<[f64; 3]> {
-    let l = dot(v, v).sqrt();
-    (l > 1e-12 && l.is_finite()).then(|| v.map(|c| c / l))
 }
 
 /// A node's own placement: its degree of freedom at its current values, under its matrix
@@ -899,58 +838,8 @@ fn place(j: &mut Value, m: &[f64; 16]) {
     for k in 0..3 {
         cols[k] = cols[k].map(|v| v / s[k]);
     }
-    let q = quat_of(cols);
-    if t.iter().any(|&v| v != 0.0) {
-        j["translation"] = json!(t);
-    }
-    if (q[3] - 1.0).abs() > 1e-12 {
-        j["rotation"] = json!(q);
-    }
-    if s.iter().any(|&v| (v - 1.0).abs() > 1e-12) {
-        j["scale"] = json!(s);
-    }
-}
-
-/// The unit quaternion of a rotation's columns.
-fn quat_of(c: [[f64; 3]; 3]) -> [f64; 4] {
-    let (m00, m11, m22) = (c[0][0], c[1][1], c[2][2]);
-    let trace = m00 + m11 + m22;
-    let q = if trace > 0.0 {
-        let s = (trace + 1.0).sqrt() * 2.0;
-        [
-            (c[1][2] - c[2][1]) / s,
-            (c[2][0] - c[0][2]) / s,
-            (c[0][1] - c[1][0]) / s,
-            0.25 * s,
-        ]
-    } else if m00 > m11 && m00 > m22 {
-        let s = (1.0 + m00 - m11 - m22).sqrt() * 2.0;
-        [
-            0.25 * s,
-            (c[1][0] + c[0][1]) / s,
-            (c[2][0] + c[0][2]) / s,
-            (c[1][2] - c[2][1]) / s,
-        ]
-    } else if m11 > m22 {
-        let s = (1.0 + m11 - m00 - m22).sqrt() * 2.0;
-        [
-            (c[1][0] + c[0][1]) / s,
-            0.25 * s,
-            (c[2][1] + c[1][2]) / s,
-            (c[2][0] - c[0][2]) / s,
-        ]
-    } else {
-        let s = (1.0 + m22 - m00 - m11).sqrt() * 2.0;
-        [
-            (c[2][0] + c[0][2]) / s,
-            (c[2][1] + c[1][2]) / s,
-            0.25 * s,
-            (c[0][1] - c[1][0]) / s,
-        ]
-    };
-    let l = q.iter().map(|v| v * v).sum::<f64>().sqrt();
-    let q = q.map(|v| v / l);
-    if q[3] < 0.0 { q.map(|v| -v) } else { q }
+    let q = quat::positive_w(quat::unit_unchecked(quat::of_rotation(|r, c| cols[c][r])));
+    set_trs(j, (t, q, s));
 }
 
 /// The color of palette entry `index` (with its intensity in the low 7 bits), as sRGB bytes.
@@ -1007,31 +896,46 @@ fn material_of(c: &mut Ctx<'_>, key: MatKey, image: Option<usize>) -> usize {
     if let Some(&m) = c.material_at.get(&key) {
         return m;
     }
-    let src = key
+    let palette = key
         .material
         .and_then(|(f, i)| c.files[f as usize].db.materials.get(&i32::from(i)))
-        .cloned()
-        .unwrap_or_default();
-    let lin = |v: [f32; 3]| v.map(|x| srgb_to_linear(x.clamp(0.0, 1.0)));
-    let alpha = src.alpha.clamp(0.0, 1.0);
-    let (base, emissive) = if key.unlit {
-        ([1.0; 3], [0.0; 3])
-    } else {
-        (lin(src.diffuse), lin(src.emissive))
+        .cloned();
+    let src = palette.clone().unwrap_or_default();
+    // A face with no material is drawn in its own color (white when it gives none), which the vertex colors
+    // hold: the default material, white under them. A palette material is OpenGL's, its shininess (0 to 128)
+    // the Blinn-Phong exponent.
+    let look = match &palette {
+        Some(m) => {
+            let mut phong = Phong::new(Rgb::Srgb(m.diffuse));
+            phong.opacity = m.alpha;
+            phong.emissive = Rgb::Srgb(m.emissive);
+            phong.specular = Some(Rgb::Srgb(m.specular));
+            phong.exponent = Some(m.shininess.clamp(0.0, 128.0));
+            phong.pbr().full("")
+        }
+        None => legacy_material::default_material(true).into(),
     };
-    let roughness = if src.specular.iter().all(|&v| v <= 0.0) {
-        1.0
+    let alpha = look.base_color[3];
+    let (base, emissive, specular) = if key.unlit {
+        ([1.0; 3], [0.0; 3], None)
     } else {
-        (2.0 / (src.shininess.clamp(0.0, 128.0) + 2.0)).powf(0.25)
+        (
+            [look.base_color[0], look.base_color[1], look.base_color[2]],
+            look.emissive,
+            look.specular,
+        )
     };
+    let roughness = look.roughness;
     let tex_name = |c: &Ctx<'_>, f: u32, i: i16| c.files[f as usize].db.textures.get(&i32::from(i)).cloned();
     let texture = key.texture.and_then(|(f, i)| tex_name(c, f, i));
     let name = if !src.name.is_empty() {
         src.name.clone()
     } else if let Some(t) = &texture {
         t.rsplit(['/', '\\']).next().unwrap_or(t).to_owned()
+    } else if let Some((_, i)) = key.material {
+        format!("material{i}")
     } else {
-        format!("material{}", key.material.map_or(-1, |(_, i)| i32::from(i)))
+        legacy_material::DEFAULT_NAME.to_owned()
     };
     // Layer coordinates follow the base set, in layer order.
     let texcoord = |l: usize| 1 + (key.layer_mask & ((1u8 << l) - 1)).count_ones();
@@ -1063,6 +967,7 @@ fn material_of(c: &mut Ctx<'_>, key: MatKey, image: Option<usize>) -> usize {
         roughness,
         normal_tex,
         emissive,
+        specular,
         alpha: if key.blend { Alpha::Blend } else { Alpha::Opaque },
         double_sided: key.double_sided,
         unlit: key.unlit,
@@ -1135,15 +1040,7 @@ fn texture_image(c: &mut Ctx<'_>, file: u32, index: i16) -> Option<Found> {
 
 /// Newell's normal of a polygon, unit length; `None` when it has no area.
 fn face_normal(db: &Db, corners: &[u32]) -> Option<[f64; 3]> {
-    let mut n = [0.0; 3];
-    for (k, &a) in corners.iter().enumerate() {
-        let p = db.verts[a as usize].pos;
-        let q = db.verts[corners[(k + 1) % corners.len()] as usize].pos;
-        n[0] += (p[1] - q[1]) * (p[2] + q[2]);
-        n[1] += (p[2] - q[2]) * (p[0] + q[0]);
-        n[2] += (p[0] - q[0]) * (p[1] + q[1]);
-    }
-    unit(n)
+    unit(vec3::newell(corners.iter().map(|&a| db.verts[a as usize].pos)))
 }
 
 /// A node's faces as a mesh, a primitive per material.
@@ -1213,11 +1110,18 @@ fn build_mesh(c: &mut Ctx<'_>, file: u32, node: u32, pal: Pal) -> Result<MeshOf>
             },
             layer_mask: if f.layers == u32::MAX { 0 } else { f.layer_mask },
             double_sided: f.draw == 1 && !points && !lines,
-            blend: alpha < 1.0
-                || mat_alpha < 1.0
-                || f.template == 1
-                || (textured && matches!(f.template, 2 | 4))
-                || image.is_some_and(|(_, a)| a),
+            // The face's own transparency is in its vertices' colors; template 1 is fixed alpha blending,
+            // and 2 and 4 billboards with it.
+            blend: Transparency {
+                opacity: mat_alpha,
+                vertex_alpha: alpha < 1.0,
+                texture_alpha: f.template == 1
+                    || (textured && matches!(f.template, 2 | 4))
+                    || image.is_some_and(|(_, a)| a),
+                cutout: None,
+            }
+            .mode()
+                == Alpha::Blend,
             unlit: f.light_mode <= 1 || points || lines,
         };
         let pi = *part_of.entry(key).or_insert_with(|| {
@@ -1229,7 +1133,9 @@ fn build_mesh(c: &mut Ctx<'_>, file: u32, node: u32, pal: Pal) -> Result<MeshOf>
         let corners = &db.corners[f.start as usize..(f.start + f.len) as usize];
         let fcolor = face_color(colors, &f).map(|v| c.lut[usize::from(v)]);
         let vertex_colors = matches!(f.light_mode, 1 | 3);
-        let normal = face_normal(db, corners).unwrap_or([0.0, 0.0, 1.0]).map(f32_of);
+        // A face with no normal of its own, or a vertex whose normal has no length, is left zero, and takes its
+        // faces' normal as the primitive is written.
+        let normal = face_normal(db, corners).unwrap_or([0.0; 3]).map(f32_of);
         let part = &mut parts[pi].2;
         part.uvs |= textured;
         let per_corner = f.layers != u32::MAX || f.morph != u32::MAX;
@@ -1257,7 +1163,7 @@ fn build_mesh(c: &mut Ctx<'_>, file: u32, node: u32, pal: Pal) -> Result<MeshOf>
                     if l > 1e-6 && l.is_finite() {
                         n.map(|x| x / l)
                     } else {
-                        normal
+                        [0.0; 3]
                     }
                 } else {
                     normal
@@ -1339,7 +1245,12 @@ fn build_mesh(c: &mut Ctx<'_>, file: u32, node: u32, pal: Pal) -> Result<MeshOf>
                 c.built_triangles += n - 2;
             }
         }
-        ensure!(c.built_triangles <= c.limit, "more than {} triangles", c.limit);
+        ensure!(
+            c.built_triangles <= c.limit,
+            LimitExceeded,
+            "more than {} triangles",
+            c.limit
+        );
     }
     let mut primitives = Vec::new();
     for (key, image, mut part) in parts {
@@ -1392,34 +1303,11 @@ fn key_layer(layers: u32, mask: u8, l: usize) -> bool {
     layers != u32::MAX && mask & (1 << l) != 0
 }
 
-/// A float accessor of `kind` with no target, for animations; `bounds` adds `min` and `max`.
-fn floats(b: &mut Builder, v: Vec<f32>, kind: &str, bounds: bool) -> usize {
-    let width = if kind == "VEC3" { 3 } else { 1 };
-    let count = v.len() / width;
-    let range = bounds.then(|| {
-        let mut min = vec![f32::MAX; width];
-        let mut max = vec![f32::MIN; width];
-        for e in v.chunks_exact(width) {
-            for k in 0..width {
-                min[k] = min[k].min(e[k]);
-                max[k] = max[k].max(e[k]);
-            }
-        }
-        (min, max)
-    });
-    let a = b.accessor(Part::f32(v), 5126, count, kind, None);
-    if let Some((min, max)) = range {
-        b.accessors[a]["min"] = json!(min);
-        b.accessors[a]["max"] = json!(max);
-    }
-    a
-}
-
 /// Animated groups as an animation: each frame node scaled to full size in its turn and to
 /// nothing otherwise, stepping.
-fn animation(b: &mut Builder, sequences: &[(parse::Sequence, Vec<usize>)]) -> Option<Value> {
-    let mut channels = Vec::new();
-    let mut samplers = Vec::new();
+fn animation(sequences: &[(parse::Sequence, Vec<usize>)]) -> (Vec<Track>, bool) {
+    let mut tracks = Vec::new();
+    let mut assumed = false;
     for (seq, frames) in sequences {
         let n = frames.len();
         if !(2..=MAX_FRAMES).contains(&n) {
@@ -1437,7 +1325,9 @@ fn animation(b: &mut Builder, sequences: &[(parse::Sequence, Vec<usize>)]) -> Op
         let frame = if seq.loop_duration > 0.0 {
             seq.loop_duration / count
         } else {
-            0.1
+            // No duration given: the readers' shared assumed frame rate.
+            assumed = true;
+            f32_of(1.0 / keys::ASSUMED_FRAME_RATE)
         };
         let mut times: Vec<f32> = (0..u32_of(steps)).map(|s| f32_of(f64::from(s)) * frame).collect();
         let last = if seq.last_frame > 0.0 { seq.last_frame } else { frame };
@@ -1445,50 +1335,150 @@ fn animation(b: &mut Builder, sequences: &[(parse::Sequence, Vec<usize>)]) -> Op
         if times.windows(2).any(|w| w[1] <= w[0] || !w[1].is_finite()) {
             continue;
         }
-        let input = floats(b, times, "SCALAR", true);
         for (k, &node) in frames.iter().enumerate() {
             let mut v = Vec::with_capacity((steps + 1) * 3);
             for &shown in order.iter().chain(std::iter::once(&order[0])) {
                 let s = if shown == k { 1.0 } else { 0.0 };
                 v.extend_from_slice(&[s, s, s]);
             }
-            let output = floats(b, v, "VEC3", false);
-            samplers.push(json!({ "input": input, "output": output, "interpolation": "STEP" }));
-            channels.push(json!({ "sampler": samplers.len() - 1, "target": { "node": node, "path": "scale" } }));
+            tracks.push(Track {
+                interp: Interp::Step,
+                ..Track::linear(node, keys::Path::Scale, times.clone(), v)
+            });
         }
     }
-    (!channels.is_empty()).then(|| json!({ "name": "sequences", "channels": channels, "samplers": samplers }))
+    (tracks, assumed)
 }
 
-fn finish(mut c: Ctx<'_>, mut s: Scene) -> Document<'static> {
+/// A date as the header writes it, C's `ctime` form (`"Tue Mar 05 14:30:00 2024"`), in ISO 8601.
+fn ctime_date(s: &str) -> Option<String> {
+    const MONTHS: [&str; 12] = [
+        "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
+    ];
+    let w: Vec<&str> = s.split_whitespace().collect();
+    let [_, month, day, time, year] = w.as_slice() else {
+        return None;
+    };
+    let month = MONTHS.iter().position(|m| month.eq_ignore_ascii_case(m))? + 1;
+    let day: u32 = day.parse().ok().filter(|d| (1..=31).contains(d))?;
+    let year: u32 = year.parse().ok().filter(|y| (1000..=9999).contains(y))?;
+    let hms: Vec<u32> = time.split(':').map(str::parse).collect::<Result<_, _>>().ok()?;
+    let [h, m, sec] = hms.as_slice() else {
+        return None;
+    };
+    (*h < 24 && *m < 60 && *sec < 61).then(|| format!("{year:04}-{month:02}-{day:02}T{h:02}:{m:02}:{sec:02}"))
+}
+
+/// Where the header places the database on the earth: its origin's latitude and longitude, its
+/// corners', the projection and the ellipsoid. `None` when they're all zero, as an unplaced
+/// database leaves them.
+fn georeference(header: &Map<String, Value>) -> Option<Value> {
+    let pair = |k: &str| {
+        let v = header.get(k)?.as_array()?;
+        Some([v.first()?.as_f64()?, v.get(1)?.as_f64()?])
+    };
+    let origin = pair("originLatLong");
+    let sw = pair("southwestLatLong");
+    let ne = pair("northeastLatLong");
+    if [origin, sw, ne].iter().flatten().flatten().all(|&x| x == 0.0) {
+        return None;
+    }
+    let mut g = Map::new();
+    if let Some([lat, lon]) = origin {
+        g.insert("latitude".into(), json!(lat));
+        g.insert("longitude".into(), json!(lon));
+    }
+    if let (Some(sw), Some(ne)) = (sw, ne) {
+        g.insert("southwest".into(), json!(sw));
+        g.insert("northeast".into(), json!(ne));
+    }
+    let code = |k: &str| header.get(k).and_then(Value::as_i64);
+    if let Some(p) = code("projection") {
+        let name = match p {
+            0 => "flat earth",
+            1 => "trapezoidal",
+            2 => "round earth",
+            3 => "Lambert",
+            4 => "UTM",
+            5 => "geodetic",
+            6 => "geocentric",
+            _ => "unknown",
+        };
+        g.insert("projection".into(), json!(name));
+    }
+    if let Some(e) = code("ellipsoid") {
+        let name = match e {
+            0 => "WGS 84",
+            1 => "WGS 72",
+            2 => "Bessel",
+            3 => "Clarke 1866",
+            4 => "NAD 27",
+            -1 => "user defined",
+            _ => "unknown",
+        };
+        g.insert("ellipsoid".into(), json!(name));
+    }
+    if code("projection") == Some(4)
+        && let Some(z) = code("utmZone")
+    {
+        g.insert("utmZone".into(), json!(z));
+    }
+    Some(Value::Object(g))
+}
+
+fn finish(mut c: Ctx<'_>, mut s: Scene) -> Document {
     for (k, kids) in s.kids.iter().enumerate() {
         if !kids.is_empty() {
             s.nodes[k]["children"] = json!(kids);
         }
     }
     let root = &c.files[0].db;
-    let mut source = json!({
-        "format": "OpenFlight",
-        "version": root.version_name(),
-        "unit": root.unit_name(),
-        "metersPerUnit": root.meters(),
-        "upAxis": "Z",
-    });
+    let mut source = Map::new();
     if !root.id.is_empty() {
-        source["id"] = json!(root.id);
+        source.insert("id".into(), json!(root.id));
     }
     if c.keep.extras {
         for (k, v) in &root.header {
-            source[k] = v.clone();
+            if k != "date" {
+                source.insert(k.clone(), v.clone());
+            }
         }
     }
     if c.files.len() > 1 {
-        source["files"] = json!(c.files.len());
+        source.insert("files".into(), json!(c.files.len()));
     }
+    let meters = root.meters();
+    let unit = root.unit_name();
+    SourceInfo {
+        format: Some("OpenFlight".into()),
+        version: Some(root.version_name()),
+        // A unit code the format doesn't define is read as meters.
+        meters_per_unit: if unit.is_some() {
+            Fact::Declared(meters)
+        } else {
+            Fact::Assumed(meters)
+        },
+        unit: unit.map(str::to_owned),
+        up_axis: Fact::Declared(Axis::PosZ),
+        handedness: Fact::Declared(Handedness::Right),
+        converted: Converted {
+            units: (meters - 1.0).abs() > 0.0,
+            up_axis: true,
+            handedness: false,
+        },
+        created: root
+            .header
+            .get("date")
+            .and_then(Value::as_str)
+            .map(|d| ctime_date(d).unwrap_or_else(|| d.to_owned())),
+        georeference: georeference(&root.header),
+        ..SourceInfo::default()
+    }
+    .write(&mut source);
     let counts = c.files.iter().fold(parse::Counts::default(), |mut a, f| {
         let n = &f.db.counts;
         a.unknown_records += n.unknown_records;
-        a.bad_corners += n.bad_corners;
+        a.dropped += n.dropped;
         a.extensions += n.extensions;
         a.subfaces += n.subfaces;
         a.billboards += n.billboards;
@@ -1499,7 +1489,6 @@ fn finish(mut c: Ctx<'_>, mut s: Scene) -> Document<'static> {
     for (key, n) in [
         ("hiddenFaces", st.hidden_faces),
         ("droppedTextures", st.dropped_textures),
-        ("missingFiles", st.missing_files),
         ("missingInstances", st.missing_instances),
         ("cycles", st.cycles),
         ("tooDeep", st.too_deep),
@@ -1508,17 +1497,20 @@ fn finish(mut c: Ctx<'_>, mut s: Scene) -> Document<'static> {
         ("switchedOff", st.switched_off),
         ("disabledLights", st.disabled_lights),
         ("unknownRecords", counts.unknown_records),
-        ("droppedCorners", counts.bad_corners),
+        (crate::geometry::DROPPED, counts.dropped),
         ("extensions", counts.extensions),
         ("subfaces", counts.subfaces),
         ("billboards", counts.billboards),
     ] {
         if n > 0 {
-            source[key] = json!(n);
+            source.insert(key.into(), json!(n));
         }
     }
+    if !st.missing_files.is_empty() {
+        source.insert("missingFiles".into(), json!(st.missing_files));
+    }
     if c.files.iter().any(|f| f.db.truncated) {
-        source["truncated"] = json!(true);
+        source.insert("truncated".into(), json!(true));
     }
     let mut facts = Map::new();
     facts.insert("triangles".into(), json!(c.triangles));
@@ -1526,15 +1518,23 @@ fn finish(mut c: Ctx<'_>, mut s: Scene) -> Document<'static> {
     facts.insert("nodes".into(), json!(s.nodes.len()));
     facts.insert("materials".into(), json!(c.materials.len()));
 
+    if c.keep.animations {
+        let (tracks, assumed) = animation(&s.sequences);
+        let mut writer = keys::Writer::new(c.keep.extras);
+        let written = writer.animation(&mut c.b, None, None, tracks).is_some();
+        writer.finish(&mut c.b);
+        if written && assumed {
+            // A sequence that gives no duration plays at the readers' shared assumed rate.
+            let mut info = SourceInfo::from_json(&source);
+            info.frame_rate = Fact::Assumed(keys::ASSUMED_FRAME_RATE);
+            info.write(&mut source);
+        }
+    }
+
     let mut json = Map::new();
     json.insert("asset".into(), json!({ "extras": { "source": source } }));
     json.insert("scene".into(), json!(0));
     json.insert("scenes".into(), json!([{ "nodes": [0] }]));
-    if c.keep.animations
-        && let Some(a) = animation(&mut c.b, &s.sequences)
-    {
-        json.insert("animations".into(), json!([a]));
-    }
     json.insert("nodes".into(), Value::Array(s.nodes));
     if !c.meshes.is_empty() {
         json.insert("meshes".into(), Value::Array(std::mem::take(&mut c.meshes)));
@@ -1552,5 +1552,7 @@ fn finish(mut c: Ctx<'_>, mut s: Scene) -> Document<'static> {
     if c.lines_or_points {
         doc.set_lines_and_points(true);
     }
+    // Z up to Y up, and the file's units to meters.
+    frame::root(&mut doc, Frame::z_up().scaled(meters));
     doc
 }

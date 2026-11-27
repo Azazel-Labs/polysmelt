@@ -54,13 +54,19 @@
         0.010023,
         0.5
       ],
-      "roughness": 0.5
+      "roughness": 0.492479,
+      "metallic": 0.0,
+      "alpha_mode": "BLEND"
     }
   ],
   "json": {
     "/asset/extras/source/format": "B3D",
-    "/asset/extras/source/version": 1,
+    "/asset/extras/source/version": "1",
+    "/asset/extras/source/handedness": "left",
     "/materials/0/doubleSided": true,
+    "/materials/0/extensions/KHR_materials_specular": {
+      "specularFactor": 0.050876
+    },
     "/meshes/0/primitives/0/attributes/TEXCOORD_1": 3
   }
 }

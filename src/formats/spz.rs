@@ -7,8 +7,9 @@
 //! stops at 3). The coordinate system extension record names the file's axes; without it they
 //! are right, up and back, glTF's own. Axes that differ only in direction are flipped in the
 //! data; those that also swap up and forward are turned on the node, as turning spherical
-//! harmonics would cost precision. The header's version, spherical-harmonic degree and
-//! antialiasing flag go in the asset's `extras.source`. Version 4 (zstd streams in a container
+//! harmonics would cost precision. The source info has the header's version and the axes' up and
+//! handedness (declared by the record, else glTF's, assumed); the spherical-harmonic degree, the
+//! antialiasing flag and the record's coordinate system code stay in the asset's `extras.source`. Version 4 (zstd streams in a container
 //! of their own) isn't read.
 //!
 //! The point count is checked against [`Keep::max_points`], and the data is inflated only as
@@ -27,7 +28,8 @@ use crate::document::{Document, Keep};
 use crate::gaussian::{REST, Splats, rotation};
 use crate::keep::spawn;
 use crate::num::usize_of;
-use crate::{Context as _, Result};
+use crate::source::{Axis, Fact, Handedness, SourceInfo};
+use crate::{Context as _, ErrorKind, Result};
 
 /// "NGSP", little-endian, which starts the header.
 const MAGIC: u32 = 0x5053_474e;
@@ -41,54 +43,64 @@ const COLOR_SCALE: f32 = 0.15;
 /// Spherical-harmonic coefficients a channel has, by degree, beyond the base one.
 const DIM: [usize; 5] = [0, 3, 8, 15, 24];
 
-pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document<'static>> {
-    decode(&input.read()?, keep.points(), keep.threads())
+pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document> {
+    decode(&input.read()?, keep.points(), keep.thread_count())
 }
 
 /// The splats in an SPZ file, up to `max` of them. With more than one thread, the stream is
 /// inflated on another as the splats are unpacked.
-fn decode(bytes: &[u8], max: usize, threads: usize) -> Result<Document<'static>> {
+fn decode(bytes: &[u8], max: usize, threads: usize) -> Result<Document> {
     if let Some(&[b'N', b'G', b'S', b'P', v0, v1, v2, v3]) = bytes.first_chunk::<8>() {
         let version = u32::from_le_bytes([v0, v1, v2, v3]);
         ensure!(
             version < 4,
+            Unsupported,
             "SPZ version {version} (zstd streams) isn't supported; versions 1 to 3 (gzip) are"
         );
-        bail!("not an SPZ file: an SPZ header outside a gzip stream");
+        bail!(UnknownFormat, "not an SPZ file: an SPZ header outside a gzip stream");
     }
-    ensure!(bytes.starts_with(&[0x1f, 0x8b]), "not an SPZ file: no gzip stream");
+    ensure!(
+        bytes.starts_with(&[0x1f, 0x8b]),
+        UnknownFormat,
+        "not an SPZ file: no gzip stream"
+    );
     let mut z = flate2::read::MultiGzDecoder::new(bytes);
     let mut head = Vec::with_capacity(HEADER);
     // What a broken stream gives before it breaks is checked for length below.
     let _ = (&mut z).take(HEADER as u64).read_to_end(&mut head);
-    ensure!(head.len() == HEADER, "SPZ data ends early: no header");
+    ensure!(head.len() == HEADER, Truncated, "SPZ data is cut short: no header");
     let word = |k: usize| u32::from_le_bytes([head[k], head[k + 1], head[k + 2], head[k + 3]]);
-    ensure!(word(0) == MAGIC, "not an SPZ file: no NGSP header");
+    ensure!(word(0) == MAGIC, UnknownFormat, "not an SPZ file: no NGSP header");
     let version = word(4);
-    ensure!((1..=3).contains(&version), "SPZ version {version} isn't supported");
+    ensure!(
+        (1..=3).contains(&version),
+        Unsupported,
+        "SPZ version {version} isn't supported"
+    );
     let n = usize_of(u64::from(word(8)));
     let (degree, fractional, flags) = (usize::from(head[12]), head[13], head[14]);
     ensure!(
         degree < DIM.len(),
+        Unsupported,
         "SPZ spherical-harmonic degree {degree} isn't supported"
     );
     ensure!(
         n <= max,
+        LimitExceeded,
         "{n} gaussian splats, more than the {max} allowed (Keep::max_points)"
     );
-    let mut source = json!({
-        "format": "SPZ",
-        "version": version,
-        "antialiased": flags & 1 != 0,
-    });
+    let mut source = Map::new();
+    source.insert("antialiased".into(), json!(flags & 1 != 0));
     if degree > 3 {
-        source["droppedShDegree"] = json!(degree);
+        source.insert("droppedShDegree".into(), json!(degree));
     }
     let pos_size = if version == 1 { 6 } else { 9 };
     let rot_size = if version >= 3 { 4 } else { 3 };
     let dim = DIM[degree];
     let per = pos_size + 7 + rot_size + dim * 3;
-    let core = n.checked_mul(per).context("too many SPZ splats")?;
+    let core = n
+        .checked_mul(per)
+        .context(ErrorKind::LimitExceeded, "too many SPZ splats")?;
     let unpack = Unpack {
         version,
         unit: 0.5f32.powi(i32::from(fractional)),
@@ -104,18 +116,29 @@ fn decode(bytes: &[u8], max: usize, threads: usize) -> Result<Document<'static>>
     let (data, unpack) = inflate(z.take(core as u64 + RECORDS), unpack, threads);
     ensure!(
         data.len() >= core,
-        "SPZ data ends early: {n} splats need {core} bytes, the stream holds {}",
+        Truncated,
+        "SPZ data is cut short: {n} splats need {core} bytes, the stream holds {}",
         data.len()
     );
     let mut s = unpack.splats;
     let records = &data[core..];
     let system = if flags & 2 != 0 { coordinates(records) } else { 0 };
     if system != 0 {
-        source["coordinateSystem"] = json!(system);
+        source.insert("coordinateSystem".into(), json!(system));
     }
     let (flip, turn) = axes(system);
     s.flip(flip);
-    Ok(s.document(source, turn, Map::new()))
+    let (up_axis, handedness) = frame(system);
+    let mut info = SourceInfo {
+        format: Some("SPZ".into()),
+        version: Some(version.to_string()),
+        up_axis,
+        handedness,
+        ..SourceInfo::default()
+    };
+    info.converted.up_axis = up_axis.value() != Some(&Axis::PosY);
+    info.converted.handedness = handedness.value() == Some(&Handedness::Left);
+    Ok(s.document(&info, source, turn, Map::new()))
 }
 
 /// The splats unpacked as their bytes are inflated: the sizes of the sections of the stream (each a
@@ -313,6 +336,26 @@ fn axes(system: u32) -> ([f32; 3], Option<[f32; 4]>) {
     }
 }
 
+/// A coordinate system's up axis and handedness: declared when the file names the system, else
+/// glTF's own (+Y up, right-handed), assumed as SPZ's default.
+fn frame(system: u32) -> (Fact<Axis>, Fact<Handedness>) {
+    // Bit 0 is right (not left), bit 1 up (not down) and bit 2 forward (not back); the second
+    // letter is up or down in systems 1 to 8, the third in 9 to 16. Either way, each of left, down
+    // and forward flips a right-handed system (RUB, RFU).
+    let (k, up, down) = match system {
+        1..=8 => (system - 1, Axis::PosY, Axis::NegY),
+        9..=16 => (system - 9, Axis::PosZ, Axis::NegZ),
+        _ => return (Fact::Assumed(Axis::PosY), Fact::Assumed(Handedness::Right)),
+    };
+    let flips = u32::from(k & 1 == 0) + u32::from(k & 2 == 0) + u32::from(k & 4 != 0);
+    let hand = if flips % 2 == 0 {
+        Handedness::Right
+    } else {
+        Handedness::Left
+    };
+    (Fact::Declared(if k & 2 != 0 { up } else { down }), Fact::Declared(hand))
+}
+
 /// A rotation packed as its three smallest components, 10 bits each (9 of magnitude and a sign),
 /// below the two bits that say which of x, y, z, w is the largest, which is positive.
 fn smallest_three(mut packed: u32) -> [f32; 4] {
@@ -403,14 +446,19 @@ mod tests {
             for degree in 0..=4 {
                 let doc = decode(&spz(version, 50, degree, 1, &[]), 1000, 1).unwrap();
                 assert_eq!(splats(&doc), 50, "version {version}, degree {degree}");
-                let a = &doc.json["meshes"][0]["primitives"][0]["attributes"];
+                let a = &doc.json()["meshes"][0]["primitives"][0]["attributes"];
                 let has = |d: usize| a.get(format!("KHR_gaussian_splatting:SH_DEGREE_{d}_COEF_0")).is_some();
                 let top = usize::from(degree.min(3));
                 assert!(
                     (1..=3).all(|d| has(d) == (d <= top)),
                     "version {version}, degree {degree}"
                 );
-                assert_eq!(doc.json["asset"]["extras"]["source"]["antialiased"], true);
+                assert_eq!(doc.json()["asset"]["extras"]["source"]["antialiased"], true);
+                let info = doc.source_info();
+                assert_eq!(info.version, Some(version.to_string()));
+                assert_eq!(info.up_axis, Fact::Assumed(Axis::PosY));
+                assert_eq!(info.meters_per_unit, Fact::Unknown);
+                assert!(!info.converted.up_axis && !info.converted.handedness);
                 doc.to_glb().unwrap();
                 let m = doc.flatten(Pose::Rest).unwrap().unwrap();
                 assert_eq!(m.points(), 50);
@@ -459,6 +507,29 @@ mod tests {
 
     #[test]
     fn coordinate_systems_flip_and_turn() {
+        assert_eq!(frame(0), (Fact::Assumed(Axis::PosY), Fact::Assumed(Handedness::Right)));
+        // RUB, RDF and LUB; RFU, RBU and LFD.
+        assert_eq!(
+            frame(4),
+            (Fact::Declared(Axis::PosY), Fact::Declared(Handedness::Right))
+        );
+        assert_eq!(
+            frame(6),
+            (Fact::Declared(Axis::NegY), Fact::Declared(Handedness::Right))
+        );
+        assert_eq!(frame(3), (Fact::Declared(Axis::PosY), Fact::Declared(Handedness::Left)));
+        assert_eq!(
+            frame(12),
+            (Fact::Declared(Axis::PosZ), Fact::Declared(Handedness::Right))
+        );
+        assert_eq!(
+            frame(16),
+            (Fact::Declared(Axis::PosZ), Fact::Declared(Handedness::Left))
+        );
+        assert_eq!(
+            frame(9),
+            (Fact::Declared(Axis::NegZ), Fact::Declared(Handedness::Right))
+        );
         assert_eq!(axes(0), ([1.0, 1.0, 1.0], None));
         assert_eq!(axes(4), ([1.0, 1.0, 1.0], None));
         assert_eq!(axes(6), ([1.0, -1.0, -1.0], None));
@@ -480,7 +551,7 @@ mod tests {
         assert_eq!(coordinates(&records), 12);
         assert_eq!(coordinates(&records[..records.len() - 1]), 0);
         let doc = decode(&spz(3, 4, 0, 2, &records), 100, 1).unwrap();
-        let node = &doc.json["nodes"][0];
+        let node = &doc.json()["nodes"][0];
         assert!(node["rotation"].is_array(), "{node}");
     }
 
@@ -492,7 +563,7 @@ mod tests {
         raw.extend(u32::MAX.to_le_bytes());
         raw.extend([3, 12, 0, 0]);
         let e = decode(&gzip(&raw), usize::MAX >> 8, 1).unwrap_err().to_string();
-        assert!(e.contains("ends early"), "{e}");
+        assert!(e.contains("is cut short"), "{e}");
         let e = decode(&gzip(&raw), 1000, 1).unwrap_err().to_string();
         assert!(e.contains("max_points"), "{e}");
         raw[12] = 7;

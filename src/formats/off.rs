@@ -14,17 +14,21 @@
 //! Polygons are triangulated in their plane. Faces with a corner out of range or at a point
 //! that isn't finite are dropped, as are points and lines (faces of one or two corners). Face
 //! colors become vertex colors, a vertex split where faces of different colors meet; without
-//! normals in the file, smooth ones are made. Colors are taken as sRGB. A file that ends early
+//! normals in the file, the default ones are made, with a crease angle. Colors are taken as sRGB. A file that ends early
 //! draws what it has.
+//!
+//! OFF names no units and no up axis, so both are unknown; geometry is kept as written.
 
-use serde_json::{Map, json};
+use serde_json::{Map, Value, json};
 
 use super::Input;
 use super::stream;
+use crate::bytes::Bin;
 use crate::document::Document;
-use crate::mesh::{FastMap, GRAY, Material, Prim, smooth_normals, srgb_to_linear, triangulate};
+use crate::mesh::{FastMap, GRAY, Prim, srgb_to_linear, triangulate};
 use crate::num::u32_of;
-use crate::{Context as _, Result};
+use crate::source::SourceInfo;
+use crate::{Context as _, ErrorKind, Result};
 
 /// What a file's vertices carry, from its header keyword.
 #[derive(Clone, Copy, Debug, Default)]
@@ -50,6 +54,9 @@ struct Model {
     normals: Vec<[f32; 3]>,
     /// As written, scaled to 0-1 once the whole file is read.
     colors: Vec<[f32; 4]>,
+    /// The vertices of an ASCII file that give no color while others do: they stay white whatever scale the
+    /// others' colors are in.
+    plain: Vec<usize>,
     uvs: Vec<[f32; 2]>,
     tris: Vec<[u32; 3]>,
     /// Each triangle's face color, an index into `face_colors`, when any face has one.
@@ -68,7 +75,7 @@ const NONE: u32 = u32::MAX;
 /// The most coordinates a position may have (`nOFF`'s dimension).
 const MAX_VALUES: usize = 32;
 
-pub(crate) fn load(input: Input<'_>) -> Result<Document<'static>> {
+pub(crate) fn load(input: Input<'_>, keep: crate::Keep) -> Result<Document> {
     let data = input.read()?;
     let data = data.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&data);
     let mut c = Cursor { d: data, at: 0 };
@@ -79,28 +86,35 @@ pub(crate) fn load(input: Input<'_>) -> Result<Document<'static>> {
     } else {
         ascii(&mut c, layout, leftover, input.limit, &mut m)?;
     }
-    ensure!(!m.tris.is_empty(), "OFF has no faces");
+    ensure!(!m.tris.is_empty(), Empty, "OFF has no faces");
     let triangles = m.tris.len();
-    let mut source =
-        json!({ "format": "OFF", "header": keyword, "encoding": if layout.binary { "binary" } else { "ASCII" } });
+    let mut source = Map::new();
+    source.insert("header".into(), json!(keyword));
+    source.insert("encoding".into(), json!(if layout.binary { "binary" } else { "ascii" }));
     if m.short {
-        source["truncated"] = json!(true);
+        source.insert("truncated".into(), json!(true));
     }
     if m.dropped > 0 {
-        source["droppedFaces"] = json!(m.dropped);
+        source.insert(crate::geometry::DROPPED.into(), json!(m.dropped));
     }
+    let info = SourceInfo {
+        format: Some("OFF".into()),
+        ..SourceInfo::default()
+    };
+    info.write(&mut source);
     let colored = !m.colors.is_empty() || !m.face_colors.is_empty();
     let prim = build(m);
-    let material = Material::plain("default", if colored { [1.0; 4] } else { GRAY });
+    let material = crate::legacy_material::default_material(colored);
     let mut facts = Map::new();
     facts.insert("triangles".into(), json!(triangles));
     Ok(Document::from_named(
         vec![(None, vec![prim])],
         &[material],
         Vec::new(),
-        Some(source),
+        Some(Value::Object(source)),
         facts,
         &[],
+        keep.crease_angle(),
     ))
 }
 
@@ -112,7 +126,7 @@ fn header<'a>(c: &mut Cursor<'a>) -> Result<(Layout, String, Option<&'a [u8]>)> 
         ..Layout::default()
     };
     let Some(first) = c.token(true) else {
-        bail!("OFF file is empty");
+        bail!(Empty, "OFF file is empty");
     };
     let mut t = first;
     for (prefix, flag) in [
@@ -132,12 +146,12 @@ fn header<'a>(c: &mut Cursor<'a>) -> Result<(Layout, String, Option<&'a [u8]>)> 
     }
     let (keyword, leftover) = if t.len() >= 3 && t[..3].eq_ignore_ascii_case(b"OFF") {
         let rest = &t[3..];
-        ensure!(rest.iter().all(u8::is_ascii_digit), "not an OFF file");
+        ensure!(rest.iter().all(u8::is_ascii_digit), UnknownFormat, "not an OFF file");
         (
-            String::from_utf8_lossy(&first[..first.len() - rest.len()]).into_owned(),
+            crate::bytes::text(&first[..first.len() - rest.len()]).into_owned(),
             (!rest.is_empty()).then_some(rest),
         )
-    } else if int(first).is_some() {
+    } else if stream::int::<i64>(first).is_some() {
         // No keyword: the counts come first.
         layout = Layout {
             dim: 3,
@@ -145,7 +159,7 @@ fn header<'a>(c: &mut Cursor<'a>) -> Result<(Layout, String, Option<&'a [u8]>)> 
         };
         (String::new(), Some(first))
     } else {
-        bail!("not an OFF file");
+        bail!(UnknownFormat, "not an OFF file");
     };
     if leftover.is_none() {
         let back = c.at;
@@ -157,8 +171,11 @@ fn header<'a>(c: &mut Cursor<'a>) -> Result<(Layout, String, Option<&'a [u8]>)> 
         }
     }
     if ndim && !layout.binary {
-        let n = c.token(true).and_then(int).context("OFF dimension missing")?;
-        ensure!((1..=32).contains(&n), "OFF dimension {n} is out of range");
+        let n = c
+            .token(true)
+            .and_then(stream::int::<i64>)
+            .context(ErrorKind::Corrupt, "OFF dimension missing")?;
+        ensure!((1..=32).contains(&n), Unsupported, "OFF dimension {n} is out of range");
         layout.dim = usize::try_from(n).unwrap_or(3);
     } else if ndim {
         layout.dim = 0; // Read with the counts.
@@ -169,15 +186,21 @@ fn header<'a>(c: &mut Cursor<'a>) -> Result<(Layout, String, Option<&'a [u8]>)> 
 /// The ASCII body: the counts, then the vertices and faces.
 fn ascii(c: &mut Cursor<'_>, layout: Layout, leftover: Option<&[u8]>, limit: usize, m: &mut Model) -> Result<()> {
     let nv = match leftover {
-        Some(t) => int(t),
-        None => c.token(true).and_then(int),
+        Some(t) => stream::int::<i64>(t),
+        None => c.token(true).and_then(stream::int::<i64>),
     }
-    .context("OFF vertex count missing")?;
-    let nf = c.token(true).and_then(int).context("OFF face count missing")?;
-    ensure!(nv >= 0 && nf >= 0, "OFF counts are negative");
+    .context(ErrorKind::Corrupt, "OFF vertex count missing")?;
+    let nf = c
+        .token(true)
+        .and_then(stream::int::<i64>)
+        .context(ErrorKind::Corrupt, "OFF face count missing")?;
+    ensure!(nv >= 0 && nf >= 0, Corrupt, "OFF counts are negative");
     // The edge count, when there is one, and anything else on the line.
     c.end_line();
-    let (nv, nf) = (usize::try_from(nv)?, usize::try_from(nf)?);
+    let (nv, nf) = (
+        usize::try_from(nv).context(ErrorKind::LimitExceeded, "OFF vertex count is too big")?,
+        usize::try_from(nf).context(ErrorKind::LimitExceeded, "OFF face count is too big")?,
+    );
     // Each vertex takes at least six bytes ("0 0 0\n"), each face eight.
     m.positions.reserve(nv.min(c.d.len() / 6));
     m.tris.reserve(nf.min(c.d.len() / 8));
@@ -191,7 +214,8 @@ fn ascii(c: &mut Cursor<'_>, layout: Layout, leftover: Option<&[u8]>, limit: usi
                 m.short = true;
                 break;
             };
-            vals[n] = num(t);
+            // One that isn't a number reads as NaN, so faces using it drop.
+            vals[n] = stream::f32_from(t).unwrap_or(f32::NAN);
             n += 1;
         }
         if m.short {
@@ -199,7 +223,7 @@ fn ascii(c: &mut Cursor<'_>, layout: Layout, leftover: Option<&[u8]>, limit: usi
         }
         while n < vals.len() {
             let Some(t) = c.token(false) else { break };
-            vals[n] = num(t);
+            vals[n] = stream::f32_from(t).unwrap_or(f32::NAN);
             n += 1;
         }
         c.end_line();
@@ -217,6 +241,12 @@ fn ascii(c: &mut Cursor<'_>, layout: Layout, leftover: Option<&[u8]>, limit: usi
     for col in &mut m.colors {
         *col = color(col, scale);
     }
+    // A vertex without a color isn't in the others' scale: it is white, as it was filled in.
+    for &v in &m.plain {
+        if let Some(col) = m.colors.get_mut(v) {
+            *col = [1.0; 4];
+        }
+    }
     let mut corners: Vec<u32> = Vec::new();
     let mut pts: Vec<[f32; 3]> = Vec::new();
     let mut local: Vec<[u32; 3]> = Vec::new();
@@ -228,7 +258,7 @@ fn ascii(c: &mut Cursor<'_>, layout: Layout, leftover: Option<&[u8]>, limit: usi
             m.short = true;
             break;
         };
-        let count = int(count).and_then(|n| usize::try_from(n).ok());
+        let count = stream::int::<usize>(count);
         corners.clear();
         let mut ok = count.is_some();
         for _ in 0..count.unwrap_or(0) {
@@ -236,7 +266,7 @@ fn ascii(c: &mut Cursor<'_>, layout: Layout, leftover: Option<&[u8]>, limit: usi
                 m.short = true;
                 break;
             };
-            match int(t).and_then(|i| u32::try_from(i).ok()) {
+            match stream::int::<u32>(t) {
                 Some(i) if (i as usize) < m.positions.len() => corners.push(i),
                 _ => ok = false,
             }
@@ -268,6 +298,7 @@ fn ascii(c: &mut Cursor<'_>, layout: Layout, leftover: Option<&[u8]>, limit: usi
         }
         ensure!(
             m.tris.len() <= limit,
+            LimitExceeded,
             "too many triangles to convert (more than {limit})"
         );
     }
@@ -303,11 +334,13 @@ fn vertex(v: &[f32], layout: Layout, m: &mut Model) {
     }
     if (layout.color && rest.len() >= 3) || (!layout.color && (rest.len() == 3 || rest.len() == 4)) {
         if m.colors.is_empty() {
+            m.plain.extend(0..m.positions.len() - 1);
             m.colors.resize(m.positions.len() - 1, [1.0; 4]);
         }
         let a = rest.get(3).copied().unwrap_or(f32::NAN);
         m.colors.push([rest[0], rest[1], rest[2], a]);
     } else if !m.colors.is_empty() {
+        m.plain.push(m.colors.len());
         m.colors.push([1.0; 4]);
     }
 }
@@ -367,15 +400,18 @@ fn face(m: &mut Model, corners: &[u32], color: Option<[f32; 4]>, pts: &mut Vec<[
 
 /// The binary body, from `at`: big-endian counts, vertices and faces.
 fn binary(d: &[u8], at: usize, mut layout: Layout, limit: usize, m: &mut Model) -> Result<()> {
-    let mut r = Be { d, at };
+    let mut r = Bin::be(d, "OFF");
+    r.at = at;
     if layout.dim == 0 {
-        let n = r.int().context("OFF dimension missing")?;
-        ensure!((1..=32).contains(&n), "OFF dimension {n} is out of range");
-        layout.dim = usize::try_from(n)?;
+        let n = r.i32().ok().context(ErrorKind::Corrupt, "OFF dimension missing")?;
+        ensure!((1..=32).contains(&n), Unsupported, "OFF dimension {n} is out of range");
+        layout.dim = usize::try_from(n).context(ErrorKind::Unsupported, "OFF dimension is out of range")?;
     }
-    let nv = usize::try_from(r.int().context("OFF counts missing")?).context("OFF counts are negative")?;
-    let nf = usize::try_from(r.int().context("OFF counts missing")?).context("OFF counts are negative")?;
-    r.int().context("OFF counts missing")?;
+    let nv = usize::try_from(r.i32().ok().context(ErrorKind::Corrupt, "OFF counts missing")?)
+        .context(ErrorKind::Corrupt, "OFF counts are negative")?;
+    let nf = usize::try_from(r.i32().ok().context(ErrorKind::Corrupt, "OFF counts missing")?)
+        .context(ErrorKind::Corrupt, "OFF counts are negative")?;
+    r.i32().ok().context(ErrorKind::Corrupt, "OFF counts missing")?;
     let floats = layout.dim
         + usize::from(layout.homogeneous)
         + if layout.normal { layout.dim } else { 0 }
@@ -389,7 +425,7 @@ fn binary(d: &[u8], at: usize, mut layout: Layout, limit: usize, m: &mut Model) 
     let mut vals = vec![0f32; floats];
     for _ in 0..nv.min(room) {
         for v in &mut vals {
-            *v = r.float().unwrap_or(0.0);
+            *v = r.f32().unwrap_or(0.0);
         }
         // The binary color is four floats between the normal and the texture coordinates.
         let dim = layout.dim + usize::from(layout.homogeneous);
@@ -424,7 +460,7 @@ fn binary(d: &[u8], at: usize, mut layout: Layout, limit: usize, m: &mut Model) 
         if m.short {
             break;
         }
-        let Some(count) = r.int() else {
+        let Some(count) = r.i32().ok() else {
             m.short = true;
             break;
         };
@@ -436,18 +472,18 @@ fn binary(d: &[u8], at: usize, mut layout: Layout, limit: usize, m: &mut Model) 
         corners.clear();
         let mut ok = true;
         for _ in 0..count {
-            match r.int().and_then(|i| u32::try_from(i).ok()) {
+            match r.i32().ok().and_then(|i| u32::try_from(i).ok()) {
                 Some(i) if (i as usize) < m.positions.len() => corners.push(i),
                 _ => ok = false,
             }
         }
-        let Some(nc) = r.int() else {
+        let Some(nc) = r.i32().ok() else {
             m.short = true;
             break;
         };
         let mut col = [0f32; 4];
         for k in 0..usize::try_from(nc).unwrap_or(0).min(16) {
-            let v = r.float().unwrap_or(0.0);
+            let v = r.f32().unwrap_or(0.0);
             if let Some(c) = col.get_mut(k) {
                 *c = v;
             }
@@ -465,6 +501,7 @@ fn binary(d: &[u8], at: usize, mut layout: Layout, limit: usize, m: &mut Model) 
         }
         ensure!(
             m.tris.len() <= limit,
+            LimitExceeded,
             "too many triangles to convert (more than {limit})"
         );
     }
@@ -485,27 +522,17 @@ fn build(m: Model) -> Prim {
     } = m;
     let n = positions.len();
     let flat: Vec<u32> = tris.into_flattened();
-    let normals = if normals.len() == n {
-        normals
-            .into_iter()
-            .map(|v| {
-                let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
-                if len > 0.0 && len.is_finite() {
-                    v.map(|x| x / len)
-                } else {
-                    [0.0, 1.0, 0.0]
-                }
-            })
-            .collect()
-    } else {
-        smooth_normals(&positions, &flat)
-    };
+    // The file's normals as they are, made unit as the primitive is written; without any, it takes the default
+    // ones then.
+    let has_normals = normals.len() == n;
     let colored = colors.len() == n || !face_colors.is_empty();
     let textured = uvs.len() == n;
     let mut p = Prim::default();
     let push = |p: &mut Prim, v: usize, face: u32| {
         p.positions.push(positions[v]);
-        p.normals.push(normals[v]);
+        if has_normals {
+            p.normals.push(normals[v]);
+        }
         if textured {
             p.uvs.push(uvs[v]);
         }
@@ -532,7 +559,8 @@ fn build(m: Model) -> Prim {
         let mut seen: FastMap<u64, u32> = FastMap::default();
         for (k, &v) in flat.iter().enumerate() {
             let face = tri_colors[k / 3];
-            let key = (u64::from(v) << 32) | u64::from(face);
+            // The vertex in the low bits, which the hash's buckets come from: there are only a few face colors.
+            let key = (u64::from(face) << 32) | u64::from(v);
             let r = if let Some(&r) = seen.get(&key) {
                 r
             } else {
@@ -544,34 +572,6 @@ fn build(m: Model) -> Prim {
         }
     }
     p
-}
-
-/// A number token; one that isn't reads as NaN, so faces using it drop.
-#[inline]
-fn num(t: &[u8]) -> f32 {
-    stream::f32_from(t).unwrap_or(f32::NAN)
-}
-
-/// An integer as written: an optional sign and up to 18 digits.
-#[inline]
-fn int(w: &[u8]) -> Option<i64> {
-    let (neg, d) = match w.first()? {
-        b'-' => (true, &w[1..]),
-        b'+' => (false, &w[1..]),
-        _ => (false, w),
-    };
-    if d.is_empty() || d.len() > 18 {
-        return None;
-    }
-    let mut n: i64 = 0;
-    for &c in d {
-        let k = c.wrapping_sub(b'0');
-        if k > 9 {
-            return None;
-        }
-        n = n * 10 + i64::from(k);
-    }
-    Some(if neg { -n } else { n })
 }
 
 /// Text read a token at a time, `#` comments skipped, and line ends (LF, CR LF or a lone CR)
@@ -631,28 +631,6 @@ impl<'a> Cursor<'a> {
     }
 }
 
-/// Big-endian binary read from `at`.
-struct Be<'a> {
-    d: &'a [u8],
-    at: usize,
-}
-
-impl Be<'_> {
-    fn word(&mut self) -> Option<[u8; 4]> {
-        let w = self.d.get(self.at..self.at.checked_add(4)?)?.try_into().ok()?;
-        self.at += 4;
-        Some(w)
-    }
-
-    fn int(&mut self) -> Option<i32> {
-        self.word().map(i32::from_be_bytes)
-    }
-
-    fn float(&mut self) -> Option<f32> {
-        self.word().map(f32::from_be_bytes)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -660,12 +638,9 @@ mod tests {
     use crate::document::{Keep, Pose};
     use crate::mesh::Mesh;
 
-    fn read_with(text: &[u8], max: usize) -> Result<Document<'static>> {
-        let keep = Keep {
-            max_triangles: max,
-            ..Keep::ALL
-        };
-        super::super::load_bytes(text, "t.off", "off", &Memory::new(), keep).map(Document::into_owned)
+    fn read_with(text: &[u8], max: usize) -> Result<Document> {
+        let keep = Keep::ALL.with_max_triangles(max);
+        super::super::load_bytes(text, "t.off", "off", &Memory::new(), keep)
     }
 
     fn mesh(text: &[u8]) -> Mesh {
@@ -700,8 +675,9 @@ mod tests {
         let doc = read_with(CUBE.as_bytes(), usize::MAX).unwrap();
         assert_eq!(doc.facts["triangles"], 12);
         let m = doc.flatten(Pose::Rest).unwrap().unwrap();
-        assert_eq!(m.prims[0].positions.len(), 8);
-        assert_eq!(m.prims[0].normals.len(), 8);
+        // Without normals in the file, the default ones: the cube's edges are hard, four corners to a face.
+        assert_eq!(m.prims[0].positions.len(), 24);
+        assert_eq!(m.prims[0].normals.len(), 24);
         assert_eq!(m.materials[0].color.map(f32::to_bits), GRAY.map(f32::to_bits));
         // Every triangle faces outward.
         let p = &m.prims[0];
@@ -758,6 +734,20 @@ mod tests {
     }
 
     #[test]
+    fn a_vertex_without_a_color_is_white_whatever_scale_the_others_use() {
+        let text = "OFF\n3 1 0\n0 0 0 255 0 0\n1 0 0\n0 1 0\n3 0 1 2\n";
+        let p = &mesh(text.as_bytes()).prims[0];
+        assert_eq!(p.colors[0], [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(p.colors[1], [1.0; 4]);
+        assert_eq!(p.colors[2], [1.0; 4]);
+        // The colored vertex last: the ones before it are filled in.
+        let text = "OFF\n3 1 0\n0 0 0\n1 0 0\n0 1 0 0 128 255 255\n3 0 1 2\n";
+        let p = &mesh(text.as_bytes()).prims[0];
+        assert_eq!(p.colors[0], [1.0; 4]);
+        assert_eq!(p.colors[2][1], srgb_to_linear(128.0 / 255.0));
+    }
+
+    #[test]
     fn homogeneous_and_other_dimensions() {
         let four = "4OFF\n3 1 0\n0 0 0 1\n2 0 0 2\n0 4 0 2\n3 0 1 2\n";
         let p = &mesh(four.as_bytes()).prims[0];
@@ -780,11 +770,11 @@ mod tests {
         let text = "OFF\n4 4 0\n0 0 0\n1 0 0\n0 1 0\nnan 0 0\n3 0 1 2\n3 0 1 9\n3 0 1 3\n2 0 1\n";
         let doc = read_with(text.as_bytes(), usize::MAX).unwrap();
         assert_eq!(doc.facts["triangles"], 1);
-        assert_eq!(doc.json["asset"]["extras"]["source"]["droppedFaces"], 3);
+        assert_eq!(doc.json()["asset"]["extras"]["source"]["droppedGeometry"], 3);
         let short = &CUBE[..CUBE.len() - 11];
         let doc = read_with(short.as_bytes(), usize::MAX).unwrap();
         assert_eq!(doc.facts["triangles"], 10);
-        assert_eq!(doc.json["asset"]["extras"]["source"]["truncated"], true);
+        assert_eq!(doc.json()["asset"]["extras"]["source"]["truncated"], true);
         assert!(read_with(b"OFF\n0 0 0\n", usize::MAX).is_err());
         assert!(read_with(b"PLY\n", usize::MAX).is_err());
     }
@@ -821,7 +811,7 @@ mod tests {
     fn binary_off() {
         let doc = read_with(&binary_cube(false), usize::MAX).unwrap();
         assert_eq!(doc.facts["triangles"], 2);
-        assert_eq!(doc.json["asset"]["extras"]["source"]["encoding"], "binary");
+        assert_eq!(doc.json()["asset"]["extras"]["source"]["encoding"], "binary");
         let m = mesh(&binary_cube(true));
         assert_eq!(m.prims[0].colors[0], [0.0, 0.0, 1.0, 1.0]);
     }
@@ -869,5 +859,16 @@ mod tests {
         survives(b"STCN4OFF 3 1 0\r0 0 0 1 0 0 1 9 0 0 1 0 0\r1 0 0 1 0 0 1 0 9 0 1 1 0\r0 1 0 1 0 0 1 0 0 9 1 0 1\r3 0 1 2 1 1 1\r");
         survives(b"nOFF 4 3 1 0\n0 0 0 0\n1 0 0 0\n0 1 0 0\n5 0 1 2 0 1 0.5 0.5 0.5\n");
         survives(&binary_cube(true));
+    }
+
+    #[test]
+    fn units_and_up_axis_are_unknown() {
+        let doc = read_with(CUBE.as_bytes(), usize::MAX).unwrap();
+        let info = doc.source_info();
+        assert_eq!(info.format.as_deref(), Some("OFF"));
+        assert_eq!(info.meters_per_unit, crate::source::Fact::Unknown);
+        assert_eq!(info.up_axis, crate::source::Fact::Unknown);
+        assert_eq!(info.converted, crate::source::Converted::default());
+        assert_eq!(doc.json()["asset"]["extras"]["source"]["encoding"], "ascii");
     }
 }

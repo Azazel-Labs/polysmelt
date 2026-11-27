@@ -4,34 +4,41 @@
   "no_mesh": true,
   "facts": {
     "markers": 2,
-    "frames": 2,
-    "frame_rate": 100.0,
-    "frame_time": 0.01
+    "frames": 2
   },
   "document": {
-    "nodes": 3,
+    "nodes": 4,
     "animations": 1,
     "channels": 2,
     "node_names": [
       "markers",
       "a",
-      "b"
+      "b",
+      "RootNode"
     ]
   },
   "json": {
     "/asset/extras/source/format": "C3D",
+    "/asset/extras/source/frameRate": 100.0,
+    "/asset/extras/source/metersPerUnit": 0.01,
     "/scenes/0/nodes": [
-      0
+      3
     ],
-    "/animations/0/name": "motion",
+    "/asset/extras/source/converted": [
+      "units",
+      "upAxis"
+    ],
+    "/animations/0/name": "screen_z_up_centimeters",
     "/animations/0/samplers/0/interpolation": "LINEAR",
     "/asset/extras/source/upAxis": "+Z",
     "/asset/extras/source/xScreen": "-Y",
-    "/asset/extras/source/units": "cm"
+    "/asset/extras/source/unit": "centimeter",
+    "/asset/extras/source/unitAsWritten": "cm",
+    "/asset/extras/source/assumed": null
   },
   "rig": [
     {
-      "node": "markers",
+      "node": "RootNode",
       "parent": null,
       "translation": [
         0,
@@ -43,6 +50,31 @@
         0.5,
         0.5,
         0.5
+      ],
+      "scale": [
+        0.01,
+        0.01,
+        0.01
+      ]
+    },
+    {
+      "node": "markers",
+      "parent": "RootNode",
+      "translation": [
+        0,
+        0,
+        0
+      ],
+      "rotation": [
+        0,
+        0,
+        0,
+        1
+      ],
+      "scale": [
+        1,
+        1,
+        1
       ]
     },
     {
@@ -55,9 +87,14 @@
         1
       ],
       "translation": [
-        0.01,
-        0.02,
-        0.03
+        1.0,
+        2.0,
+        3.0
+      ],
+      "world": [
+        -0.02,
+        0.03,
+        -0.01
       ]
     },
     {
@@ -73,18 +110,28 @@
       "node": "a",
       "time": 0.0,
       "translation": [
-        0.01,
-        0.02,
-        0.03
+        1.0,
+        2.0,
+        3.0
+      ],
+      "world": [
+        -0.02,
+        0.03,
+        -0.01
       ]
     },
     {
       "node": "a",
       "time": 0.01,
       "translation": [
-        0.015,
-        0.025,
-        0.035
+        1.5,
+        2.5,
+        3.5
+      ],
+      "world": [
+        -0.025,
+        0.035,
+        -0.015
       ]
     },
     {
@@ -97,9 +144,14 @@
         1
       ],
       "translation": [
-        0.04,
-        0.05,
-        0.06
+        4.0,
+        5.0,
+        6.0
+      ],
+      "world": [
+        -0.05,
+        0.06,
+        -0.04
       ]
     },
     {
@@ -115,18 +167,28 @@
       "node": "b",
       "time": 0.0,
       "translation": [
-        0.04,
-        0.05,
-        0.06
+        4.0,
+        5.0,
+        6.0
+      ],
+      "world": [
+        -0.05,
+        0.06,
+        -0.04
       ]
     },
     {
       "node": "b",
       "time": 0.01,
       "translation": [
-        0.04,
-        0.055,
-        0.07
+        4.0,
+        5.5,
+        7.0
+      ],
+      "world": [
+        -0.055,
+        0.07,
+        -0.04
       ]
     }
   ]

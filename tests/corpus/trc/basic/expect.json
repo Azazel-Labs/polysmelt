@@ -5,33 +5,36 @@
   "facts": {
     "markers": 3,
     "frames": 4,
-    "frame_rate": 100.0,
-    "frame_time": 0.01,
-    "up_axis_assumed": true,
     "missing_samples": 1
   },
   "document": {
-    "nodes": 4,
+    "nodes": 5,
     "animations": 1,
     "channels": 3,
     "node_names": [
       "markers",
       "LASI",
       "R.Knee",
-      "Toe Tip"
+      "Toe Tip",
+      "RootNode"
     ]
   },
   "json": {
     "/asset/extras/source/format": "TRC",
-    "/asset/extras/source/upAxis": "Y",
+    "/asset/extras/source/upAxis": "+Y",
     "/scenes/0/nodes": [
-      0
+      4
     ],
     "/asset/extras/source/frameRate": 100.0,
-    "/animations/0/name": "motion",
+    "/asset/extras/source/metersPerUnit": 0.001,
+    "/asset/extras/source/converted": [
+      "units"
+    ],
+    "/animations/0/name": "basic",
     "/animations/0/samplers/0/interpolation": "LINEAR",
     "/asset/extras/source/startTime": 0.0,
-    "/asset/extras/source/units": "mm",
+    "/asset/extras/source/unit": "millimeter",
+    "/asset/extras/source/unitAsWritten": "mm",
     "/asset/extras/source/pathFileType": "4",
     "/asset/extras/source/cameraRate": 100,
     "/asset/extras/source/origDataRate": 100,
@@ -40,7 +43,7 @@
   },
   "rig": [
     {
-      "node": "markers",
+      "node": "RootNode",
       "parent": null,
       "translation": [
         0,
@@ -51,6 +54,31 @@
         0,
         0,
         0,
+        1
+      ],
+      "scale": [
+        0.001,
+        0.001,
+        0.001
+      ]
+    },
+    {
+      "node": "markers",
+      "parent": "RootNode",
+      "translation": [
+        0,
+        0,
+        0
+      ],
+      "rotation": [
+        0,
+        0,
+        0,
+        1
+      ],
+      "scale": [
+        1,
+        1,
         1
       ]
     },
@@ -64,6 +92,11 @@
         1
       ],
       "translation": [
+        100,
+        900,
+        50
+      ],
+      "world": [
         0.1,
         0.9,
         0.05
@@ -84,6 +117,11 @@
       "node": "LASI",
       "time": 0.0,
       "translation": [
+        100,
+        900,
+        50
+      ],
+      "world": [
         0.1,
         0.9,
         0.05
@@ -93,6 +131,11 @@
       "node": "LASI",
       "time": 0.01,
       "translation": [
+        102,
+        901.5,
+        51
+      ],
+      "world": [
         0.102,
         0.9015,
         0.051
@@ -102,6 +145,11 @@
       "node": "LASI",
       "time": 0.02,
       "translation": [
+        104.25,
+        903,
+        52
+      ],
+      "world": [
         0.10425,
         0.903,
         0.052
@@ -111,6 +159,11 @@
       "node": "LASI",
       "time": 0.03,
       "translation": [
+        106,
+        904,
+        53.5
+      ],
+      "world": [
         0.106,
         0.904,
         0.0535
@@ -126,6 +179,11 @@
         1
       ],
       "translation": [
+        -120,
+        500,
+        40
+      ],
+      "world": [
         -0.12,
         0.5,
         0.04
@@ -145,6 +203,11 @@
       "node": "R.Knee",
       "time": 0.0,
       "translation": [
+        -120,
+        500,
+        40
+      ],
+      "world": [
         -0.12,
         0.5,
         0.04
@@ -154,6 +217,11 @@
       "node": "R.Knee",
       "time": 0.02,
       "translation": [
+        -118,
+        502,
+        41
+      ],
+      "world": [
         -0.118,
         0.502,
         0.041
@@ -163,6 +231,11 @@
       "node": "R.Knee",
       "time": 0.03,
       "translation": [
+        -117,
+        503,
+        42
+      ],
+      "world": [
         -0.117,
         0.503,
         0.042
@@ -178,6 +251,11 @@
         1
       ],
       "translation": [
+        90,
+        20,
+        150
+      ],
+      "world": [
         0.09,
         0.02,
         0.15
@@ -198,6 +276,11 @@
       "node": "Toe Tip",
       "time": 0.0,
       "translation": [
+        90,
+        20,
+        150
+      ],
+      "world": [
         0.09,
         0.02,
         0.15
@@ -207,6 +290,11 @@
       "node": "Toe Tip",
       "time": 0.01,
       "translation": [
+        91,
+        21,
+        151
+      ],
+      "world": [
         0.091,
         0.021,
         0.151
@@ -216,6 +304,11 @@
       "node": "Toe Tip",
       "time": 0.02,
       "translation": [
+        92,
+        22.5,
+        152
+      ],
+      "world": [
         0.092,
         0.0225,
         0.152
@@ -225,6 +318,11 @@
       "node": "Toe Tip",
       "time": 0.03,
       "translation": [
+        93,
+        24,
+        153
+      ],
+      "world": [
         0.093,
         0.024,
         0.153
@@ -234,6 +332,11 @@
       "node": "R.Knee",
       "time": 0.01,
       "translation": [
+        -119,
+        501,
+        40.5
+      ],
+      "world": [
         -0.119,
         0.501,
         0.0405

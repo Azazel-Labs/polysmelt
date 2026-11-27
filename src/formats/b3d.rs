@@ -4,32 +4,45 @@
 //! length and rate (`ANIM`).
 //!
 //! The nodes become glTF nodes, each triangle list a primitive with its brush as the material (color, alpha,
-//! shininess as roughness, the first texture as the color image, full-bright as unlit, two-sided), and the vertices'
+//! shininess as the highlight, the first texture as the color image, cut out or blended by its alpha as the texture's
+//! flags say, full-bright as unlit, two-sided), a triangle list on no brush taking the default material; the vertices'
 //! normals, colors (when the brush asks for them) and texture coordinate sets are kept. Bones make a skin over the
-//! mesh they weigh; keys, at frame numbers divided by the animation's frames per second, an animation. `Blitz3D` is Y
+//! mesh they weigh (a skinned mesh whose own node is placed hangs from an unnamed child of it, so the node keeps
+//! its transform for the bones under it); keys, at frame numbers divided by the animation's frames per second, an
+//! animation. `Blitz3D` is Y
 //! up and left-handed, so the scene is mirrored through the XY plane, and its quaternions turn row vectors, so each is
-//! read as its conjugate.
+//! read as its conjugate. In the source info the handedness is declared left (the format defines it) and converted,
+//! the up axis an assumed `+Y`, the units' length unknown; the frame rate is the `ANIM` chunk's, or an assumed 60
+//! when keys need one and it gives none.
 
 use std::collections::HashMap;
 
 use serde_json::json;
 
-use super::scene::{self, Animation, Bin, Channel, Interp, M4, Node, Path as Key, Primitive, Scene, SceneMesh, Skin};
+use super::scene::{self, Animation, Channel, Interp, M4, Node, Path as Key, Primitive, Scene, SceneMesh, Skin};
 use crate::Result;
 use crate::assets::Assets;
+use crate::bytes::Bin;
 use crate::document::{Document, Keep};
 use crate::images::Images;
-use crate::mesh::{Material, srgb_to_linear};
+use crate::legacy_material::{Phong, Rgb, Transparency};
+use crate::material::Alpha;
+use crate::mesh::srgb_to_linear;
 use crate::num::{f32_of, u32_of};
+use crate::quat;
+use crate::source::{Axis, Fact, Handedness};
 
 /// How deep nodes may nest.
 const MAX_DEPTH: usize = 256;
-/// The frame rate when the file gives none.
+/// The frame rate when the file gives none: the format's own default (its specification lists an `ANIM` chunk's
+/// `fps` as `default=60`). So that, not the readers' shared assumption.
 const DEFAULT_FPS: f32 = 60.0;
 
 /// A texture: its file.
 struct Texture {
     file: String,
+    /// `Blitz3D`'s texture flags: 2 is alpha, 4 is masked.
+    flags: i32,
 }
 
 /// A brush: a material.
@@ -90,30 +103,31 @@ struct B3d {
 }
 
 /// Reads a `.b3d` file.
-pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document<'static>> {
+pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document> {
     let bytes = input.read()?;
     let f = parse(&bytes)?;
-    let stem = input
-        .path
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_default();
     let mut scene = Scene::default();
     let mut facts = serde_json::Map::new();
 
     // Brushes.
     let dir = input.dir();
     let mut images = Images::new(!keep.image_bytes, dir);
-    let mut found: HashMap<usize, Option<usize>> = HashMap::new();
     for b in &f.brushes {
         let unit = |c: f32| if c.is_finite() { c.clamp(0.0, 1.0) } else { 1.0 };
         let c = b.color.map(unit);
-        let mut m = Material::plain(
-            &b.name,
-            [srgb_to_linear(c[0]), srgb_to_linear(c[1]), srgb_to_linear(c[2]), c[3]],
-        );
-        m.roughness = 1.0 - unit(b.shininess.max(0.0)).sqrt();
+        // A brush's shininess, 0 to 1, is both the highlight's strength and its size: Blitz3D hands
+        // Direct3D a gray specular color of that value and a power of 128 times it. None by default.
+        let shininess = unit(b.shininess.max(0.0));
+        let mut phong = Phong::new(Rgb::Srgb([c[0], c[1], c[2]]));
+        phong.opacity = c[3];
+        phong.specular = Some(Rgb::Srgb([shininess; 3]));
+        phong.exponent = Some(shininess * 128.0);
+        let mut m = phong.pbr().material(&b.name);
         m.unlit = b.fx & 1 != 0;
+        if m.unlit {
+            // Nothing reflects, and nothing needs saying so.
+            m.extensions = None;
+        }
         m.double_sided = b.fx & 0x10 != 0;
         let texture = b
             .textures
@@ -123,10 +137,19 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         if keep.textures
             && let Some(t) = texture
         {
-            m.color_image = *found.entry(t).or_insert_with(|| {
-                let name = &f.textures[t].file;
-                assets.find(name, dir).and_then(|path| images.file(assets, path, name))
-            });
+            m.color_image = images.find(assets, &[&f.textures[t].file], &[dir]);
+        }
+        // The texture's flags say how its alpha is used: masked (4) is cut out, alpha (2) blended.
+        let flags = texture.map_or(0, |t| f.textures[t].flags);
+        let transparency = Transparency {
+            texture_alpha: flags & 2 != 0,
+            cutout: (flags & 4 != 0).then_some(0.5),
+            ..Transparency::of(c[3])
+        };
+        match transparency.mode() {
+            Alpha::Mask(cutoff) => m.alpha_cutoff = Some(cutoff),
+            Alpha::Blend if c[3] >= 1.0 => scene.blend.push(scene.materials.len()),
+            _ => {}
         }
         scene.materials.push(m);
     }
@@ -252,7 +275,7 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
                     .unwrap_or(0)
                     .clamp(1, scene::MAX_INFLUENCES);
                 p.influences = width;
-                p.rest_joint = rest;
+                p.rest_joint = Some(rest);
                 for &v in &used {
                     unbound |= links[v].is_empty();
                     let mut l = links[v].clone();
@@ -275,8 +298,9 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
             prims,
             ..SceneMesh::default()
         });
-        scene.nodes[ni].mesh = Some(index);
-        if !bones.is_empty() {
+        if bones.is_empty() {
+            scene.nodes[ni].mesh = Some(index);
+        } else {
             // Vertices are in the mesh node's space: each inverse bind takes them there first.
             let bind = |j: usize| -> M4 { scene::mul(&scene::invert(&world[j]), &world[ni]) };
             let mut joints = bones.clone();
@@ -288,12 +312,25 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
                 inverse_binds: joints.iter().map(|&j| bind(j)).collect(),
                 joints,
             });
-            scene.nodes[ni].skin = Some(scene.skins.len() - 1);
+            // glTF leaves a skinned mesh's own node out of where the mesh goes, and the node is written without
+            // its transform. A node that is placed must keep it for the bones under it, which are its children
+            // in this format, so its skinned mesh hangs from a node of its own below it.
+            let node = &scene.nodes[ni];
+            let r = node.rotation;
+            #[allow(clippy::float_cmp, reason = "only a node exactly at rest is left as it is")]
+            let placed = node.translation != [0.0; 3]
+                || node.scale != [1.0; 3]
+                || (r != [0.0, 0.0, 0.0, 1.0] && r != [0.0, 0.0, 0.0, -1.0]);
+            let holder = if placed {
+                scene.add(Node::named(String::new(), Some(ni)))
+            } else {
+                ni
+            };
+            scene.nodes[holder].mesh = Some(index);
+            scene.nodes[holder].skin = Some(scene.skins.len() - 1);
         }
     }
-    if dropped > 0 {
-        facts.insert("dropped_triangles".into(), json!(dropped));
-    }
+    scene.dropped = dropped;
     if stray > 0 {
         facts.insert("dropped_weights".into(), json!(stray));
     }
@@ -337,12 +374,12 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
     }
     if !channels.is_empty() {
         scene.animations.push(Animation {
-            name: stem,
+            name: String::new(),
             channels,
             extras: None,
         });
     }
-    ensure!(!scene.nodes.is_empty(), "B3D file has no nodes");
+    ensure!(!scene.nodes.is_empty(), Empty, "B3D file has no nodes");
 
     facts.insert("nodes".into(), json!(f.nodes.len()));
     facts.insert("brushes".into(), json!(f.brushes.len()));
@@ -350,14 +387,19 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         facts.insert("unsupported_settings".into(), json!(f.unsupported));
     }
     let mut source = serde_json::Map::new();
-    source.insert("format".into(), json!("B3D"));
-    source.insert("version".into(), json!(f.version));
-    source.insert("handedness".into(), json!("left"));
+    scene.info.format = Some("B3D".into());
+    scene.info.version = Some(f.version.to_string());
+    scene.info.up_axis = Fact::Assumed(Axis::PosY);
+    scene.info.handedness = Fact::Declared(Handedness::Left);
     if let Some((_, frames, rate)) = f.anim {
         source.insert("frames".into(), json!(frames));
-        if rate.is_finite() && rate > 0.0 {
-            source.insert("frameRate".into(), json!(rate));
-        }
+        scene.info.frame_rate = if rate.is_finite() && rate > 0.0 {
+            Fact::Declared(f64::from(rate))
+        } else {
+            Fact::Assumed(f64::from(DEFAULT_FPS))
+        };
+    } else if !scene.animations.is_empty() {
+        scene.info.frame_rate = Fact::Assumed(f64::from(DEFAULT_FPS));
     }
     scene.source = source;
     scene.facts = facts;
@@ -375,15 +417,16 @@ fn chunks(data: &[u8]) -> impl Iterator<Item = Result<([u8; 4], &[u8])>> {
         let rest = &data[at..];
         if rest.len() < 8 {
             at = data.len();
-            return Some(Err(invalid!("B3D file is cut short in a chunk header")));
+            return Some(Err(err!(Truncated, "B3D file is cut short in a chunk header")));
         }
         let tag: [u8; 4] = [rest[0], rest[1], rest[2], rest[3]];
         let size = i32::from_le_bytes([rest[4], rest[5], rest[6], rest[7]]);
         let Some(size) = usize::try_from(size).ok().filter(|&s| s <= rest.len() - 8) else {
             at = data.len();
-            return Some(Err(invalid!(
-                "B3D {} chunk claims {size} bytes, more than the {} it has room for",
-                String::from_utf8_lossy(&tag),
+            return Some(Err(err!(
+                Truncated,
+                "B3D {} chunk runs past the end of what holds it: it claims {size} bytes, and there is room for {}",
+                crate::bytes::text(&tag),
                 rest.len() - 8
             )));
         };
@@ -396,7 +439,7 @@ fn chunks(data: &[u8]) -> impl Iterator<Item = Result<([u8; 4], &[u8])>> {
 fn cstring(b: &mut Bin<'_>) -> Result<String> {
     let rest = &b.data[b.at..];
     let Some(end) = rest.iter().position(|&c| c == 0) else {
-        bail!("B3D file is cut short in a name");
+        bail!(Truncated, "B3D file is cut short in a name");
     };
     let s = scene::text(&rest[..end]);
     b.skip(end + 1)?;
@@ -407,11 +450,12 @@ fn cstring(b: &mut Bin<'_>) -> Result<String> {
 fn parse(data: &[u8]) -> Result<B3d> {
     ensure!(
         data.len() >= 8 && &data[..4] == b"BB3D",
+        UnknownFormat,
         "isn't a Blitz3D file: it doesn't start with BB3D"
     );
     let mut f = B3d::default();
     let mut top = chunks(data);
-    let (_, body) = top.next().unwrap_or_else(|| Err(invalid!("B3D file is empty")))?;
+    let (_, body) = top.next().unwrap_or_else(|| Err(err!(Empty, "B3D file is empty")))?;
     let mut b = Bin::new(body, "B3D");
     f.version = b.i32()?;
     for c in chunks(&body[4..]) {
@@ -430,7 +474,7 @@ fn texs(body: &[u8], f: &mut B3d) -> Result<()> {
     let mut b = Bin::new(body, "B3D");
     while b.left() > 0 {
         let file = cstring(&mut b)?.replace('\\', "/");
-        let _flags = b.i32()?;
+        let flags = b.i32()?;
         let blend = b.i32()?;
         let pos = b.vec2()?;
         let scale = b.vec2()?;
@@ -443,7 +487,7 @@ fn texs(body: &[u8], f: &mut B3d) -> Result<()> {
         if moved || rot.abs() > 1e-6 || !(blend == 1 || blend == 2) {
             f.unsupported += 1;
         }
-        f.textures.push(Texture { file });
+        f.textures.push(Texture { file, flags });
     }
     Ok(())
 }
@@ -453,6 +497,7 @@ fn brus(body: &[u8], f: &mut B3d) -> Result<()> {
     let n = b.i32()?;
     ensure!(
         (0..=8).contains(&n),
+        Corrupt,
         "B3D brushes claim {n} textures each, more than the 8 the format allows"
     );
     let n = usize::try_from(n).unwrap_or(0);
@@ -481,7 +526,11 @@ fn brus(body: &[u8], f: &mut B3d) -> Result<()> {
 }
 
 fn node(body: &[u8], parent: Option<usize>, depth: usize, f: &mut B3d) -> Result<()> {
-    ensure!(depth < MAX_DEPTH, "B3D nodes nest deeper than {MAX_DEPTH}");
+    ensure!(
+        depth < MAX_DEPTH,
+        LimitExceeded,
+        "B3D nodes nest deeper than {MAX_DEPTH}"
+    );
     let mut b = Bin::new(body, "B3D");
     let name = cstring(&mut b)?;
     let translation = b.vec3()?;
@@ -538,7 +587,7 @@ fn node(body: &[u8], parent: Option<usize>, depth: usize, f: &mut B3d) -> Result
 /// A rotation as the file stores it (w first, turning row vectors) in glTF's order, turning column vectors.
 fn turn([w, x, y, z]: [f32; 4]) -> [f32; 4] {
     let q = [-x, -y, -z, w].map(f64::from);
-    scene::normalize(q)
+    quat::normalize(q)
 }
 
 fn keys(body: &[u8], k: &mut Keys) -> Result<()> {
@@ -600,7 +649,10 @@ fn vrts(body: &[u8], m: &mut Mesh) -> Result<()> {
         usize::try_from(sets).ok().filter(|&s| s <= 8),
         usize::try_from(size).ok().filter(|&s| s <= 4),
     ) else {
-        bail!("B3D vertices claim {sets} texture coordinate sets of {size}, more than the format allows (8 of 4)");
+        bail!(
+            Corrupt,
+            "B3D vertices claim {sets} texture coordinate sets of {size}, more than the format allows (8 of 4)"
+        );
     };
     let normals = flags & 1 != 0;
     let colors = flags & 2 != 0;
@@ -664,6 +716,11 @@ mod tests {
 
     /// A triangle on a root node, weighed by a bone that turns a quarter about Y between frames 0 and 10.
     fn sample() -> Vec<u8> {
+        sample_at([0.0; 3], [0.0; 3])
+    }
+
+    /// [`sample`] with its root node and its bone moved to `root` and `bone`.
+    fn sample_at(root: [f32; 3], bone_at: [f32; 3]) -> Vec<u8> {
         let mut texs = b"skin.png\0".to_vec();
         texs.extend(i(&[1, 2]));
         texs.extend(f(&[0.0, 0.0, 1.0, 1.0, 0.0]));
@@ -698,8 +755,8 @@ mod tests {
         bone.extend(chunk(*b"KEYS", &keys));
         let mut kids = chunk(*b"MESH", &mesh);
         kids.extend(chunk(*b"ANIM", &[i(&[0, 10]), f(&[10.0])].concat()));
-        kids.extend(node_chunk("bone", [0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0], &bone));
-        let root = node_chunk("root", [0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0], &kids);
+        kids.extend(node_chunk("bone", bone_at, [1.0, 0.0, 0.0, 0.0], &bone));
+        let root = node_chunk("root", root, [1.0, 0.0, 0.0, 0.0], &kids);
         let mut body = i(&[1]);
         body.extend(chunk(*b"TEXS", &texs));
         body.extend(chunk(*b"BRUS", &brus));
@@ -707,14 +764,35 @@ mod tests {
         chunk(*b"BB3D", &body)
     }
 
-    fn read(bytes: &[u8]) -> Result<Document<'static>> {
+    fn read(bytes: &[u8]) -> Result<Document> {
         load(super::super::Input::memory(bytes, "t.b3d"), &Memory::new(), Keep::ALL)
+    }
+
+    #[test]
+    fn a_skinned_mesh_keeps_its_nodes_place() {
+        // The vertices are in the mesh node's space, so the triangle (0,0,0) (1,0,0) (0,1,0) stands at the
+        // node's (10, 20, 30); Z is mirrored on the way in. The bone's own place moves nothing at rest.
+        let doc = read(&sample_at([10.0, 20.0, 30.0], [0.0, 2.0, 0.0])).unwrap();
+        let mesh = doc.flatten(crate::document::Pose::Rest).unwrap().unwrap();
+        let mut got = mesh.prims[0].positions.clone();
+        got.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(got, [[10.0, 20.0, -30.0], [10.0, 21.0, -30.0], [11.0, 20.0, -30.0]]);
+        let rig = doc.rig().unwrap();
+        let (root, bone) = (rig.find("root").unwrap(), rig.find("bone").unwrap());
+        assert_eq!(rig.nodes[root].rest.translation, [10.0, 20.0, -30.0]);
+        assert_eq!(rig.nodes[bone].rest.translation, [0.0, 2.0, 0.0]);
+        assert_eq!(rig.nodes[bone].parent, Some(root));
+        // A node that isn't placed still holds its skinned mesh itself.
+        let plain = read(&sample()).unwrap();
+        assert_eq!(plain.json()["nodes"].as_array().unwrap().len(), 3);
+        assert!(plain.json()["nodes"][0]["skin"].is_number());
+        assert_eq!(plain.json()["nodes"][2]["name"], "RootNode");
     }
 
     #[test]
     fn a_skinned_triangle_with_a_brush_and_keys() {
         let doc = read(&sample()).unwrap();
-        let j = &doc.json;
+        let j = &doc.json();
         assert_eq!(doc.facts["triangles"], json!(1));
         assert_eq!(j["materials"][0]["name"], "red");
         assert_eq!(j["materials"][0]["doubleSided"], true);
@@ -731,6 +809,14 @@ mod tests {
         // Mirrored: the file's normal toward -Z faces +Z, and the winding turns with it.
         let mesh = doc.flatten(crate::document::Pose::Rest).unwrap().unwrap();
         assert!(mesh.prims[0].normals.iter().all(|n| n[2] > 0.99));
+        let info = doc.source_info();
+        assert_eq!(info.format.as_deref(), Some("B3D"));
+        assert_eq!(info.version.as_deref(), Some("1"));
+        assert_eq!(info.handedness, Fact::Declared(Handedness::Left));
+        assert!(info.converted.handedness && !info.converted.up_axis && !info.converted.units);
+        assert_eq!(info.up_axis, Fact::Assumed(Axis::PosY));
+        assert_eq!(info.meters_per_unit, Fact::Unknown);
+        assert_eq!(info.frame_rate, Fact::Declared(10.0));
     }
 
     #[test]
@@ -739,7 +825,7 @@ mod tests {
         // -Z; glTF's quarter turn about +Y takes +X to -Z.
         let half = std::f32::consts::FRAC_1_SQRT_2;
         let q = scene::mirror_quat(turn([half, 0.0, half, 0.0]));
-        let v = scene::rotate(q.map(f64::from), [1.0, 0.0, 0.0]);
+        let v = quat::rotate(q.map(f64::from), [1.0, 0.0, 0.0]);
         assert!((v[2] + 1.0).abs() < 1e-6, "{v:?}");
     }
 
@@ -754,7 +840,9 @@ mod tests {
         // A chunk claiming more than its parent.
         let mut v = good.clone();
         v[4..8].copy_from_slice(&i32::MAX.to_le_bytes());
-        assert!(read(&v).unwrap_err().to_string().contains("more than"));
+        let err = read(&v).unwrap_err();
+        assert_eq!(err.kind(), crate::ErrorKind::Truncated);
+        assert!(err.to_string().contains("runs past the end of what holds it"), "{err}");
         // Too many texture coordinate sets.
         let at = v.windows(4).position(|w| w == b"VRTS").unwrap();
         let mut v = good.clone();
@@ -765,7 +853,7 @@ mod tests {
         let at = v.windows(4).position(|w| w == b"TRIS").unwrap();
         v[at + 20..at + 24].copy_from_slice(&7i32.to_le_bytes());
         let doc = read(&v);
-        assert!(doc.is_err() || doc.unwrap().facts["dropped_triangles"] == json!(1));
+        assert!(doc.is_err() || doc.unwrap().json()["asset"]["extras"]["source"]["droppedGeometry"] == json!(1));
     }
 
     #[test]

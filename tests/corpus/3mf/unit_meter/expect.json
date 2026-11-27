@@ -14,14 +14,15 @@
       0.0
     ]
   },
-  "facts": {
-    "unit": "meter"
-  },
   "tolerance": 1e-05,
   "document": {
     "source": {
       "unit": "meter",
       "metersPerUnit": 1.0
     }
+  },
+  "json": {
+    "/asset/extras/source/unit": "meter",
+    "/asset/extras/source/unitAsWritten": null
   }
 }

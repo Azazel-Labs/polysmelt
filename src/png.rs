@@ -1,9 +1,7 @@
 //! A PNG encoder for 8-bit gray, gray and alpha, RGB and RGBA pixels, for images decoded from formats glTF can't embed,
 //! and a sampler that reads a few of a PNG's pixels without keeping the image.
 
-use std::io::Write as _;
-
-use flate2::{Compression, Crc, write::ZlibEncoder};
+use flate2::Crc;
 #[cfg(any(feature = "3ds", feature = "obj"))]
 use flate2::{Decompress, FlushDecompress, Status};
 
@@ -16,7 +14,9 @@ pub(crate) fn encode(w: u32, h: u32, channels: usize, pixels: &[u8]) -> Option<V
     if !(1..=4).contains(&channels) || row == 0 || pixels.len() != row.checked_mul(usize_of(u64::from(h)))? {
         return None;
     }
-    let mut z = ZlibEncoder::new(Vec::new(), Compression::fast());
+    // A deflater made for filtered PNG rows: several times faster than a general one at its
+    // fastest level, and smaller too.
+    let mut z = fdeflate::Compressor::new(Vec::new()).ok()?;
     let (mut prev, mut best, mut cand) = (vec![0; row], vec![0; row], vec![0; row]);
     for line in pixels.chunks_exact(row) {
         let mut best_kind = 0;
@@ -29,8 +29,8 @@ pub(crate) fn encode(w: u32, h: u32, channels: usize, pixels: &[u8]) -> Option<V
                 std::mem::swap(&mut best, &mut cand);
             }
         }
-        z.write_all(&[best_kind]).ok()?;
-        z.write_all(&best).ok()?;
+        z.write_data(&[best_kind]).ok()?;
+        z.write_data(&best).ok()?;
         prev.copy_from_slice(line);
     }
     let data = z.finish().ok()?;
@@ -131,9 +131,8 @@ const MAX_ROW: usize = 1 << 19;
 /// How many bytes of rows [`sample`] decodes before it stops: the top of a huge image stands for all of it.
 #[cfg(feature = "3ds")]
 const SAMPLE_BYTES: usize = 1 << 24;
-/// The most pixels [`decode`] makes: 8192 by 8192.
 #[cfg(feature = "obj")]
-const MAX_PIXELS: usize = 1 << 26;
+use crate::images::MAX_PIXELS;
 
 /// A PNG's header and its compressed rows: gray, RGB, palette and alpha kinds of 8 or 16 bits, not interlaced.
 #[cfg(any(feature = "3ds", feature = "obj"))]
@@ -374,8 +373,8 @@ mod tests {
         ihdr[..4].copy_from_slice(&2u32.to_be_bytes());
         ihdr[4..8].copy_from_slice(&1u32.to_be_bytes());
         let png = |ihdr: &[u8], plte: &[u8], row: &[u8]| {
-            let mut z = ZlibEncoder::new(Vec::new(), Compression::fast());
-            z.write_all(row).unwrap();
+            let mut z = fdeflate::Compressor::new(Vec::new()).unwrap();
+            z.write_data(row).unwrap();
             let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
             chunk(&mut out, *b"IHDR", ihdr).unwrap();
             if !plte.is_empty() {

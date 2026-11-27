@@ -1,0 +1,19 @@
+{
+  "spec": "3DS (Autodesk 3D Studio chunk format, as lib3ds documents it): a real file, a rock",
+  "source": "assimp/assimp at 711b4e9bbde2, test/models/3DS/fels.3ds (BSD-3-Clause, see ../LICENSE-assimp); expectations measured with assimp 6.0.5 (assimp-py 1.2.0)",
+  "triangles": 768,
+  "bounds": {
+    "min": [
+      -2.221913,
+      -2.564741,
+      -0.121266
+    ],
+    "max": [
+      1.282885,
+      2.11686,
+      3.084285
+    ]
+  },
+  "area": 60.166715,
+  "position_set": "positions.f32"
+}

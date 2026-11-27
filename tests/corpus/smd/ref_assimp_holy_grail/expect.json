@@ -1,0 +1,32 @@
+{
+  "spec": "Valve SMD (Studiomdl Data version 1): a real file, a reference mesh of 896 triangles on one bone",
+  "source": "assimp/assimp at 711b4e9bbde2, test/models/SMD/holy_grailref.smd (BSD-3-Clause, see ../LICENSE-assimp); expectations measured with assimp 6.0.5 (assimp-py 1.2.0)",
+  "triangles": 896,
+  "bounds": {
+    "min": [
+      -8.373686,
+      0.10911,
+      -8.246472
+    ],
+    "max": [
+      8.373683,
+      23.414265,
+      8.24647
+    ]
+  },
+  "area": 1202.648941,
+  "position_set": "positions.f32",
+  "document": {
+    "joints": 1
+  },
+  "rig": [
+    {
+      "node": "Cylinder01",
+      "world": [
+        0.0,
+        6.26841,
+        0.0
+      ]
+    }
+  ]
+}

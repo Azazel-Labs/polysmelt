@@ -5,11 +5,10 @@
   "facts": {
     "joints": 2,
     "channels": 9,
-    "frames": 3,
-    "frame_time": 0.04
+    "frames": 3
   },
   "document": {
-    "nodes": 3,
+    "nodes": 4,
     "animations": 1,
     "channels": 3,
     "node_names": [
@@ -42,18 +41,18 @@
     ],
     "/nodes/2/children": null,
     "/nodes/1/rotation": null,
-    "/asset/extras/source/upAxis": "Y",
+    "/asset/extras/source/upAxis": "+Y",
     "/asset/extras/source/frames": 3,
-    "/animations/0/name": "motion",
+    "/animations/0/name": "basic_two_joint",
     "/scenes/0/nodes": [
-      0
+      3
     ],
     "/asset/extras/source/format": "BVH"
   },
   "rig": [
     {
       "node": "Hips",
-      "parent": null,
+      "parent": "RootNode",
       "translation": [
         0,
         90,

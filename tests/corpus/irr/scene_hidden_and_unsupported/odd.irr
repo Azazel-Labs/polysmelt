@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<irr_scene>
+<attributes>
+</attributes>
+<node type="cube">
+<attributes>
+<string name="Name" value="shown" />
+<float name="Size" value="1" />
+</attributes>
+<animators>
+<attributes>
+<string name="Type" value="texture" />
+</attributes>
+</animators>
+</node>
+<node type="cube">
+<attributes>
+<string name="Name" value="hidden" />
+<bool name="Visible" value="false" />
+</attributes>
+<node type="cube">
+<attributes>
+<string name="Name" value="under" />
+</attributes>
+</node>
+</node>
+<node type="terrain">
+<attributes>
+<string name="Name" value="ground" />
+</attributes>
+</node>
+</irr_scene>

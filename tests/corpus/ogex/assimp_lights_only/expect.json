@@ -1,5 +1,10 @@
 {
-  "spec": "OpenGEX 3.0 (the OpenGEX specification): a real file, light objects no node places",
+  "spec": "OpenGEX 3.0 (the OpenGEX specification): a real file, light objects and no nodes, each placed under the root by itself",
   "source": "assimp test models (test/models/OpenGEX), BSD license, see ../LICENSE-assimp",
-  "error": "no geometry"
+  "no_mesh": true,
+  "document": {
+    "nodes": 4,
+    "lights": 3,
+    "cameras": 0
+  }
 }

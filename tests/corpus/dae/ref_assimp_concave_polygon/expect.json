@@ -1,0 +1,19 @@
+{
+  "spec": "COLLADA 1.4.1: a real file, a concave polygon of 66 corners",
+  "source": "assimp/assimp at 711b4e9bbde2, test/models/Collada/ConcavePolygon.dae (BSD-3-Clause, see ../LICENSE-assimp); expectations measured with assimp 6.0.5 (assimp-py 1.2.0)",
+  "triangles": 64,
+  "bounds": {
+    "min": [
+      -1.146,
+      1.6575,
+      1.6055
+    ],
+    "max": [
+      -1.146,
+      3.1425,
+      3.0905
+    ]
+  },
+  "area": 0.245497,
+  "position_set": "positions.f32"
+}

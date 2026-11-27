@@ -1,8 +1,10 @@
 {
   "spec": "SketchUp .skp (closed; as openskp reads it): an instance scaled through the transform's last value (1/w), in a 2021+ (ZIP) file",
   "source": "saved by SketchUp, from openskp's test fixtures (packages/cpp/tests/fixtures)",
-  "facts": {
-    "application": "SketchUp 2025"
+  "document": {
+    "source": {
+      "tool": "SketchUp 2025"
+    }
   },
   "triangles": 24,
   "area": 0.0077419199999999985,

@@ -39,7 +39,9 @@
   "document": {
     "meshes": 2,
     "source": {
-      "missingFiles": 1,
+      "missingFiles": [
+        "missing.flt"
+      ],
       "files": 2
     }
   }

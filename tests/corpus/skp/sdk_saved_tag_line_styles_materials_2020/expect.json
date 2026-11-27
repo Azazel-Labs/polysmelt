@@ -1,8 +1,10 @@
 {
   "spec": "SketchUp .skp (closed; as openskp reads it): a triangle on each tag, the tags carrying line styles: five tags, four with a line style, and three materials (SketchUp 2020)",
   "source": "saved by SketchUp, from openskp's test fixtures (packages/cpp/tests/fixtures)",
-  "facts": {
-    "application": "SketchUp 2020"
+  "document": {
+    "source": {
+      "tool": "SketchUp 2020"
+    }
   },
   "triangles": 5
 }

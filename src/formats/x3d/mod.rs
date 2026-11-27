@@ -8,7 +8,9 @@
 //!   the CAD nodes, `Switch` by its choice, `LOD` by its finest level) become nodes, a
 //!   transform's center folded into its translation;
 //! - a `Shape` becomes a mesh, its `Appearance` a material: `Material`'s diffuse and emissive
-//!   colors and transparency, `PhysicalMaterial` and `UnlitMaterial` as they are, an
+//!   colors and transparency, and its specular color and shininess as the highlight (the
+//!   classic material every reader reads one way, `legacy_material`), `PhysicalMaterial` and
+//!   `UnlitMaterial` as they are, a shape with no appearance in the default material, an
 //!   `ImageTexture` by its relative URL (clamped where it doesn't repeat), a `TextureTransform`
 //!   baked into the texture coordinates;
 //! - the geometry: `IndexedFaceSet` (polygons of any size, separate normal, color and texture
@@ -32,6 +34,18 @@
 //! Scripts, routes, sensors and interpolators are skipped, as is any node not named here
 //! (`Text`, `NurbsPatchSurface`): the asset's `extras.source.skipped` counts them.
 //! Colors are taken as sRGB. `UNIT length` scales the scene.
+//!
+//! A file is known by its start: `#VRML V2.0` or `#X3D V3` (or later) for the classic encoding,
+//! and an `<X3D>` root element for XML. Anything else is not this format (`UnknownFormat`), since
+//! any text at all would otherwise read as an empty scene. VRML 1.0 is refused as unsupported.
+//!
+//! The asset's `extras.source` records the encoding, the version and the length unit (meters
+//! unless `UNIT length` names another, which the document's `RootNode` scales to meters; the node
+//! is over the scene's top-level nodes whether or not there is a unit to convert), +Y up as the
+//! standard has it, the first `WorldInfo`'s title and `info` strings (as comments), and the `META`
+//! statements (`meta` elements): `title`, `creator` or `author`, `generator` as the tool,
+//! `description`, `copyright` or `rights`, `license`, `created`, `modified` and `keywords` by
+//! their meanings, any other under `meta` as written.
 
 mod classic;
 mod geometry;
@@ -45,13 +59,17 @@ use std::path::{Path, PathBuf};
 use serde_json::{Map, Value, json};
 
 use super::Input;
+use super::frame::{self, Frame};
 use crate::Result;
 use crate::assets::Assets;
 use crate::document::{Builder, Document, Keep};
 use crate::images::Images;
+use crate::legacy_material::{self, Phong, Rgb};
 use crate::material::{Alpha, CLAMP, Full, REPEAT, Tex};
 use crate::mesh::{GRAY, Material, srgb_to_linear};
 use crate::num::f32_of;
+use crate::quat::{self, rotate};
+use crate::source::{Axis, Fact, Handedness, SourceInfo};
 
 /// An absent index.
 pub(super) const NONE: u32 = u32::MAX;
@@ -119,6 +137,10 @@ pub(super) struct Graph {
     pub roots: Vec<usize>,
     /// Meters a length unit is, from `UNIT length`.
     pub unit: Option<f64>,
+    /// The length unit's name, likewise.
+    pub unit_name: Option<String>,
+    /// The file's `META` statements (`meta` elements), each name and content.
+    pub meta: Vec<(String, String)>,
     /// Statements and nodes not read, by kind.
     pub skipped: BTreeMap<String, usize>,
     pub version: String,
@@ -127,6 +149,8 @@ pub(super) struct Graph {
     /// External prototypes declared: each one's name and URLs.
     pub externs: Vec<(String, Vec<String>)>,
     pub notes: BTreeSet<&'static str>,
+    /// Whether the file stops before its scene does: a node, list or element still open at its end.
+    pub cut: bool,
 }
 
 impl Graph {
@@ -276,6 +300,8 @@ pub(super) struct Info {
     format: &'static str,
     encoding: &'static str,
     gzip: bool,
+    /// Whether the file is cut short: its gzip stream or its scene ends early.
+    cut: bool,
 }
 
 /// A file's scene graph: inflated when gzipped, then by its first character the XML encoding
@@ -283,62 +309,57 @@ pub(super) struct Info {
 fn parse(bytes: &[u8]) -> Result<(Graph, Info)> {
     let mut inflated = Vec::new();
     let gzip = bytes.starts_with(&[0x1f, 0x8b]);
+    let mut cut = false;
     let bytes = if gzip {
         let mut r = flate2::read::MultiGzDecoder::new(bytes).take(MAX_INFLATED);
         // A file cut short reads as far as it inflates.
-        if r.read_to_end(&mut inflated).is_err() && inflated.is_empty() {
-            bail!("not a gzipped X3D or VRML file");
+        if r.read_to_end(&mut inflated).is_err() {
+            ensure!(!inflated.is_empty(), UnknownFormat, "not a gzipped X3D or VRML file");
+            cut = true;
         }
         inflated.as_slice()
     } else {
         bytes
     };
-    let utf16;
-    let bytes = match bytes {
-        [0xff, 0xfe, rest @ ..] | [0xfe, 0xff, rest @ ..] => {
-            let le = bytes[0] == 0xff;
-            let units: Vec<u16> = rest
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .map(|&b| {
-                    if le {
-                        u16::from_le_bytes(b)
-                    } else {
-                        u16::from_be_bytes(b)
-                    }
-                })
-                .collect();
-            utf16 = String::from_utf16_lossy(&units).into_bytes();
-            utf16.as_slice()
-        }
-        [0xef, 0xbb, 0xbf, rest @ ..] => rest,
-        _ => bytes,
-    };
+    let decoded = crate::formats::xml::utf8(bytes);
+    let bytes = &*decoded;
     let start = bytes
         .iter()
         .position(|&b| !b.is_ascii_whitespace())
         .unwrap_or(bytes.len());
     let bytes = &bytes[start..];
     if bytes.first() == Some(&b'<') {
+        ensure!(
+            xml_root(bytes) == Some(&b"X3D"[..]),
+            UnknownFormat,
+            "not an X3D file: its root element isn't <X3D>"
+        );
         let g = xml::parse(bytes);
         let info = Info {
             format: "X3D",
-            encoding: "XML",
+            encoding: "xml",
             gzip,
+            cut: cut || g.cut,
         };
         return Ok((g, info));
     }
     let line = bytes.split(|&b| b == b'\n' || b == b'\r').next().unwrap_or_default();
-    let mut words = line.split(u8::is_ascii_whitespace).filter(|w| !w.is_empty());
+    // Commas are white space in this syntax.
+    let mut words = line
+        .split(|b: &u8| b.is_ascii_whitespace() || *b == b',')
+        .filter(|w| !w.is_empty());
     let (head, version) = (words.next().unwrap_or_default(), words.next().unwrap_or_default());
-    let version = String::from_utf8_lossy(version.strip_prefix(b"V").unwrap_or(version)).into_owned();
+    let version = crate::bytes::text(version.strip_prefix(b"V").unwrap_or(version)).into_owned();
     let format = match head {
-        b"#VRML" if version.starts_with('1') => bail!("VRML 1.0 isn't supported, only VRML97 and X3D"),
-        b"#VRML" => "VRML97",
-        b"#X3D" => "X3D",
-        _ if bytes.is_empty() => bail!("an empty file"),
-        _ => "VRML97",
+        b"#VRML" if version.starts_with('1') => bail!(Unsupported, "VRML 1.0 isn't supported, only VRML97 and X3D"),
+        b"#VRML" if version.starts_with('2') => "VRML97",
+        b"#X3D" if version.starts_with(|c: char| c.is_ascii_digit()) => "X3D",
+        _ if bytes.is_empty() => bail!(Empty, "an empty file"),
+        // Any text at all reads as a (likely empty) scene in this syntax: the header is what tells the format.
+        _ => bail!(
+            UnknownFormat,
+            "not a VRML97 or X3D file: it starts with neither `#VRML V2.0` nor `#X3D V3`"
+        ),
     };
     let mut g = classic::parse(bytes);
     if matches!(head, b"#VRML" | b"#X3D") {
@@ -348,11 +369,12 @@ fn parse(bytes: &[u8]) -> Result<(Graph, Info)> {
         format,
         encoding: "classic",
         gzip,
+        cut: cut || g.cut,
     };
     Ok((g, info))
 }
 
-pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document<'static>> {
+pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document> {
     let (mut graph, info) = parse(&input.read()?)?;
     let dir = input.path.parent().map(Path::to_path_buf).unwrap_or_default();
     let mut library = proto::Library::new();
@@ -367,7 +389,7 @@ pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
         dirs: vec![dir],
         library,
         inline_of: HashMap::new(),
-        b: Builder::default(),
+        b: Builder::new(keep.crease_angle()),
         nodes: Vec::new(),
         meshes: Vec::new(),
         mesh_tris: Vec::new(),
@@ -381,19 +403,53 @@ pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
         skipped: BTreeMap::new(),
         notes: BTreeSet::new(),
         title: None,
+        info: Vec::new(),
     };
     c.inline_of.insert(input.path.to_path_buf(), Some(0));
     let mut roots = Vec::new();
     for r in c.graphs[0].roots.clone() {
         roots.extend(c.visit(0, r, 0)?);
     }
-    if let Some(u) = c.graphs[0].unit.filter(|u| u.is_finite() && *u > 0.0)
-        && (u - 1.0).abs() > 1e-12
-        && !roots.is_empty()
-    {
-        roots = vec![c.push_node(json!({ "name": "RootNode", "children": roots, "scale": [u, u, u] }))];
+    let unit = c.graphs[0].unit.filter(|u| u.is_finite() && *u > 0.0).unwrap_or(1.0);
+    if roots.is_empty() && info.cut {
+        return Err(crate::Error::cut_short(
+            "X3D or VRML file is cut short before anything whole to keep",
+        ));
     }
-    Ok(c.finish(&roots, &info))
+    let mut doc = c.finish(&roots, &info);
+    // X3D is Y up; a `UNIT` statement's length is the root node's scale.
+    frame::root(&mut doc, Frame::IDENTITY.scaled(unit));
+    Ok(doc)
+}
+
+/// The name of an XML document's root element: the first tag that isn't a declaration, a processing
+/// instruction, a comment or a doctype.
+fn xml_root(mut d: &[u8]) -> Option<&[u8]> {
+    loop {
+        let at = d.iter().position(|&b| b == b'<')?;
+        d = &d[at..];
+        let skip = |d: &[u8], end: &[u8]| d.windows(end.len()).position(|w| w == end).map(|p| p + end.len());
+        if d.starts_with(b"<!--") {
+            d = &d[skip(d, b"-->")?..];
+        } else if d.starts_with(b"<?") {
+            d = &d[skip(d, b"?>")?..];
+        } else if d.starts_with(b"<!") {
+            // A doctype, which may hold declarations of its own in brackets.
+            let close = d.iter().position(|&b| b == b'>')?;
+            let end = match d[..close].iter().position(|&b| b == b'[') {
+                Some(open) => open + skip(&d[open..], b"]>")?,
+                None => close + 1,
+            };
+            d = &d[end..];
+        } else {
+            let name = &d[1..];
+            let len = name
+                .iter()
+                .position(|&b| b.is_ascii_whitespace() || b == b'>' || b == b'/')
+                .unwrap_or(name.len());
+            return Some(&name[..len]);
+        }
+    }
 }
 
 /// Walks scene graphs into a glTF document.
@@ -428,6 +484,8 @@ struct Convert<'a> {
     skipped: BTreeMap<String, usize>,
     notes: BTreeSet<&'static str>,
     title: Option<String>,
+    /// The first `WorldInfo`'s `info` strings.
+    info: Vec<String>,
 }
 
 impl Convert<'_> {
@@ -495,6 +553,14 @@ impl Convert<'_> {
             "WorldInfo" => {
                 if self.title.is_none() {
                     self.title = graph.strs(id, "title").first().filter(|t| !t.is_empty()).cloned();
+                }
+                if self.info.is_empty() {
+                    self.info = graph
+                        .strs(id, "info")
+                        .iter()
+                        .filter(|t| !t.is_empty())
+                        .cloned()
+                        .collect();
                 }
                 return Ok(None);
             }
@@ -565,6 +631,7 @@ impl Convert<'_> {
         self.triangles += self.mesh_tris[m];
         ensure!(
             self.triangles <= self.limit,
+            LimitExceeded,
             "too many triangles to convert (more than {})",
             self.limit
         );
@@ -583,7 +650,8 @@ impl Convert<'_> {
         };
         let app = graph.node(id, "appearance");
         let textured = texture(graph, app).is_some();
-        let Some((mut prim, double)) = geometry::geometry(graph, geo, textured, self.limit)? else {
+        let Some((mut prim, double)) = geometry::geometry(graph, geo, textured, self.limit, &mut self.b.dropped)?
+        else {
             let kind = graph.kind(geo).to_owned();
             self.skip(&kind);
             return Ok(None);
@@ -639,10 +707,11 @@ impl Convert<'_> {
         let mut m = Full::from(&Material::plain("", GRAY));
         m.double_sided = double;
         let Some(a) = app else {
-            if colored {
-                m.base_color = [1.0; 4];
-            }
-            return m;
+            // No appearance: the default material, white under the shape's own colors.
+            return Full {
+                double_sided: double,
+                ..legacy_material::default_material(colored).into()
+            };
         };
         let lin = |c: [f64; 3]| c.map(|x| srgb_to_linear(f32_of(x).clamp(0.0, 1.0)));
         let mat = graph.node(a, "material");
@@ -651,15 +720,20 @@ impl Convert<'_> {
         let replaced = tex.is_some() || colored;
         match mat.map(|k| (k, graph.kind(k))) {
             Some((k, "Material" | "TwoSidedMaterial")) => {
-                let [r, gr, b] = if replaced {
-                    [1.0; 3]
+                let srgb = |name: &str, default: f64| Rgb::Srgb(graph.vec(k, name, [default; 3]).map(f32_of));
+                // The Material node (X3D 19775-1, 12.4.4 and the lighting equations of 17.2.2): the
+                // highlight is specularColor (black by default) to the power of shininess (0.2 by default)
+                // times 128.
+                let mut phong = Phong::new(if replaced {
+                    Rgb::WHITE
                 } else {
-                    lin(graph.vec(k, "diffuseColor", [0.8; 3]))
-                };
-                m.base_color = [r, gr, b, opacity(k)];
-                m.emissive = lin(graph.vec(k, "emissiveColor", [0.0; 3]));
-                m.metallic = 0.0;
-                m.roughness = (1.0 - f32_of(graph.num(k, "shininess", 0.2))).clamp(0.0, 1.0);
+                    srgb("diffuseColor", 0.8)
+                });
+                phong.opacity = opacity(k);
+                phong.emissive = srgb("emissiveColor", 0.0);
+                phong.specular = Some(srgb("specularColor", 0.0));
+                phong.exponent = Some(f32_of(graph.num(k, "shininess", 0.2)).clamp(0.0, 1.0) * 128.0);
+                phong.pbr().set_full(&mut m);
             }
             Some((k, "PhysicalMaterial")) => {
                 let [r, gr, b] = lin(graph.vec(k, "baseColor", [1.0; 3]));
@@ -688,10 +762,9 @@ impl Convert<'_> {
             && self.keep.textures
         {
             let dir = &self.dirs[g];
-            let image = graph.strs(t, "url").iter().find_map(|u| {
-                let found = self.assets.find(u, dir)?;
-                self.images.file(self.assets, found, u)
-            });
+            let urls = graph.strs(t, "url");
+            // The urls are alternatives: the first that is found.
+            let image = self.images.find(self.assets, urls, &[dir]);
             if let Some(image) = image {
                 let mut tex = Tex::new(image);
                 tex.wrap = [graph.flag(t, "repeatS", true), graph.flag(t, "repeatT", true)]
@@ -864,11 +937,23 @@ impl Convert<'_> {
             "DirectionalLight" => "directional",
             "PointLight" => "point",
             _ => {
-                let half = std::f64::consts::FRAC_PI_2;
-                let outer = graph.num(id, "cutOffAngle", half).clamp(1e-4, half);
-                let inner = graph
-                    .num(id, "beamWidth", std::f64::consts::FRAC_PI_4)
-                    .clamp(0.0, outer * 0.999);
+                // cutOffAngle is the cone's outer bound and beamWidth the inner cone of full intensity; a
+                // beam wider than the cut-off is the cut-off. The defaults went with the version: VRML97 and
+                // X3D up to 3.2 have a beam of pi/2 in a cut-off of pi/4 (so the whole cone is at full
+                // intensity), X3D 3.3 a beam of pi/4 in a cut-off of pi/2, and X3D 4 a beam of 3 pi/16.
+                use std::f64::consts::{FRAC_PI_2, FRAC_PI_4, PI};
+                let version = graph.version.as_str();
+                let number = |s: &str| s.parse::<u32>().ok();
+                let mut parts = version.split('.').map(number);
+                let (major, minor) = (parts.next().flatten().unwrap_or(2), parts.next().flatten().unwrap_or(0));
+                let (beam, cut_off) = match (major, minor) {
+                    (4.., _) => (PI * 3.0 / 16.0, FRAC_PI_2),
+                    (3, 3..) => (FRAC_PI_4, FRAC_PI_2),
+                    _ => (FRAC_PI_2, FRAC_PI_4),
+                };
+                let outer = graph.num(id, "cutOffAngle", cut_off).clamp(1e-4, FRAC_PI_2);
+                // glTF wants the inner angle under the outer one.
+                let inner = graph.num(id, "beamWidth", beam).clamp(0.0, outer * 0.999);
                 light["spot"] = json!({ "innerConeAngle": inner, "outerConeAngle": outer });
                 "spot"
             }
@@ -881,18 +966,84 @@ impl Convert<'_> {
         Some(self.push_node(Value::Object(node)))
     }
 
-    fn finish(mut self, roots: &[usize], info: &Info) -> Document<'static> {
-        let mut source = json!({ "format": info.format, "encoding": info.encoding });
-        let main = &self.graphs[0];
-        if !main.version.is_empty() {
-            source["version"] = json!(main.version);
-        }
+    fn finish(mut self, roots: &[usize], info: &Info) -> Document {
+        let mut source = Map::new();
+        source.insert("encoding".into(), json!(info.encoding));
         if info.gzip {
-            source["gzip"] = json!(true);
+            source.insert("gzip".into(), json!(true));
         }
-        if let Some(t) = &self.title {
-            source["title"] = json!(t);
+        if info.cut {
+            source.insert("truncated".into(), json!(true));
         }
+        let main = &self.graphs[0];
+        let unit = main.unit.filter(|u| u.is_finite() && *u > 0.0);
+        let mut si = SourceInfo {
+            format: Some(info.format.into()),
+            version: (!main.version.is_empty()).then(|| main.version.clone()),
+            // Lengths are meters unless a `UNIT` says otherwise.
+            meters_per_unit: Fact::Declared(unit.unwrap_or(1.0)),
+            unit: Some(
+                main.unit_name
+                    .clone()
+                    .filter(|_| unit.is_some())
+                    .unwrap_or_else(|| "meter".into()),
+            ),
+            // The standard's coordinate system: right-handed, +Y straight up.
+            up_axis: Fact::Declared(Axis::PosY),
+            handedness: Fact::Declared(Handedness::Right),
+            title: self.title.clone(),
+            comments: std::mem::take(&mut self.info),
+            ..SourceInfo::default()
+        };
+        let mut other = Map::new();
+        for (name, content) in &main.meta {
+            let content = content.trim();
+            if content.is_empty() {
+                continue;
+            }
+            let join = |slot: &mut Option<String>| {
+                *slot = Some(match slot.take() {
+                    Some(old) if old != content => format!("{old}; {content}"),
+                    Some(old) => old,
+                    None => content.to_owned(),
+                });
+            };
+            match name.to_ascii_lowercase().as_str() {
+                "title" => {
+                    if si.title.is_none() {
+                        si.title = Some(content.to_owned());
+                    }
+                }
+                "creator" | "author" => join(&mut si.author),
+                "generator" => join(&mut si.tool),
+                "description" => join(&mut si.description),
+                "copyright" | "rights" => join(&mut si.copyright),
+                "license" => join(&mut si.license),
+                "created" => join(&mut si.created),
+                "modified" => join(&mut si.modified),
+                "keywords" => si.keywords.extend(
+                    content
+                        .split([',', ';'])
+                        .map(str::trim)
+                        .filter(|k| !k.is_empty())
+                        .map(str::to_owned),
+                ),
+                _ => {
+                    // Kept as the file has it; a name given twice keeps each content.
+                    match other.get_mut(name) {
+                        Some(Value::Array(a)) => a.push(json!(content)),
+                        Some(v) => *v = json!([v.take(), content]),
+                        None => {
+                            other.insert(name.clone(), json!(content));
+                        }
+                    }
+                }
+            }
+        }
+        if !other.is_empty() {
+            source.insert("meta".into(), Value::Object(other));
+        }
+        si.write(&mut source);
         let mut skipped = std::mem::take(&mut self.skipped);
         for g in &self.graphs {
             for (k, n) in &g.skipped {
@@ -901,10 +1052,10 @@ impl Convert<'_> {
             self.notes.extend(&g.notes);
         }
         if !skipped.is_empty() {
-            source["skipped"] = json!(skipped);
+            source.insert("skipped".into(), json!(skipped));
         }
         if !self.notes.is_empty() {
-            source["notes"] = json!(self.notes);
+            source.insert("notes".into(), json!(self.notes));
         }
         let mut json = Map::new();
         json.insert("asset".into(), json!({ "extras": { "source": source } }));
@@ -995,24 +1146,7 @@ fn quat(r: [f64; 4]) -> [f64; 4] {
     if !(len > 1e-12 && len.is_finite() && r[3].is_finite()) {
         return [0.0, 0.0, 0.0, 1.0];
     }
-    let (s, c) = (r[3] / 2.0).sin_cos();
-    [r[0] / len * s, r[1] / len * s, r[2] / len * s, c]
-}
-
-/// `v` turned by unit quaternion `q`.
-fn rotate(q: [f64; 4], v: [f64; 3]) -> [f64; 3] {
-    let [x, y, z, w] = q;
-    // v + 2w(u × v) + 2u × (u × v), u the vector part.
-    let t = [
-        2.0 * (y * v[2] - z * v[1]),
-        2.0 * (z * v[0] - x * v[2]),
-        2.0 * (x * v[1] - y * v[0]),
-    ];
-    [
-        v[0] + w * t[0] + (y * t[2] - z * t[1]),
-        v[1] + w * t[1] + (z * t[0] - x * t[2]),
-        v[2] + w * t[2] + (x * t[1] - y * t[0]),
-    ]
+    quat::about_axis([r[0] / len, r[1] / len, r[2] / len], r[3])
 }
 
 /// The turn from -Z, where glTF lights and cameras point, to `d`; `None` for none or no

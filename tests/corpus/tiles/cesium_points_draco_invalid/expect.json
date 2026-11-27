@@ -1,0 +1,7 @@
+{
+  "spec": "3D Tiles 1.0 (OGC 18-053r2): pnts with Draco data, whose batch table names properties neither that nor its empty binary body holds",
+  "source": "CesiumGS/cesium Specs/Data/Cesium3DTiles/PointCloud/PointCloudDracoInvalid at 49f9cfe7c2c0 (Apache-2.0, LICENSE-cesium); expectations decoded by tools/corpus/tiles.py",
+  "needs": "draco",
+  "error": "runs past the binary body",
+  "error_kind": "Truncated"
+}

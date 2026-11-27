@@ -97,19 +97,28 @@ pub fn first_frame_only(ext: &str) -> bool {
     matches!(ext, "md2" | "md3" | "mdc")
 }
 
-pub fn polysmelt_reads(ext: &str) -> bool {
-    polysmelt::formats::EXTENSIONS.contains(&ext)
+/// Every extension Polysmelt reads, whether or not this build has the format's feature: each
+/// [`polysmelt::Format`]'s, and `xml` (an OGRE mesh or skeleton, told by its root element).
+pub fn polysmelt_extensions() -> Vec<&'static str> {
+    let mut exts: Vec<&str> = polysmelt::Format::all().flat_map(polysmelt::Format::extensions).copied().collect();
+    exts.push("xml");
+    exts
 }
 
-fn polysmelt_doc(src: &Src, keep: polysmelt::document::Keep) -> Result<polysmelt::document::Document<'static>, String> {
-    let ext = src.ext();
-    let folder = polysmelt::assets::Folder::new(src.dir());
+pub fn polysmelt_reads(ext: &str) -> bool {
+    ext == "xml" || polysmelt::Format::from_extension(ext).is_some()
+}
+
+fn polysmelt_doc(src: &Src, keep: polysmelt::Keep) -> Result<polysmelt::Document, String> {
+    let loader = polysmelt::Loader::new().keep(keep);
     match src {
-        Src::File(p) => polysmelt::formats::load(p, &ext, &folder, keep).map_err(e),
+        // Its references are found from its folder, as a `Folder` rooted there finds them.
+        Src::File(p) => loader.open(p).map_err(e),
         Src::Bytes(b, p) => {
             // The model's path, so that what it references resolves from its folder.
             let name = p.to_string_lossy().into_owned();
-            polysmelt::formats::load_bytes(b, &name, &ext, &folder, keep).map(|d| d.into_owned()).map_err(e)
+            let folder = polysmelt::assets::Folder::new(src.dir());
+            loader.read_with(b.to_vec(), &name, &folder).map_err(e)
         }
     }
 }
@@ -188,7 +197,7 @@ pub fn json_stats(json: &Map<String, Value>) -> Stats {
 }
 
 fn doc_stats(doc: &polysmelt::document::Document) -> Stats {
-    let mut s = json_stats(&doc.json);
+    let mut s = json_stats(doc.json());
     let fact = |k: &str| doc.facts.get(k).and_then(Value::as_u64);
     for (k, name) in [("voxels", "voxels"), ("frames", "frames"), ("channels", "bvh_channels")] {
         if let Some(v) = fact(k) {
@@ -200,13 +209,13 @@ fn doc_stats(doc: &polysmelt::document::Document) -> Stats {
 }
 
 fn polysmelt_doc_stats(r: &dyn Any) -> Stats {
-    if let Some(doc) = r.downcast_ref::<polysmelt::document::Document<'static>>() {
+    if let Some(doc) = r.downcast_ref::<polysmelt::Document>() {
         return doc_stats(doc);
     }
-    if let Some((doc, _)) = r.downcast_ref::<(polysmelt::document::Document<'static>, Option<polysmelt::mesh::Mesh>)>() {
+    if let Some((doc, _)) = r.downcast_ref::<(polysmelt::Document, Option<polysmelt::mesh::Mesh>)>() {
         return doc_stats(doc);
     }
-    if let Some((doc, _)) = r.downcast_ref::<(polysmelt::document::Document<'static>, Vec<u8>)>() {
+    if let Some((doc, _)) = r.downcast_ref::<(polysmelt::Document, Vec<u8>)>() {
         return doc_stats(doc);
     }
     Stats::new()
@@ -235,19 +244,19 @@ fn polysmelt_keep(src: &Src, keep: polysmelt::document::Keep) -> Out {
 
 pub fn polysmelt(src: &Src) -> Out {
     use polysmelt::document::Keep;
-    polysmelt_keep(src, Keep { threads: 1, ..Keep::ALL })
+    polysmelt_keep(src, Keep::ALL.with_threads(1))
 }
 
 pub fn polysmelt_all_cores(src: &Src) -> Out {
     use polysmelt::document::Keep;
-    polysmelt_keep(src, Keep { threads: 0, ..Keep::ALL })
+    polysmelt_keep(src, Keep::ALL.with_threads(0))
 }
 
 /// Without reading the bytes of the image files a model names: the work libraries that keep only
 /// an image's path (assimp, `gltf` without image decoding) do.
 pub fn polysmelt_no_image_bytes(src: &Src) -> Out {
     use polysmelt::document::Keep;
-    polysmelt_keep(src, Keep { threads: 1, image_bytes: false, ..Keep::ALL })
+    polysmelt_keep(src, Keep::ALL.with_threads(1).with_image_bytes(false))
 }
 
 /// The first frame alone, without morph targets, animation or texture files read: the work a
@@ -257,14 +266,14 @@ pub fn polysmelt_first_frame(src: &Src) -> Out {
     use polysmelt::document::Keep;
     polysmelt_keep(
         src,
-        Keep { threads: 1, morph_targets: false, animations: false, image_bytes: false, ..Keep::ALL },
+        Keep::ALL.with_threads(1).with_morph_targets(false).with_animations(false).with_image_bytes(false),
     )
 }
 
 /// A conversion: load, and write the document as a GLB in memory.
 pub fn polysmelt_glb(src: &Src) -> Out {
     use polysmelt::document::Keep;
-    let doc = polysmelt_doc(src, Keep { threads: 1, ..Keep::ALL })?;
+    let doc = polysmelt_doc(src, Keep::ALL.with_threads(1))?;
     let glb = doc.to_glb().map_err(e)?;
     let k = glb.len();
     loaded((doc, glb), k, polysmelt_doc_stats)
@@ -279,9 +288,9 @@ pub fn polysmelt_convert(src: &Src) -> Out {
     let mesh = doc.flatten(Pose::Rest).map_err(e)?;
     let k = mesh.as_ref().map_or(0, polysmelt::mesh::Mesh::triangles);
     if let Some(m) = &mesh {
-        polysmelt::mesh::to_glb(m).map_err(e)?;
+        m.to_glb().map_err(e)?;
     }
-    if doc.json.get("animations").is_some() {
+    if doc.json().get("animations").is_some() {
         doc.rig().map_err(e)?;
     }
     loaded((glb, mesh), k, no_stats)
@@ -294,7 +303,7 @@ pub fn polysmelt_glbs(path: &Path) -> Result<(Vec<u8>, Option<Vec<u8>>), String>
     let doc = polysmelt_doc(&Src::File(path), Keep::ALL)?;
     let glb = doc.to_glb().map_err(e)?;
     let mesh = match doc.flatten(Pose::Rest).map_err(e)? {
-        Some(m) => Some(polysmelt::mesh::to_glb(&m).map_err(e)?),
+        Some(m) => Some(m.to_glb().map_err(e)?),
         None => None,
     };
     Ok((glb, mesh))

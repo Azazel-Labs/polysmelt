@@ -5,37 +5,68 @@
   "facts": {
     "segments": 2,
     "frames": 0,
-    "frame_time": 0.016666666666666666,
     "unknown_parents": 1
   },
   "document": {
-    "nodes": 4,
+    "nodes": 5,
     "animations": 0,
     "channels": 0,
     "node_names": [
       "Hips",
       "Arm",
       "Hips_end",
-      "Arm_end"
+      "Arm_end",
+      "RootNode"
     ]
   },
   "json": {
     "/asset/extras/source/format": "HTR",
-    "/asset/extras/source/upAxis": "Y",
+    "/asset/extras/source/upAxis": "+Y",
+    "/asset/extras/source/unit": "millimeter",
+    "/asset/extras/source/unitAsWritten": "mm",
+    "/asset/extras/source/metersPerUnit": 0.001,
+    "/asset/extras/source/frameRate": 60.0,
+    "/asset/extras/source/assumed": null,
     "/scenes/0/nodes": [
+      4
+    ],
+    "/nodes/4/children": [
       0,
       1
+    ],
+    "/asset/extras/source/converted": [
+      "units"
     ],
     "/animations": null
   },
   "rig": [
     {
-      "node": "Hips",
+      "node": "RootNode",
       "parent": null,
       "translation": [
-        0.01,
-        0.95,
-        -0.02
+        0,
+        0,
+        0
+      ],
+      "rotation": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "scale": [
+        0.001,
+        0.001,
+        0.001
+      ]
+    },
+    {
+      "node": "Hips",
+      "parent": "RootNode",
+      "translation": [
+        10.0,
+        950.0,
+        -20.0
       ],
       "rotation": [
         0.054447,
@@ -47,14 +78,19 @@
         1,
         1,
         1
+      ],
+      "world": [
+        0.01,
+        0.95,
+        -0.02
       ]
     },
     {
       "node": "Arm",
-      "parent": null,
+      "parent": "RootNode",
       "translation": [
         0.0,
-        0.12,
+        120.0,
         0.0
       ],
       "rotation": [
@@ -67,15 +103,20 @@
         1,
         1,
         1
+      ],
+      "world": [
+        0.0,
+        0.12,
+        0.0
       ]
     },
     {
       "node": "Hips_end",
       "parent": "Hips",
       "translation": [
-        0.0,
-        0.12,
-        0.0
+        0,
+        120,
+        0
       ],
       "rotation": [
         0,
@@ -88,9 +129,9 @@
       "node": "Arm_end",
       "parent": "Arm",
       "translation": [
-        0.0,
-        0.3,
-        0.0
+        0,
+        300,
+        0
       ],
       "rotation": [
         0,

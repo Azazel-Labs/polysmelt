@@ -8,6 +8,11 @@ use std::collections::HashMap;
 use quick_xml::Reader;
 use quick_xml::events::Event;
 
+use crate::formats::stream::{self, f32_lenient, f64_lenient, tokens};
+use crate::formats::xml as shared;
+use crate::gltf::percent_decode;
+use crate::num::u32_of;
+
 /// No element: the end of a list of children.
 const NONE: u32 = u32::MAX;
 
@@ -40,6 +45,9 @@ pub(super) struct Dom<'a> {
     /// The names of the folders the first document is in, the innermost last, so a path that steps
     /// out of its folder and back in (`../here/x.dae`) is known for the same as `x.dae`.
     home: Vec<String>,
+    /// Whether the first document stops before its XML does: elements still open at its end, or a tag the
+    /// file ends inside.
+    pub(super) cut: bool,
 }
 
 /// An attribute: its local name and its unescaped value.
@@ -84,6 +92,7 @@ impl<'a> Dom<'a> {
             ids: HashMap::new(),
             docs: Vec::new(),
             home: Vec::new(),
+            cut: false,
         };
         let mut reader = Reader::from_reader(bytes);
         let config = reader.config_mut();
@@ -95,7 +104,14 @@ impl<'a> Dom<'a> {
         let mut skipped = 0usize;
         loop {
             let event = match reader.read_event() {
-                Ok(Event::Eof) | Err(_) => break,
+                Ok(Event::Eof) => {
+                    dom.cut = !stack.is_empty() || skipped > 0;
+                    break;
+                }
+                Err(_) => {
+                    dom.cut = true;
+                    break;
+                }
                 Ok(e) => e,
             };
             match event {
@@ -131,8 +147,9 @@ impl<'a> Dom<'a> {
                 }
                 Event::GeneralRef(r) if skipped == 0 => {
                     if let Some(&top) = stack.last() {
-                        let resolved = resolve_reference(&r);
-                        dom.append(top, Cow::Owned(resolved));
+                        let mut text = Vec::new();
+                        shared::push_reference(&r, &mut text);
+                        dom.append(top, Cow::Owned(text));
                     }
                 }
                 _ => {}
@@ -272,7 +289,8 @@ impl<'a> Dom<'a> {
         self.els[e].text.trim_ascii()
     }
 
-    /// The trimmed text inside an element as a string (empty when it isn't UTF-8).
+    /// The trimmed text inside an element as a string. The document is UTF-8 by the time it's parsed
+    /// ([`crate::formats::xml::utf8`]).
     pub(super) fn string(&self, e: usize) -> &str {
         std::str::from_utf8(self.text(e)).unwrap_or("")
     }
@@ -556,7 +574,7 @@ fn split_borrowed<'a>(b: &'a [u8], attrs: &mut Vec<Attr<'a>>) -> Cow<'a, [u8]> {
             &b[v0..i]
         };
         if !key.is_empty() {
-            attrs.push((Cow::Borrowed(local(key)), unescape(value)));
+            attrs.push((Cow::Borrowed(local(key)), shared::unescape_lossy(value)));
         }
     }
     Cow::Borrowed(name)
@@ -572,57 +590,6 @@ fn local(name: &[u8]) -> &[u8] {
         Some(k) => &name[k + 1..],
         None => name,
     }
-}
-
-/// An attribute value with its references resolved.
-fn unescape(v: &[u8]) -> Cow<'_, str> {
-    if !v.contains(&b'&') {
-        return String::from_utf8_lossy(v);
-    }
-    let mut out = Vec::with_capacity(v.len());
-    let mut i = 0;
-    while i < v.len() {
-        if v[i] == b'&'
-            && let Some(len) = v[i + 1..].iter().take(12).position(|&c| c == b';')
-        {
-            out.extend(resolve_reference(&v[i + 1..i + 1 + len]));
-            i += len + 2;
-            continue;
-        }
-        out.push(v[i]);
-        i += 1;
-    }
-    Cow::Owned(String::from_utf8_lossy(&out).into_owned())
-}
-
-/// The text an entity or character reference (without `&` and `;`) stands for; an unknown one
-/// as it was written.
-fn resolve_reference(name: &[u8]) -> Vec<u8> {
-    let fixed: &[u8] = match name {
-        b"amp" => b"&",
-        b"lt" => b"<",
-        b"gt" => b">",
-        b"quot" => b"\"",
-        b"apos" => b"'",
-        _ => {
-            let code = match name {
-                [b'#', b'x' | b'X', hex @ ..] => std::str::from_utf8(hex)
-                    .ok()
-                    .and_then(|h| u32::from_str_radix(h, 16).ok()),
-                [b'#', dec @ ..] => std::str::from_utf8(dec).ok().and_then(|d| d.parse().ok()),
-                _ => None,
-            };
-            if let Some(c) = code.and_then(char::from_u32) {
-                return c.to_string().into_bytes();
-            }
-            let mut v = Vec::with_capacity(name.len() + 2);
-            v.push(b'&');
-            v.extend_from_slice(name);
-            v.push(b';');
-            return v;
-        }
-    };
-    fixed.to_vec()
 }
 
 /// `path` taken from the folder `dir` (empty, or with a trailing `/`), its `.` and `..` parts
@@ -641,257 +608,40 @@ pub(super) fn join(dir: &str, path: &str) -> String {
     parts.join("/")
 }
 
-/// `s` with `%XX` escapes decoded.
-pub(super) fn percent_decode(s: &str) -> String {
-    if !s.contains('%') {
-        return s.to_owned();
-    }
-    let b = s.as_bytes();
-    let mut out = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] == b'%'
-            && i + 2 < b.len()
-            && let (Some(h), Some(l)) = (hex(b[i + 1]), hex(b[i + 2]))
-        {
-            out.push(h * 16 + l);
-            i += 3;
-            continue;
-        }
-        out.push(b[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-fn hex(c: u8) -> Option<u8> {
-    match c {
-        b'0'..=b'9' => Some(c - b'0'),
-        b'a'..=b'f' => Some(c - b'a' + 10),
-        b'A'..=b'F' => Some(c - b'A' + 10),
-        _ => None,
-    }
-}
-
-/// Bytes from hexadecimal text (whitespace ignored); `None` when it isn't hexadecimal.
-pub(super) fn from_hex(text: &[u8]) -> Option<Vec<u8>> {
-    let digits: Vec<u8> = text.iter().copied().filter(|c| !c.is_ascii_whitespace()).collect();
-    if !digits.len().is_multiple_of(2) {
-        return None;
-    }
-    digits
-        .chunks_exact(2)
-        .map(|p| Some(hex(p[0])? * 16 + hex(p[1])?))
-        .collect()
-}
-
-/// Bytes from base64 text (whitespace ignored); `None` when it isn't base64.
-pub(super) fn from_base64(text: &[u8]) -> Option<Vec<u8>> {
-    let value = |c: u8| -> Option<u32> {
-        Some(u32::from(match c {
-            b'A'..=b'Z' => c - b'A',
-            b'a'..=b'z' => c - b'a' + 26,
-            b'0'..=b'9' => c - b'0' + 52,
-            b'+' | b'-' => 62,
-            b'/' | b'_' => 63,
-            _ => return None,
-        }))
-    };
-    let mut out = Vec::with_capacity(text.len() * 3 / 4);
-    let (mut acc, mut bits) = (0u32, 0u32);
-    for &c in text {
-        if c.is_ascii_whitespace() {
-            continue;
-        }
-        if c == b'=' {
-            break;
-        }
-        acc = (acc << 6) | value(c)?;
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            out.push(((acc >> bits) & 0xFF).to_le_bytes()[0]);
-        }
-    }
-    Some(out)
-}
-
-#[allow(
-    clippy::cast_possible_truncation,
-    reason = "the tree is far smaller than 2^32 elements"
-)]
-fn u32_of(n: usize) -> u32 {
-    n as u32
-}
-
-/// Powers of ten a `f64` holds exactly.
-const POW10: [f64; 23] = [
-    1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18, 1e19, 1e20,
-    1e21, 1e22,
-];
-
 /// The numbers in whitespace-separated text, as `f64`: anything that isn't one reads as 0.
 pub(super) fn floats(text: &[u8], out: &mut Vec<f64>) {
-    let n = text.len();
-    let mut i = 0;
-    loop {
-        while i < n && text[i] <= b' ' {
-            i += 1;
-        }
-        if i >= n {
-            break;
-        }
-        let start = i;
-        while i < n && text[i] > b' ' {
-            i += 1;
-        }
-        out.push(float(&text[start..i]));
-    }
+    out.extend(tokens(text).map(float));
 }
 
 /// The numbers in whitespace-separated text, as `f32`, non-finite ones as 0.
 pub(super) fn floats32(text: &[u8]) -> Vec<f32> {
-    let n = text.len();
-    let mut out = Vec::with_capacity(n / 6);
-    let mut i = 0;
-    loop {
-        while i < n && text[i] <= b' ' {
-            i += 1;
-        }
-        if i >= n {
-            break;
-        }
-        let start = i;
-        while i < n && text[i] > b' ' {
-            i += 1;
-        }
-        let v = crate::num::f32_of(float(&text[start..i]));
-        out.push(if v.is_finite() { v } else { 0.0 });
-    }
+    let mut out = Vec::with_capacity(text.len() / 6);
+    out.extend(tokens(text).map(|t| match stream::f32_from(t) {
+        Some(v) if v.is_finite() => v,
+        Some(_) => 0.0,
+        None => float32(t),
+    }));
     out
 }
 
-/// A number. The common short forms are read directly; anything else goes through the
-/// standard library, which rounds every form correctly. Not a number reads as 0.
-pub(super) fn float(t: &[u8]) -> f64 {
-    let n = t.len();
-    let mut i = 0;
-    let neg = match t.first() {
-        Some(b'-') => {
-            i = 1;
-            true
-        }
-        Some(b'+') => {
-            i = 1;
-            false
-        }
-        _ => false,
-    };
-    let mut mant: u64 = 0;
-    let mut digits = 0u32;
-    let mut seen = false;
-    let mut exp: i32 = 0;
-    let mut exact = true;
-    while i < n && t[i].is_ascii_digit() {
-        seen = true;
-        if digits < 19 {
-            mant = mant * 10 + u64::from(t[i] - b'0');
-            if mant != 0 {
-                digits += 1;
-            }
-        } else {
-            exact = false;
-        }
-        i += 1;
-    }
-    if i < n && t[i] == b'.' {
-        i += 1;
-        while i < n && t[i].is_ascii_digit() {
-            seen = true;
-            if digits < 19 {
-                mant = mant * 10 + u64::from(t[i] - b'0');
-                if mant != 0 {
-                    digits += 1;
-                }
-                exp -= 1;
-            } else {
-                exact = false;
-            }
-            i += 1;
-        }
-    }
-    if seen && i < n && (t[i] == b'e' || t[i] == b'E') {
-        i += 1;
-        let eneg = match t.get(i) {
-            Some(b'-') => {
-                i += 1;
-                true
-            }
-            Some(b'+') => {
-                i += 1;
-                false
-            }
-            _ => false,
-        };
-        let mut e: i32 = 0;
-        let e0 = i;
-        while i < n && t[i].is_ascii_digit() {
-            e = (e * 10 + i32::from(t[i] - b'0')).min(100_000);
-            i += 1;
-        }
-        if i == e0 {
-            exact = false;
-        }
-        exp += if eneg { -e } else { e };
-    }
-    if !seen || i != n || !exact {
-        return slow(t);
-    }
-    if mant == 0 {
-        return if neg { -0.0 } else { 0.0 };
-    }
-    if mant >= 1 << 53 || !(-22..=22).contains(&exp) {
-        return slow(t);
-    }
-    #[allow(clippy::cast_precision_loss, reason = "below 2^53, exactly")]
-    let m = mant as f64;
-    let e = POW10[exp.unsigned_abs() as usize];
-    let v = if exp >= 0 { m * e } else { m / e };
-    if neg { -v } else { v }
+/// The numbers in whitespace-separated text, as `f32`, as they are: a mesh's sources, where a position that
+/// isn't finite takes what's drawn on it out of the model rather than moving it to the origin. Anything that
+/// isn't a number reads as 0.
+pub(super) fn floats32_raw(text: &[u8]) -> Vec<f32> {
+    let mut out = Vec::with_capacity(text.len() / 6);
+    out.extend(tokens(text).map(|t| stream::f32_from(t).or_else(|| f32_lenient(t)).unwrap_or(0.0)));
+    out
 }
 
+/// A number in one of the rarer spellings [`f32_lenient`] takes, finite, or else 0.
 #[cold]
-fn slow(t: &[u8]) -> f64 {
-    std::str::from_utf8(t)
-        .ok()
-        .and_then(|s| s.parse::<f64>().ok())
-        .or_else(|| {
-            // `1.#INF` and `1.#QNAN`, as some writers put them.
-            let s = std::str::from_utf8(t).ok()?;
-            if s.contains("INF") {
-                Some(if s.starts_with('-') {
-                    f64::NEG_INFINITY
-                } else {
-                    f64::INFINITY
-                })
-            } else {
-                None
-            }
-        })
-        .or_else(|| {
-            // `1,5`: a decimal comma, as writers set to such a locale put it.
-            let comma = |c: &u8| *c == b',';
-            if t.contains(&b'.')
-                || t.iter()
-                    .position(comma)
-                    .is_none_or(|i| t.iter().rposition(comma) != Some(i))
-            {
-                return None;
-            }
-            let s: String = t.iter().map(|&c| if c == b',' { '.' } else { char::from(c) }).collect();
-            s.parse::<f64>().ok()
-        })
-        .unwrap_or(0.0)
+fn float32(t: &[u8]) -> f32 {
+    f32_lenient(t).filter(|v| v.is_finite()).unwrap_or(0.0)
+}
+
+/// A number, in any spelling [`f64_lenient`] takes. Not a number reads as 0.
+pub(super) fn float(t: &[u8]) -> f64 {
+    f64_lenient(t).filter(|v| !v.is_nan()).unwrap_or(0.0)
 }
 
 /// The whole numbers in whitespace-separated text; anything that isn't one (negative ones too)
@@ -901,63 +651,55 @@ pub(super) fn indices(text: &[u8]) -> Vec<u32> {
     let mut out = Vec::with_capacity(n / 3);
     let mut i = 0;
     loop {
-        while i < n && text[i] <= b' ' {
+        while i < n && stream::space(text[i]) {
             i += 1;
         }
         if i >= n {
             break;
         }
-        let mut v: u64 = 0;
-        let mut ok = true;
+        // Nearly every one is plain digits, read as the token is found.
         let start = i;
-        while i < n && text[i] > b' ' {
-            let c = text[i];
-            if c.is_ascii_digit() {
-                v = (v * 10 + u64::from(c - b'0')).min(u64::from(u32::MAX));
-            } else {
-                ok = false;
-            }
+        let mut v: u64 = 0;
+        while let Some(d) = text.get(i).map(|c| c.wrapping_sub(b'0')).filter(|&d| d <= 9) {
+            v = (v * 10 + u64::from(d)).min(u64::from(u32::MAX));
             i += 1;
         }
-        if !ok {
-            // `3.0` is 3; anything else is no index.
-            let tok = &text[start..i];
-            let f = float(tok);
-            ok = f >= 0.0 && f.fract() == 0.0 && f < f64::from(u32::MAX);
-            #[allow(
-                clippy::cast_possible_truncation,
-                clippy::cast_sign_loss,
-                reason = "checked just above"
-            )]
-            if ok {
-                v = f as u64;
+        if text.get(i).is_some_and(|&c| !stream::space(c)) {
+            while i < n && !stream::space(text[i]) {
+                i += 1;
             }
-        }
-        out.push(if ok {
-            u32::try_from(v).unwrap_or(u32::MAX)
+            out.push(index(&text[start..i]));
         } else {
-            u32::MAX
-        });
+            out.push(u32::try_from(v).unwrap_or(u32::MAX));
+        }
     }
     out
+}
+
+/// An index in any other spelling: `+3`, `-0`, or `3.0`, which is 3; anything else is no index.
+#[cold]
+fn index(t: &[u8]) -> u32 {
+    stream::int(t).unwrap_or_else(|| {
+        let f = f64_lenient(t).unwrap_or(f64::NAN);
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "checked to be a whole number in range"
+        )]
+        if f >= 0.0 && f.fract() == 0.0 && f < f64::from(u32::MAX) {
+            f as u32
+        } else {
+            u32::MAX
+        }
+    })
 }
 
 /// The whole numbers in whitespace-separated text, signed; anything that isn't one reads as -1.
 pub(super) fn ints(text: &[u8]) -> Vec<i64> {
-    let mut out = Vec::new();
-    for tok in text.split(|c| *c <= b' ').filter(|t| !t.is_empty()) {
-        let v = std::str::from_utf8(tok)
-            .ok()
-            .and_then(|s| s.parse::<i64>().ok())
-            .unwrap_or(-1);
-        out.push(v);
-    }
-    out
+    tokens(text).map(|t| stream::int(t).unwrap_or(-1)).collect()
 }
 
 /// The whitespace-separated words of `text`.
 pub(super) fn words(text: &[u8]) -> impl Iterator<Item = &str> {
-    text.split(|c| *c <= b' ')
-        .filter(|t| !t.is_empty())
-        .map(|t| std::str::from_utf8(t).unwrap_or(""))
+    tokens(text).map(|t| std::str::from_utf8(t).unwrap_or(""))
 }

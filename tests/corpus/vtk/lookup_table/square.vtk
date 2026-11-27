@@ -1,0 +1,18 @@
+# vtk DataFile Version 3.0
+a square
+ASCII
+DATASET POLYDATA
+POINTS 4 float
+0 0 0  1 0 0
+1 1 0  0 1 0
+POLYGONS 1 5
+4 0 1 2 3
+POINT_DATA 4
+SCALARS level float 1
+LOOKUP_TABLE ramp
+0 1 2 3
+LOOKUP_TABLE ramp 4
+1 0 0 1
+0 1 0 1
+0 0 1 1
+1 1 1 0.2

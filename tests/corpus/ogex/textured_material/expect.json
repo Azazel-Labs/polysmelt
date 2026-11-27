@@ -30,7 +30,7 @@
   },
   "document": {
     "source": {
-      "missingTextures": 1
+      "droppedTextures": 1
     }
   }
 }

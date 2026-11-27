@@ -1,0 +1,32 @@
+{
+  "spec": "Gmsh MSH file format: a real file: ASCII 2.2, a wire and its insulation: triangles in two physical surfaces and the lines of a physical curve",
+  "source": "meshio's test meshes (tests/meshes/msh), MIT license, see ../LICENSE-meshio; expectations computed with Gmsh 4.15.2, meshio 5.3.5 and VTK 9.7.2",
+  "triangles": 111,
+  "lines": 21,
+  "bounds": {
+    "min": [
+      -2.9664924144744873,
+      -2.9916114807128906,
+      0.0
+    ],
+    "max": [
+      3.0,
+      2.9916114807128906,
+      0.0
+    ]
+  },
+  "area": 27.854364,
+  "facts": {
+    "triangles": 111
+  },
+  "document": {
+    "nodes": 4,
+    "node_names": [
+      "convection",
+      "wire",
+      "insulation"
+    ]
+  },
+  "colors": false,
+  "uvs": false
+}

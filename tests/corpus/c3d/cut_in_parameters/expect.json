@@ -5,34 +5,37 @@
   "facts": {
     "markers": 3,
     "frames": 0,
-    "frame_rate": 100.0,
-    "frame_time": 0.01,
     "markers_never_seen": 3,
-    "up_axis_assumed": true,
     "frames_cut_off": 4,
     "parameters_cut_short": true
   },
   "document": {
-    "nodes": 4,
+    "nodes": 5,
     "animations": 0,
     "channels": 0,
     "node_names": [
       "markers",
       "marker1",
       "marker2",
-      "marker3"
+      "marker3",
+      "RootNode"
     ]
   },
   "json": {
     "/asset/extras/source/format": "C3D",
+    "/asset/extras/source/frameRate": 100.0,
+    "/asset/extras/source/metersPerUnit": null,
     "/scenes/0/nodes": [
-      0
+      4
+    ],
+    "/asset/extras/source/converted": [
+      "upAxis"
     ],
     "/animations": null
   },
   "rig": [
     {
-      "node": "markers",
+      "node": "RootNode",
       "parent": null,
       "translation": [
         0,
@@ -44,6 +47,31 @@
         0.0,
         0.0,
         0.707107
+      ],
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ]
+    },
+    {
+      "node": "markers",
+      "parent": "RootNode",
+      "translation": [
+        0,
+        0,
+        0
+      ],
+      "rotation": [
+        0,
+        0,
+        0,
+        1
+      ],
+      "scale": [
+        1,
+        1,
+        1
       ]
     },
     {

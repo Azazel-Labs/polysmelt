@@ -1,0 +1,23 @@
+{
+  "spec": "VTK File Formats: a real file: legacy ASCII 1.0, a red blood cell as an unstructured grid of triangles",
+  "source": "meshio's test meshes (tests/meshes), MIT license, see ../LICENSE-meshio; expectations computed with VTK 9.7.2",
+  "triangles": 996,
+  "bounds": {
+    "min": [
+      -4.225549221038818,
+      -1.5104140043258667,
+      -4.007984161376953
+    ],
+    "max": [
+      4.207241058349609,
+      1.5521060228347778,
+      3.9112958908081055
+    ]
+  },
+  "area": 132.452461,
+  "facts": {
+    "triangles": 996
+  },
+  "colors": false,
+  "uvs": false
+}

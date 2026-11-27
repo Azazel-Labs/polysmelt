@@ -1,0 +1,6 @@
+{
+  "spec": "XGL 1.0 (the XGL file format specification): a real file, the specification's sample",
+  "source": "assimp/assimp at 711b4e9bbde2, test/models/XGL/sample_official.xgl (BSD-3-Clause, see ../LICENSE-assimp); expectations measured with assimp 6.0.5 (assimp-py 1.2.0). assimp 6.0.5 leaves both objects where the mesh is, without their <TRANSFORM>'s <POSITION>, so only what moving them doesn't change is compared",
+  "triangles": 24,
+  "area": 12.0
+}

@@ -6,8 +6,9 @@ use std::path::Path;
 
 use super::xml;
 use crate::images::Location;
-use crate::material::{Alpha, CLAMP, Factor, Full, MIRROR, REPEAT, Specular, Tex, UvTransform};
-use crate::mesh::srgb_to_linear;
+use crate::legacy_material::{self, Phong, Rgb, Transparency};
+use crate::material::{CLAMP, Factor, Full, MIRROR, REPEAT, Specular, Tex, UvTransform};
+use crate::mesh::linear_rgba as linear;
 use crate::num::f32_of;
 
 /// What a shading channel (`diffuse`, `emission`, ...) holds.
@@ -24,23 +25,18 @@ fn luminance(c: [f32; 4]) -> f32 {
     0.212_671 * c[0] + 0.715_160 * c[1] + 0.072_169 * c[2]
 }
 
-/// A color with its RGB made linear.
-fn linear(c: [f32; 4]) -> [f32; 4] {
-    [srgb_to_linear(c[0]), srgb_to_linear(c[1]), srgb_to_linear(c[2]), c[3]]
-}
-
 impl super::Reader<'_> {
     /// The material of `<material>` `mat`; `uv` maps texture coordinate semantics to the `TEXCOORD_n` they read.
     pub(super) fn material(&mut self, mat: usize, uv: &[(String, u32)]) -> Full {
         let dom = self.dom;
+        // A material with no effect to read says nothing but its name: the default's look.
         let mut full = Full {
             name: dom
                 .attr(mat, "name")
                 .or_else(|| dom.attr(mat, "id"))
                 .unwrap_or("")
                 .to_owned(),
-            metallic: 0.0,
-            ..Full::default()
+            ..Full::from(legacy_material::default_material(false))
         };
         let instance = dom.child(mat, "instance_effect");
         let Some(effect) = instance
@@ -83,11 +79,18 @@ impl super::Reader<'_> {
                 .and_then(|(_, c)| c.clone())
         };
 
-        // The color: diffuse, or emission for the unlit constant shader.
+        // The color: diffuse, or emission for the unlit constant shader. A texture shows as painted.
         let color = if constant { get("emission") } else { get("diffuse") };
         let mut color_image = None;
+        let mut phong = Phong::new(Rgb::WHITE);
+        // The color's fourth number is no opacity (`transparent` and `transparency` give that); it is kept
+        // beside the color as written.
+        let mut fourth = 1.0;
         match color {
-            Some(Channel::Color(c)) => full.base_color = linear(c),
+            Some(Channel::Color(c)) => {
+                phong.diffuse = Rgb::Srgb([c[0], c[1], c[2]]);
+                fourth = linear(c)[3];
+            }
             Some(Channel::Texture(sampler, set, el)) => {
                 if let Some(t) = self.texture(&sampler, &set, el, &scopes, uv) {
                     color_image = Some(t.image);
@@ -97,48 +100,50 @@ impl super::Reader<'_> {
             _ => {}
         }
         full.unlit = constant;
+        let mut emissive_tex = None;
         if !constant {
             match get("emission") {
-                Some(Channel::Color(c)) => {
-                    let c = linear(c);
-                    full.emissive = [c[0], c[1], c[2]].map(|v| v.max(0.0));
-                }
+                Some(Channel::Color(c)) => phong.emissive = Rgb::Srgb([c[0], c[1], c[2]]),
                 Some(Channel::Texture(sampler, set, el)) => {
-                    if let Some(t) = self.texture(&sampler, &set, el, &scopes, uv) {
-                        full.emissive_tex = Some(t);
-                        full.emissive = [1.0; 3];
-                    }
+                    emissive_tex = self.texture(&sampler, &set, el, &scopes, uv);
                 }
                 _ => {}
             }
         }
+        // `<phong>` and `<blinn>` have a highlight: `<shininess>` is its exponent and `<specular>` its color
+        // (COLLADA 1.4.1, "phong" and "blinn"); `<lambert>` has none.
         let glossy = matches!(dom.name(shader), b"phong" | b"blinn");
-        full.roughness = match get("shininess") {
-            Some(Channel::Float(s)) if glossy && s.is_finite() => (2.0 / (s.max(0.0) + 2.0)).sqrt().clamp(0.05, 1.0),
-            _ => 1.0,
-        };
-        // The highlight's color, where half is glTF's usual.
+        phong.highlight = glossy;
+        let mut specular_tex = None;
         if glossy {
+            phong.exponent = match get("shininess") {
+                Some(Channel::Float(s)) if s.is_finite() => Some(s.max(0.0)),
+                _ => None,
+            };
             match get("specular") {
-                Some(Channel::Color(c)) => {
-                    let c = linear(c);
-                    full.specular = Some(Specular {
-                        factor: Factor::of(1.0),
-                        color: [c[0], c[1], c[2]].map(|v| if v.is_finite() { v.max(0.0) * 2.0 } else { 1.0 }),
-                        color_tex: None,
-                    });
-                }
+                Some(Channel::Color(c)) => phong.specular = Some(Rgb::Srgb([c[0], c[1], c[2]])),
                 Some(Channel::Texture(sampler, set, el)) => {
-                    if let Some(t) = self.texture(&sampler, &set, el, &scopes, uv) {
-                        full.specular = Some(Specular {
-                            factor: Factor::of(1.0),
-                            color: [1.0; 3],
-                            color_tex: Some(t),
-                        });
-                    }
+                    specular_tex = self.texture(&sampler, &set, el, &scopes, uv);
                 }
                 _ => {}
             }
+        }
+        phong.pbr().set_full(&mut full);
+        full.base_color[3] = fourth;
+        if constant {
+            // Unlit: nothing reflects, and nothing needs saying so.
+            full.specular = None;
+        }
+        if let Some(t) = emissive_tex {
+            full.emissive_tex = Some(t);
+            full.emissive = [1.0; 3];
+        }
+        if let Some(t) = specular_tex {
+            full.specular = Some(Specular {
+                factor: Factor::of(1.0),
+                color: [1.0; 3],
+                color_tex: Some(t),
+            });
         }
 
         // Transparency, in whichever of its modes says what is opaque.
@@ -157,8 +162,8 @@ impl super::Reader<'_> {
                         _ => c[3] * factor,
                     };
                     if alpha > 0.0 && alpha < 0.999 {
-                        full.alpha = Alpha::Blend;
                         full.base_color[3] *= alpha;
+                        full.alpha = Transparency::of(alpha).mode();
                     }
                 }
                 Some(Channel::Texture(sampler, set, el)) if mode == "A_ONE" => {
@@ -169,7 +174,11 @@ impl super::Reader<'_> {
                             .texture(&sampler, &set, el, &scopes, uv)
                             .is_some_and(|t| t.image == image)
                     {
-                        full.alpha = Alpha::Blend;
+                        let transparency = Transparency {
+                            texture_alpha: true,
+                            ..Transparency::of(1.0)
+                        };
+                        full.alpha = transparency.mode();
                     }
                 }
                 _ => {}
@@ -340,7 +349,7 @@ impl super::Reader<'_> {
         let name = dom.attr(el, "name").or_else(|| dom.attr(el, "id")).unwrap_or("image");
         let init = dom.child(el, "init_from");
         if let Some(hex) = init.and_then(|i| dom.child(i, "hex")).or_else(|| dom.child(el, "data")) {
-            let bytes = xml::from_hex(dom.text(hex))?;
+            let bytes = crate::formats::xml::from_hex(dom.text(hex))?;
             let format = dom.attr(hex, "format").unwrap_or("png").to_ascii_lowercase();
             let file = format!("{name}.{format}");
             let assets = self.assets;
@@ -367,35 +376,16 @@ impl super::Reader<'_> {
     /// The image at a URI: a `data:` URI, an entry of the archive, or a file beside the model.
     fn uri_image(&mut self, uri: &str) -> Option<usize> {
         let assets = self.assets;
-        if let Some(data) = uri.strip_prefix("data:") {
-            let (head, body) = data.split_once(',')?;
-            let bytes = if head.ends_with(";base64") {
-                xml::from_base64(body.as_bytes())?
-            } else {
-                xml::percent_decode(body).into_bytes()
-            };
-            let ext = head
-                .split(';')
-                .next()
-                .and_then(|m| m.strip_prefix("image/"))
-                .unwrap_or("png");
+        if uri.starts_with("data:") {
+            let (mime, bytes) = crate::gltf::data_uri(uri).ok()?;
+            let ext = mime.as_deref().and_then(|m| m.strip_prefix("image/")).unwrap_or("png");
             let file = format!("image.{ext}");
             return self.images.bytes(Cow::Owned(bytes), &file, Location::Embedded, |b| {
                 assets.image(b, Path::new(&file))
             });
         }
-        let decoded = xml::percent_decode(uri).replace('\\', "/");
-        let path = if let Some(rest) = decoded.strip_prefix("file:///") {
-            if rest.as_bytes().get(1) == Some(&b':') {
-                rest.to_owned()
-            } else {
-                format!("/{rest}")
-            }
-        } else if let Some(rest) = decoded.strip_prefix("file://") {
-            rest.strip_prefix("localhost").unwrap_or(rest).to_owned()
-        } else {
-            decoded
-        };
+        // The path the URI names, as every reader takes a reference ([`crate::assets::local_path`]).
+        let path = crate::assets::local_path(uri);
         let path = path.trim_start_matches("./").to_owned();
         if path.is_empty() {
             return None;
@@ -413,14 +403,21 @@ impl super::Reader<'_> {
             }
         }
         let relative = !path.starts_with('/') && path.as_bytes().get(1) != Some(&b':');
-        let found = assets.find(&path, self.dir).or_else(|| {
-            let base = self.base.as_deref()?;
-            let base = base.strip_prefix("file:///").unwrap_or(base);
-            let dir = base.rsplit_once('/').map_or("", |(d, _)| d);
-            relative
-                .then(|| assets.find(&format!("{dir}/{path}"), self.dir))
-                .flatten()
-        })?;
+        let found = assets
+            .find(uri, self.dir)
+            .or_else(|| assets.find(&path, self.dir))
+            .or_else(|| {
+                let base = self.base.as_deref()?;
+                let base = base.strip_prefix("file:///").unwrap_or(base);
+                let dir = base.rsplit_once('/').map_or("", |(d, _)| d);
+                relative
+                    .then(|| assets.find(&format!("{dir}/{path}"), self.dir))
+                    .flatten()
+            });
+        let Some(found) = found else {
+            self.images.miss(uri);
+            return None;
+        };
         self.images.file(assets, found, &path)
     }
 

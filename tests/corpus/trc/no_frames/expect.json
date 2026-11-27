@@ -5,34 +5,36 @@
   "facts": {
     "markers": 3,
     "frames": 0,
-    "frame_rate": 100.0,
-    "frame_time": 0.01,
-    "up_axis_assumed": true,
     "markers_never_seen": 3
   },
   "document": {
-    "nodes": 4,
+    "nodes": 5,
     "animations": 0,
     "channels": 0,
     "node_names": [
       "markers",
       "LASI",
       "R.Knee",
-      "Toe Tip"
+      "Toe Tip",
+      "RootNode"
     ]
   },
   "json": {
     "/asset/extras/source/format": "TRC",
-    "/asset/extras/source/upAxis": "Y",
+    "/asset/extras/source/upAxis": "+Y",
     "/scenes/0/nodes": [
-      0
+      4
     ],
     "/asset/extras/source/frameRate": 100.0,
+    "/asset/extras/source/metersPerUnit": 0.001,
+    "/asset/extras/source/converted": [
+      "units"
+    ],
     "/animations": null
   },
   "rig": [
     {
-      "node": "markers",
+      "node": "RootNode",
       "parent": null,
       "translation": [
         0,
@@ -43,6 +45,31 @@
         0,
         0,
         0,
+        1
+      ],
+      "scale": [
+        0.001,
+        0.001,
+        0.001
+      ]
+    },
+    {
+      "node": "markers",
+      "parent": "RootNode",
+      "translation": [
+        0,
+        0,
+        0
+      ],
+      "rotation": [
+        0,
+        0,
+        0,
+        1
+      ],
+      "scale": [
+        1,
+        1,
         1
       ]
     },

@@ -23,14 +23,15 @@
     {
       "name": "Shell",
       "color": [
-        0.433185,
-        0.095578,
-        0.023922,
+        0.304987,
+        0.07036,
+        0.018938,
         1.0
       ]
     }
   ],
   "json": {
-    "/asset/extras/source/format": "LWOB"
+    "/asset/extras/source/format": "LWO",
+    "/asset/extras/source/version": "LWOB"
   }
 }

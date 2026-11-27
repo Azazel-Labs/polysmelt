@@ -4,7 +4,8 @@
 //! chunks, the vertex declarations of v1.30 on (every element type, half floats and packed colors included), the
 //! level of detail layouts of v1.40, v1.41, v1.8 and v1.100, and the edge lists and extremes they may carry
 //! (skipped). The XML layouts are read as OGRE's converter writes them. A `.xml` file is told apart by its top
-//! element. OGRE models are right-handed and Y up with counter-clockwise faces, as glTF's are, so nothing is turned.
+//! element. OGRE models are right-handed and Y up with counter-clockwise faces, as glTF's are, so nothing is turned
+//! (the source info assumes both, as the engine's convention; the units' length is unknown).
 //!
 //! Each submesh of level of detail 0 becomes a primitive; one on the shared geometry gets only the shared vertices
 //! it uses. Strips, fans and line strips become lists; a submesh without indices draws its vertices in order.
@@ -14,7 +15,7 @@
 //! semantic, third and fourth texture coordinates) are noted in the facts.
 //!
 //! The skeleton the mesh links to is found among the assets, binary or XML. Its bones become nodes in their bind
-//! pose; the bone assignments become joints and weights, the four heaviest of each vertex scaled to sum to 1;
+//! pose; the bone assignments become joints and weights, up to sixteen of each vertex, scaled to sum to 1;
 //! inverse bind matrices come from the bind pose. Skeleton animations' keys are relative to the bind pose and
 //! are written as the poses they make; animations of linked skeletons are added, their translations scaled. A
 //! submesh without bone assignments goes in a second mesh without the skin, as OGRE draws it unskinned; the split
@@ -43,6 +44,8 @@ use crate::assets::Assets;
 use crate::document::{Document, Keep};
 use crate::images::Images;
 use crate::mesh::{Material, srgb_to_linear};
+use crate::quat;
+use crate::source::{Axis, Fact, Handedness};
 
 /// The most morph target and weights animation floats kept: offsets for every target's vertices, and every key's
 /// weights.
@@ -231,10 +234,9 @@ enum Parsed {
     Skeleton(SkeletonFile),
 }
 
-/// An XML file's text: UTF-8 without its byte order mark, or bytes as Latin-1.
-fn xml_text(data: &[u8]) -> String {
-    let data = data.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(data);
-    scene::text(data)
+/// An XML file's text: UTF-16 converted, UTF-8 without its byte order mark, or bytes as Latin-1.
+fn xml_text(data: &[u8]) -> std::borrow::Cow<'_, str> {
+    crate::formats::xml::text(data)
 }
 
 fn parse(data: &[u8]) -> Result<Parsed> {
@@ -245,19 +247,19 @@ fn parse(data: &[u8]) -> Result<Parsed> {
         if line.starts_with("[Serializer") {
             return binary::skeleton(data).map(Parsed::Skeleton);
         }
-        bail!("unknown OGRE file version {line}");
+        bail!(Unsupported, "unknown OGRE file version {line}");
     }
     let text = xml_text(data);
     let doc = xml::Xml::parse(&text)?;
     match doc.root().name() {
         "mesh" => xml::mesh(&doc).map(|m| Parsed::Mesh(Box::new(m))),
         "skeleton" => xml::skeleton(&doc).map(Parsed::Skeleton),
-        other => bail!("not an OGRE mesh or skeleton: its XML is a <{other}>"),
+        other => bail!(UnknownFormat, "not an OGRE mesh or skeleton: its XML is a <{other}>"),
     }
 }
 
 /// Reads an OGRE mesh or skeleton, binary or XML.
-pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document<'static>> {
+pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document> {
     let data = input.read()?;
     let name = input
         .path
@@ -277,11 +279,10 @@ pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
             let bones = add_bones(&mut scene, &skel);
             let links = linked(&skel, &input, assets, &mut facts);
             add_skeleton_animations(&mut scene, &skel, &bones, &links, &mut facts);
-            scene.source.insert("format".into(), json!("OGRE"));
-            scene.source.insert("version".into(), json!(skel.version));
+            convention(&mut scene, &skel.version);
             scene.source.insert("kind".into(), json!("skeleton"));
             if skel.big_endian {
-                scene.source.insert("byteOrder".into(), json!("big-endian"));
+                scene.source.insert("byteOrder".into(), json!("big"));
             }
             if let Some(m) = skel.blend_mode {
                 scene.source.insert("blendMode".into(), json!(m));
@@ -292,6 +293,14 @@ pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
             scene.finish(keep)
         }
     }
+}
+
+/// The source info every OGRE file shares: its format and version, and the engine's right-handed, Y up convention.
+fn convention(scene: &mut Scene, version: &str) {
+    scene.info.format = Some("OGRE".into());
+    scene.info.version = Some(version.to_owned());
+    scene.info.up_axis = Fact::Assumed(Axis::PosY);
+    scene.info.handedness = Fact::Assumed(Handedness::Right);
 }
 
 /// The bones' nodes, in the skeleton's order, each found by its handle.
@@ -306,7 +315,7 @@ fn add_bones(scene: &mut Scene, skel: &SkeletonFile) -> Bones {
     for (k, b) in skel.bones.iter().enumerate() {
         let mut node = Node::named(b.name.clone(), None);
         node.translation = b.position;
-        node.rotation = scene::normalize(b.rotation.map(f64::from));
+        node.rotation = quat::normalize(b.rotation.map(f64::from));
         node.scale = b.scale;
         nodes.push(scene.add(node));
         by_handle.entry(b.handle).or_insert(k);
@@ -416,7 +425,7 @@ fn add_skeleton_animations(
             let rotation: Vec<f32> = t
                 .keys
                 .iter()
-                .flat_map(|key| scene::normalize(scene::quat_mul(bind, key.rotation.map(f64::from))))
+                .flat_map(|key| quat::normalize(quat::mul(bind, key.rotation.map(f64::from))))
                 .collect();
             #[allow(clippy::float_cmp, reason = "a scale of exactly 1 everywhere needs no channel")]
             let scaled = t.keys.iter().any(|key| key.scale != [1.0; 3]);
@@ -483,7 +492,8 @@ fn lists(sub: &SubMesh, n: usize) -> (Vec<u32>, bool, bool) {
         5 => {
             let mut out = Vec::with_capacity(idx.len().saturating_sub(2) * 3);
             for (k, w) in idx.windows(3).enumerate() {
-                if w[0] == w[1] || w[1] == w[2] || w[0] == w[2] {
+                // A strip's triangle on one vertex twice restarts the strip, and draws nothing.
+                if !crate::geometry::distinct([w[0], w[1], w[2]]) {
                     continue;
                 }
                 if k % 2 == 0 {
@@ -498,7 +508,9 @@ fn lists(sub: &SubMesh, n: usize) -> (Vec<u32>, bool, bool) {
             let mut out = Vec::with_capacity(idx.len().saturating_sub(2) * 3);
             if let Some(&c) = idx.first() {
                 for w in idx[1.min(idx.len())..].windows(2) {
-                    out.extend_from_slice(&[c, w[0], w[1]]);
+                    if crate::geometry::distinct([c, w[0], w[1]]) {
+                        out.extend_from_slice(&[c, w[0], w[1]]);
+                    }
                 }
             }
             (out, false, false)
@@ -515,9 +527,10 @@ fn gather<T: Copy>(v: &[T], used: Option<&[u32]>) -> Vec<T> {
     }
 }
 
-/// Each vertex's four heaviest bone assignments, as joints (indices into the bones) and weights summing to 1.
-fn influences(assigns: &[Assign], n: usize, bones: &Bones, unknown: &mut usize) -> Vec<[(u32, f32); 4]> {
-    let mut out = vec![[(0u32, 0.0f32); 4]; n];
+/// Each vertex's bone assignments as the file lists them, as joints (indices into the bones) and weights: the
+/// shared writer merges them, keeps the strongest and makes them sum to 1 ([`crate::skin`]).
+fn influences(assigns: &[Assign], n: usize, bones: &Bones, unknown: &mut usize) -> Vec<Vec<(u32, f32)>> {
+    let mut out = vec![Vec::new(); n];
     for a in assigns {
         let Some(slot) = out.get_mut(a.vertex as usize) else {
             *unknown += 1;
@@ -530,27 +543,12 @@ fn influences(assigns: &[Assign], n: usize, bones: &Bones, unknown: &mut usize) 
         if !(a.weight > 0.0 && a.weight.is_finite()) {
             continue;
         }
-        let joint = crate::num::u32_of(joint);
-        // The lightest slot, unless a slot already holds this joint.
-        if let Some(s) = slot.iter_mut().find(|s| s.0 == joint && s.1 > 0.0) {
-            s.1 += a.weight;
-            continue;
-        }
-        let (k, min) = slot
-            .iter()
-            .enumerate()
-            .min_by(|a, b| a.1.1.total_cmp(&b.1.1))
-            .map_or((0, 0.0), |(k, s)| (k, s.1));
-        if a.weight > min {
-            slot[k] = (joint, a.weight);
-        }
+        slot.push((crate::num::u32_of(joint), a.weight));
     }
+    // A file may list one vertex's assignments without end: no more are kept than can matter.
     for slot in &mut out {
-        let sum: f32 = slot.iter().map(|s| s.1).sum();
-        if sum > 0.0 {
-            for s in slot.iter_mut() {
-                s.1 /= sum;
-            }
+        if slot.len() > scene::MAX_INFLUENCES {
+            scene::strongest(slot);
         }
     }
     out
@@ -574,10 +572,7 @@ struct MaterialPost {
 
 /// Finds a texture a material names: from its script's folder, then the model's.
 fn texture(t: &material::TextureRef, input: &Input<'_>, assets: &dyn Assets, images: &mut Images) -> Option<usize> {
-    let p = assets
-        .find(&t.file, &t.dir)
-        .or_else(|| assets.find(&t.file, input.dir()))?;
-    images.file(assets, p, &t.file)
+    images.find(assets, &[&t.file], &[&t.dir, input.dir()])
 }
 
 /// Reads the material scripts the mesh may use.
@@ -638,13 +633,7 @@ fn library(file: &MeshFile, stem: &str, input: &Input<'_>, assets: &dyn Assets) 
     clippy::too_many_lines,
     reason = "one pass over the mesh, in the order glTF wants it"
 )]
-fn mesh_document(
-    file: &MeshFile,
-    stem: &str,
-    input: &Input<'_>,
-    assets: &dyn Assets,
-    keep: Keep,
-) -> Result<Document<'static>> {
+fn mesh_document(file: &MeshFile, stem: &str, input: &Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document> {
     let mut scene = Scene::default();
     let mut facts = Map::new();
 
@@ -675,7 +664,6 @@ fn mesh_document(
     let mut material_of: HashMap<(String, Vec<(String, String)>), usize> = HashMap::new();
     let mut posts: Vec<MaterialPost> = Vec::new();
     let mut missing_materials: Vec<String> = Vec::new();
-    let mut missing_textures: Vec<String> = Vec::new();
 
     // Each geometry's influences, worked out once.
     let mut unknown_bones = 0usize;
@@ -686,7 +674,7 @@ fn mesh_document(
             file.submeshes.get(usize::from(g) - 1)?.geometry.as_ref()
         }
     };
-    let mut skin_cache: HashMap<u16, Vec<[(u32, f32); 4]>> = HashMap::new();
+    let mut skin_cache: HashMap<u16, Vec<Vec<(u32, f32)>>> = HashMap::new();
 
     let mut skinned_prims: Vec<Primitive> = Vec::new();
     let mut static_prims: Vec<Primitive> = Vec::new();
@@ -798,17 +786,11 @@ fn mesh_document(
                 let mut mat = m.material;
                 if let Some(t) = &m.color {
                     mat.color_image = texture(t, input, assets, &mut images);
-                    if mat.color_image.is_none() {
-                        missing_textures.push(t.file.clone());
-                    }
                     mat.sampling.color = t.sampling;
                     post.color_uv = t.uv_set;
                 }
                 if let Some(t) = &m.normal {
                     mat.normal_image = texture(t, input, assets, &mut images);
-                    if mat.normal_image.is_none() {
-                        missing_textures.push(t.file.clone());
-                    }
                     mat.sampling.normal = t.sampling;
                     post.normal_uv = t.uv_set;
                 }
@@ -837,12 +819,14 @@ fn mesh_document(
             let inf = skin_cache
                 .entry(gid)
                 .or_insert_with(|| influences(assigns, n, b, &mut unknown_bones));
-            let mut joints = Vec::with_capacity(count * 4);
-            let mut weights = Vec::with_capacity(count * 4);
-            let mut push = |v: &[(u32, f32); 4]| {
-                for s in v {
-                    joints.push(s.0);
-                    weights.push(s.1);
+            let width = inf.iter().map(Vec::len).max().unwrap_or(0).max(1);
+            let mut joints = Vec::with_capacity(count * width);
+            let mut weights = Vec::with_capacity(count * width);
+            let mut push = |v: &Vec<(u32, f32)>| {
+                for k in 0..width {
+                    let (j, w) = v.get(k).copied().unwrap_or((0, 0.0));
+                    joints.push(j);
+                    weights.push(w);
                 }
             };
             match u {
@@ -851,7 +835,7 @@ fn mesh_document(
             }
             prim.joints = joints;
             prim.weights = weights;
-            prim.influences = 4;
+            prim.influences = width;
         }
         let source = Source { geometry: gid, used };
         if skinned {
@@ -1061,10 +1045,9 @@ fn mesh_document(
     }
 
     // Source and facts.
-    scene.source.insert("format".into(), json!("OGRE"));
-    scene.source.insert("version".into(), json!(file.version));
+    convention(&mut scene, &file.version);
     if file.big_endian {
-        scene.source.insert("byteOrder".into(), json!("big-endian"));
+        scene.source.insert("byteOrder".into(), json!("big"));
     }
     if let Some(s) = &file.skeleton {
         scene.source.insert("skeleton".into(), json!(s));
@@ -1129,11 +1112,6 @@ fn mesh_document(
     }
     if !missing_materials.is_empty() {
         facts.insert("missing_materials".into(), json!(missing_materials));
-    }
-    missing_textures.sort();
-    missing_textures.dedup();
-    if !missing_textures.is_empty() {
-        facts.insert("missing_textures".into(), json!(missing_textures));
     }
     scene.facts.extend(facts);
 
@@ -1261,8 +1239,8 @@ fn weights_channel(
 
 /// Sets what the shared material writer doesn't: blending by a texture's alpha, texture coordinate sets past the
 /// first, and the scripts' other properties as extras.
-fn finish_materials(doc: &mut Document<'_>, posts: &[MaterialPost], keep: Keep) {
-    let Some(Value::Array(mats)) = doc.json.get_mut("materials") else {
+fn finish_materials(doc: &mut Document, posts: &[MaterialPost], keep: Keep) {
+    let Some(Value::Array(mats)) = doc.base_mut().get_mut("materials") else {
         return;
     };
     for (m, post) in mats.iter_mut().zip(posts) {

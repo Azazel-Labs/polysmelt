@@ -1,0 +1,562 @@
+{
+  "spec": "BVH (Biovision Hierarchy motion capture): a real file, a CMU capture of 31 joints, cut to its first 24 frames",
+  "source": "assimp/assimp at 711b4e9bbde2, test/models/BVH/01_01.bvh (the CMU Graphics Lab Motion Capture Database's and its BVH conversion's terms, free to use, in 01_nn.bvh.source.txt beside it); expectations measured with assimp 6.0.5 (assimp-py 1.2.0)",
+  "animation_spans": [
+    [
+      0.0,
+      0.19167
+    ]
+  ],
+  "document": {
+    "node_names": [
+      "Hips",
+      "LHipJoint",
+      "LeftUpLeg",
+      "LeftLeg",
+      "LeftFoot",
+      "LeftToeBase",
+      "RHipJoint",
+      "RightUpLeg",
+      "RightLeg",
+      "RightFoot",
+      "RightToeBase",
+      "LowerBack",
+      "Spine",
+      "Spine1",
+      "Neck",
+      "Neck1",
+      "Head",
+      "LeftShoulder",
+      "LeftArm",
+      "LeftForeArm",
+      "LeftHand",
+      "LeftFingerBase",
+      "LFingers",
+      "LThumb",
+      "RightShoulder",
+      "RightArm",
+      "RightForeArm",
+      "RightHand",
+      "RightFingerBase",
+      "RFingers",
+      "RThumb"
+    ],
+    "animations": 1
+  },
+  "rig": [
+    {
+      "node": "LHipJoint",
+      "world": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "parent": "Hips"
+    },
+    {
+      "node": "LeftUpLeg",
+      "world": [
+        1.36306,
+        -1.79463,
+        0.83929
+      ],
+      "parent": "LHipJoint"
+    },
+    {
+      "node": "LeftLeg",
+      "world": [
+        3.81117,
+        -8.52076,
+        0.83929
+      ],
+      "parent": "LeftUpLeg"
+    },
+    {
+      "node": "LeftFoot",
+      "world": [
+        6.37337,
+        -15.56035,
+        0.83929
+      ],
+      "parent": "LeftLeg"
+    },
+    {
+      "node": "LeftToeBase",
+      "world": [
+        6.53101,
+        -15.99346,
+        3.16184
+      ],
+      "parent": "LeftFoot"
+    },
+    {
+      "node": "RHipJoint",
+      "world": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "parent": "Hips"
+    },
+    {
+      "node": "RightUpLeg",
+      "world": [
+        -1.30552,
+        -1.79463,
+        0.83929
+      ],
+      "parent": "RHipJoint"
+    },
+    {
+      "node": "RightLeg",
+      "world": [
+        -3.84805,
+        -8.78018,
+        0.83929
+      ],
+      "parent": "RightUpLeg"
+    },
+    {
+      "node": "RightFoot",
+      "world": [
+        -6.41631,
+        -15.83641,
+        0.83929
+      ],
+      "parent": "RightLeg"
+    },
+    {
+      "node": "RightToeBase",
+      "world": [
+        -6.58104,
+        -16.289,
+        3.20244
+      ],
+      "parent": "RightFoot"
+    },
+    {
+      "node": "LowerBack",
+      "world": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "parent": "Hips"
+    },
+    {
+      "node": "Spine",
+      "world": [
+        0.02827,
+        2.03559,
+        -0.19338
+      ],
+      "parent": "LowerBack"
+    },
+    {
+      "node": "Neck",
+      "world": [
+        0.08499,
+        4.08444,
+        -0.23613
+      ],
+      "parent": "Spine1"
+    },
+    {
+      "node": "Neck1",
+      "world": [
+        0.03082,
+        5.83068,
+        -0.06411
+      ],
+      "parent": "Neck"
+    },
+    {
+      "node": "Head",
+      "world": [
+        0.13489,
+        7.59204,
+        -0.18808
+      ],
+      "parent": "Neck1"
+    },
+    {
+      "node": "LeftShoulder",
+      "world": [
+        0.08499,
+        4.08444,
+        -0.23613
+      ],
+      "parent": "Spine1"
+    },
+    {
+      "node": "LeftArm",
+      "world": [
+        3.4474,
+        5.28533,
+        -0.54734
+      ],
+      "parent": "LeftShoulder"
+    },
+    {
+      "node": "LeftForeArm",
+      "world": [
+        8.4304,
+        5.28533,
+        -0.54734
+      ],
+      "parent": "LeftArm"
+    },
+    {
+      "node": "LeftFingerBase",
+      "world": [
+        11.91396,
+        5.28533,
+        -0.54734
+      ],
+      "parent": "LeftHand"
+    },
+    {
+      "node": "LFingers",
+      "world": [
+        12.62922,
+        5.28533,
+        -0.54734
+      ],
+      "parent": "LeftFingerBase"
+    },
+    {
+      "node": "LThumb",
+      "world": [
+        11.91396,
+        5.28533,
+        -0.54734
+      ],
+      "parent": "LeftHand"
+    },
+    {
+      "node": "RightShoulder",
+      "world": [
+        0.08499,
+        4.08444,
+        -0.23613
+      ],
+      "parent": "Spine1"
+    },
+    {
+      "node": "RightArm",
+      "world": [
+        -3.05161,
+        5.45849,
+        -0.64078
+      ],
+      "parent": "RightShoulder"
+    },
+    {
+      "node": "RightForeArm",
+      "world": [
+        -8.29351,
+        5.45849,
+        -0.64078
+      ],
+      "parent": "RightArm"
+    },
+    {
+      "node": "RightFingerBase",
+      "world": [
+        -11.73768,
+        5.45849,
+        -0.64078
+      ],
+      "parent": "RightHand"
+    },
+    {
+      "node": "RFingers",
+      "world": [
+        -12.36021,
+        5.45849,
+        -0.64078
+      ],
+      "parent": "RightFingerBase"
+    },
+    {
+      "node": "RThumb",
+      "world": [
+        -11.73768,
+        5.45849,
+        -0.64078
+      ],
+      "parent": "RightHand"
+    },
+    {
+      "node": "LHipJoint",
+      "animation": 0,
+      "time": 0.1,
+      "world": [
+        9.3649,
+        17.8511,
+        -17.3802
+      ]
+    },
+    {
+      "node": "LeftUpLeg",
+      "animation": 0,
+      "time": 0.1,
+      "world": [
+        10.48626,
+        16.00548,
+        -16.32226
+      ]
+    },
+    {
+      "node": "LeftLeg",
+      "animation": 0,
+      "time": 0.1,
+      "world": [
+        10.8761,
+        8.85832,
+        -16.33946
+      ]
+    },
+    {
+      "node": "LeftFoot",
+      "animation": 0,
+      "time": 0.1,
+      "world": [
+        11.53376,
+        1.92397,
+        -19.09679
+      ]
+    },
+    {
+      "node": "LeftToeBase",
+      "animation": 0,
+      "time": 0.1,
+      "world": [
+        11.59052,
+        1.29321,
+        -16.81522
+      ]
+    },
+    {
+      "node": "RHipJoint",
+      "animation": 0,
+      "time": 0.1,
+      "world": [
+        9.3649,
+        17.8511,
+        -17.3802
+      ]
+    },
+    {
+      "node": "RightUpLeg",
+      "animation": 0,
+      "time": 0.1,
+      "world": [
+        7.84317,
+        16.18699,
+        -16.64226
+      ]
+    },
+    {
+      "node": "RightLeg",
+      "animation": 0,
+      "time": 0.1,
+      "world": [
+        7.7629,
+        8.76245,
+        -16.27878
+      ]
+    },
+    {
+      "node": "RightFoot",
+      "animation": 0,
+      "time": 0.1,
+      "world": [
+        7.79507,
+        1.85238,
+        -19.21754
+      ]
+    },
+    {
+      "node": "RightToeBase",
+      "animation": 0,
+      "time": 0.1,
+      "world": [
+        7.25482,
+        1.073,
+        -17.00008
+      ]
+    },
+    {
+      "node": "LowerBack",
+      "animation": 0,
+      "time": 0.1,
+      "world": [
+        9.3649,
+        17.8511,
+        -17.3802
+      ]
+    },
+    {
+      "node": "Spine",
+      "animation": 0,
+      "time": 0.1,
+      "world": [
+        9.50455,
+        19.88483,
+        -17.54224
+      ]
+    },
+    {
+      "node": "Neck",
+      "animation": 0,
+      "time": 0.1,
+      "world": [
+        9.54555,
+        21.93448,
+        -17.55093
+      ]
+    },
+    {
+      "node": "Neck1",
+      "animation": 0,
+      "time": 0.1,
+      "world": [
+        9.63742,
+        23.68528,
+        -17.64125
+      ]
+    },
+    {
+      "node": "Head",
+      "animation": 0,
+      "time": 0.1,
+      "world": [
+        9.7845,
+        25.39916,
+        -17.22946
+      ]
+    },
+    {
+      "node": "LeftShoulder",
+      "animation": 0,
+      "time": 0.1,
+      "world": [
+        9.54555,
+        21.93448,
+        -17.55093
+      ]
+    },
+    {
+      "node": "LeftArm",
+      "animation": 0,
+      "time": 0.1,
+      "world": [
+        12.85554,
+        23.29738,
+        -17.37417
+      ]
+    },
+    {
+      "node": "LeftForeArm",
+      "animation": 0,
+      "time": 0.1,
+      "world": [
+        14.1852,
+        20.4113,
+        -13.53583
+      ]
+    },
+    {
+      "node": "LeftFingerBase",
+      "animation": 0,
+      "time": 0.1,
+      "world": [
+        12.31566,
+        23.32409,
+        -13.93034
+      ]
+    },
+    {
+      "node": "LFingers",
+      "animation": 0,
+      "time": 0.1,
+      "world": [
+        12.36143,
+        23.9219,
+        -14.32038
+      ]
+    },
+    {
+      "node": "LThumb",
+      "animation": 0,
+      "time": 0.1,
+      "world": [
+        12.31566,
+        23.32409,
+        -13.93034
+      ]
+    },
+    {
+      "node": "RightShoulder",
+      "animation": 0,
+      "time": 0.1,
+      "world": [
+        9.54555,
+        21.93448,
+        -17.55093
+      ]
+    },
+    {
+      "node": "RightArm",
+      "animation": 0,
+      "time": 0.1,
+      "world": [
+        6.443,
+        23.14941,
+        -18.43872
+      ]
+    },
+    {
+      "node": "RightForeArm",
+      "animation": 0,
+      "time": 0.1,
+      "world": [
+        6.46563,
+        17.90891,
+        -18.31958
+      ]
+    },
+    {
+      "node": "RightFingerBase",
+      "animation": 0,
+      "time": 0.1,
+      "world": [
+        5.99789,
+        14.70972,
+        -17.1327
+      ]
+    },
+    {
+      "node": "RFingers",
+      "animation": 0,
+      "time": 0.1,
+      "world": [
+        5.73216,
+        14.14735,
+        -17.15871
+      ]
+    },
+    {
+      "node": "RThumb",
+      "animation": 0,
+      "time": 0.1,
+      "world": [
+        5.99789,
+        14.70972,
+        -17.1327
+      ]
+    }
+  ],
+  "no_mesh": true
+}

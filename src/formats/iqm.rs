@@ -12,8 +12,8 @@
 //! so turned linear; floats taken as linear). Blend index and weight arrays give each vertex its joints and weights
 //! (integer weights as fractions of their range); with more than one pair, each pair adds its influences.
 //! Triangles are wound clockwise seen from the front, so each is turned around for glTF. Tangents, adjacency,
-//! custom arrays (types from 16 on), bounds, comments and extensions are dropped. A mesh with no triangles is left
-//! out.
+//! custom arrays (types from 16 on), bounds and extensions are dropped. A mesh with no triangles is left out. The
+//! comment block's strings are the source info's `comments`.
 //!
 //! The material name is the texture's file (`Body.jpg`), looked for as written and, when it has no extension, as a
 //! `.png` (the assets find the same name in other image formats, and by file name in other folders); each distinct
@@ -24,38 +24,47 @@
 //! joint's place in the model. Poses (one per joint) say how frames move them: each of a joint's ten channels
 //! (translation X, Y, Z, rotation X, Y, Z, W, scale X, Y, Z) is its offset, plus, when its bit is set in the mask,
 //! the next 16-bit number of the frame times its scale. Each animation is a range of frames with a name and a frame
-//! rate (24 when it isn't a positive number, noted in the facts): a linear animation with translation, rotation and
-//! scale channels for each joint, leaving out those that hold the joint's rest value in every frame. Looping
-//! animations say so in their extras (`loop`).
+//! rate (an assumed 30 when it isn't a positive number; one with no name has none): a linear animation with translation, rotation and scale channels for
+//! each joint, leaving out those that hold the joint's rest value in every frame. Looping animations say so in their
+//! extras (`loop`). The source info's `frameRate` is the first animation's rate that is a positive number (assumed 24
+//! when none is); when the animations' rates differ, each gives its own in its extras (`frameRate`).
 //!
-//! The format is Z up, so the scene's roots are turned for glTF's Y up; units are kept unscaled.
+//! The format is Z up and right-handed, so the scene stays as the file has it under the document's `RootNode`, which turns it for glTF's Y up (the source info's
+//! `upAxis` is a declared `+Z`, converted); units are kept unscaled, and their length unknown.
 //!
 //! A file cut short, a list past its end, a name outside the text block, an unknown number format, vertex arrays
-//! that don't all hold every vertex, a triangle naming a vertex outside its mesh, a weighted influence naming a
+//! that don't all hold every vertex, a weighted influence naming a
 //! joint there isn't, a joint whose parent isn't earlier in the list, poses that aren't one per joint, frames
-//! that don't hold the channels the poses say, or an animation past the frames is an error. Counts are checked
-//! against the file's size before anything is allocated for them.
+//! that don't hold the channels the poses say, or an animation past the frames is an error. A triangle naming a
+//! vertex outside its mesh is dropped and counted (`droppedGeometry` in the source extras), as in every
+//! format. Counts are checked against the file's size before anything is allocated for them.
 
 use std::collections::HashMap;
 
 use serde_json::{Value, json};
 
 use super::Input;
-use super::scene::{
-    self, Animation, Bin, Channel, Interp, M4, Node, Path, Primitive, Scene, SceneMesh, Skin, Z_UP_TO_Y_UP,
-};
+use super::scene::{self, Animation, Channel, Interp, M4, Node, Path, Primitive, Scene, SceneMesh, Skin, Z_UP_TO_Y_UP};
 use crate::Result;
 use crate::assets::Assets;
+use crate::bytes::Bin;
 use crate::document::{Document, Keep};
 use crate::images::Images;
 use crate::mesh::{Material, srgb_to_linear};
 use crate::num::{f32_of, u32_of};
+use crate::quat;
+use crate::source::{Axis, Fact, Handedness};
 
-/// The frame rate taken when an animation gives none that's usable.
-const DEFAULT_RATE: f32 = 24.0;
+/// The frame rate taken when an animation gives none that's usable: the readers' shared assumption, as the
+/// format documents no default.
+#[allow(clippy::cast_possible_truncation, reason = "a small whole number")]
+const DEFAULT_RATE: f32 = super::keys::ASSUMED_FRAME_RATE as f32;
 
 /// The most pose values (frames times joints) decoded.
 const MAX_POSE_FRAMES: usize = 1 << 22;
+
+/// The most pose values decoded when the frames animate nothing: then the file holds no frame data to back them.
+const MAX_STILL_POSE_FRAMES: usize = 1 << 16;
 
 /// The header's size.
 const HEADER: usize = 124;
@@ -69,7 +78,7 @@ const BLENDWEIGHTS: u32 = 5;
 const COLOR: u32 = 6;
 
 /// Reads an `.iqm` model.
-pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document<'static>> {
+pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document> {
     let data = input.read()?;
     let file = parse(&data, keep.animations)?;
     let stem = input
@@ -77,10 +86,19 @@ pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
         .file_stem()
         .map_or_else(|| "iqm".to_owned(), |s| s.to_string_lossy().into_owned());
     let mut scene = build(&file, &stem, &input, assets, keep)?;
-    scene.source.insert("format".into(), json!("IQM"));
-    scene.source.insert("version".into(), json!(2));
-    scene.source.insert("upAxis".into(), json!("Z"));
-    scene.rotate_roots(Z_UP_TO_Y_UP);
+    scene.info.format = Some("IQM".into());
+    scene.info.version = Some("2".into());
+    scene.info.up_axis = Fact::Declared(Axis::PosZ);
+    scene.info.handedness = Fact::Declared(Handedness::Right);
+    scene.info.comments.clone_from(&file.comments);
+    // The first animation's rate that is one; with none, the rate frames are taken at.
+    let rates = file.anims.iter().map(|a| a.rate);
+    if let Some(r) = rates.clone().find(|r| *r > 0.0 && r.is_finite()) {
+        scene.info.frame_rate = Fact::Declared(f64::from(r));
+    } else if !file.anims.is_empty() {
+        scene.info.frame_rate = Fact::Assumed(f64::from(DEFAULT_RATE));
+    }
+    scene.turn(Z_UP_TO_Y_UP);
     scene.finish(keep)
 }
 
@@ -134,6 +152,8 @@ struct File {
     /// Each frame's ten channels for every pose, laid end to end.
     frames: Vec<f32>,
     num_frames: usize,
+    /// The comment block's strings.
+    comments: Vec<String>,
 }
 
 /// A header field as a count or offset.
@@ -146,6 +166,7 @@ fn name(text: &[u8], ofs: u32) -> Result<String> {
     let ofs = usize_of(ofs);
     ensure!(
         ofs < text.len() || (ofs == 0 && text.is_empty()),
+        Corrupt,
         "IQM name at {ofs} is outside the {}-byte text block",
         text.len()
     );
@@ -213,6 +234,7 @@ fn numbers(raw: &[u8], format: u32, normalized: bool) -> Vec<f32> {
 fn parse(data: &[u8], frames: bool) -> Result<File> {
     ensure!(
         data.starts_with(b"INTERQUAKEMODEL\0"),
+        UnknownFormat,
         "not an IQM file: no INTERQUAKEMODEL signature"
     );
     let mut b = Bin::new(data, "IQM");
@@ -244,11 +266,19 @@ fn parse(data: &[u8], frames: bool) -> Result<File> {
         num_frames,
         num_framechannels,
         ofs_frames,
+        _ofs_bounds,
+        num_comment,
+        ofs_comment,
         ..,
     ] = h;
-    ensure!(version == 2, "IQM version {version} isn't supported, only 2");
+    ensure!(
+        version == 2,
+        Unsupported,
+        "IQM version {version} isn't supported, only 2"
+    );
     ensure!(
         usize_of(filesize) <= data.len(),
+        Truncated,
         "IQM file is cut short: {} bytes of {filesize}",
         data.len()
     );
@@ -274,19 +304,19 @@ fn parse(data: &[u8], frames: bool) -> Result<File> {
         }
         for (i, [kind, _flags, format, size, offset]) in heads.into_iter().enumerate() {
             let Some(bytes) = format_size(format) else {
-                bail!("IQM vertex array {i} has unknown number format {format}");
+                bail!(Corrupt, "IQM vertex array {i} has unknown number format {format}");
             };
             // Tangents and custom arrays aren't kept.
             if !matches!(kind, POSITION | TEXCOORD | NORMAL | BLENDINDEXES | BLENDWEIGHTS | COLOR) {
                 continue;
             }
             let size = usize_of(size);
-            ensure!(size > 0, "IQM vertex array {i} has no components");
+            ensure!(size > 0, Corrupt, "IQM vertex array {i} has no components");
             let mut a = Bin::new(data, "IQM");
             a.seek(usize_of(offset))?;
             let total = vertices
                 .checked_mul(size)
-                .ok_or_else(|| invalid!("IQM vertex array {i} is too large"))?;
+                .ok_or_else(|| err!(LimitExceeded, "IQM vertex array {i} is too large"))?;
             a.count(total as u64, bytes)?;
             let normalized = matches!(kind, TEXCOORD | BLENDWEIGHTS | COLOR);
             let mut values = numbers(a.bytes(total * bytes)?, format, normalized);
@@ -389,13 +419,21 @@ fn parse(data: &[u8], frames: bool) -> Result<File> {
         let channels: u32 = poses.iter().map(|p| (p.mask & 0x3ff).count_ones()).sum();
         ensure!(
             channels == num_framechannels,
+            Corrupt,
             "IQM poses animate {channels} channels, but frames hold {num_framechannels}"
         );
         ensure!(
             num_frames
                 .checked_mul(poses.len())
                 .is_some_and(|n| n <= MAX_POSE_FRAMES),
+            LimitExceeded,
             "IQM file has {num_frames} frames of {} joints, more than can be read",
+            poses.len()
+        );
+        ensure!(
+            channels > 0 || num_frames * poses.len() <= MAX_STILL_POSE_FRAMES,
+            LimitExceeded,
+            "IQM file has {num_frames} frames of {} joints that animate nothing, more than are read",
             poses.len()
         );
         b.seek(usize_of(ofs_frames))?;
@@ -419,6 +457,19 @@ fn parse(data: &[u8], frames: bool) -> Result<File> {
             }
         }
     }
+    // The comment block: text, its strings ended by NULs. One past the file's end is skipped, not an error.
+    let comments = usize_of(ofs_comment)
+        .checked_add(usize_of(num_comment))
+        .and_then(|end| data.get(usize_of(ofs_comment)..end))
+        .filter(|_| num_comment > 0)
+        .map(|block| {
+            block
+                .split(|&c| c == 0)
+                .map(|s| scene::text(s).trim().to_owned())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
     Ok(File {
         vertices,
         arrays,
@@ -429,22 +480,13 @@ fn parse(data: &[u8], frames: bool) -> Result<File> {
         anims,
         frames,
         num_frames,
+        comments,
     })
 }
 
 /// The texture a material name gives: as written, then as a `.png` when it has no extension.
 fn texture(name: &str, input: &Input<'_>, assets: &dyn Assets, images: &mut Images) -> Option<usize> {
-    if name.is_empty() {
-        return None;
-    }
-    let mut tries = vec![name.to_owned()];
-    if std::path::Path::new(name).extension().is_none() {
-        tries.push(format!("{name}.png"));
-    }
-    tries
-        .iter()
-        .find_map(|t| assets.find(t, input.dir()).map(|p| (p, t)))
-        .and_then(|(p, t)| images.file(assets, p, t))
+    images.find_bare(assets, name, &[".png"], input.dir())
 }
 
 fn build(f: &File, stem: &str, input: &Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Scene> {
@@ -455,12 +497,13 @@ fn build(f: &File, stem: &str, input: &Input<'_>, assets: &dyn Assets, keep: Kee
         let parent = usize::try_from(j.parent).ok();
         ensure!(
             j.parent >= -1 && parent.is_none_or(|p| p < i),
+            Corrupt,
             "IQM joint {i} has parent {}, which isn't an earlier joint",
             j.parent
         );
         let mut node = Node::named(j.name.clone(), parent);
         node.translation = j.t;
-        node.rotation = scene::normalize(j.r.map(f64::from));
+        node.rotation = quat::normalize(j.r.map(f64::from));
         node.scale = j.s;
         let local = node.matrix();
         worlds.push(parent.map_or(local, |p| scene::mul(&worlds[p], &local)));
@@ -480,6 +523,7 @@ fn build(f: &File, stem: &str, input: &Input<'_>, assets: &dyn Assets, keep: Kee
     let Some(positions) = first(POSITION).filter(|a| a.size >= 3) else {
         ensure!(
             f.meshes.iter().all(|m| m.num_triangles == 0),
+            Corrupt,
             "IQM file has meshes but no positions"
         );
         return finish_anims(scene, f, keep.animations);
@@ -489,12 +533,14 @@ fn build(f: &File, stem: &str, input: &Input<'_>, assets: &dyn Assets, keep: Kee
         let verts = m.first_vertex..m.first_vertex.saturating_add(m.num_vertexes);
         ensure!(
             verts.end <= f.vertices,
+            Corrupt,
             "IQM mesh {mi}'s vertices run past the {} there are",
             f.vertices
         );
         let tris = m.first_triangle..m.first_triangle.saturating_add(m.num_triangles);
         ensure!(
             tris.end <= f.triangles.len(),
+            Corrupt,
             "IQM mesh {mi}'s triangles run past the {} there are",
             f.triangles.len()
         );
@@ -502,10 +548,12 @@ fn build(f: &File, stem: &str, input: &Input<'_>, assets: &dyn Assets, keep: Kee
             continue;
         }
         let mut indices = Vec::with_capacity(tris.len() * 3);
-        for (ti, t) in f.triangles[tris].iter().enumerate() {
+        for t in &f.triangles[tris] {
             let local = t.map(|v| usize_of(v).checked_sub(verts.start).filter(|&v| v < verts.len()));
+            // A triangle naming a vertex outside the mesh is dropped, as in every format.
             let [Some(a), Some(b), Some(c)] = local else {
-                bail!("IQM mesh {mi}'s triangle {ti} names a vertex outside the mesh");
+                scene.dropped += 1;
+                continue;
             };
             // Clockwise front faces in the file; glTF's are counterclockwise.
             indices.extend([a, c, b].map(u32_of));
@@ -560,6 +608,7 @@ fn build(f: &File, stem: &str, input: &Input<'_>, assets: &dyn Assets, keep: Kee
                         let weighted = w > 0.0 && w.is_finite();
                         ensure!(
                             !weighted || (j >= 0.0 && f64::from(j) < f64::from(u32::try_from(n).unwrap_or(u32::MAX))),
+                            Corrupt,
                             "IQM vertex {v} is weighted to joint {j}, but there are {n}"
                         );
                         prim.joints.push(if weighted { joint_of(j) } else { 0 });
@@ -648,35 +697,43 @@ fn finish_anims(mut scene: Scene, f: &File, keep: bool) -> Result<Scene> {
     }
     ensure!(
         f.poses.len() == n,
+        Corrupt,
         "IQM file has {} poses for {n} joints",
         f.poses.len()
     );
-    let mut guessed = false;
+    let rate_of = |a: &Anim| {
+        if a.rate > 0.0 && a.rate.is_finite() {
+            a.rate
+        } else {
+            DEFAULT_RATE
+        }
+    };
+    // When animations differ in rate, each says its own in its extras.
+    let rates_differ = f
+        .anims
+        .windows(2)
+        .any(|w| rate_of(&w[0]).to_bits() != rate_of(&w[1]).to_bits());
     for (ai, a) in f.anims.iter().enumerate() {
         let frames = a.first..a.first.saturating_add(a.count);
         ensure!(
             frames.end <= f.num_frames,
+            Corrupt,
             "IQM animation {ai} runs past the {} frames there are",
             f.num_frames
         );
         if frames.is_empty() {
             continue;
         }
-        let rate = if a.rate > 0.0 && a.rate.is_finite() {
-            a.rate
-        } else {
-            guessed = true;
-            DEFAULT_RATE
-        };
+        let rate = rate_of(a);
         let times: Vec<f32> = (0..frames.len()).map(|k| frame_time(k, rate)).collect();
         let mut channels = Vec::new();
         for (j, joint) in f.joints.iter().enumerate() {
             let value = |fr: usize, c: usize| f.frames[(fr * n + j) * 10 + c];
-            let rest = scene::normalize(joint.r.map(f64::from));
+            let rest = quat::normalize(joint.r.map(f64::from));
             let t: Vec<f32> = frames.clone().flat_map(|fr| [0, 1, 2].map(|c| value(fr, c))).collect();
             let r: Vec<f32> = frames
                 .clone()
-                .flat_map(|fr| scene::normalize([3, 4, 5, 6].map(|c| f64::from(value(fr, c)))))
+                .flat_map(|fr| quat::normalize([3, 4, 5, 6].map(|c| f64::from(value(fr, c)))))
                 .collect();
             let s: Vec<f32> = frames.clone().flat_map(|fr| [7, 8, 9].map(|c| value(fr, c))).collect();
             let same = |v: &[f32], rest: &[f32]| v.chunks(rest.len()).all(|k| close(k, rest));
@@ -691,25 +748,23 @@ fn finish_anims(mut scene: Scene, f: &File, keep: bool) -> Result<Scene> {
                 channels.push(channel(j, Path::Scale, &times, s));
             }
         }
-        let name = if a.name.is_empty() {
-            format!("anim{ai}")
-        } else {
-            a.name.clone()
-        };
+        // An animation the file gives no name has none.
         scene.animations.push(Animation {
-            name,
+            name: a.name.clone(),
             channels,
-            extras: a.looping.then(|| {
+            extras: (a.looping || rates_differ).then(|| {
                 let mut m = serde_json::Map::new();
-                m.insert("loop".into(), Value::Bool(true));
+                if a.looping {
+                    m.insert("loop".into(), Value::Bool(true));
+                }
+                if rates_differ {
+                    m.insert("frameRate".into(), json!(rate));
+                }
                 Value::Object(m)
             }),
         });
     }
     scene.facts.insert("animations".into(), json!(f.anims.len()));
-    if guessed {
-        scene.facts.insert("frame_rate_guessed".into(), Value::Bool(true));
-    }
     Ok(scene)
 }
 
@@ -762,5 +817,56 @@ mod tests {
         sweep(bytes, |b| {
             let _ = load(Input::memory(b, "rig.iqm"), &crate::assets::Memory::new(), Keep::ALL);
         });
+    }
+
+    #[test]
+    fn source_info_has_the_first_rate_and_the_comments() {
+        let mut bytes = include_bytes!("../../tests/corpus/iqm/skinned_animated/rig.iqm").to_vec();
+        let at = u32::try_from(bytes.len()).unwrap();
+        let comment = b"made by hand\0exported\0";
+        bytes.extend(comment);
+        let set =
+            |b: &mut Vec<u8>, field: usize, v: u32| b[16 + 4 * field..20 + 4 * field].copy_from_slice(&v.to_le_bytes());
+        let len = u32::try_from(bytes.len()).unwrap();
+        set(&mut bytes, 1, len);
+        set(&mut bytes, 23, u32::try_from(comment.len()).unwrap());
+        set(&mut bytes, 24, at);
+        let doc = load(
+            Input::memory(&bytes, "rig.iqm"),
+            &crate::assets::Memory::new(),
+            Keep::ALL,
+        )
+        .unwrap();
+        let info = doc.source_info();
+        assert_eq!(info.format.as_deref(), Some("IQM"));
+        assert_eq!(info.comments, ["made by hand", "exported"]);
+        // "wave" at 10 frames a second, "hold" with none (the shared 30): the first that has one, and each its own.
+        assert_eq!(info.frame_rate, Fact::Declared(10.0));
+        assert_eq!(doc.json()["animations"][0]["extras"]["frameRate"], 10.0);
+        assert_eq!(doc.json()["animations"][1]["extras"]["frameRate"], 30.0);
+        assert_eq!(info.up_axis, Fact::Declared(Axis::PosZ));
+        assert_eq!(info.meters_per_unit, Fact::Unknown);
+        assert!(info.converted.up_axis);
+    }
+
+    #[test]
+    fn frames_that_animate_nothing_are_not_made_from_nothing() {
+        let mut bytes = include_bytes!("../../tests/corpus/iqm/skinned_animated/rig.iqm").to_vec();
+        let get = |b: &[u8], field: usize| u32::from_le_bytes(b[16 + 4 * field..20 + 4 * field].try_into().unwrap());
+        let set =
+            |b: &mut Vec<u8>, field: usize, v: u32| b[16 + 4 * field..20 + 4 * field].copy_from_slice(&v.to_le_bytes());
+        // Every pose's channel mask cleared, so the frames hold nothing.
+        let (poses, at) = (get(&bytes, 15) as usize, get(&bytes, 16) as usize);
+        for p in 0..poses {
+            bytes[at + 88 * p + 4..at + 88 * p + 8].fill(0);
+        }
+        set(&mut bytes, 20, 0);
+        let load = |b: &[u8]| load(Input::memory(b, "rig.iqm"), &crate::assets::Memory::new(), Keep::ALL);
+        // As many frames as the poses' frames are kept: still rotations, read.
+        assert!(load(&bytes).is_ok());
+        // Within the limit on frames that are there, but each of these would be made from no data.
+        set(&mut bytes, 19, u32::try_from(MAX_POSE_FRAMES / poses).unwrap());
+        let err = load(&bytes).unwrap_err();
+        assert_eq!(err.kind(), crate::ErrorKind::LimitExceeded, "{err}");
     }
 }

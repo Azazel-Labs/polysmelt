@@ -1,17 +1,11 @@
 //! Just enough of a ZIP reader for `SketchUp` 2021+ files: the central directory, stored and deflated entries, and a
 //! cap on how much any entry may inflate to.
 
-use std::io::Read;
-
-use crate::{Context, Result};
+use crate::{Context, ErrorKind, Result};
 use flate2::read::DeflateDecoder;
 
 use super::reader::{u16_at, u32_at};
-
-/// The largest entry this will inflate. Real `model.dat` files run to tens of megabytes.
-const MAX_ENTRY_BYTES: u64 = 1 << 30;
-/// Real entries compress about 10:1; twenty times that is a decompression bomb, not a model.
-const MAX_RATIO: u64 = 200;
+use crate::formats::inflate_capped;
 
 #[derive(Debug)]
 struct Entry {
@@ -35,24 +29,30 @@ impl<'a> Zip<'a> {
         let eocd = (lowest..=d.len().saturating_sub(22))
             .rev()
             .find(|&i| u32_at(d, i) == Some(0x0605_4b50))
-            .context("ZIP container has no end record")?;
-        let count = u16_at(d, eocd + 10).context("ZIP end record is cut short")?;
-        let dir = u32_at(d, eocd + 16).context("ZIP end record is cut short")? as usize;
-        ensure!(dir != 0xffff_ffff, "ZIP64 containers are not supported");
+            .context(ErrorKind::Truncated, "ZIP container is cut short: it has no end record")?;
+        let count = u16_at(d, eocd + 10).context(ErrorKind::Truncated, "ZIP end record is cut short")?;
+        let dir = u32_at(d, eocd + 16).context(ErrorKind::Truncated, "ZIP end record is cut short")? as usize;
+        ensure!(dir != 0xffff_ffff, Unsupported, "ZIP64 containers are not supported");
         let mut entries = Vec::new();
         let mut p = dir;
         for _ in 0..count {
-            ensure!(u32_at(d, p) == Some(0x0201_4b50), "ZIP central directory is damaged");
-            let field = |at: usize| u16_at(d, p + at).context("ZIP central directory is cut short");
+            ensure!(
+                u32_at(d, p) == Some(0x0201_4b50),
+                Corrupt,
+                "ZIP central directory is damaged"
+            );
+            let field =
+                |at: usize| u16_at(d, p + at).context(ErrorKind::Truncated, "ZIP central directory is cut short");
             let method = field(10)?;
-            let compressed = u32_at(d, p + 20).context("ZIP central directory is cut short")?;
+            let compressed = u32_at(d, p + 20).context(ErrorKind::Truncated, "ZIP central directory is cut short")?;
             let (name_len, extra_len, comment_len) = (field(28)?, field(30)?, field(32)?);
-            let local_header = u32_at(d, p + 42).context("ZIP central directory is cut short")? as usize;
+            let local_header =
+                u32_at(d, p + 42).context(ErrorKind::Truncated, "ZIP central directory is cut short")? as usize;
             let name = d
                 .get(p + 46..p + 46 + usize::from(name_len))
-                .context("ZIP entry name is cut short")?;
+                .context(ErrorKind::Truncated, "ZIP entry name is cut short")?;
             entries.push(Entry {
-                name: String::from_utf8_lossy(name).into_owned(),
+                name: crate::bytes::text(name).into_owned(),
                 method,
                 compressed: u64::from(compressed),
                 local_header,
@@ -76,33 +76,30 @@ impl<'a> Zip<'a> {
         let h = e.local_header;
         ensure!(
             u32_at(d, h) == Some(0x0403_4b50),
+            Corrupt,
             "ZIP entry {} has no local header",
             e.name
         );
-        let name_len = usize::from(u16_at(d, h + 26).context("ZIP local header is cut short")?);
-        let extra_len = usize::from(u16_at(d, h + 28).context("ZIP local header is cut short")?);
+        let name_len = usize::from(u16_at(d, h + 26).context(ErrorKind::Truncated, "ZIP local header is cut short")?);
+        let extra_len = usize::from(u16_at(d, h + 28).context(ErrorKind::Truncated, "ZIP local header is cut short")?);
         let start = h + 30 + name_len + extra_len;
-        let len = usize::try_from(e.compressed)?;
+        let len = usize::try_from(e.compressed).context(ErrorKind::LimitExceeded, "ZIP entry is too large")?;
         let data = d
-            .get(start..start.checked_add(len).context("ZIP entry is too large")?)
-            .context("ZIP entry is cut short")?;
+            .get(
+                start
+                    ..start
+                        .checked_add(len)
+                        .context(ErrorKind::LimitExceeded, "ZIP entry is too large")?,
+            )
+            .context(ErrorKind::Truncated, "ZIP entry is cut short")?;
         match e.method {
             0 => Ok(data.to_vec()),
-            8 => {
-                let limit = MAX_ENTRY_BYTES.min(e.compressed.saturating_mul(MAX_RATIO).saturating_add(1 << 20));
-                let mut out = Vec::new();
-                DeflateDecoder::new(data)
-                    .take(limit + 1)
-                    .read_to_end(&mut out)
-                    .with_context(|| format!("inflating {}", e.name))?;
-                ensure!(
-                    (out.len() as u64) <= limit,
-                    "ZIP entry {} inflates implausibly far",
-                    e.name
-                );
-                Ok(out)
-            }
-            m => bail!("ZIP entry {} uses unsupported compression method {m}", e.name),
+            8 => inflate_capped(DeflateDecoder::new(data), e.compressed, &e.name),
+            m => bail!(
+                Unsupported,
+                "ZIP entry {} uses unsupported compression method {m}",
+                e.name
+            ),
         }
     }
 }

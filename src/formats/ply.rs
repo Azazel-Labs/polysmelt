@@ -1,6 +1,7 @@
 //! PLY (the Stanford polygon file format), ASCII and binary in either byte order.
 //!
-//! Read: positions, normals (`nx` or `normal_x`), vertex colors (sRGB, as integers or floats),
+//! Read: positions, normals (`nx` or `normal_x`), vertex colors (sRGB, as integers or floats: an
+//! 8-bit channel is out of 255, a 16-bit one out of 65535, and a 32-bit whole number out of 255),
 //! texture coordinates under any of their usual names, polygons (triangulated in their plane) and
 //! triangle strips; `MeshLab`'s per-face texture coordinates and `comment TextureFile` (several, a
 //! face picking one by its `texnumber`, a material each); per-face colors. Elements the reader
@@ -10,23 +11,33 @@
 //! logarithm, rotation normalized, the harmonics in whole degrees, and the axes (right, down,
 //! forward) flipped to glTF's; [`Keep::max_points`] caps the splats. Splat-like files with only
 //! some of those properties show their color: the zero-order spherical harmonics and `opacity`
-//! give the vertex colors when the file has no other. A zero normal (splat files write nothing
-//! else) is a placeholder: a mesh's vertex takes a made one, and a file of nothing but zeros has
-//! none. Made normals are smooth across vertices split only by texture coordinates. Header lines
-//! may end in a lone `\r`, and a leading byte order mark is skipped. Counts the header gives are
-//! checked against the bytes left before anything is allocated for them.
+//! give the vertex colors when the file has no other. `SuperSplat`'s compressed PLY (a `chunk`
+//! element and packed vertices) is read as the same splats: see [`compressed`]. A zero normal
+//! (splat files write nothing else) is a placeholder: a mesh's vertex takes a made one, and a
+//! file of nothing but zeros has none. Made normals are smooth across vertices split only by
+//! texture coordinates. Header lines may end in a lone `\r`, and a leading byte order mark is
+//! skipped. Counts the header gives are checked against the bytes left before anything is
+//! allocated for them.
 //!
 //! Nothing the vertices carry is lost: properties beyond those are custom attributes, named as
 //! the file names them in capitals after an underscore (`_CONFIDENCE`, `_F_DC_0`). A file without
 //! faces is a point cloud, drawn as points; an `edge` element's `vertex1` and `vertex2` are
-//! lines. The header's comments, `obj_info` lines, encoding and the elements skipped go in the
-//! asset's `extras.source`.
+//! lines. A point cloud's colors are normalized 16-bit linear RGBA, as the other point clouds'
+//! are: that keeps every value of an 8-bit channel, made linear, apart, in half the bytes of floats.
+//!
+//! The header's comments are the source's comments, and one naming the program that wrote the
+//! file (`Created in Blender version 4.2`, `VCGLIB generated`) its tool; `obj_info` lines, the
+//! encoding and the elements skipped go in the asset's `extras.source` too. PLY names no units and
+//! no up axis, so both are unknown, and the geometry is kept as written. Gaussian splats are the
+//! exception: their convention is -Y up and right-handed (assumed in the source info), and the
+//! flip is recorded as a converted up axis, as the other splat readers record theirs.
 
 use std::path::Path;
 
 use serde_json::{Map, Value, json};
 
 use super::Input;
+use super::frame::{self, Frame};
 use super::stream::{self, Blocks};
 use crate::assets::Assets;
 use crate::document::{Builder, Document, Keep, Part};
@@ -34,7 +45,11 @@ use crate::gaussian::{self, REST, Splats, degree_of, rotation, sigmoid};
 use crate::images::Images;
 use crate::mesh::{FastMap, Material, Mesh, Prim, quad, smooth_normals, srgb_to_linear, triangulate};
 use crate::num::{f32_of, u32_of};
-use crate::{Context as _, Result};
+use crate::source::{Axis, Fact, Handedness, SourceInfo};
+use crate::vec3;
+use crate::{Context as _, ErrorKind, Result};
+
+mod compressed;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Format {
@@ -66,7 +81,7 @@ impl Ty {
             b"uint" | b"uint32" => Ty::U32,
             b"float" | b"float32" => Ty::F32,
             b"double" | b"float64" => Ty::F64,
-            t => bail!("unknown PLY type {}", crate::shown(t)),
+            t => bail!(Corrupt, "unknown PLY type {}", crate::shown(t)),
         })
     }
 
@@ -79,12 +94,14 @@ impl Ty {
         }
     }
 
-    /// The value that means full intensity for a color channel of this type.
+    /// The value that means full intensity for a color channel of this type: the most an unsigned 8-bit or
+    /// 16-bit channel holds (a signed one read the same), and 1 for a float. A 32-bit whole number is 0 to 255
+    /// too, as the writers that give colors that type write them; more than 255 is full intensity.
     fn color_scale(self) -> f64 {
         match self {
-            Ty::U8 | Ty::I8 => 255.0,
+            Ty::U8 | Ty::I8 | Ty::I32 | Ty::U32 => 255.0,
             Ty::U16 | Ty::I16 => 65535.0,
-            _ => 1.0,
+            Ty::F32 | Ty::F64 => 1.0,
         }
     }
 }
@@ -330,14 +347,14 @@ fn header(data: &[u8]) -> Result<(Header, Vec<Element>, usize)> {
     let mut elements: Vec<Element> = Vec::new();
     let mut textures = Vec::new();
     let (mut comments, mut obj_info) = (Vec::new(), Vec::new());
-    let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
+    let text = |b: &[u8]| crate::bytes::text(b).into_owned();
     let mut at = 0;
     let mut first = true;
     loop {
         let rest = data
             .get(at..)
             .filter(|r| !r.is_empty())
-            .context("PLY header has no end_header")?;
+            .context(ErrorKind::Truncated, "PLY header is cut short: it has no end_header")?;
         let len = rest
             .iter()
             .position(|&c| c == b'\n' || c == b'\r')
@@ -352,7 +369,7 @@ fn header(data: &[u8]) -> Result<(Header, Vec<Element>, usize)> {
             };
         if first {
             let line = line.strip_prefix(BOM).unwrap_or(line);
-            ensure!(line == b"ply", "not a PLY file");
+            ensure!(line == b"ply", UnknownFormat, "not a PLY file");
             first = false;
             continue;
         }
@@ -365,7 +382,7 @@ fn header(data: &[u8]) -> Result<(Header, Vec<Element>, usize)> {
                     b"ascii" => Format::Ascii,
                     b"binary_little_endian" => Format::Le,
                     b"binary_big_endian" => Format::Be,
-                    f => bail!("unknown PLY format {}", crate::shown(f)),
+                    f => bail!(Corrupt, "unknown PLY format {}", crate::shown(f)),
                 });
             }
             [b"comment", kind, ..] if kind.eq_ignore_ascii_case(b"texturefile") => {
@@ -376,28 +393,28 @@ fn header(data: &[u8]) -> Result<(Header, Vec<Element>, usize)> {
             [b"comment", ..] => comments.push(text(line[b"comment".len()..].trim_ascii())),
             [b"obj_info", ..] => obj_info.push(text(line[b"obj_info".len()..].trim_ascii())),
             [b"element", name, count] => elements.push(Element {
-                name: String::from_utf8_lossy(name).into_owned(),
+                name: crate::bytes::text(name).into_owned(),
                 count: std::str::from_utf8(count)
                     .ok()
                     .and_then(|c| c.parse().ok())
-                    .context("bad PLY element count")?,
+                    .context(ErrorKind::Corrupt, "bad PLY element count")?,
                 props: Vec::new(),
             }),
             [b"property", b"list", c, i, name] => elements
                 .last_mut()
-                .context("PLY property before element")?
+                .context(ErrorKind::Corrupt, "PLY property before element")?
                 .props
                 .push(Prop {
-                    name: String::from_utf8_lossy(name).into_owned(),
+                    name: crate::bytes::text(name).into_owned(),
                     ty: Ty::parse(i)?,
                     count: Some(Ty::parse(c)?),
                 }),
             [b"property", ty, name] => elements
                 .last_mut()
-                .context("PLY property before element")?
+                .context(ErrorKind::Corrupt, "PLY property before element")?
                 .props
                 .push(Prop {
-                    name: String::from_utf8_lossy(name).into_owned(),
+                    name: crate::bytes::text(name).into_owned(),
                     ty: Ty::parse(ty)?,
                     count: None,
                 }),
@@ -405,7 +422,7 @@ fn header(data: &[u8]) -> Result<(Header, Vec<Element>, usize)> {
         }
     }
     let header = Header {
-        format: format.context("PLY header names no format")?,
+        format: format.context(ErrorKind::Corrupt, "PLY header names no format")?,
         version,
         textures,
         comments,
@@ -512,12 +529,6 @@ fn splat_color(vals: &[f64], dc: [usize; 3], opacity: Option<usize>) -> [f32; 4]
 #[allow(clippy::float_cmp, reason = "the placeholder is written exactly")]
 fn is_zero(n: [f32; 3]) -> bool {
     n == [0.0; 3]
-}
-
-/// `n` made unit length; `None` for a zero or broken one, which says nothing.
-fn unit(n: [f32; 3]) -> Option<[f32; 3]> {
-    let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
-    (len > 0.0 && len.is_finite()).then(|| n.map(|c| c / len))
 }
 
 /// Where an element's properties are, and which of them the reader uses.
@@ -655,6 +666,8 @@ struct Body {
     skipped: Vec<String>,
     /// Whether the data ends before the header's counts do.
     cut: bool,
+    /// Faces, strip triangles and edges left out for naming a vertex that isn't there.
+    dropped: usize,
     // Scratch, reused from record to record.
     vals: Vec<f64>,
     idx: Vec<u32>,
@@ -663,7 +676,7 @@ struct Body {
     local: Vec<[u32; 3]>,
 }
 
-pub(crate) fn ply(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document<'static>> {
+pub(crate) fn ply(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document> {
     let path = input.path;
     let mut blocks = input.blocks()?;
     // The header, whole.
@@ -680,6 +693,14 @@ pub(crate) fn ply(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<D
         }
         want *= 2;
     };
+    if compressed::is_compressed(&elements) {
+        // Packed splats are unpacked from the whole file, not a block at a time.
+        drop(blocks);
+        let data = input.read()?;
+        let mut doc = compressed::load(data.get(start..).unwrap_or(&[]), &head, &elements, keep.points())?;
+        frame::flat(&mut doc);
+        return Ok(doc);
+    }
     blocks.consume(start);
     let room = blocks.size_hint().saturating_sub(start);
     let has_faces = elements
@@ -714,44 +735,52 @@ pub(crate) fn ply(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<D
     // A file cut short keeps the items it holds whole, if it holds any vertices.
     ensure!(
         !body.cut || !body.verts.pos.is_empty(),
-        "PLY data ends early: the file holds fewer items than its header counts"
+        Truncated,
+        "PLY data is cut short: the file holds fewer items than its header counts"
     );
-    let mut source = json!({
-        "format": "PLY",
-        "encoding": match head.format {
-            Format::Ascii => "ascii",
-            Format::Le => "binary_little_endian",
-            Format::Be => "binary_big_endian",
-        },
-        "version": head.version,
-    });
+    let mut source = json!({ "encoding": if matches!(head.format, Format::Ascii) { "ascii" } else { "binary" } });
+    match head.format {
+        Format::Ascii => {}
+        Format::Le => source["byteOrder"] = json!("little"),
+        Format::Be => source["byteOrder"] = json!("big"),
+    }
     if body.cut {
         source["truncated"] = json!(true);
     }
-    for (key, list) in [
-        ("comments", &head.comments),
-        ("objInfo", &head.obj_info),
-        ("skipped", &body.skipped),
-    ] {
+    for (key, list) in [("objInfo", &head.obj_info), ("skipped", &body.skipped)] {
         if !list.is_empty() {
             source[key] = json!(list);
         }
     }
+    let info = SourceInfo {
+        format: Some("PLY".into()),
+        version: Some(head.version.clone()).filter(|v| !v.is_empty()),
+        tool: head.comments.iter().find_map(|c| writer(c)),
+        comments: head.comments.clone(),
+        ..SourceInfo::default()
+    };
+    if let Value::Object(m) = &mut source {
+        info.write(m);
+    }
     let mut facts = Map::new();
-    let mut b = Builder::default();
+    let mut b = Builder::new(keep.crease_angle());
     let mut json = Map::new();
     json.insert("asset".into(), json!({ "extras": { "source": source } }));
     let names = std::mem::take(&mut body.extra_names);
     let nv = body.verts.pos.len();
-    let edges: Vec<u32> = body
+    // An edge to a vertex that isn't there, or to one that isn't a finite point, is dropped, as a triangle is.
+    let pos = &body.verts.pos;
+    let there = |i: u32| pos.get(i as usize).is_some_and(|p| p.iter().all(|c| c.is_finite()));
+    let mut edges: Vec<u32> = body
         .edges
         .as_chunks::<2>()
         .0
         .iter()
-        .filter(|e| e.iter().all(|&i| (i as usize) < nv))
+        .filter(|e| e.iter().all(|&i| there(i)))
         .flatten()
         .copied()
         .collect();
+    b.dropped += body.edges.len() / 2 - edges.len() / 2;
     let mut primitives = Vec::new();
     // The attributes the edges share: the triangles' when their vertices are the file's.
     let mut shared = None;
@@ -764,19 +793,34 @@ pub(crate) fn ply(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<D
         };
         let dir = path.parent().unwrap_or(Path::new(""));
         let mut images = Images::new(!keep.image_bytes, dir);
-        let (mesh, srcs) = build(&mut body, textures, path, assets, &mut images)?;
+        let cut = body.cut;
+        let (mesh, srcs) = build(&mut body, textures, path, assets, &mut images).map_err(|e| {
+            if cut && e.kind() == ErrorKind::Empty {
+                crate::Error::cut_short("PLY data is cut short before its first whole face")
+            } else {
+                e
+            }
+        })?;
+        b.dropped += body.dropped;
         facts.insert("triangles".into(), json!(mesh.triangles()));
-        facts.insert(
-            "vertices".into(),
-            json!(mesh.prims.iter().map(|p| p.positions.len()).sum::<usize>()),
-        );
         let Mesh { prims, materials, .. } = mesh;
-        for (k, p) in prims.into_iter().enumerate() {
+        let mut vertices = 0;
+        for (k, mut p) in prims.into_iter().enumerate() {
             let n = p.positions.len();
+            // Without normals in the file, the default ones; the vertices they add keep their other properties.
+            let added = if p.normals.len() == n || p.indices.is_empty() {
+                Vec::new()
+            } else {
+                crate::geometry::default_normals(&mut p, b.crease)
+            };
+            vertices += p.positions.len();
             let material = p.material;
             let src = srcs.as_ref().and_then(|s| s.get(k));
             if let Some(mut prim) = b.primitive(p) {
-                let columns = gather(&mut body.verts.extra, src.map(Vec::as_slice), n);
+                let mut columns = gather(&mut body.verts.extra, src.map(Vec::as_slice), n);
+                for column in &mut columns {
+                    crate::geometry::follow(column, n, &added);
+                }
                 custom(&mut b, &mut prim["attributes"], &names, columns);
                 prim["material"] = json!(material);
                 if src.is_none() {
@@ -785,6 +829,7 @@ pub(crate) fn ply(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<D
                 primitives.push(prim);
             }
         }
+        facts.insert("vertices".into(), json!(vertices));
         b.materials(&materials, images.list, &mut json);
     } else {
         facts.insert("points".into(), json!(body.points));
@@ -814,6 +859,17 @@ pub(crate) fn ply(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<D
             }
             let n = splats.len();
             if let Some(mut prim) = splats.primitive(&mut b) {
+                // Right, down and forward by convention, which the file doesn't state: turned to glTF's.
+                let mut turned = SourceInfo {
+                    up_axis: Fact::Assumed(Axis::NegY),
+                    handedness: Fact::Assumed(Handedness::Right),
+                    ..SourceInfo::default()
+                };
+                turned.converted.up_axis = true;
+                if let Some(Value::Object(source)) = json.get_mut("asset").and_then(|a| a.pointer_mut("/extras/source"))
+                {
+                    turned.write(source);
+                }
                 let has_normals = v.nrm.iter().any(|&c| !is_zero(c));
                 others(&mut b, &mut prim["attributes"], v, n, has_normals, &names, "COLOR_1");
                 shared = Some(json!({ "POSITION": prim["attributes"]["POSITION"] }));
@@ -822,16 +878,24 @@ pub(crate) fn ply(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<D
             }
             facts.insert("points".into(), json!(n));
             facts.insert("splats".into(), json!(n));
-        } else if nv > 0 {
-            let attributes = vertex_attributes(&mut b, &mut body.verts, body.zero_normals, &names);
-            primitives.push(json!({ "attributes": attributes, "mode": 0 }));
+        } else if nv > 0
+            && let Some((attributes, indices)) = vertex_attributes(&mut b, &mut body.verts, body.zero_normals, &names)
+        {
+            let mut prim = json!({ "attributes": attributes, "mode": 0 });
+            if let Some(i) = indices {
+                prim["indices"] = json!(i);
+            }
+            primitives.push(prim);
             shared = Some(attributes);
         }
     }
     if !edges.is_empty() {
-        let attributes = match shared {
-            Some(a) => a,
-            None => json!({ "POSITION": b.positions(std::mem::take(&mut body.verts.pos)) }),
+        let attributes = if let Some(a) = shared {
+            a
+        } else {
+            let mut pos = std::mem::take(&mut body.verts.pos);
+            b.sound(&mut pos, [&mut Vec::new(), &mut edges, &mut Vec::new()]);
+            json!({ "POSITION": b.positions(pos) })
         };
         let count = edges.len();
         let indices = b.accessor(Part::u32(edges), 5125, count, "SCALAR", Some(34963));
@@ -844,8 +908,18 @@ pub(crate) fn ply(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<D
     json.insert("scene".into(), json!(0));
     json.insert("scenes".into(), json!([{ "nodes": [0] }]));
     json.insert("nodes".into(), json!([{ "mesh": 0 }]));
+    // Only points (a cloud, or splats) is sampled data, converted in place if at all; a mesh is a scene.
+    let sampled = primitives
+        .iter()
+        .all(|p| p.get("mode").and_then(Value::as_u64) == Some(0));
     json.insert("meshes".into(), json!([{ "primitives": primitives }]));
-    Ok(b.finish(json, facts))
+    let mut doc = b.finish(json, facts);
+    if sampled {
+        frame::flat(&mut doc);
+    } else {
+        frame::root(&mut doc, Frame::IDENTITY);
+    }
+    Ok(doc)
 }
 
 /// The extra columns for `n` drawn vertices: the file's own when `src` is `None`, otherwise
@@ -879,12 +953,29 @@ fn custom(b: &mut Builder, attributes: &mut Value, names: &[String], columns: Ve
     }
 }
 
-/// A point cloud's attributes: everything its vertices carry.
-fn vertex_attributes(b: &mut Builder, v: &mut Vertices, zero_normals: usize, names: &[String]) -> Value {
+/// A point cloud's attributes: everything its vertices carry. With them, the indices of the points to draw when
+/// some aren't finite points and are left out; `None` when none is left.
+fn vertex_attributes(
+    b: &mut Builder,
+    v: &mut Vertices,
+    zero_normals: usize,
+    names: &[String],
+) -> Option<(Value, Option<usize>)> {
     let n = v.pos.len();
-    let mut attributes = json!({ "POSITION": b.positions(std::mem::take(&mut v.pos)) });
+    let mut pos = std::mem::take(&mut v.pos);
+    let mut indices = None;
+    if !crate::geometry::finite(&pos) {
+        let mut points: Vec<u32> = (0..u32_of(n)).collect();
+        b.sound(&mut pos, [&mut Vec::new(), &mut Vec::new(), &mut points]);
+        if points.is_empty() {
+            return None;
+        }
+        let count = points.len();
+        indices = Some(b.accessor(Part::u32(points), 5125, count, "SCALAR", Some(34963)));
+    }
+    let mut attributes = json!({ "POSITION": b.positions(pos) });
     others(b, &mut attributes, v, n, zero_normals < n, names, "COLOR_0");
-    attributes
+    Some((attributes, indices))
 }
 
 /// Adds what `n` points carry beyond their positions to `attributes`: normals (unless
@@ -926,11 +1017,21 @@ fn others(
         attributes["TEXCOORD_0"] = json!(a);
     }
     if v.col.len() == n {
-        let mut colors = std::mem::take(&mut v.col).into_flattened();
-        for c in &mut colors {
-            *c = c.clamp(0.0, 1.0);
-        }
-        attributes[color] = json!(b.accessor(Part::f32(colors), 5126, n, "VEC4", Some(34962)));
+        // Normalized 16-bit, as the other point clouds' colors are: an 8-bit channel's values, made linear, stay
+        // apart (the closest two, 0 and 1, are some 20 steps apart), in half the bytes of floats.
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "clamped to 0..=1, the product is in 0..=65535"
+        )]
+        let colors: Vec<u16> = std::mem::take(&mut v.col)
+            .into_flattened()
+            .into_iter()
+            .map(|c| (c.clamp(0.0, 1.0) * 65535.0).round() as u16)
+            .collect();
+        let a = b.accessor(Part::u16(colors), 5123, n, "VEC4", Some(34962));
+        b.accessors[a].normalized = true;
+        attributes[color] = json!(a);
     }
     let columns = gather(&mut v.extra, None, n);
     custom(b, attributes, names, columns);
@@ -992,7 +1093,7 @@ enum Kind {
 fn reserve<T>(v: &mut Vec<T>, n: usize) -> Result<()> {
     v.try_reserve_exact(n)
         .ok()
-        .context("not enough memory for the PLY data")
+        .context(ErrorKind::LimitExceeded, "not enough memory for the PLY data")
 }
 
 /// Reads one element's items, a block of the file at a time.
@@ -1018,6 +1119,7 @@ fn read_element(blocks: &mut Blocks<'_>, format: Format, el: &Element, body: &mu
     if kind == Kind::Vertex {
         ensure!(
             plan.xyz.iter().all(|&s| s != usize::MAX),
+            Corrupt,
             "PLY vertices have no x, y and z"
         );
         let n = el.count;
@@ -1027,6 +1129,7 @@ fn read_element(blocks: &mut Blocks<'_>, format: Format, el: &Element, body: &mu
             plan.splat = None;
             ensure!(
                 n <= body.max_splats,
+                LimitExceeded,
                 "{n} gaussian splats, more than the {} allowed (Keep::max_points)",
                 body.max_splats
             );
@@ -1102,7 +1205,7 @@ fn read_element(blocks: &mut Blocks<'_>, format: Format, el: &Element, body: &mu
                     kept = cur.pos;
                 }
                 Err(Stop::Short) => break,
-                Err(Stop::Bad(m)) => bail!("{m}"),
+                Err(Stop::Bad(m)) => bail!(Corrupt, "{m}"),
             }
         }
         let buffered = all.len();
@@ -1117,6 +1220,7 @@ fn read_element(blocks: &mut Blocks<'_>, format: Format, el: &Element, body: &mu
         }
         ensure!(
             body.tris.len() / 3 <= body.limit,
+            LimitExceeded,
             "too many triangles to convert (more than {})",
             body.limit
         );
@@ -1187,10 +1291,11 @@ impl Floats {
         v.pos.extend(rows().map(|r| self.xyz.map(|at| f(r, at))));
         if let Some(n) = self.n {
             for r in rows() {
-                v.nrm.push(unit(n.map(|at| f(r, at))).unwrap_or_else(|| {
-                    body.zero_normals += 1;
-                    [0.0; 3]
-                }));
+                v.nrm
+                    .push(vec3::unit_above(n.map(|at| f(r, at)), 0.0).unwrap_or_else(|| {
+                        body.zero_normals += 1;
+                        [0.0; 3]
+                    }));
             }
         }
         for (col, &at) in v.extra.iter_mut().zip(&self.extra) {
@@ -1269,7 +1374,7 @@ fn vertex(cur: &mut Cursor, el: &Element, plan: &Plan, body: &mut Body) -> Got<(
     let g = |s: usize| f32_of(vals[s]);
     v.pos.push(plan.xyz.map(g));
     if let Some(n) = plan.n {
-        v.nrm.push(unit(n.map(g)).unwrap_or_else(|| {
+        v.nrm.push(vec3::unit_above(n.map(g), 0.0).unwrap_or_else(|| {
             body.zero_normals += 1;
             [0.0; 3]
         }));
@@ -1316,7 +1421,11 @@ fn face(cur: &mut Cursor, el: &Element, plan: &Plan, direct: bool, body: &mut Bo
     let idx = &body.idx;
     if direct {
         let nv = body.verts.pos.len();
-        if idx.len() < 3 || idx.iter().any(|&i| i as usize >= nv) {
+        if idx.len() < 3 {
+            return Ok(());
+        }
+        if idx.iter().any(|&i| i as usize >= nv) {
+            body.dropped += 1;
             return Ok(());
         }
         if idx.len() == 3 {
@@ -1374,7 +1483,10 @@ fn strip(cur: &mut Cursor, el: &Element, plan: &Plan, body: &mut Body) -> Got<()
     for run in body.idx.split(|&i| i == u32::MAX) {
         for k in 2..run.len() {
             let (a, b, c) = (run[k - 2], run[k - 1], run[k]);
-            body.strip_tris.push(if k % 2 == 0 { [a, b, c] } else { [b, a, c] });
+            // A strip's triangle on one vertex twice restarts the strip, and draws nothing.
+            if crate::geometry::distinct([a, b, c]) {
+                body.strip_tris.push(if k % 2 == 0 { [a, b, c] } else { [b, a, c] });
+            }
         }
     }
     Ok(())
@@ -1434,7 +1546,11 @@ fn build(
     for (f, &s) in faces.starts.iter().enumerate() {
         let end = faces.starts.get(f + 1).copied().unwrap_or(faces.corners.len());
         let face = &faces.corners[s..end];
-        if face.len() < 3 || face.iter().any(|&i| i as usize >= nv) {
+        if face.len() < 3 {
+            continue;
+        }
+        if face.iter().any(|&i| i as usize >= nv) {
+            body.dropped += 1;
             continue;
         }
 
@@ -1454,16 +1570,23 @@ fn build(
         }
         ensure!(
             corner_tris.len() <= limit,
+            LimitExceeded,
             "too many triangles to convert (more than {limit})"
         );
     }
+    let listed = strip_tris.len();
     let strips: Vec<[u32; 3]> = strip_tris
         .into_iter()
         .filter(|t| t.iter().all(|&i| (i as usize) < nv))
         .collect();
+    body.dropped += listed - strips.len();
     let total = tris.len() / 3 + corner_tris.len() + strips.len();
-    ensure!(total <= limit, "too many triangles to convert (more than {limit})");
-    ensure!(total > 0, "PLY has no faces");
+    ensure!(
+        total <= limit,
+        LimitExceeded,
+        "too many triangles to convert (more than {limit})"
+    );
+    ensure!(total > 0, Empty, "PLY has no faces");
 
     let per_corner = !faces.corner_uv.is_empty() || !faces.corner_col.is_empty() || slots > 1;
     let has_uv = !faces.corner_uv.is_empty() || verts.uv.len() == nv && nv > 0;
@@ -1478,9 +1601,9 @@ fn build(
         .collect();
     let mut srcs: Vec<Vec<u32>> = vec![Vec::new(); slots];
     if per_corner {
-        // Generated normals are smoothed over the file's vertices, so splitting a vertex by its
-        // corners' data leaves no seam.
-        let smooth = if has_nrm && zero_normals == 0 {
+        // Normals made for placeholders are smoothed over the file's vertices, so splitting a vertex by
+        // its corners' data leaves no seam.
+        let smooth = if !has_nrm || zero_normals == 0 {
             Vec::new()
         } else {
             let mut by_vertex = Vec::with_capacity(total * 3);
@@ -1503,9 +1626,12 @@ fn build(
                 srcs[slot as usize].push(v);
                 let at = v as usize;
                 p.positions.push(verts.pos[at]);
-                let own = verts.nrm.get(at).copied().filter(|&n| has_nrm && !is_zero(n));
-                p.normals
-                    .push(own.or_else(|| smooth.get(at).copied()).unwrap_or([0.0, 1.0, 0.0]));
+                // Without normals in the file, the primitive takes the default ones as it's written.
+                if has_nrm {
+                    let own = verts.nrm.get(at).copied().filter(|&n| !is_zero(n));
+                    p.normals
+                        .push(own.or_else(|| smooth.get(at).copied()).unwrap_or([0.0, 1.0, 0.0]));
+                }
                 if has_uv {
                     p.uvs
                         .push(uv.or_else(|| verts.uv.get(at).copied()).unwrap_or([0.0, 1.0]));
@@ -1554,9 +1680,7 @@ fn build(
         if has_col {
             p.colors = std::mem::take(&mut verts.col);
         }
-        if !has_nrm {
-            p.normals = smooth_normals(&p.positions, &p.indices);
-        } else if zero_normals > 0 {
+        if has_nrm && zero_normals > 0 {
             // Only the vertices without a normal of their own take a smooth one.
             let smooth = smooth_normals(&p.positions, &p.indices);
             for (n, s) in p.normals.iter_mut().zip(smooth) {
@@ -1568,8 +1692,8 @@ fn build(
     }
 
     let mut mesh = Mesh::default();
-    // Vertex colors show as they are; otherwise the usual gray.
-    let base = if has_col { [1.0; 4] } else { crate::mesh::GRAY };
+    // The default material: vertex colors show as they are; otherwise the usual gray.
+    let base = crate::legacy_material::default_material(has_col);
     let dir = path.parent().unwrap_or(Path::new(""));
     for k in 0..slots {
         // One texture: the last the file names, as before there were several.
@@ -1577,12 +1701,12 @@ fn build(
         let name = if slots > 1 {
             texture.map_or_else(|| format!("texture{k}"), Clone::clone)
         } else {
-            "default".to_owned()
+            base.name.clone()
         };
-        let mut mat = Material::plain(&name, base);
+        let mut mat = Material { name, ..base.clone() };
         if has_uv
             && let Some(t) = texture
-            && let Some(i) = assets.find(t, dir).and_then(|f| images.file(assets, f, t))
+            && let Some(i) = images.find(assets, &[t], &[dir])
         {
             mat.color_image = Some(i);
             mat.color = [1.0; 4];
@@ -1599,15 +1723,38 @@ fn build(
     Ok((mesh, per_corner.then_some(kept)))
 }
 
+/// The program a header comment says wrote the file: `Blender 4.2.0` from `Created in Blender version 4.2.0`,
+/// `VCGLIB` from `VCGLIB generated`, or what follows `Generated by`, `Exported from` or `Exported by`.
+fn writer(comment: &str) -> Option<String> {
+    let c = comment.trim();
+    let lower = c.to_ascii_lowercase();
+    let after = |p: &str| {
+        lower
+            .starts_with(p)
+            .then(|| c[p.len()..].trim())
+            .filter(|t| !t.is_empty())
+    };
+    if let Some(t) = after("created in ") {
+        return Some(t.replacen(" version ", " ", 1));
+    }
+    if let Some(t) = c.strip_suffix(" generated").filter(|t| !t.contains(' ')) {
+        return Some(t.to_owned());
+    }
+    ["generated by ", "exported from ", "exported by "]
+        .iter()
+        .find_map(|p| after(p))
+        .map(str::to_owned)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn load(bytes: &[u8]) -> Result<Document<'static>> {
+    fn load(bytes: &[u8]) -> Result<Document> {
         ply(Input::memory(bytes, "t.ply"), &crate::assets::Memory::new(), Keep::ALL)
     }
 
-    fn read(text: &str) -> Document<'static> {
+    fn read(text: &str) -> Document {
         load(text.as_bytes()).unwrap()
     }
 
@@ -1615,17 +1762,131 @@ mod tests {
         read(text).flatten(crate::document::Pose::Rest).unwrap().unwrap()
     }
 
-    fn attributes(doc: &Document<'_>) -> Vec<String> {
-        let prim = &doc.json["meshes"][0]["primitives"][0]["attributes"];
+    #[test]
+    fn whole_number_colors_scale_by_their_type() {
+        let file = |ty: &str, v: [u32; 3]| {
+            format!(
+                "ply\nformat ascii 1.0\nelement vertex 3\nproperty float x\nproperty float y\nproperty float z\n\
+                 property {ty} red\nproperty {ty} green\nproperty {ty} blue\nelement face 1\n\
+                 property list uchar int vertex_indices\nend_header\n0 0 0 {} {} {}\n1 0 0 {} {} {}\n\
+                 0 1 0 {} {} {}\n3 0 1 2\n",
+                v[0], v[1], v[2], v[0], v[1], v[2], v[0], v[1], v[2]
+            )
+        };
+        let half = srgb_to_linear(128.0 / 255.0);
+        // A 32-bit channel holds 0 to 255, as the writers that use one give it.
+        for ty in ["int", "uint", "int32", "uint32", "uchar", "short", "char"] {
+            let c = mesh(&file(ty, [128, 0, 255])).prims[0].colors[0];
+            let want = if ty == "short" {
+                srgb_to_linear(128.0 / 65535.0)
+            } else {
+                half
+            };
+            assert!((c[0] - want).abs() < 1e-6, "{ty}: {c:?}");
+            if ty != "short" {
+                assert!(
+                    c[1].abs() < 1e-9 && (c[2] - 1.0).abs() < 1e-9 && (c[3] - 1.0).abs() < 1e-9,
+                    "{ty}: {c:?}"
+                );
+            }
+        }
+        let c = mesh(&file("ushort", [65535, 0, 32768])).prims[0].colors[0];
+        assert!(
+            (c[0] - 1.0).abs() < 1e-9 && (c[2] - srgb_to_linear(32768.0 / 65535.0)).abs() < 1e-6,
+            "{c:?}"
+        );
+        // Past 255 a 32-bit channel is full.
+        assert_eq!(mesh(&file("int", [70000, 0, 0])).prims[0].colors[0][0], 1.0);
+    }
+
+    #[test]
+    fn header_comments_and_the_writer_are_the_source_info() {
+        let doc = read(
+            "ply
+format ascii 1.0
+comment Created in Blender version 4.2.0
+comment a cube
+obj_info a note
+             element vertex 3
+property float x
+property float y
+property float z
+             element face 1
+property list uchar int vertex_indices
+end_header
+0 0 0
+1 0 0
+0 1 0
+3 0 1 2
+",
+        );
+        let info = doc.source_info();
+        assert_eq!(info.format.as_deref(), Some("PLY"));
+        assert_eq!(info.version.as_deref(), Some("1.0"));
+        assert_eq!(info.tool.as_deref(), Some("Blender 4.2.0"));
+        assert_eq!(info.comments, ["Created in Blender version 4.2.0", "a cube"]);
+        assert_eq!(info.meters_per_unit, crate::source::Fact::Unknown);
+        assert_eq!(info.up_axis, crate::source::Fact::Unknown);
+        assert_eq!(info.converted, crate::source::Converted::default());
+        assert_eq!(doc.json()["asset"]["extras"]["source"]["objInfo"], json!(["a note"]));
+        assert_eq!(writer("VCGLIB generated").as_deref(), Some("VCGLIB"));
+        assert_eq!(writer("made by hand"), None);
+    }
+
+    #[test]
+    fn a_point_clouds_byte_colors_are_normalized_16_bit() {
+        let mut bytes = b"ply
+format binary_little_endian 1.0
+element vertex 3
+property float x
+property float y
+property float z
+property uchar red
+property uchar green
+property uchar blue
+end_header
+"
+        .to_vec();
+        let rgb = [[255u8, 0, 0], [0, 1, 128], [12, 13, 14]];
+        for (k, c) in rgb.iter().enumerate() {
+            for v in [f32::from(u8::try_from(k).unwrap()), 0.0, 0.0] {
+                bytes.extend(v.to_le_bytes());
+            }
+            bytes.extend(c);
+        }
+        let doc = load(&bytes).unwrap();
+        let index = |v: &Value| usize::try_from(v.as_u64().unwrap()).unwrap();
+        let a = &doc.json()["accessors"][index(&doc.json()["meshes"][0]["primitives"][0]["attributes"]["COLOR_0"])];
+        assert_eq!(
+            (a["componentType"].as_u64(), a["type"].as_str()),
+            (Some(5123), Some("VEC4"))
+        );
+        assert_eq!(a["normalized"], true);
+        assert_eq!(doc.json()["bufferViews"][index(&a["bufferView"])]["byteLength"], 3 * 8);
+        // Each byte value reads back as the byte it was, made linear.
+        let m = doc.flatten(crate::document::Pose::Rest).unwrap().unwrap();
+        for (got, want) in m.prims[0].colors.iter().zip(rgb) {
+            for (g, w) in got.iter().zip(want) {
+                assert!(
+                    (g - srgb_to_linear(f32::from(w) / 255.0)).abs() < 1e-4,
+                    "{got:?} {want:?}"
+                );
+            }
+            assert!((got[3] - 1.0).abs() < 1e-6);
+        }
+    }
+
+    fn attributes(doc: &Document) -> Vec<String> {
+        let prim = &doc.json()["meshes"][0]["primitives"][0]["attributes"];
         prim.as_object().unwrap().keys().cloned().collect()
     }
 
     /// How many vertices the first primitive has.
-    fn vertex_count(doc: &Document<'_>) -> u64 {
-        let pos = doc.json["meshes"][0]["primitives"][0]["attributes"]["POSITION"]
+    fn vertex_count(doc: &Document) -> u64 {
+        let pos = doc.json()["meshes"][0]["primitives"][0]["attributes"]["POSITION"]
             .as_u64()
             .unwrap();
-        doc.json["accessors"][usize::try_from(pos).unwrap()]["count"]
+        doc.json()["accessors"][usize::try_from(pos).unwrap()]["count"]
             .as_u64()
             .unwrap()
     }
@@ -1645,7 +1906,7 @@ mod tests {
         bytes.extend(std::iter::repeat_n(0u8, 20_000_000));
         let doc = load(&bytes).unwrap();
         assert_eq!(vertex_count(&doc), 20_000_000 / 1012);
-        assert_eq!(doc.json["asset"]["extras"]["source"]["truncated"], true);
+        assert_eq!(doc.json()["asset"]["extras"]["source"]["truncated"], true);
         // As ASCII: each property needs a character and a separator; two whole vertices.
         let text = "ply\nformat ascii 1.0\nelement vertex 3\nproperty float x\nproperty float y\n\
                     property float z\nend_header\n0 0 0 1 0 0 0 1";
@@ -1654,7 +1915,7 @@ mod tests {
         let text = b"ply\nformat ascii 1.0\nelement vertex 9\nproperty float x\nproperty float y\nproperty float z\n\
                      end_header\n";
         let err = load(text).err().unwrap().to_string();
-        assert!(err.contains("ends early"), "{err}");
+        assert!(err.contains("is cut short"), "{err}");
     }
 
     #[test]
@@ -1664,7 +1925,7 @@ mod tests {
                     property float z\nelement face 4\nproperty list uchar int vertex_indices\n\
                     end_header\n0 0 0\n1 0 0\n0 1 0\n1 1 0\n3 0 1 2\n3 1 3 2\n3 0 1";
         let doc = read(text);
-        assert_eq!(doc.json["asset"]["extras"]["source"]["truncated"], true);
+        assert_eq!(doc.json()["asset"]["extras"]["source"]["truncated"], true);
         assert_eq!(mesh(text).triangles(), 2);
     }
 
@@ -1676,7 +1937,7 @@ mod tests {
                     7.5 -2.25 0\r\n-1 2 3\r\n4 5 6\r\n";
         let doc = read(text);
         assert_eq!(vertex_count(&doc), 3);
-        assert!(doc.json["asset"]["extras"]["source"].get("truncated").is_none());
+        assert!(doc.json()["asset"]["extras"]["source"].get("truncated").is_none());
         // Items written a value a line still read, and a list on its item's line does.
         let faces = "ply\nformat ascii 1.0\nelement vertex 3\nproperty float x\nproperty float y\n\
                      property float z\nelement face 1\nproperty uchar flags\n\
@@ -1742,24 +2003,24 @@ mod tests {
              property int texnumber\nend_header\n0 0 0\n1 0 0\n1 1 0\n0 1 0\n\
              3 0 1 2 6 0 0 1 0 1 1 1\n3 0 2 3 6 0 0 1 1 0 1 0\n",
         );
-        let prims = doc.json["meshes"][0]["primitives"].as_array().unwrap();
+        let prims = doc.json()["meshes"][0]["primitives"].as_array().unwrap();
         assert_eq!(prims.len(), 2);
         assert_eq!(prims[0]["material"], 0);
         assert_eq!(prims[1]["material"], 1);
-        assert_eq!(doc.json["materials"][0]["name"], "a.png");
-        assert_eq!(doc.json["materials"][1]["name"], "b.png");
+        assert_eq!(doc.json()["materials"][0]["name"], "a.png");
+        assert_eq!(doc.json()["materials"][1]["name"], "b.png");
         let m = doc.flatten(crate::document::Pose::Rest).unwrap().unwrap();
         assert_eq!(m.triangles(), 2);
     }
 
     #[test]
     fn generated_normals_have_no_seam_where_texture_coordinates_split_a_vertex() {
-        // A folded strip: vertex 1 and 2 are split by their faces' texture coordinates, and
+        // A strip folded gently: vertex 1 and 2 are split by their faces' texture coordinates, and
         // still share one smooth normal.
         let m = mesh(
             "ply\nformat ascii 1.0\nelement vertex 4\nproperty float x\nproperty float y\nproperty float z\n\
              element face 2\nproperty list uchar int vertex_indices\nproperty list uchar float texcoord\n\
-             end_header\n0 0 0\n1 0 0\n1 1 0\n1 0 -1\n\
+             end_header\n0 0 0\n1 0 0\n1 1 0\n2 0 -0.3\n\
              3 0 1 2 6 0 0 1 0 1 1\n3 1 3 2 6 0.5 0 1 0 0.5 1\n",
         );
         let p = &m.prims[0];
@@ -1827,8 +2088,8 @@ mod tests {
         out
     }
 
-    fn floats(doc: &Document<'_>, name: &str) -> Vec<f32> {
-        let a = &doc.json["meshes"][0]["primitives"][0]["attributes"][name];
+    fn floats(doc: &Document, name: &str) -> Vec<f32> {
+        let a = &doc.json()["meshes"][0]["primitives"][0]["attributes"][name];
         doc.read_floats(usize::try_from(a.as_u64().unwrap()).unwrap())
             .unwrap()
             .1
@@ -1838,10 +2099,18 @@ mod tests {
     fn gaussian_splats_read_as_khr_gaussian_splatting() {
         let doc = load(&splat_file(3, 45)).unwrap();
         assert_eq!(doc.facts["splats"], 3);
-        assert_eq!(doc.json["extensionsUsed"][0], gaussian::EXTENSION);
+        assert_eq!(doc.json()["extensionsUsed"][0], gaussian::EXTENSION);
         let names = attributes(&doc);
         assert!(!names.iter().any(|n| n == "NORMAL" || n.starts_with('_')), "{names:?}");
         assert!(names.iter().any(|n| n.ends_with("SH_DEGREE_3_COEF_6")), "{names:?}");
+        // Turned from the convention's Y down, as the other splat readers say they turn theirs.
+        let info = doc.source_info();
+        assert_eq!(info.up_axis, crate::source::Fact::Assumed(crate::source::Axis::NegY));
+        assert_eq!(
+            info.handedness,
+            crate::source::Fact::Assumed(crate::source::Handedness::Right)
+        );
+        assert!(info.converted.up_axis && !info.converted.handedness && !info.converted.units);
         // Right, down, forward to right, up, back.
         assert_eq!(floats(&doc, "POSITION")[3..6], [1.0, -2.0, -3.0]);
         let scale = floats(&doc, "KHR_gaussian_splatting:SCALE");
@@ -1884,10 +2153,7 @@ mod tests {
 
     #[test]
     fn gaussian_splats_past_max_points_are_refused() {
-        let keep = Keep {
-            max_points: 2,
-            ..Keep::ALL
-        };
+        let keep = Keep::ALL.with_max_points(2);
         let bytes = splat_file(3, 0);
         let err = ply(Input::memory(&bytes, "t.ply"), &crate::assets::Memory::new(), keep).unwrap_err();
         assert!(err.to_string().contains("max_points"), "{err}");
@@ -1972,8 +2238,8 @@ mod tests {
              0 0 0 1\n1 0 0 2\n1 1 0 3\n0 1 0 4\n\
              3 0 1 2 6 0 0 1 0 1 1\n3 0 2 3 6 0.5 0.5 1 1 0 1\n",
         );
-        let prim = &doc.json["meshes"][0]["primitives"][0];
-        let count = |a: &Value| doc.json["accessors"][usize::try_from(a.as_u64().unwrap()).unwrap()]["count"].clone();
+        let prim = &doc.json()["meshes"][0]["primitives"][0];
+        let count = |a: &Value| doc.json()["accessors"][usize::try_from(a.as_u64().unwrap()).unwrap()]["count"].clone();
         let positions = count(&prim["attributes"]["POSITION"]);
         assert_eq!(positions, 5, "vertices 0 and 2 split by their two texture coordinates");
         assert_eq!(count(&prim["attributes"]["_QUALITY"]), positions);

@@ -5,11 +5,10 @@
   "facts": {
     "joints": 1,
     "channels": 6,
-    "frames": 2,
-    "frame_time": 0.04
+    "frames": 2
   },
   "document": {
-    "nodes": 2,
+    "nodes": 3,
     "animations": 1,
     "channels": 2,
     "node_names": [
@@ -27,7 +26,7 @@
   "rig": [
     {
       "node": "Hips",
-      "parent": null,
+      "parent": "RootNode",
       "translation": [
         15.0,
         90.0,

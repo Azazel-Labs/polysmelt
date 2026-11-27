@@ -131,7 +131,7 @@ impl Lex<'_> {
                     Some(b'*') => {
                         let rest = &self.b[self.at + 2..];
                         let Some(end) = rest.windows(2).position(|w| w == b"*/") else {
-                            bail!("an OpenDDL comment isn't closed")
+                            bail!(Truncated, "OpenDDL file is cut short inside a comment")
                         };
                         self.at += end + 4;
                         continue;
@@ -160,7 +160,12 @@ impl Lex<'_> {
 
     fn expect(&mut self, c: u8) -> Result<()> {
         if !self.eat(c)? {
-            bail!("expected '{}' at byte {} of an OpenDDL file", char::from(c), self.at);
+            bail!(
+                Corrupt,
+                "expected '{}' at byte {} of an OpenDDL file",
+                char::from(c),
+                self.at
+            );
         }
         Ok(())
     }
@@ -189,7 +194,11 @@ impl Lex<'_> {
         };
         self.at += 1;
         let Some((s, n)) = self.ident() else {
-            bail!("a name without an identifier at byte {} of an OpenDDL file", self.at)
+            bail!(
+                Corrupt,
+                "a name without an identifier at byte {} of an OpenDDL file",
+                self.at
+            )
         };
         Ok(Some((global, s, n)))
     }
@@ -204,13 +213,17 @@ impl Lex<'_> {
             self.at = at;
         }
         let Some((global, s, n)) = self.name()? else {
-            bail!("expected a reference at byte {} of an OpenDDL file", self.at)
+            bail!(Corrupt, "expected a reference at byte {} of an OpenDDL file", self.at)
         };
         let mut parts = vec![(s, n)];
         while self.b.get(self.at) == Some(&b'%') {
             self.at += 1;
             let Some(p) = self.ident() else {
-                bail!("a reference ends in '%' at byte {} of an OpenDDL file", self.at)
+                bail!(
+                    Corrupt,
+                    "a reference ends in '%' at byte {} of an OpenDDL file",
+                    self.at
+                )
             };
             parts.push(p);
         }
@@ -226,7 +239,7 @@ impl Lex<'_> {
             self.at += 1;
             loop {
                 let Some(&c) = self.b.get(self.at) else {
-                    bail!("an OpenDDL string isn't closed")
+                    bail!(Truncated, "OpenDDL file is cut short inside a string")
                 };
                 self.at += 1;
                 match c {
@@ -236,14 +249,14 @@ impl Lex<'_> {
                 }
             }
         }
-        ensure!(any, "expected a string at byte {} of an OpenDDL file", self.at);
-        Ok(String::from_utf8(out).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned()))
+        ensure!(any, Corrupt, "expected a string at byte {} of an OpenDDL file", self.at);
+        Ok(String::from_utf8(out).unwrap_or_else(|e| crate::bytes::text(e.as_bytes()).into_owned()))
     }
 
     /// The character an escape sequence (after its backslash) stands for, into `out` as UTF-8.
     fn escape(&mut self, out: &mut Vec<u8>) -> Result<()> {
         let Some(&c) = self.b.get(self.at) else {
-            bail!("an OpenDDL string isn't closed")
+            bail!(Corrupt, "an OpenDDL string isn't closed")
         };
         self.at += 1;
         let digits = match c {
@@ -266,14 +279,14 @@ impl Lex<'_> {
             b'x' => 2,
             b'u' => 4,
             b'U' => 6,
-            _ => bail!("an unknown escape '\\{}' in an OpenDDL string", char::from(c)),
+            _ => bail!(Corrupt, "an unknown escape '\\{}' in an OpenDDL string", char::from(c)),
         };
         let hex = self.b.get(self.at..self.at + digits).unwrap_or_default();
         let v = std::str::from_utf8(hex)
             .ok()
             .and_then(|h| u32::from_str_radix(h, 16).ok());
         let Some(v) = v.filter(|_| hex.len() == digits) else {
-            bail!("a bad escape in an OpenDDL string")
+            bail!(Corrupt, "a bad escape in an OpenDDL string")
         };
         self.at += digits;
         let ch = char::from_u32(v).unwrap_or(char::REPLACEMENT_CHARACTER);
@@ -298,7 +311,7 @@ impl Lex<'_> {
             while self.b.get(end).is_some_and(|&c| c != b'\'') {
                 end += if self.b[end] == b'\\' { 2 } else { 1 };
             }
-            ensure!(end < self.b.len(), "an OpenDDL character literal isn't closed");
+            ensure!(end < self.b.len(), Corrupt, "an OpenDDL character literal isn't closed");
             self.at = end + 1;
             return Ok((neg, 0, start + 1, end));
         }
@@ -336,6 +349,7 @@ impl Lex<'_> {
         let body = &self.b[start..end];
         ensure!(
             body.iter().any(u8::is_ascii_digit),
+            Corrupt,
             "expected a number at byte {} of an OpenDDL file",
             start
         );
@@ -413,6 +427,7 @@ impl<'a> Tree<'a> {
     pub fn parse(src: &'a [u8]) -> Result<Self> {
         ensure!(
             u32::try_from(src.len()).is_ok_and(|n| n < u32::MAX),
+            LimitExceeded,
             "the OpenDDL file is too big"
         );
         let mut t = Tree {
@@ -448,6 +463,7 @@ impl<'a> Tree<'a> {
             if c == b'}' {
                 ensure!(
                     open.pop().is_some(),
+                    Corrupt,
                     "an unmatched '}}' at byte {} of an OpenDDL file",
                     lex.at
                 );
@@ -457,6 +473,7 @@ impl<'a> Tree<'a> {
             let parent = open.last().copied().unwrap_or(ROOT);
             let Some(ident) = lex.ident() else {
                 bail!(
+                    Corrupt,
                     "expected a structure at byte {} of an OpenDDL file, not {}",
                     lex.at,
                     crate::shown(&src[lex.at..(lex.at + 16).min(src.len())])
@@ -488,7 +505,7 @@ impl<'a> Tree<'a> {
                     };
                     let n = n.and_then(|n: u64| u32::try_from(n).ok()).filter(|&n| n > 0 && !neg);
                     let Some(n) = n else {
-                        bail!("a bad array size in an OpenDDL file")
+                        bail!(Corrupt, "a bad array size in an OpenDDL file")
                     };
                     node.width = n;
                     lex.expect(b']')?;
@@ -506,7 +523,7 @@ impl<'a> Tree<'a> {
                         loop {
                             lex.skip()?;
                             let Some(key) = lex.ident() else {
-                                bail!("expected a property in an OpenDDL file")
+                                bail!(Corrupt, "expected a property in an OpenDDL file")
                             };
                             let v = if lex.eat(b'=')? {
                                 t.value(&mut lex, &mut buf)?
@@ -525,7 +542,7 @@ impl<'a> Tree<'a> {
                 lex.expect(b'{')?;
             }
             let k = span(t.nodes.len());
-            ensure!(k < NONE, "too many OpenDDL structures");
+            ensure!(k < NONE, LimitExceeded, "too many OpenDDL structures");
             if let Some((global, s, n)) = node.name {
                 let name = &src[s as usize..(s + n) as usize];
                 if global {
@@ -545,10 +562,18 @@ impl<'a> Tree<'a> {
             t.nodes[parent as usize].last = k;
             if ty.is_none() {
                 open.push(k);
-                ensure!(open.len() <= MAX_DEPTH, "OpenDDL structures nest too deep");
+                ensure!(
+                    open.len() <= MAX_DEPTH,
+                    LimitExceeded,
+                    "OpenDDL structures nest too deep"
+                );
             }
         }
-        ensure!(open.is_empty(), "an OpenDDL structure isn't closed");
+        ensure!(
+            open.is_empty(),
+            Truncated,
+            "OpenDDL file is cut short: a structure isn't closed"
+        );
         Ok(t)
     }
 
@@ -567,7 +592,7 @@ impl<'a> Tree<'a> {
                     b"false" => Val::Bool(false),
                     b"null" => Val::Ref(Ref::default()),
                     _ if data_type(id).is_some() => Val::Type,
-                    _ => bail!("a bad property value at byte {at} of an OpenDDL file"),
+                    _ => bail!(Corrupt, "a bad property value at byte {at} of an OpenDDL file"),
                 }
             }
             _ => {
@@ -596,13 +621,13 @@ impl<'a> Tree<'a> {
                 f64_from(d)
             };
             let Some(v) = v else {
-                bail!("a bad number {} in an OpenDDL file", crate::shown(digits))
+                bail!(Corrupt, "a bad number {} in an OpenDDL file", crate::shown(digits))
             };
             v
         } else {
             let digits = if base == 0 { digits } else { &digits[2..] };
             let Some(bits) = integer(digits, base) else {
-                bail!("a bad number {} in an OpenDDL file", crate::shown(digits))
+                bail!(Corrupt, "a bad number {} in an OpenDDL file", crate::shown(digits))
             };
             match ty {
                 // Floats written in hex, octal or binary are their bits.
@@ -668,10 +693,10 @@ impl<'a> Tree<'a> {
             Ty::Type => {
                 lex.skip()?;
                 let Some((s, n)) = lex.ident() else {
-                    bail!("expected a data type in an OpenDDL file")
+                    bail!(Corrupt, "expected a data type in an OpenDDL file")
                 };
                 let id = &self.src[s as usize..(s + n) as usize];
-                self.strs.push(String::from_utf8_lossy(id).into_owned());
+                self.strs.push(crate::bytes::text(id).into_owned());
             }
             Ty::Base64 => {
                 lex.skip()?;
@@ -684,7 +709,7 @@ impl<'a> Tree<'a> {
                     lex.at += 1;
                 }
                 self.strs
-                    .push(String::from_utf8_lossy(&self.src[start..lex.at]).into_owned());
+                    .push(crate::bytes::text(&self.src[start..lex.at]).into_owned());
             }
             Ty::Bool => {
                 lex.skip()?;
@@ -692,7 +717,7 @@ impl<'a> Tree<'a> {
                 let v = match lex.ident().map(|(s, n)| &self.src[s as usize..(s + n) as usize]) {
                     Some(b"true") => 1.0,
                     Some(b"false") => 0.0,
-                    Some(_) => bail!("a bad boolean at byte {at} of an OpenDDL file"),
+                    Some(_) => bail!(Corrupt, "a bad boolean at byte {at} of an OpenDDL file"),
                     None => {
                         let (neg, base, s, e) = lex.number()?;
                         let v = self.literal_number(Ty::Int, neg, base, s, e, buf)?;
@@ -706,6 +731,7 @@ impl<'a> Tree<'a> {
                 if ty == Ty::Int && base == 10 {
                     ensure!(
                         !self.src[s..e].iter().any(|&c| matches!(c, b'.' | b'e' | b'E')),
+                        Corrupt,
                         "a fraction in an OpenDDL integer"
                     );
                 }
@@ -966,7 +992,7 @@ mod tests {
             b"1 {}",
             b"X { float {0x1FFFFFFFFFFFFFFFFF} }",
         ] {
-            assert!(Tree::parse(src).is_err(), "{}", String::from_utf8_lossy(src));
+            assert!(Tree::parse(src).is_err(), "{}", crate::bytes::text(src));
         }
         let deep = "X {".repeat(MAX_DEPTH + 1) + &"}".repeat(MAX_DEPTH + 1);
         assert!(Tree::parse(deep.as_bytes()).is_err());

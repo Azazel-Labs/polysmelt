@@ -22,10 +22,13 @@
 //! in the source facts. GL commands (the triangle strips and fans the engine draws with) repeat the triangles and
 //! are skipped.
 //!
-//! The format is Z up, so the mesh node is turned for glTF's Y up; game units are kept unscaled.
+//! The format is Z up and right-handed, as the engine it belongs to is, so the document's `RootNode`, over the mesh node, turns it for glTF's Y up
+//! (the source info's `upAxis` is a declared `+Z`, converted, and its `handedness` a declared `right`); game units are kept unscaled, and their length unknown. The assumed
+//! frame rate is recorded when there are frames to animate.
 //!
-//! A file cut short, an offset past its end, a negative count, or a triangle naming a position or texture
-//! coordinate past its list is an error. Counts are checked against the file's size before anything is allocated
+//! A file cut short, an offset past its end or a negative count is an error. A triangle naming a position or
+//! texture coordinate past its list is dropped and counted (`droppedGeometry` in the source extras), as in
+//! every format. Counts are checked against the file's size before anything is allocated
 //! for them, and a file whose frames would make more morph data than a model of the engine can hold is refused.
 
 use std::collections::HashMap;
@@ -34,17 +37,19 @@ use std::ops::Range;
 use serde_json::json;
 
 use super::Input;
-use super::scene::{
-    self, Animation, Bin, Channel, Interp, Node, Path, Primitive, Scene, SceneMesh, Target, Z_UP_TO_Y_UP,
-};
+use super::scene::{Animation, Channel, Interp, Node, Path, Primitive, Scene, SceneMesh, Target, Z_UP_TO_Y_UP};
 use crate::Result;
 use crate::assets::Assets;
+use crate::bytes::Bin;
 use crate::document::{Document, Keep};
 use crate::images::Images;
 use crate::mesh::{FastMap, Material};
 use crate::num::{f32_of, u32_of};
+use crate::source::{Axis, Fact, Handedness};
 
-/// Frames a second: the rate the engine's game logic runs at, as the format stores none.
+/// Frames a second, as the format stores none: the rate of the engine the format belongs to, whose game logic
+/// steps a model's frame every 100 ms (`FRAMETIME` 0.1 in id Software's released Quake II source). So that, not
+/// the readers' shared assumption.
 const RATE: f32 = 10.0;
 
 /// The most frames read; the engine holds 512.
@@ -114,7 +119,7 @@ static NORMALS: [[f32; 3]; 162] = [
 ];
 
 /// Reads an `.md2` model.
-pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document<'static>> {
+pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document> {
     let data = input.read()?;
     let model = parse(&data, keep.morph_targets)?;
     let stem = input
@@ -122,22 +127,26 @@ pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
         .file_stem()
         .map_or_else(|| "md2".to_owned(), |s| s.to_string_lossy().into_owned());
 
-    let mut scene = Scene::default();
+    let mut scene = Scene {
+        dropped: model.dropped,
+        ..Scene::default()
+    };
     let mut images = Images::new(!keep.image_bytes, input.dir());
     let textured = !model.prim.uvs.is_empty();
     let skin = model.skins.first().filter(|s| !s.is_empty());
-    let found = skin.and_then(|s| assets.find(s, input.dir()).map(|p| (p, s.clone())));
-    let found = found.or_else(|| {
-        let p = assets.color_texture_for(input.path).filter(|_| textured)?;
-        let name = p
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        Some((p, name))
-    });
+    let found = skin.and_then(|s| Some((assets.find(s, input.dir())?, s)));
     let name = skin.cloned().unwrap_or_else(|| stem.clone());
     let mut material = Material::plain(&name, [1.0, 1.0, 1.0, 1.0]);
-    material.color_image = found.and_then(|(p, r)| images.file(assets, p, &r));
+    // A skin that isn't there gives way to a texture by name, as one the model doesn't name does.
+    material.color_image = match found {
+        Some((p, s)) => images.file(assets, p, s),
+        None if textured => super::color_texture(input.path, assets, &mut images),
+        None => None,
+    };
+    // A skin the model names that isn't there, with nothing found in its place, is a texture it doesn't have.
+    if let (None, Some(s), true) = (material.color_image, skin, keep.textures) {
+        images.miss(s);
+    }
     scene.materials.push(material);
     scene.images = images.list;
 
@@ -185,14 +194,17 @@ pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
 
     scene.facts.insert("frames".into(), json!(model.names.len()));
     scene.facts.insert("skins".into(), json!(model.skins.len()));
-    scene.source.insert("format".into(), json!("MD2"));
-    scene.source.insert("version".into(), json!(model.version));
-    scene.source.insert("upAxis".into(), json!("Z"));
-    scene.source.insert("frameRate".into(), json!(RATE));
+    scene.info.format = Some("MD2".into());
+    scene.info.version = Some(model.version.to_string());
+    scene.info.up_axis = Fact::Declared(Axis::PosZ);
+    scene.info.handedness = Fact::Declared(Handedness::Right);
+    if model.names.len() > 1 {
+        scene.info.frame_rate = Fact::Assumed(f64::from(RATE));
+    }
     if !model.skins.is_empty() {
         scene.source.insert("skins".into(), json!(model.skins));
     }
-    scene.rotate_roots(Z_UP_TO_Y_UP);
+    scene.turn(Z_UP_TO_Y_UP);
     scene.finish(keep)
 }
 
@@ -206,22 +218,34 @@ struct Model {
     prim: Primitive,
     /// Each kept frame's target; `None` for the first frame and any frame that doesn't move from it.
     frames: Vec<Option<usize>>,
+    /// The triangles left out for naming a vertex or a texture coordinate that isn't there.
+    dropped: usize,
 }
 
 /// A header count or offset, which can't be negative.
 fn size(v: i32, what: &str) -> Result<usize> {
-    usize::try_from(v).map_err(|_| invalid!("MD2 header's {what} is negative ({v})"))
+    usize::try_from(v).map_err(|_| err!(Corrupt, "MD2 header's {what} is negative ({v})"))
 }
 
 /// Reads the file; `morphs` says whether frames after the first are kept as targets.
 fn parse(data: &[u8], morphs: bool) -> Result<Model> {
-    ensure!(data.starts_with(b"IDP2"), "not an MD2 file: no IDP2 signature");
+    ensure!(
+        data.starts_with(b"IDP2"),
+        UnknownFormat,
+        "not an MD2 file: no IDP2 signature"
+    );
     let mut b = Bin::new(data, "MD2");
     b.skip(4)?;
     let mut h = [0i32; 16];
     for v in &mut h {
         *v = b.i32()?;
     }
+    ensure!(
+        h[0] == 8,
+        Unsupported,
+        "MD2 version {} isn't read, only version 8",
+        h[0]
+    );
     let [
         version,
         skin_w,
@@ -251,7 +275,7 @@ fn parse(data: &[u8], morphs: bool) -> Result<Model> {
     if n_skins > 0 {
         b.seek(size(ofs_skins, "skin offset")?)?;
         for _ in 0..b.count(n_skins as u64, 64)? {
-            skins.push(scene::text(b.fixed_str(64)?));
+            skins.push(crate::bytes::name(b.fixed_str(64)?));
         }
     }
     let mut st = Vec::new();
@@ -261,21 +285,19 @@ fn parse(data: &[u8], morphs: bool) -> Result<Model> {
             st.push([b.i16()?, b.i16()?]);
         }
     }
-    ensure!(n_tris > 0, "MD2 file has no triangles");
+    ensure!(n_tris > 0, Empty, "MD2 file has no triangles");
     b.seek(size(ofs_tris, "triangle offset")?)?;
     let mut tris = Vec::with_capacity(b.count(n_tris as u64, 12)?);
-    for t in 0..n_tris {
+    let mut dropped = 0;
+    for _ in 0..n_tris {
         let v = [b.u16()?, b.u16()?, b.u16()?];
         let s = [b.u16()?, b.u16()?, b.u16()?];
-        ensure!(
-            v.iter().all(|&i| usize::from(i) < n_xyz),
-            "MD2 triangle {t} names a vertex past the {n_xyz} each frame holds"
-        );
-        // With no texture coordinates at all, their indices mean nothing.
-        ensure!(
-            n_st == 0 || s.iter().all(|&i| usize::from(i) < n_st),
-            "MD2 triangle {t} names a texture coordinate past the {n_st} there are"
-        );
+        // A triangle naming a vertex that isn't there is dropped, as in every format, and so is one naming a
+        // texture coordinate that isn't. With no texture coordinates at all, their indices mean nothing.
+        if v.iter().any(|&i| usize::from(i) >= n_xyz) || (n_st > 0 && s.iter().any(|&i| usize::from(i) >= n_st)) {
+            dropped += 1;
+            continue;
+        }
         tris.push((v, if n_st == 0 { [0; 3] } else { s }));
     }
 
@@ -295,19 +317,22 @@ fn parse(data: &[u8], morphs: bool) -> Result<Model> {
         }
     }
 
-    ensure!(n_frames > 0, "MD2 file has no frames");
+    ensure!(n_frames > 0, Empty, "MD2 file has no frames");
     ensure!(
         n_frames <= MAX_FRAMES,
+        LimitExceeded,
         "MD2 file has {n_frames} frames, more than {MAX_FRAMES}"
     );
     let need = n_xyz.checked_mul(4).and_then(|n| n.checked_add(40));
     ensure!(
         need.is_some_and(|n| frame_size >= n),
+        Corrupt,
         "MD2 frames are {frame_size} bytes, too few for {n_xyz} vertices"
     );
     let kept = if morphs { n_frames } else { 1 };
     ensure!(
         kept.checked_mul(verts.len()).is_some_and(|n| n <= MAX_FRAME_VERTICES),
+        LimitExceeded,
         "MD2 file's {n_frames} frames of {} vertices are more than a model can hold",
         verts.len()
     );
@@ -325,7 +350,7 @@ fn parse(data: &[u8], morphs: bool) -> Result<Model> {
         b.seek(ofs_frames + f * frame_size)?;
         let scale = b.vec3()?;
         let translate = b.vec3()?;
-        names.push(scene::text(b.fixed_str(16)?));
+        names.push(crate::bytes::name(b.fixed_str(16)?));
         if f >= kept {
             continue;
         }
@@ -362,6 +387,7 @@ fn parse(data: &[u8], morphs: bool) -> Result<Model> {
         names,
         prim,
         frames,
+        dropped,
     })
 }
 
@@ -396,12 +422,11 @@ fn target(prim: &mut Primitive, verts: &[(u16, u16)], pos: &[[f32; 3]], nrm: &[[
 }
 
 /// The runs of frames that make each animation: consecutive frames whose names match once trailing digits are
-/// taken off, named that way (`frames` when nothing is left; a name used again gets a number).
+/// taken off, named that way (with no name when nothing is left; a name used again gets a number).
 fn groups(names: &[String]) -> Vec<(String, Range<usize>)> {
     let mut out: Vec<(String, Range<usize>)> = Vec::new();
     for (i, n) in names.iter().enumerate() {
         let p = n.trim_end_matches(|c: char| c.is_ascii_digit());
-        let p = if p.is_empty() { "frames" } else { p };
         match out.last_mut() {
             Some((q, r)) if q == p => r.end = i + 1,
             _ => out.push((p.to_owned(), i..i + 1)),
@@ -411,7 +436,7 @@ fn groups(names: &[String]) -> Vec<(String, Range<usize>)> {
     for (name, _) in &mut out {
         let n = seen.entry(name.clone()).or_insert(0);
         *n += 1;
-        if *n > 1 {
+        if *n > 1 && !name.is_empty() {
             *name = format!("{name}_{n}");
         }
     }
@@ -430,10 +455,7 @@ mod tests {
             .collect();
         let g = groups(&names);
         let got: Vec<(&str, Range<usize>)> = g.iter().map(|(n, r)| (n.as_str(), r.clone())).collect();
-        assert_eq!(
-            got,
-            vec![("stand", 0..2), ("run", 2..5), ("frames", 5..6), ("stand_2", 6..7)]
-        );
+        assert_eq!(got, vec![("stand", 0..2), ("run", 2..5), ("", 5..6), ("stand_2", 6..7)]);
     }
 
     #[test]
@@ -487,5 +509,23 @@ mod tests {
         sweep(bytes, |b| {
             let _ = load(Input::memory(b, "quad.md2"), &crate::assets::Memory::new(), Keep::ALL);
         });
+    }
+
+    #[test]
+    fn source_info_is_game_units_z_up_at_ten_frames_a_second() {
+        let bytes = include_bytes!("../../tests/corpus/md2/morph_frame_groups/quad.md2");
+        let doc = load(
+            Input::memory(bytes, "quad.md2"),
+            &crate::assets::Memory::new(),
+            Keep::ALL,
+        )
+        .unwrap();
+        let info = doc.source_info();
+        assert_eq!(info.format.as_deref(), Some("MD2"));
+        assert_eq!(info.version.as_deref(), Some("8"));
+        assert_eq!(info.meters_per_unit, Fact::Unknown);
+        assert_eq!(info.up_axis, Fact::Declared(Axis::PosZ));
+        assert_eq!(info.frame_rate, Fact::Assumed(10.0));
+        assert!(info.converted.up_axis && !info.converted.units);
     }
 }

@@ -1,0 +1,14 @@
+{
+  "points": null,
+  "triangles": null,
+  "lines": null,
+  "verts": null,
+  "attributes": null,
+  "soup": "cf8d77f973dc1709",
+  "soup_attributes": [
+    "_PRESSURE1",
+    "_PRESSURE2"
+  ],
+  "boundary_faces": 120,
+  "surface_filter_triangles": 240
+}

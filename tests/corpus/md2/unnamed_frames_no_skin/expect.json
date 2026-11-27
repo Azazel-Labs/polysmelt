@@ -13,7 +13,7 @@
     "morph_targets": 2
   },
   "json": {
-    "/animations/0/name": "frames"
+    "/animations/0/name": null
   },
   "winding_matches_normals": true,
   "poses": [

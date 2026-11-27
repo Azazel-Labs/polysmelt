@@ -1,0 +1,28 @@
+{
+  "spec": "VTK File Formats: a real file: legacy ASCII 2.0, an unstructured grid of tetrahedra",
+  "source": "VTK's test data (Testing/Data), BSD license, see ../LICENSE-VTK; expectations computed with VTK 9.7.2",
+  "triangles": 80,
+  "bounds": {
+    "min": [
+      -9.465700149536133,
+      -9.090609550476074,
+      -9.771069526672363
+    ],
+    "max": [
+      9.780320167541504,
+      9.94653034210205,
+      7.140719890594482
+    ]
+  },
+  "area": 932.793817,
+  "facts": {
+    "triangles": 80
+  },
+  "document": {
+    "attributes": [
+      "_SCALARS"
+    ]
+  },
+  "colors": false,
+  "uvs": false
+}

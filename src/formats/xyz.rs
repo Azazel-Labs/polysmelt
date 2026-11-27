@@ -14,18 +14,19 @@
 //! is the `_SCAN` attribute when there are several. An ESRI grid is a point per cell with a
 //! value, at the cell's center.
 //!
-//! The formats name no units or axes; these clouds come from surveys and scanners, so they are
-//! taken as meters with Z up, and turned Y-up. Far from the origin, positions are measured from a
+//! The formats name no units or axes; these clouds come from surveys and scanners, so Z up is
+//! assumed and turned Y-up. The units are unknown, and left as they are. Far from the origin, positions are measured from a
 //! point near the cloud, which the node's translation carries back.
 
 use serde_json::{Map, Value, json};
 
 use super::Input;
 use super::points::{self, Cloud, Column};
-use super::stream::{f32_from, f64_from, lines, space};
+use super::stream::{f32_from, f64_from, lines, space, trim};
 use crate::document::{Document, Keep};
 use crate::num::f32_of;
-use crate::{Context as _, Result};
+use crate::source::{Axis, Fact, SourceInfo};
+use crate::{Context as _, ErrorKind, Result};
 
 /// Bytes of text parsed per job.
 const PIECE: usize = if cfg!(test) { 16 << 10 } else { 2 << 20 };
@@ -34,11 +35,13 @@ const TOKENS: usize = 64;
 /// Lines looked at to tell what the values are.
 const SAMPLE: usize = 2000;
 
-pub(crate) fn load(input: Input<'_>, ext: &str, keep: Keep) -> Result<Document<'static>> {
-    let head = input.head(64 * 1024).context("reading the point cloud")?;
+pub(crate) fn load(input: Input<'_>, ext: &str, keep: Keep) -> Result<Document> {
+    let head = input
+        .head(64 * 1024)
+        .context(ErrorKind::Corrupt, "reading the point cloud")?;
     let head = head.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&head);
     if ext == "ptx" {
-        let bytes = input.read().context("reading the PTX file")?;
+        let bytes = input.read().context(ErrorKind::Corrupt, "reading the PTX file")?;
         return ptx(&bytes, keep);
     }
     let first = head
@@ -47,7 +50,7 @@ pub(crate) fn load(input: Input<'_>, ext: &str, keep: Keep) -> Result<Document<'
         .find(|l| !l.is_empty())
         .unwrap_or_default();
     if ext == "asc" && first.len() >= 5 && first[..5].eq_ignore_ascii_case(b"ncols") {
-        let bytes = input.read().context("reading the grid")?;
+        let bytes = input.read().context(ErrorKind::Corrupt, "reading the grid")?;
         return grid(&bytes, keep);
     }
     let plan = Plan::sample(head, ext)?;
@@ -55,15 +58,18 @@ pub(crate) fn load(input: Input<'_>, ext: &str, keep: Keep) -> Result<Document<'
         let b = b.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(b);
         parse_all(b, &plan, keep)?
     } else {
-        let mut blocks = input.blocks().context("reading the point cloud")?;
-        let target = keep.threads().max(1) * PIECE;
+        let mut blocks = input.blocks().context(ErrorKind::Corrupt, "reading the point cloud")?;
+        let target = keep.thread_count().max(1) * PIECE;
         let mut part = Part::new(&plan);
         let mut batch = Vec::new();
         let mut first = true;
         loop {
             batch.clear();
             while batch.len() < target {
-                match blocks.text(lines).context("reading the point cloud")? {
+                match blocks
+                    .text(lines)
+                    .context(ErrorKind::Corrupt, "reading the point cloud")?
+                {
                     Some(t) => batch.extend_from_slice(t),
                     None => break,
                 }
@@ -82,20 +88,8 @@ pub(crate) fn load(input: Input<'_>, ext: &str, keep: Keep) -> Result<Document<'
         part
     };
     part.check(keep)?;
-    let source = json!({
-        "format": ext.to_ascii_uppercase(),
-        "columns": plan.described(),
-        "units": "unknown, taken as meters",
-        "axes": "Z-up source turned Y-up: glTF x = x, y = z, z = -y",
-    });
-    Ok(part.cloud(&plan, source))
-}
-
-/// `s` without spaces and control characters at its ends.
-fn trim(s: &[u8]) -> &[u8] {
-    let start = s.iter().position(|&b| !space(b)).unwrap_or(s.len());
-    let end = s.iter().rposition(|&b| !space(b)).map_or(start, |e| e + 1);
-    &s[start..end]
+    let source = json!({ "columns": plan.described() });
+    Ok(part.cloud(&plan, &ext.to_ascii_uppercase(), source))
 }
 
 /// How a line's values are split.
@@ -203,18 +197,26 @@ impl Plan {
                     rows.push(v);
                 }
                 None if rows.is_empty() && names.is_none() && n >= 3 => {
-                    names = Some(
-                        toks[..n]
-                            .iter()
-                            .map(|t| String::from_utf8_lossy(t).into_owned())
-                            .collect(),
-                    );
+                    names = Some(toks[..n].iter().map(|t| crate::bytes::text(t).into_owned()).collect());
                 }
                 _ => {}
             }
         }
         let width = (3..=TOKENS).max_by_key(|&n| (counts[n], n)).filter(|&n| counts[n] > 0);
-        let width = width.with_context(|| format!("no points in the {} file", ext.to_ascii_uppercase()))?;
+        let Some(width) = width else {
+            // Text, and no line of it a point: some other kind of file. Only comments, or nothing: empty.
+            let text = body
+                .split(|&b| b == b'\n')
+                .map(trim)
+                .any(|l| !l.is_empty() && !l.starts_with(b"//") && !l.starts_with(b"#"));
+            ensure!(
+                !text,
+                UnknownFormat,
+                "not a point cloud: no line of the {} file is a point",
+                ext.to_ascii_uppercase()
+            );
+            bail!(Empty, "no points in the {} file", ext.to_ascii_uppercase());
+        };
         let rows: Vec<&Vec<f64>> = rows.iter().filter(|r| r.len() == width).collect();
         // Far away, measure from the middle of what was sampled.
         let mut min = [f64::INFINITY; 3];
@@ -412,7 +414,7 @@ impl Part {
         points::check_count(u64::try_from(self.pos.len()).unwrap_or(u64::MAX), keep.points(), "text")
     }
 
-    fn cloud(self, plan: &Plan, source: Value) -> Document<'static> {
+    fn cloud(self, plan: &Plan, format: &str, source: Value) -> Document {
         let mut cloud = Cloud {
             positions: self.pos,
             colors: self.colors,
@@ -423,7 +425,7 @@ impl Part {
         for ((_, name), values) in plan.columns.iter().zip(self.columns) {
             cloud.columns.push(Column::new(name, values));
         }
-        cloud.document(source, Map::new())
+        document(cloud, format, source)
     }
 }
 
@@ -448,7 +450,7 @@ fn parse_all(text: &[u8], plan: &Plan, keep: Keep) -> Result<Part> {
     let pieces: Vec<&[u8]> = cuts.windows(2).map(|w| &text[w[0]..w[1]]).collect();
     // A piece holds at most a point per two bytes; refusing too many is up to the caller.
     let limit = keep.points().saturating_add(1);
-    let parts = points::map(pieces, keep.threads(), |t| parse(t, plan, None, limit));
+    let parts = points::map(pieces, keep.thread_count(), |t| parse(t, plan, None, limit));
     let mut all = Part::new(plan);
     for p in parts {
         all.append(p, keep)?;
@@ -546,13 +548,15 @@ fn numbers<const N: usize>(b: &[u8], at: &mut usize) -> Option<[f64; N]> {
 }
 
 /// The scans of a PTX file.
-fn ptx(bytes: &[u8], keep: Keep) -> Result<Document<'static>> {
+fn ptx(bytes: &[u8], keep: Keep) -> Result<Document> {
     let bytes = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
     let mut at = 0;
     let mut scans = Vec::new();
     let mut all: Option<Part> = None;
     let mut plan: Option<Plan> = None;
     let mut scan_ids: Vec<f32> = Vec::new();
+    // Whether the file ends inside a scan: fewer lines than its header counts.
+    let mut cut = false;
     loop {
         // Skip blank lines between scans.
         while let Some((line, next)) = line_at(bytes, at) {
@@ -581,13 +585,37 @@ fn ptx(bytes: &[u8], keep: Keep) -> Result<Document<'static>> {
             ];
             Some((cols, rows, position, axes, m))
         })();
-        let (cols, rows, position, axes, m) = head.context("a PTX scan's header is broken")?;
+        let Some((cols, rows, position, axes, m)) = head else {
+            // The file ran out inside the header: cut short, and what came before is kept.
+            if at >= bytes.len()
+                && bytes
+                    .first()
+                    .is_some_and(|c| c.is_ascii_digit() || c.is_ascii_whitespace())
+            {
+                ensure!(
+                    !scans.is_empty(),
+                    Truncated,
+                    "PTX file is cut short inside its first scan's header"
+                );
+                cut = true;
+                break;
+            }
+            // No scan yet and no header to start one: not a PTX file.
+            ensure!(
+                !scans.is_empty(),
+                UnknownFormat,
+                "not a PTX file: it doesn't start with a scan's size"
+            );
+            bail!(Corrupt, "a PTX scan's header is broken");
+        };
         ensure!(
             cols.fract() == 0.0 && rows.fract() == 0.0 && cols >= 0.0 && rows >= 0.0,
+            Corrupt,
             "a PTX scan's size is broken"
         );
         ensure!(
             m.iter().flatten().all(|v| v.is_finite()),
+            Corrupt,
             "a PTX scan's matrix is broken"
         );
         let count = cols * rows;
@@ -595,6 +623,7 @@ fn ptx(bytes: &[u8], keep: Keep) -> Result<Document<'static>> {
         let most = keep.points() as f64;
         ensure!(
             count.le(&most),
+            LimitExceeded,
             "{count} points in a PTX scan, more than the {} allowed (Keep::max_points)",
             keep.points()
         );
@@ -615,6 +644,7 @@ fn ptx(bytes: &[u8], keep: Keep) -> Result<Document<'static>> {
             }
             found += 1;
         }
+        cut |= found < count;
         at = end;
         let body = &bytes[start..end];
         let plan = plan.get_or_insert_with(|| {
@@ -639,7 +669,7 @@ fn ptx(bytes: &[u8], keep: Keep) -> Result<Document<'static>> {
         });
         let pieces = split_lines(body);
         let limit = keep.points().saturating_add(1);
-        let parts = points::map(pieces, keep.threads(), |t| parse(t, plan, Some(&m), limit));
+        let parts = points::map(pieces, keep.thread_count(), |t| parse(t, plan, Some(&m), limit));
         let index = scans.len();
         scans.push(json!({
             "columns": cols,
@@ -661,21 +691,18 @@ fn ptx(bytes: &[u8], keep: Keep) -> Result<Document<'static>> {
             scan_ids.extend(std::iter::repeat_n(index as f32, n));
         }
     }
-    let plan = plan.context("no scans in the PTX file")?;
+    let plan = plan.context(ErrorKind::Empty, "no scans in the PTX file")?;
     let mut all = all.unwrap_or_else(|| Part::new(&plan));
     let mut plan = plan;
     if scans.len() > 1 {
         plan.columns.push((usize::MAX, "SCAN".into()));
         all.columns.push(scan_ids);
     }
-    let source = json!({
-        "format": "PTX",
-        "scans": scans,
-        "columns": plan.described_ptx(),
-        "units": "unknown, taken as meters",
-        "axes": "Z-up source turned Y-up: glTF x = x, y = z, z = -y",
-    });
-    Ok(all.cloud(&plan, source))
+    let mut source = json!({ "scans": scans, "columns": plan.described_ptx() });
+    if cut {
+        source["truncated"] = json!(true);
+    }
+    Ok(all.cloud(&plan, "PTX", source))
 }
 
 impl Plan {
@@ -714,7 +741,7 @@ fn split_lines(text: &[u8]) -> Vec<&[u8]> {
 }
 
 /// An ESRI ASCII grid: a point at each cell's center that has a value.
-fn grid(bytes: &[u8], keep: Keep) -> Result<Document<'static>> {
+fn grid(bytes: &[u8], keep: Keep) -> Result<Document> {
     let bytes = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
     let mut at = 0;
     let mut keys: Map<String, Value> = Map::new();
@@ -730,12 +757,12 @@ fn grid(bytes: &[u8], keep: Keep) -> Result<Document<'static>> {
         if f64_from(key).is_some() {
             break;
         }
-        ensure!(keys.len() < 32, "the ESRI grid's header is broken");
-        let key = String::from_utf8_lossy(key).to_ascii_lowercase();
+        ensure!(keys.len() < 32, Corrupt, "the ESRI grid's header is broken");
+        let key = crate::bytes::text(key).to_ascii_lowercase();
         let v = it
             .next()
             .and_then(f64_from)
-            .with_context(|| format!("the ESRI grid's {key} has no value"))?;
+            .with_context(ErrorKind::Corrupt, || format!("the ESRI grid's {key} has no value"))?;
         keys.insert(key.clone(), json!(v));
         match key.as_str() {
             "ncols" => cols = Some(v),
@@ -762,10 +789,11 @@ fn grid(bytes: &[u8], keep: Keep) -> Result<Document<'static>> {
         at = next;
     }
     let (Some(cols), Some(rows), Some(dx), Some(dy)) = (cols, rows, dx, dy) else {
-        bail!("the ESRI grid's header lacks its size or cell size");
+        bail!(Corrupt, "the ESRI grid's header lacks its size or cell size");
     };
     ensure!(
         cols.fract() == 0.0 && rows.fract() == 0.0 && cols >= 1.0 && rows >= 1.0 && dx.is_finite() && dy.is_finite(),
+        Corrupt,
         "the ESRI grid's size is broken"
     );
     let count = cols * rows;
@@ -773,6 +801,7 @@ fn grid(bytes: &[u8], keep: Keep) -> Result<Document<'static>> {
     let most = keep.points() as f64;
     ensure!(
         count.le(&most),
+        LimitExceeded,
         "{count} cells in the ESRI grid, more than the {} allowed (Keep::max_points)",
         keep.points()
     );
@@ -829,14 +858,21 @@ fn grid(bytes: &[u8], keep: Keep) -> Result<Document<'static>> {
             f32_of(origin[1] - p[1]),
         ]);
     }
-    let source = json!({
-        "format": "ESRI ASCII grid",
-        "header": keys,
-        "cellsRead": z.len(),
-        "units": "unknown, taken as meters",
-        "axes": "Z-up source turned Y-up: glTF x = east, y = up, z = south",
-    });
-    Ok(cloud.document(source, Map::new()))
+    let source = json!({ "header": keys, "cellsRead": z.len() });
+    Ok(document(cloud, "ESRI ASCII grid", source))
+}
+
+/// The document of `cloud`, its source info `format`, with Z up assumed (and turned Y-up) and its
+/// units unknown, over `source`'s details.
+fn document(cloud: Cloud, format: &str, source: Value) -> Document {
+    let mut info = SourceInfo {
+        format: Some(format.into()),
+        up_axis: Fact::Assumed(Axis::PosZ),
+        ..SourceInfo::default()
+    };
+    info.converted.up_axis = true;
+    let Value::Object(source) = source else { unreachable!() };
+    cloud.document(&info, source, Map::new())
 }
 
 #[cfg(test)]
@@ -850,13 +886,13 @@ fn grid(bytes: &[u8], keep: Keep) -> Result<Document<'static>> {
 mod tests {
     use super::*;
 
-    fn load_text(text: &str, ext: &str, keep: Keep) -> Result<Document<'static>> {
+    fn load_text(text: &str, ext: &str, keep: Keep) -> Result<Document> {
         let name = format!("cloud.{ext}");
-        load(Input::memory(text.as_bytes(), &name), ext, keep).map(Document::into_owned)
+        load(Input::memory(text.as_bytes(), &name), ext, keep)
     }
 
-    fn attrs(doc: &Document<'_>) -> Vec<String> {
-        let mut v: Vec<String> = doc.json["meshes"][0]["primitives"][0]["attributes"]
+    fn attrs(doc: &Document) -> Vec<String> {
+        let mut v: Vec<String> = doc.json()["meshes"][0]["primitives"][0]["attributes"]
             .as_object()
             .unwrap()
             .keys()
@@ -866,12 +902,12 @@ mod tests {
         v
     }
 
-    fn values(doc: &Document<'_>, name: &str) -> Vec<f32> {
-        let a = doc.json["meshes"][0]["primitives"][0]["attributes"][name]
+    fn values(doc: &Document, name: &str) -> Vec<f32> {
+        let a = doc.json()["meshes"][0]["primitives"][0]["attributes"][name]
             .as_u64()
             .unwrap() as usize;
-        let acc = &doc.json["accessors"][a];
-        let view = &doc.json["bufferViews"][acc["bufferView"].as_u64().unwrap() as usize];
+        let acc = &doc.json()["accessors"][a];
+        let view = &doc.json()["bufferViews"][acc["bufferView"].as_u64().unwrap() as usize];
         let buf = doc.buffer(view["buffer"].as_u64().unwrap_or(0) as usize).unwrap();
         let off = view["byteOffset"].as_u64().unwrap_or(0) as usize;
         let len = view["byteLength"].as_u64().unwrap() as usize;
@@ -913,8 +949,15 @@ mod tests {
         assert_eq!(attrs(&doc), ["COLOR_0", "NORMAL", "POSITION"]);
         let n = values(&doc, "NORMAL");
         assert_eq!(&n[..6], &[0.0, 1.0, 0.0, 0.6, 0.0, -0.8]);
-        let cols = &doc.json["asset"]["extras"]["source"]["columns"];
+        let cols = &doc.json()["asset"]["extras"]["source"]["columns"];
         assert_eq!(cols[3], "normal x");
+        let info = doc.source_info();
+        assert_eq!(info.format.as_deref(), Some("XYZ"));
+        assert_eq!(
+            (info.meters_per_unit, info.up_axis),
+            (Fact::Unknown, Fact::Assumed(Axis::PosZ))
+        );
+        assert!(info.converted.up_axis && !info.converted.units);
         assert_eq!(cols[8], "blue");
     }
 
@@ -934,7 +977,10 @@ mod tests {
     fn far_points_keep_their_detail() {
         let text = "637012.24 849028.31 431.66\n637012.25 849028.33 431.67\n";
         let doc = load_text(text, "xyz", Keep::ALL).unwrap();
-        assert_eq!(doc.json["nodes"][0]["translation"], json!([637_012.0, 0.0, -849_028.0]));
+        assert_eq!(
+            doc.json()["nodes"][0]["translation"],
+            json!([637_012.0, 0.0, -849_028.0])
+        );
         let p = values(&doc, "POSITION");
         assert!((p[3] - p[0] - 0.01).abs() < 1e-5);
         assert!((p[5] - p[2] + 0.02).abs() < 1e-5);
@@ -950,9 +996,12 @@ mod tests {
         // (1, 2, 3) turned to (-2, 1, 3) and moved to (8, 1, 3); Y-up, (8, 3, -1).
         assert_eq!(values(&doc, "POSITION"), [1.0, 3.0, -2.0, 8.0, 3.0, -1.0]);
         assert_eq!(values(&doc, "_SCAN"), [0.0, 1.0]);
-        assert_eq!(doc.json["meshes"][0]["extras"]["constant"]["_INTENSITY"], 0.25);
+        assert_eq!(doc.json()["meshes"][0]["extras"]["constant"]["_INTENSITY"], 0.25);
         assert_eq!(
-            doc.json["asset"]["extras"]["source"]["scans"].as_array().unwrap().len(),
+            doc.json()["asset"]["extras"]["source"]["scans"]
+                .as_array()
+                .unwrap()
+                .len(),
             2
         );
     }
@@ -976,25 +1025,9 @@ mod tests {
             .collect();
         assert!(text.len() > 4 * PIECE);
         let one = load_text(&text, "xyz", Keep::ALL).unwrap();
-        let many = load_text(
-            &text,
-            "xyz",
-            Keep {
-                threads: 4,
-                ..Keep::ALL
-            },
-        )
-        .unwrap();
+        let many = load_text(&text, "xyz", Keep::ALL.with_threads(4)).unwrap();
         crate::keep::NO_THREADS.set(true);
-        let none = load_text(
-            &text,
-            "xyz",
-            Keep {
-                threads: 4,
-                ..Keep::ALL
-            },
-        )
-        .unwrap();
+        let none = load_text(&text, "xyz", Keep::ALL.with_threads(4)).unwrap();
         crate::keep::NO_THREADS.set(false);
         assert_eq!(one.facts["points"], 20_000);
         for d in [&many, &none] {
@@ -1020,22 +1053,8 @@ mod tests {
             .collect();
         let path = std::env::temp_dir().join(format!("polysmelt-xyz-{}.xyz", std::process::id()));
         std::fs::write(&path, &text).unwrap();
-        let file = load(
-            Input::file(&path),
-            "xyz",
-            Keep {
-                threads: 2,
-                ..Keep::ALL
-            },
-        );
-        let small = load(
-            Input::file(&path),
-            "xyz",
-            Keep {
-                max_points: 20_000,
-                ..Keep::ALL
-            },
-        );
+        let file = load(Input::file(&path), "xyz", Keep::ALL.with_threads(2));
+        let small = load(Input::file(&path), "xyz", Keep::ALL.with_max_points(20_000));
         std::fs::remove_file(&path).unwrap();
         let file = file.unwrap();
         let memory = load_text(&text, "xyz", Keep::ALL).unwrap();
@@ -1048,15 +1067,7 @@ mod tests {
     #[test]
     fn too_many_points_are_refused() {
         let text: String = (0..100).map(|i| format!("{i} 0 0\n")).collect();
-        let err = load_text(
-            &text,
-            "xyz",
-            Keep {
-                max_points: 10,
-                ..Keep::ALL
-            },
-        )
-        .unwrap_err();
+        let err = load_text(&text, "xyz", Keep::ALL.with_max_points(10)).unwrap_err();
         assert!(err.to_string().contains("Keep::max_points"), "{err}");
         let err = load_text("ncols 100000\nnrows 100000\ncellsize 1\n1\n", "asc", Keep::ALL).unwrap_err();
         assert!(err.to_string().contains("Keep::max_points"), "{err}");

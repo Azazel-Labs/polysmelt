@@ -1,11 +1,5 @@
-//! The XML `.mesh.xml` and `.skeleton.xml` layouts, as OGRE's converter writes and reads them, and the small XML
-//! reader they need.
-//!
-//! The XML reader keeps elements and their attributes in two flat lists, each element linked to its first child
-//! and next sibling, so a mesh's thousands of vertex elements cost no allocation each. Comments, processing
-//! instructions, CDATA, a document type and text are skipped; the five named entities and numeric references are
-//! decoded in attribute values. Tags that don't match, a tag left open, or elements nested deeper than
-//! [`MAX_DEPTH`] are errors.
+//! The XML `.mesh.xml` and `.skeleton.xml` layouts, as OGRE's converter writes and reads them, read with the
+//! shared XML reader.
 
 use std::borrow::Cow;
 
@@ -14,336 +8,26 @@ use super::{
     PoseOffset, SkeletonAnimation, SkeletonFile, SubMesh, Track,
 };
 use crate::Result;
+use crate::formats::stream::f32_from;
+pub(super) use crate::formats::xml::{El, Xml};
 
-/// The deepest elements nest.
-const MAX_DEPTH: usize = 256;
-/// No element: the end of a sibling list.
-const NONE: usize = usize::MAX;
-/// The most texture coordinate sets a geometry keeps.
-const MAX_UV_SETS: usize = 8;
+use crate::formats::scene::MAX_UV_SETS;
 
-/// A parsed XML document.
-pub(super) struct Xml<'a> {
-    src: &'a str,
-    nodes: Vec<XNode>,
-    attrs: Vec<XAttr>,
-}
-
-#[derive(Clone, Copy)]
-struct XNode {
-    name: (usize, usize),
-    attrs: (usize, usize),
-    first: usize,
-    last: usize,
-    next: usize,
-}
-
-#[derive(Clone, Copy)]
-struct XAttr {
-    name: (usize, usize),
-    value: (usize, usize),
-}
-
-/// An element of a parsed document.
-#[derive(Clone, Copy)]
-pub(super) struct El<'d, 'a> {
-    doc: &'d Xml<'a>,
-    i: usize,
-}
-
-impl<'a> Xml<'a> {
-    /// Parses `src`.
-    pub(super) fn parse(src: &'a str) -> Result<Self> {
-        let b = src.as_bytes();
-        let mut doc = Xml {
-            src,
-            nodes: Vec::new(),
-            attrs: Vec::new(),
-        };
-        let mut stack: Vec<usize> = Vec::new();
-        let mut at = 0;
-        let find = |from: usize, pat: &[u8]| -> Result<usize> {
-            b[from..]
-                .windows(pat.len())
-                .position(|w| w == pat)
-                .map(|p| from + p)
-                .ok_or_else(|| invalid!("XML cut short at byte {from}"))
-        };
-        while let Some(p) = b[at..].iter().position(|&c| c == b'<') {
-            at += p;
-            let rest = &b[at..];
-            if rest.starts_with(b"<!--") {
-                at = find(at + 4, b"-->")? + 3;
-            } else if rest.starts_with(b"<![CDATA[") {
-                at = find(at + 9, b"]]>")? + 3;
-            } else if rest.starts_with(b"<?") {
-                at = find(at + 2, b"?>")? + 2;
-            } else if rest.starts_with(b"<!") {
-                // A document type: to its closing bracket, past any internal subset and quoted strings.
-                let mut depth = 0usize;
-                let mut quote = 0u8;
-                let mut i = at + 2;
-                loop {
-                    let Some(&c) = b.get(i) else {
-                        bail!("XML document type left open");
-                    };
-                    if quote != 0 {
-                        if c == quote {
-                            quote = 0;
-                        }
-                    } else if c == b'"' || c == b'\'' {
-                        quote = c;
-                    } else if c == b'[' {
-                        depth += 1;
-                    } else if c == b']' {
-                        depth = depth.saturating_sub(1);
-                    } else if c == b'>' && depth == 0 {
-                        break;
-                    }
-                    i += 1;
-                }
-                at = i + 1;
-            } else if rest.starts_with(b"</") {
-                let start = at + 2;
-                let end = find(start, b">")?;
-                let name = src[start..end].trim_end();
-                let Some(open) = stack.pop() else {
-                    bail!("XML closing tag </{name}> has no opening tag");
-                };
-                let (s, e) = doc.nodes[open].name;
-                ensure!(&src[s..e] == name, "XML tag <{}> closed by </{name}>", &src[s..e]);
-                at = end + 1;
-            } else {
-                at = doc.tag(at + 1, &mut stack)?;
-            }
-        }
-        if let Some(&open) = stack.last() {
-            let (s, e) = doc.nodes[open].name;
-            bail!("XML element <{}> left open", &src[s..e]);
-        }
-        ensure!(!doc.nodes.is_empty(), "XML holds no element");
-        Ok(doc)
-    }
-
-    /// Reads an opening tag from just past its `<`; returns where the reader goes on.
-    fn tag(&mut self, mut at: usize, stack: &mut Vec<usize>) -> Result<usize> {
-        let b = self.src.as_bytes();
-        let name_end = at
-            + b[at..]
-                .iter()
-                .position(|&c| c.is_ascii_whitespace() || c == b'>' || c == b'/')
-                .unwrap_or(b.len() - at);
-        ensure!(name_end > at, "XML tag without a name at byte {at}");
-        let name = (at, name_end);
-        at = name_end;
-        let attr_start = self.attrs.len();
-        let closed;
-        loop {
-            while b.get(at).is_some_and(u8::is_ascii_whitespace) {
-                at += 1;
-            }
-            match b.get(at) {
-                None => bail!("XML tag cut short"),
-                Some(b'>') => {
-                    closed = false;
-                    at += 1;
-                    break;
-                }
-                Some(b'/') => {
-                    ensure!(b.get(at + 1) == Some(&b'>'), "XML tag has a stray / at byte {at}");
-                    closed = true;
-                    at += 2;
-                    break;
-                }
-                _ => {}
-            }
-            let n0 = at;
-            while b
-                .get(at)
-                .is_some_and(|&c| !c.is_ascii_whitespace() && c != b'=' && c != b'>' && c != b'/')
-            {
-                at += 1;
-            }
-            let n1 = at;
-            while b.get(at).is_some_and(u8::is_ascii_whitespace) {
-                at += 1;
-            }
-            ensure!(
-                n1 > n0 && b.get(at) == Some(&b'='),
-                "XML attribute without a value at byte {n0}"
-            );
-            at += 1;
-            while b.get(at).is_some_and(u8::is_ascii_whitespace) {
-                at += 1;
-            }
-            let Some(&q @ (b'"' | b'\'')) = b.get(at) else {
-                bail!("XML attribute value without quotes at byte {at}");
-            };
-            let v0 = at + 1;
-            let Some(len) = b[v0..].iter().position(|&c| c == q) else {
-                bail!("XML attribute value left open");
-            };
-            at = v0 + len + 1;
-            self.attrs.push(XAttr {
-                name: (n0, n1),
-                value: (v0, v0 + len),
-            });
-        }
-        let i = self.nodes.len();
-        self.nodes.push(XNode {
-            name,
-            attrs: (attr_start, self.attrs.len()),
-            first: NONE,
-            last: NONE,
-            next: NONE,
-        });
-        if let Some(&parent) = stack.last() {
-            let p = &mut self.nodes[parent];
-            if p.first == NONE {
-                p.first = i;
-            } else {
-                let last = p.last;
-                self.nodes[last].next = i;
-            }
-            self.nodes[parent].last = i;
-        } else if i != 0 {
-            // A second top-level element: it isn't linked anywhere, so it's ignored.
-        }
-        if !closed {
-            ensure!(stack.len() < MAX_DEPTH, "XML elements nest deeper than {MAX_DEPTH}");
-            stack.push(i);
-        }
-        Ok(at)
-    }
-
-    /// The document's top element.
-    pub(super) fn root(&self) -> El<'_, 'a> {
-        El { doc: self, i: 0 }
-    }
-}
-
-/// Decodes the entities in an attribute value.
-fn unescape(s: &str) -> Cow<'_, str> {
-    if !s.contains('&') {
-        return Cow::Borrowed(s);
-    }
-    let mut out = String::with_capacity(s.len());
-    let mut rest = s;
-    while let Some(p) = rest.find('&') {
-        out.push_str(&rest[..p]);
-        rest = &rest[p..];
-        let Some(end) = rest.find(';').filter(|&e| e <= 12) else {
-            out.push('&');
-            rest = &rest[1..];
-            continue;
-        };
-        let name = &rest[1..end];
-        let c = match name {
-            "lt" => Some('<'),
-            "gt" => Some('>'),
-            "amp" => Some('&'),
-            "quot" => Some('"'),
-            "apos" => Some('\''),
-            _ => name
-                .strip_prefix("#x")
-                .or_else(|| name.strip_prefix("#X"))
-                .map_or_else(
-                    || name.strip_prefix('#').and_then(|d| d.parse::<u32>().ok()),
-                    |h| u32::from_str_radix(h, 16).ok(),
-                )
-                .and_then(char::from_u32),
-        };
-        if let Some(c) = c {
-            out.push(c);
-            rest = &rest[end + 1..];
-        } else {
-            out.push('&');
-            rest = &rest[1..];
-        }
-    }
-    out.push_str(rest);
-    Cow::Owned(out)
-}
-
-impl<'d, 'a> El<'d, 'a> {
-    fn node(&self) -> XNode {
-        self.doc.nodes[self.i]
-    }
-
-    /// The element's name.
-    pub(super) fn name(&self) -> &'d str {
-        let (s, e) = self.node().name;
-        &self.doc.src[s..e]
-    }
-
-    /// An attribute's value, entities decoded.
-    pub(super) fn attr(&self, name: &str) -> Option<Cow<'d, str>> {
-        let (s, e) = self.node().attrs;
-        self.doc.attrs[s..e]
-            .iter()
-            .find(|a| &self.doc.src[a.name.0..a.name.1] == name)
-            .map(|a| unescape(&self.doc.src[a.value.0..a.value.1]))
-    }
-
-    /// An attribute as a float: 0 when it's missing or isn't a number.
-    fn f32(&self, name: &str) -> f32 {
-        self.attr(name).and_then(|v| v.trim().parse().ok()).unwrap_or(0.0)
-    }
-
-    /// An attribute as a float, `None` when it's missing.
-    fn opt_f32(&self, name: &str) -> Option<f32> {
-        self.attr(name).map(|v| v.trim().parse().unwrap_or(0.0))
-    }
-
-    /// An attribute as a whole number: `None` when it's missing or isn't one.
-    fn u32(&self, name: &str) -> Option<u32> {
-        self.attr(name).and_then(|v| v.trim().parse().ok())
-    }
-
+/// What OGRE reads from an element's attributes beyond the shared reader's.
+trait Attrs {
     /// An attribute as a yes or no, as OGRE reads them.
+    fn bool(&self, name: &str) -> bool;
+    /// The `x`, `y` and `z` attributes.
+    fn xyz(&self) -> [f32; 3];
+}
+
+impl Attrs for El<'_, '_> {
     fn bool(&self, name: &str) -> bool {
         self.attr(name).is_some_and(|v| truthy(&v))
     }
 
-    /// The `x`, `y` and `z` attributes.
     fn xyz(&self) -> [f32; 3] {
         [self.f32("x"), self.f32("y"), self.f32("z")]
-    }
-
-    /// The element's children.
-    pub(super) fn children(&self) -> impl Iterator<Item = El<'d, 'a>> + use<'d, 'a> {
-        let doc = self.doc;
-        let mut at = self.node().first;
-        std::iter::from_fn(move || {
-            (at != NONE).then(|| {
-                let e = El { doc, i: at };
-                at = doc.nodes[at].next;
-                e
-            })
-        })
-    }
-
-    /// The children named `name`.
-    fn named(&self, name: &'static str) -> impl Iterator<Item = El<'d, 'a>> + use<'d, 'a> {
-        self.children().filter(move |c| c.name() == name)
-    }
-
-    /// The first child named `name`.
-    fn child(&self, name: &str) -> Option<El<'d, 'a>> {
-        self.children().find(|c| c.name() == name)
-    }
-
-    /// The siblings after this element named `name`.
-    fn next_named(&self, name: &str) -> Option<El<'d, 'a>> {
-        let mut at = self.node().next;
-        while at != NONE {
-            let e = El { doc: self.doc, i: at };
-            if e.name() == name {
-                return Some(e);
-            }
-            at = self.doc.nodes[at].next;
-        }
-        None
     }
 }
 
@@ -357,7 +41,7 @@ pub(super) fn truthy(v: &str) -> bool {
 fn color(v: &str) -> [f32; 4] {
     let mut c = [0.0, 0.0, 0.0, 1.0];
     for (o, t) in c.iter_mut().zip(v.split_ascii_whitespace()) {
-        *o = t.parse().unwrap_or(0.0);
+        *o = f32_from(t.as_bytes()).unwrap_or(0.0);
     }
     c
 }
@@ -367,6 +51,7 @@ pub(super) fn mesh(doc: &Xml<'_>) -> Result<MeshFile> {
     let root = doc.root();
     ensure!(
         root.name() == "mesh",
+        UnknownFormat,
         "not an OGRE mesh: its XML is a <{}>",
         root.name()
     );
@@ -526,7 +211,11 @@ fn mesh_animation(a: El<'_, '_>, file: &MeshFile) -> Result<MeshAnimation> {
                     })
                     .collect(),
             ),
-            other => bail!("OGRE animation track type {:?} is unknown", other.unwrap_or("")),
+            other => bail!(
+                Corrupt,
+                "OGRE animation track type {:?} is unknown",
+                other.unwrap_or("")
+            ),
         };
         out.tracks.push(Track { target, keys });
     }
@@ -722,6 +411,7 @@ pub(super) fn skeleton(doc: &Xml<'_>) -> Result<SkeletonFile> {
     let root = doc.root();
     ensure!(
         root.name() == "skeleton",
+        UnknownFormat,
         "not an OGRE skeleton: its XML is a <{}>",
         root.name()
     );
@@ -811,27 +501,6 @@ pub(super) fn skeleton(doc: &Xml<'_>) -> Result<SkeletonFile> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parses_xml() {
-        let x = Xml::parse(
-            "<?xml version='1.0'?><!DOCTYPE m [<!ENTITY a 'b'>]><!-- c --><m a=\"1 &amp; &#x41;&#66;\"><n/> \
-             text <![CDATA[<x>]]><n b='2'></n ></m>",
-        )
-        .unwrap();
-        let r = x.root();
-        assert_eq!(r.name(), "m");
-        assert_eq!(r.attr("a").unwrap(), "1 & AB");
-        let kids: Vec<_> = r.children().collect();
-        assert_eq!(kids.len(), 2);
-        assert_eq!(kids[1].attr("b").unwrap(), "2");
-        assert!(Xml::parse("<a><b></a>").is_err());
-        assert!(Xml::parse("<a>").is_err());
-        assert!(Xml::parse("<a b></a>").is_err());
-        assert!(Xml::parse("").is_err());
-        let deep = "<a>".repeat(MAX_DEPTH + 1);
-        assert!(Xml::parse(&deep).is_err());
-    }
 
     #[test]
     fn angle_axis_rotation() {

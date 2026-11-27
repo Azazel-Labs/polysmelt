@@ -1,0 +1,20 @@
+{
+  "spec": "DXF (DXF Reference, 2013 edition): a real file, two 3DFACE entities and a LINE",
+  "source": "assimp/assimp at 711b4e9bbde2, test/models/DXF/lineTest.dxf (BSD-3-Clause, see ../LICENSE-assimp); expectations measured with ezdxf 1.4.5",
+  "triangles": 3,
+  "lines": 1,
+  "bounds": {
+    "min": [
+      -0.5,
+      -0.5,
+      -0.5
+    ],
+    "max": [
+      0.5,
+      0.5,
+      0.5
+    ]
+  },
+  "area": 1.5,
+  "position_set": "positions.f32"
+}

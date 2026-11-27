@@ -14,14 +14,15 @@
       0.0
     ]
   },
-  "facts": {
-    "unit": "centimeter"
-  },
   "tolerance": 1e-05,
   "document": {
     "source": {
       "unit": "centimeter",
       "metersPerUnit": 0.01
     }
+  },
+  "json": {
+    "/asset/extras/source/unit": "centimeter",
+    "/asset/extras/source/unitAsWritten": null
   }
 }

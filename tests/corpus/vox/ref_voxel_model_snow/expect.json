@@ -1,0 +1,22 @@
+{
+  "spec": "MagicaVoxel .vox (ephtracy/voxel-model, MagicaVoxel-file-format-vox.txt): a real file, a snowflake in the default palette",
+  "source": "ephtracy/voxel-model at 3bff8feaa7d9, vox/procedure/snow.vox (MIT, see ../LICENSE-voxel-model); expectations measured with py-vox-io 0.1",
+  "area": 7776,
+  "bounds": {
+    "min": [
+      0.0,
+      0.0,
+      -81.0
+    ],
+    "max": [
+      81.0,
+      81.0,
+      0.0
+    ]
+  },
+  "facts": {
+    "voxels": 1296,
+    "voxel_size": "81x81x81"
+  },
+  "material_count": 1
+}

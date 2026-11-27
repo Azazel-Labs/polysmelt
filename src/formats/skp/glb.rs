@@ -6,13 +6,17 @@
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 
-use crate::Result;
+use crate::{Context as _, ErrorKind, Result};
 use serde_json::{Value, json};
 
 use super::model::{Definition, Face, Id, Instance, Model};
-use super::triangulate::{cross, dot, newell, normalize, sub, triangulate};
+use crate::legacy_material::{self, Transparency};
+use crate::material::Alpha;
+use crate::polygon::{newell, triangulate_holes};
+use crate::vec3::{cross, dot, sub, unit};
 
-const INCH: f64 = 0.0254;
+/// An inch in meters: the model's unit, which the document's root node scales by.
+pub(super) const INCH: f64 = 0.0254;
 /// More nodes than any real model has; a file that nests big instance arrays inside each other could otherwise ask
 /// for billions.
 const MAX_NODES: usize = 1_000_000;
@@ -25,9 +29,6 @@ fn max_vertices(triangles: usize) -> usize {
 }
 /// Component nesting deeper than this is skipped rather than recursed into.
 const MAX_NESTING: usize = 64;
-/// `SketchUp`'s default front-face color, for faces nobody painted.
-const DEFAULT_RGB: [u8; 3] = [255, 255, 255];
-
 /// The image type of an embedded texture, from its leading bytes. Anything other than PNG or JPEG is dropped,
 /// since glTF viewers only have to understand those two.
 pub(crate) fn image_mime(bytes: &[u8]) -> Option<&'static str> {
@@ -40,8 +41,8 @@ pub(crate) fn image_mime(bytes: &[u8]) -> Option<&'static str> {
     }
 }
 
-/// Whether a PNG has an alpha channel (grayscale-alpha or RGBA in its header), so cut-out textures like leaves
-/// and fences keep their holes.
+/// Whether a PNG has an alpha channel (grayscale-alpha or RGBA in its header), which `SketchUp` draws as a
+/// cutout: textures like leaves and fences keep their holes.
 fn png_has_alpha(bytes: &[u8]) -> bool {
     bytes.starts_with(b"\x89PNG\r\n\x1a\n") && matches!(bytes.get(25), Some(4 | 6))
 }
@@ -62,36 +63,23 @@ fn tint(rgb: [u8; 3], average: Option<[u8; 3]>) -> [f64; 3] {
 }
 
 fn srgb_to_linear(c: u8) -> f64 {
-    let c = f64::from(c) / 255.0;
-    if c <= 0.04045 {
-        c / 12.92
-    } else {
-        ((c + 0.055) / 1.055).powf(2.4)
-    }
+    crate::mesh::srgb_to_linear_f64(f64::from(c) / 255.0)
 }
 
-/// `SketchUp`'s inches, Z up, to glTF's meters, Y up. A rotation, so it keeps winding.
-fn to_gltf(p: [f64; 3]) -> [f64; 3] {
-    [p[0] * INCH, p[2] * INCH, -p[1] * INCH]
-}
-
-/// `SketchUp`'s 13-value transform as a column-major glTF matrix in meters and Y up, or `None` when it holds
-/// non-finite values. Index 12 is a uniform scale that multiplies the rest.
+/// `SketchUp`'s 13-value transform as a column-major glTF matrix, in the model's own inches and Z up as the
+/// vertices are (the document's root node turns and scales them all), or `None` when it holds non-finite values.
+/// Index 12 is a uniform scale that multiplies the rest.
 fn node_matrix(m: &[f64; 13]) -> Option<[f64; 16]> {
     let s = if m[12] == 0.0 { 1.0 } else { m[12] };
-    let a = |r: usize, c: usize| m[r * 3 + c] * s;
-    // swap axes on both sides: R * A * R^T with R = (x, y, z) -> (x, z, -y)
-    let src = [0, 2, 1];
-    let sign = [1.0, 1.0, -1.0];
     let mut out = [0.0; 16];
     for r in 0..3 {
         for c in 0..3 {
-            out[c * 4 + r] = sign[r] * sign[c] * a(src[r], src[c]);
+            out[c * 4 + r] = m[r * 3 + c] * s;
         }
     }
-    out[12] = m[9] * s * INCH;
-    out[13] = m[11] * s * INCH;
-    out[14] = -m[10] * s * INCH;
+    out[12] = m[9] * s;
+    out[13] = m[10] * s;
+    out[14] = m[11] * s;
     out[15] = 1.0;
     out.iter().all(|v| v.is_finite()).then_some(out)
 }
@@ -336,7 +324,11 @@ impl<'m> Writer<'m> {
             return Ok(None);
         }
         if self.nodes.len() >= MAX_NODES {
-            ensure!(self.lenient, "the SketchUp model has too many component instances");
+            ensure!(
+                self.lenient,
+                LimitExceeded,
+                "the SketchUp model has too many component instances"
+            );
             return Ok(None);
         }
         self.active.push(inst.definition);
@@ -435,6 +427,7 @@ impl<'m> Writer<'m> {
             }
             ensure!(
                 self.vertices <= self.max_vertices,
+                LimitExceeded,
                 "the SketchUp model is too large to convert"
             );
         }
@@ -511,36 +504,55 @@ impl<'m> Writer<'m> {
         json!({ "attributes": attributes, "indices": self.accessors.len() - 1, "material": material })
     }
 
-    /// The glTF material for a `SketchUp` material (unpainted faces when `None`), shown on both sides of a face or
-    /// on its front only.
+    /// The glTF material for a `SketchUp` material (the default material for unpainted faces, `None`), shown on
+    /// both sides of a face or on its front only. A `SketchUp` material is a color or a texture and an opacity,
+    /// and says nothing of its highlight.
     fn material(&mut self, key: MaterialKey) -> usize {
         if let Some(&i) = self.material_index.get(&key) {
             return i;
         }
         let (id, double_sided) = key;
         let model = self.model;
-        let (name, rgb, alpha, texture, colorize) = match id.and_then(|m| model.materials.get(&m)) {
-            Some(m) => (m.name.as_str(), m.rgb, m.alpha, m.texture.as_ref(), m.colorize),
-            None => ("Default", DEFAULT_RGB, 1.0, None, false),
+        let Some(sm) = id.and_then(|m| model.materials.get(&m)) else {
+            let d = legacy_material::default_material(false);
+            let pbr =
+                json!({ "baseColorFactor": d.color, "metallicFactor": d.metallic, "roughnessFactor": d.roughness });
+            self.materials
+                .push(json!({ "name": d.name, "pbrMetallicRoughness": pbr, "doubleSided": double_sided }));
+            let i = self.materials.len() - 1;
+            self.material_index.insert(key, i);
+            return i;
         };
+        let (name, rgb, alpha, texture, colorize) =
+            (sm.name.as_str(), sm.rgb, sm.alpha, sm.texture.as_ref(), sm.colorize);
         let alpha = if alpha.is_finite() { alpha.clamp(0.0, 1.0) } else { 1.0 };
-        let mut pbr = json!({ "metallicFactor": 0.0, "roughnessFactor": 0.9 });
-        let mut cutout = false;
+        let mut pbr = json!({ "metallicFactor": 0.0, "roughnessFactor": legacy_material::ROUGHNESS });
+        let mut texture_alpha = false;
         if let Some(tex) = texture {
             let [r, g, b] = if colorize { tint(rgb, tex.average) } else { [1.0; 3] };
             pbr["baseColorFactor"] = json!([r, g, b, alpha]);
             pbr["baseColorTexture"] = json!({ "index": self.texture(&tex.bytes) });
-            cutout = png_has_alpha(&tex.bytes);
+            texture_alpha = png_has_alpha(&tex.bytes);
         } else {
             let [r, g, b] = rgb.map(srgb_to_linear);
             pbr["baseColorFactor"] = json!([r, g, b, alpha]);
         }
         let mut m = json!({ "name": name, "pbrMetallicRoughness": pbr, "doubleSided": double_sided });
-        if alpha < 0.999 {
-            m["alphaMode"] = json!("BLEND");
-        } else if cutout {
-            m["alphaMode"] = json!("MASK");
-            m["alphaCutoff"] = json!(0.5);
+        #[allow(clippy::cast_possible_truncation, reason = "an opacity, 0 to 1")]
+        let transparency = Transparency {
+            texture_alpha,
+            // A texture's alpha cuts out, unless the material itself is see-through.
+            cutout: (texture_alpha && alpha >= 0.999).then_some(0.5),
+            // Within a thousandth of opaque is opaque.
+            ..Transparency::of(if alpha < 0.999 { alpha as f32 } else { 1.0 })
+        };
+        match transparency.mode() {
+            Alpha::Blend => m["alphaMode"] = json!("BLEND"),
+            Alpha::Mask(c) => {
+                m["alphaMode"] = json!("MASK");
+                m["alphaCutoff"] = json!(c);
+            }
+            Alpha::Opaque => {}
         }
         self.materials.push(m);
         let i = self.materials.len() - 1;
@@ -579,12 +591,13 @@ impl<'m> Writer<'m> {
                 .collect();
             doc["images"] = json!(self.images);
             doc["textures"] = json!(textures);
-            doc["samplers"] = json!([{ "wrapS": 10497, "wrapT": 10497 }]);
+            // The readers' one default sampler: repeating, linear, and linear between linear mipmaps.
+            doc["samplers"] = json!([{ "wrapS": 10497, "wrapT": 10497, "magFilter": 9729, "minFilter": 9987 }]);
         }
         if self.hidden_nodes {
             doc["extensionsUsed"] = json!(["KHR_node_visibility"]);
         }
-        let mut text = serde_json::to_vec(&doc)?;
+        let mut text = serde_json::to_vec(&doc).context(ErrorKind::Invalid, "writing the glTF JSON")?;
         while !text.len().is_multiple_of(4) {
             text.push(b' ');
         }
@@ -598,7 +611,7 @@ impl<'m> Writer<'m> {
             u32::try_from(text.len()),
             u32::try_from(bin.len()),
         ) else {
-            bail!("the converted model is larger than a GLB file can hold");
+            bail!(LimitExceeded, "the converted model is larger than a GLB file can hold");
         };
         let mut out = Vec::with_capacity(total);
         out.extend_from_slice(b"glTF");
@@ -616,7 +629,7 @@ impl<'m> Writer<'m> {
 
 /// A face's unit normal: the one the file gives, or failing that its outer loop's.
 fn face_normal(face: &Face) -> Option<[f64; 3]> {
-    normalize(face.normal).or_else(|| face.loops.first().and_then(|l| newell(l)))
+    unit(face.normal).or_else(|| face.loops.first().and_then(|l| newell(l)))
 }
 
 /// The root of `x`'s set, halving the path on the way.
@@ -725,7 +738,7 @@ fn smooth_normals(faces: &[&Face]) -> Option<Vec<[f64; 3]>> {
     for c in 0..count {
         let root = find(&mut parent, c) as usize;
         let n = flat[c as usize];
-        if let Some(s) = normalize(sums[root]).filter(|s| dot(*s, n) > 0.0) {
+        if let Some(s) = unit(sums[root]).filter(|s| dot(*s, n) > 0.0) {
             flat[c as usize] = s;
         }
     }
@@ -743,14 +756,14 @@ fn add_face(
     smoothed: Option<&[[f64; 3]]>,
 ) -> usize {
     let points: Vec<[f64; 3]> = face.loops.iter().flatten().copied().collect();
-    let out: Vec<[f32; 3]> = points.iter().map(|&p| to_gltf(p).map(|v| v as f32)).collect();
+    let out: Vec<[f32; 3]> = points.iter().map(|&p| p.map(|v| v as f32)).collect();
     if out.iter().flatten().any(|v| !v.is_finite()) {
         return 0;
     }
     let Some(n) = face_normal(face) else {
         return 0;
     };
-    let tris = triangulate(&face.loops, n);
+    let tris = triangulate_holes(&face.loops, Some(n));
     let Ok(base) = u32::try_from(prim.positions.len() / 3) else {
         return 0;
     };
@@ -763,7 +776,7 @@ fn add_face(
         return 0;
     }
     let sign = if reverse { -1.0 } else { 1.0 };
-    let gltf_normal = |n: [f64; 3]| to_gltf(n).map(|v| (sign * v / INCH) as f32);
+    let gltf_normal = |n: [f64; 3]| n.map(|v| (sign * v) as f32);
     let normal = gltf_normal(n);
     let matrix = if reverse { face.back_uv_matrix } else { face.uv_matrix };
     let inv = matrix.as_ref().map(invert_3x3);
@@ -817,15 +830,7 @@ mod tests {
     }
 
     #[test]
-    fn axis_swap_is_a_rotation() {
-        assert_eq!(to_gltf([1.0, 0.0, 0.0]), [INCH, 0.0, 0.0]);
-        // SketchUp's up becomes glTF's up, and SketchUp's north (+Y) points away from a glTF viewer (-Z)
-        assert_eq!(to_gltf([0.0, 0.0, 1.0]), [0.0, INCH, 0.0]);
-        assert_eq!(to_gltf([0.0, 1.0, 0.0]), [0.0, 0.0, -INCH]);
-    }
-
-    #[test]
-    fn node_matrices_match_baked_points() {
+    fn node_matrices_place_points_as_the_model_does() {
         // rotate 90 degrees about Z, then move by (1, 2, 3) inches
         let m = [0.0, -1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 2.0, 3.0, 1.0];
         let g = node_matrix(&m).unwrap();
@@ -835,11 +840,10 @@ mod tests {
             m[3] * p[0] + m[4] * p[1] + m[5] * p[2] + m[10],
             m[6] * p[0] + m[7] * p[1] + m[8] * p[2] + m[11],
         ];
-        let want = to_gltf(moved);
-        let q = to_gltf(p);
+        // The matrix is in the model's own space, as the vertices are.
         for r in 0..3 {
-            let got = g[r] * q[0] + g[4 + r] * q[1] + g[8 + r] * q[2] + g[12 + r];
-            assert!((got - want[r]).abs() < 1e-12, "row {r}: {got} vs {}", want[r]);
+            let got = g[r] * p[0] + g[4 + r] * p[1] + g[8 + r] * p[2] + g[12 + r];
+            assert!((got - moved[r]).abs() < 1e-12, "row {r}: {got} vs {}", moved[r]);
         }
         assert!(node_matrix(&[f64::NAN; 13]).is_none());
     }
@@ -906,7 +910,18 @@ mod tests {
             .iter()
             .map(|m| m["name"].as_str().unwrap())
             .collect();
-        assert!(mats.contains(&"Red") && mats.contains(&"Default"));
+        // Unpainted faces take the default material.
+        assert!(mats.contains(&"Red") && mats.contains(&"default"));
+        let d = json["materials"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["name"] == "default")
+            .unwrap();
+        assert_eq!(
+            d["pbrMetallicRoughness"]["baseColorFactor"],
+            json!([0.72f32, 0.72f32, 0.74f32, 1.0f32])
+        );
     }
 
     #[test]
@@ -973,8 +988,9 @@ mod tests {
         };
         let (front_n, front_i) = read(&prims[0]);
         let (back_n, back_i) = read(&prims[1]);
-        assert_eq!(front_n[0], [0.0, 1.0, 0.0]);
-        assert_eq!(back_n[0], [0.0, -1.0, 0.0]);
+        // In the model's own Z up.
+        assert_eq!(front_n[0], [0.0, 0.0, 1.0]);
+        assert_eq!(back_n[0], [0.0, 0.0, -1.0]);
         for (f, b) in front_i.chunks_exact(3).zip(back_i.chunks_exact(3)) {
             assert_eq!([f[0], f[2], f[1]], b);
         }
@@ -1048,7 +1064,7 @@ mod tests {
         wall.normal = [1.0, 0.0, 0.0];
         wall.smooth = vec![true, false, false];
         let n = smooth_normals(&[&floor, &wall]).unwrap();
-        let want = normalize([1.0, 0.0, 2.0]).unwrap();
+        let want = unit([1.0, 0.0, 2.0]).unwrap();
         assert!((0..3).all(|i| (n[0][i] - want[i]).abs() < 1e-12), "{:?}", n[0]);
     }
 
@@ -1061,10 +1077,10 @@ mod tests {
         let bin = doc.blob.as_deref().unwrap();
         let prim = doc.meshes().next().unwrap().primitives().next().unwrap();
         let normals: Vec<[f32; 3]> = prim.reader(|_| Some(bin)).read_normals().unwrap().collect();
-        // glTF's Y is SketchUp's Z
+        // In the model's own Z up.
         let h = std::f32::consts::FRAC_1_SQRT_2;
-        assert!((normals[0][0] - h).abs() < 1e-6 && (normals[0][1] - h).abs() < 1e-6);
-        assert_eq!(normals[1], [0.0, 1.0, 0.0]);
+        assert!((normals[0][0] - h).abs() < 1e-6 && (normals[0][2] - h).abs() < 1e-6);
+        assert_eq!(normals[1], [0.0, 0.0, 1.0]);
     }
 
     #[test]

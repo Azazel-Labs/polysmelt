@@ -18,10 +18,17 @@
 //! (continued in `LABELS2`, `LABELS3`, …), or `marker<n>` where it has none. A marker's rest position is its first
 //! sample that isn't missing. Its track is a linear translation channel with a key at each frame where it isn't
 //! missing, frame `k` (counting from 0) at `k / rate` seconds; glTF has no way to leave a gap, so a missing stretch
-//! is filled in by the keys on each side, and the missing samples are counted. Lengths become meters from
-//! `POINT:UNITS` (millimeters when it's absent). The root turns the capture so that `POINT:Y_SCREEN`, the axis that
-//! points up on screen, is glTF's Y and `POINT:X_SCREEN` is its X; a file without them is taken to be Z-up, as
-//! laboratory captures nearly all are, and that is noted.
+//! is filled in by the keys on each side, and the missing samples are counted. Positions stay in the file's unit and
+//! axes: the document's `RootNode`, over `markers`, scales them to meters from `POINT:UNITS` and turns the capture so
+//! that `POINT:Y_SCREEN`, the axis that points up on screen, is glTF's Y and `POINT:X_SCREEN` is its X; a file
+//! without them is taken to be Z-up, as laboratory captures nearly all are.
+//!
+//! The source info has `POINT:UNITS` as the `unit` and its length as `metersPerUnit`, declared (unknown when
+//! it's absent or names a unit that isn't known, which leaves lengths as they are); `POINT:Y_SCREEN`
+//! as the up axis, declared (assumed `+Z` without the screen axes); the header's rate, or `POINT:RATE`, as
+//! `frameRate`, declared (an assumed default when neither gives one); and `MANUFACTURER:SOFTWARE` as the `tool`.
+//! `MANUFACTURER:COMPANY`, `MANUFACTURER:VERSION_LABEL` and `SUBJECTS:NAMES` are kept as `company`,
+//! `softwareVersion` and `subject`, `POINT:X_SCREEN` as `xScreen`.
 //!
 //! Analog channels (force plates, EMG and such) and the header's events have no glTF form, so they're left out and
 //! counted. A file whose last frame doesn't fit in the header's 16 bits gives its frame count in `TRIAL` or
@@ -37,9 +44,11 @@ use super::scene::{self, Animation, Channel, Interp, Node, Path, Scene};
 use crate::Result;
 use crate::document::{Document, Keep};
 use crate::num::f32_of;
+use crate::quat;
+use crate::source::{Axis, Fact, meters_in};
 
 /// Frames per second when neither the header nor `POINT:RATE` gives one.
-const DEFAULT_RATE: f64 = 30.0;
+const DEFAULT_RATE: f64 = super::keys::ASSUMED_FRAME_RATE;
 /// A C3D block's size in bytes.
 const BLOCK: usize = 512;
 
@@ -139,7 +148,7 @@ impl<'a> Params<'a> {
                 cut_short = true;
                 break;
             };
-            let name = String::from_utf8_lossy(name).trim().to_ascii_uppercase();
+            let name = crate::bytes::text(name).trim().to_ascii_uppercase();
             let body = at + 4 + len;
             if id < 0 {
                 groups.entry(id.unsigned_abs()).or_insert(name);
@@ -266,19 +275,6 @@ fn seconds(f: usize, rate: f64) -> f32 {
     f32_of(f as f64 / rate)
 }
 
-/// The length of a unit name in meters.
-fn unit_length(s: &str) -> Option<f64> {
-    Some(match s.trim().to_ascii_lowercase().as_str() {
-        "mm" | "millimeter" | "millimeters" | "millimetre" | "millimetres" => 0.001,
-        "cm" | "centimeter" | "centimeters" | "centimetre" | "centimetres" => 0.01,
-        "dm" => 0.1,
-        "m" | "meter" | "meters" | "metre" | "metres" => 1.0,
-        "in" | "inch" | "inches" => 0.0254,
-        "ft" | "foot" | "feet" => 0.3048,
-        _ => return None,
-    })
-}
-
 /// A screen axis (`+X`, `-Z`, `Y`, …) as a unit vector.
 fn axis(s: &str) -> Option<[f64; 3]> {
     let s = s.trim().to_ascii_uppercase();
@@ -315,25 +311,27 @@ fn screen_rotation(x: [f64; 3], y: [f64; 3]) -> Option<[f64; 4]> {
             m[c * 3 + r] = *v;
         }
     }
-    Some(scene::matrix_quat(&m))
+    Some(quat::from_matrix(&m))
 }
 
 /// Reads a C3D file.
-pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document<'static>> {
+pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document> {
     let bytes = input.read()?;
     let b: &[u8] = &bytes;
     ensure!(
         b.len() >= 2 && b[1] == 0x50,
+        UnknownFormat,
         "not a C3D file: its second byte isn't 0x50"
     );
     ensure!(
         b[0] >= 2,
+        Corrupt,
         "C3D header points at parameter block {}, not one past the header",
         b[0]
     );
     let param_start = (usize::from(b[0]) - 1) * BLOCK;
     let Some(&proc_byte) = b.get(param_start + 3) else {
-        bail!("C3D file is cut short: its parameters are missing");
+        bail!(Truncated, "C3D file is cut short: its parameters are missing");
     };
     let p = match proc_byte {
         84 => Some(Processor::Intel),
@@ -369,7 +367,7 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document<'static>> {
         0 => params.count("POINT:DATA_START").unwrap_or(0),
         n => usize::from(n),
     };
-    ensure!(start_block > 0, "C3D file doesn't say where its data starts");
+    ensure!(start_block > 0, Corrupt, "C3D file doesn't say where its data starts");
     let data_start = (start_block - 1).saturating_mul(BLOCK);
     let rate_given = float(11)
         .filter(|r| *r > 0.0)
@@ -465,7 +463,7 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document<'static>> {
     }
     if keep.animations && !channels.is_empty() {
         scene.animations.push(Animation {
-            name: "motion".into(),
+            name: super::keys::clip_name(input.path).unwrap_or_default(),
             channels,
             extras: None,
         });
@@ -473,10 +471,8 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document<'static>> {
 
     // Units and the up axis.
     let units = params.string("POINT:UNITS");
-    let meters = match &units {
-        Some(u) => unit_length(u),
-        None => Some(0.001),
-    };
+    // A file that doesn't say its unit has none that is known: nothing is scaled.
+    let meters = units.as_deref().and_then(meters_in);
     let x_screen = params.string("POINT:X_SCREEN");
     let y_screen = params.string("POINT:Y_SCREEN");
     let screen = match (x_screen.as_deref().and_then(axis), y_screen.as_deref().and_then(axis)) {
@@ -485,28 +481,34 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document<'static>> {
     };
     let turn = screen.unwrap_or_else(|| scene::Z_UP_TO_Y_UP.map(f64::from));
 
+    let info = &mut scene.info;
+    info.format = Some("C3D".into());
+    info.meters_per_unit = meters.map_or(Fact::Unknown, Fact::Declared);
+    info.unit.clone_from(&units);
+    info.up_axis = match y_screen.as_deref().and_then(|s| s.parse().ok()) {
+        Some(up) if screen.is_some() => Fact::Declared(up),
+        _ => Fact::Assumed(Axis::PosZ),
+    };
+    info.frame_rate = match rate_given {
+        Some(r) => Fact::Declared(r),
+        None => Fact::Assumed(rate),
+    };
+    info.tool = params.string("MANUFACTURER:SOFTWARE");
     let mut source = Map::new();
-    source.insert("format".into(), json!("C3D"));
     source.insert("processor".into(), json!(rd.p.name()));
+    // Fewer frames than the header counts: the file is cut short in its data.
+    if missing_frames > 0 {
+        source.insert("truncated".into(), json!(true));
+    }
     source.insert("storage".into(), json!(if floats { "float" } else { "integer" }));
-    source.insert("units".into(), json!(units.as_deref().unwrap_or("mm")));
-    source.insert(
-        "upAxis".into(),
-        json!(if screen.is_some() {
-            y_screen.as_deref().unwrap_or("+Z")
-        } else {
-            "+Z"
-        }),
-    );
     if let Some(x) = &x_screen {
         source.insert("xScreen".into(), json!(x));
     }
-    source.insert("frameRate".into(), json!(rate));
     source.insert("firstFrame".into(), json!(first));
     source.insert("scale".into(), json!(scale));
     for (key, name) in [
         ("MANUFACTURER:COMPANY", "company"),
-        ("MANUFACTURER:SOFTWARE", "software"),
+        ("MANUFACTURER:VERSION_LABEL", "softwareVersion"),
         ("SUBJECTS:NAMES", "subject"),
     ] {
         if let Some(v) = params.string(key) {
@@ -517,11 +519,6 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document<'static>> {
     let facts = &mut scene.facts;
     facts.insert("markers".into(), json!(points));
     facts.insert("frames".into(), json!(frames));
-    facts.insert("frame_rate".into(), json!(rate));
-    facts.insert("frame_time".into(), json!(1.0 / rate));
-    if rate_given.is_none() {
-        facts.insert("frame_time_guessed".into(), json!(true));
-    }
     if invalid > 0 {
         facts.insert("missing_samples".into(), json!(invalid));
     }
@@ -547,15 +544,9 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document<'static>> {
     if params.cut_short {
         facts.insert("parameters_cut_short".into(), json!(true));
     }
-    if meters.is_none() {
-        facts.insert("units_unknown".into(), json!(true));
-    }
-    if screen.is_none() {
-        facts.insert("up_axis_assumed".into(), json!(true));
-    }
     scene.source = source;
-    scene.scale(f32_of(meters.unwrap_or(1.0)));
-    scene.rotate_roots(scene::normalize(turn));
+    scene.unit(meters.unwrap_or(1.0));
+    scene.turn(quat::normalize(turn));
     scene.finish(keep)
 }
 
@@ -666,7 +657,7 @@ mod tests {
         ]
     }
 
-    fn read(b: &[u8]) -> Result<Document<'static>> {
+    fn read(b: &[u8]) -> Result<Document> {
         load(Input::memory(b, "t.c3d"), Keep::ALL)
     }
 
@@ -683,23 +674,34 @@ mod tests {
                 assert_eq!(doc.facts["markers"], json!(2), "{p:?}");
                 assert_eq!(doc.facts["frames"], json!(3));
                 assert_eq!(doc.facts["missing_samples"], json!(1));
-                assert_eq!(doc.facts["up_axis_assumed"], json!(true));
+                let info = doc.source_info();
+                assert_eq!(info.up_axis, Fact::Assumed(Axis::PosZ), "{p:?}");
+                // No `POINT:UNITS`: the unit is unknown, and nothing is scaled.
+                assert_eq!(info.meters_per_unit, Fact::Unknown);
+                assert_eq!(info.unit, None);
+                assert_eq!(info.frame_rate, Fact::Declared(10.0));
+                assert!(!info.converted.units && info.converted.up_axis);
                 let rig = doc.rig().unwrap();
                 assert_eq!(rig.nodes[1].name.as_deref(), Some("LASI"));
                 assert_eq!(rig.nodes[2].name.as_deref(), Some("marker2"));
-                // Z-up millimeters: (100, 200, 300) mm is (0.1, 0.3, -0.2) m in glTF.
+                // The markers are as the file has them, under `markers`, under the root node that turns them.
+                assert_eq!(rig.nodes[3].name.as_deref(), Some("RootNode"));
+                assert_eq!(rig.nodes[0].parent, Some(3));
+                assert!(near(&rig.nodes[0].rest.rotation, &[0.0, 0.0, 0.0, 1.0]));
                 let pose = rig.pose(Some(0), 0.0);
-                let world =
-                    |i: usize| scene::rotate(pose[0].rotation.map(f64::from), pose[i].translation.map(f64::from));
+                assert!(near(&pose[1].translation, &[100.0, 200.0, 300.0]));
+                // Z up: (100, 200, 300) is (100, 300, -200) in glTF.
+                let world = |pose: &[crate::rig::Trs], i: usize| {
+                    let m = rig.world(pose)[i];
+                    [m[12], m[13], m[14]]
+                };
                 assert!(
-                    near(&world(1).map(f32_of), &[0.1, 0.3, -0.2]),
+                    near(&world(&pose, 1), &[100.0, 300.0, -200.0]),
                     "{p:?} {scale}: {:?}",
-                    world(1)
+                    world(&pose, 1)
                 );
                 let pose = rig.pose(Some(0), 0.2);
-                let world =
-                    |i: usize| scene::rotate(pose[0].rotation.map(f64::from), pose[i].translation.map(f64::from));
-                assert!(near(&world(2).map(f32_of), &[0.0, 1.0, -0.01]), "{p:?} {scale}");
+                assert!(near(&world(&pose, 2), &[0.0, 1000.0, -10.0]), "{p:?} {scale}");
                 assert_eq!(rig.animations[0].channels[1].times, [0.1, 0.2]);
             }
         }
@@ -715,15 +717,22 @@ mod tests {
             &[("X_SCREEN", "+X"), ("Y_SCREEN", "+Y"), ("UNITS", "m")],
         );
         let doc = read(&b).unwrap();
-        assert!(doc.facts.get("up_axis_assumed").is_none());
+        let info = doc.source_info();
+        assert_eq!(info.format.as_deref(), Some("C3D"));
+        assert_eq!(info.up_axis, Fact::Declared(Axis::PosY));
+        assert_eq!(info.meters_per_unit, Fact::Declared(1.0));
+        assert_eq!(info.unit.as_deref(), Some("m"));
+        assert!(!info.converted.units);
+        assert!(!info.converted.up_axis, "a file that is Y up already isn't turned");
         let rig = doc.rig().unwrap();
         assert!(near(&rig.nodes[1].rest.translation, &[100.0, 200.0, 300.0]));
-        assert!(near(&rig.nodes[0].rest.rotation, &[0.0, 0.0, 0.0, 1.0]));
+        // Y up, in meters: the root node is there and changes nothing.
+        assert_eq!(doc.json()["nodes"][2], json!({ "name": "RootNode", "children": [0] }));
         // Screen right -Y and up +Z: file -Y is glTF X, +Z is Y, so +X is glTF Z... (−Y)×Z = −X toward the viewer.
         let q = screen_rotation(axis("-Y").unwrap(), axis("+Z").unwrap()).unwrap();
-        assert!(near(&scene::rotate(q, [0.0, -1.0, 0.0]).map(f32_of), &[1.0, 0.0, 0.0]));
-        assert!(near(&scene::rotate(q, [0.0, 0.0, 1.0]).map(f32_of), &[0.0, 1.0, 0.0]));
-        assert!(near(&scene::rotate(q, [-1.0, 0.0, 0.0]).map(f32_of), &[0.0, 0.0, 1.0]));
+        assert!(near(&quat::rotate(q, [0.0, -1.0, 0.0]).map(f32_of), &[1.0, 0.0, 0.0]));
+        assert!(near(&quat::rotate(q, [0.0, 0.0, 1.0]).map(f32_of), &[0.0, 1.0, 0.0]));
+        assert!(near(&quat::rotate(q, [-1.0, 0.0, 0.0]).map(f32_of), &[0.0, 0.0, 1.0]));
         assert!(screen_rotation(axis("+Z").unwrap(), axis("-Z").unwrap()).is_none());
     }
 

@@ -1,0 +1,194 @@
+{
+  "spec": "KHR_texture_transform: Khronos sample TextureTransformTest",
+  "source": "KhronosGroup/glTF-Sample-Assets@e124e8d, Models/TextureTransformTest/glTF (CC0-1.0, Microsoft); textures scaled down to 64 pixels",
+  "file": "TextureTransformTest.gltf",
+  "triangles": 24,
+  "vertices": 48,
+  "area": 6.11,
+  "bounds": {
+    "min": [
+      -1.6,
+      -1.141267,
+      0.0
+    ],
+    "max": [
+      1.6,
+      1.05,
+      0.01
+    ]
+  },
+  "material_count": 9,
+  "materials": [
+    {
+      "name": "Offset U",
+      "double_sided": false,
+      "alpha_mode": "OPAQUE",
+      "normal_map": false,
+      "emissive": [
+        0,
+        0,
+        0
+      ],
+      "textured": true,
+      "metallic": 0,
+      "roughness": 1,
+      "color": [
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "name": "Offset V",
+      "double_sided": false,
+      "alpha_mode": "OPAQUE",
+      "normal_map": false,
+      "emissive": [
+        0,
+        0,
+        0
+      ],
+      "textured": true,
+      "metallic": 0,
+      "roughness": 1,
+      "color": [
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "name": "Offset UV",
+      "double_sided": false,
+      "alpha_mode": "OPAQUE",
+      "normal_map": false,
+      "emissive": [
+        0,
+        0,
+        0
+      ],
+      "textured": true,
+      "metallic": 0,
+      "roughness": 1,
+      "color": [
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "name": "Rotation",
+      "double_sided": false,
+      "alpha_mode": "OPAQUE",
+      "normal_map": false,
+      "emissive": [
+        0,
+        0,
+        0
+      ],
+      "textured": true,
+      "metallic": 0,
+      "roughness": 1,
+      "color": [
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "name": "Correct",
+      "double_sided": false,
+      "alpha_mode": "OPAQUE",
+      "normal_map": false,
+      "emissive": [
+        0,
+        0,
+        0
+      ],
+      "textured": true,
+      "metallic": 0,
+      "roughness": 1,
+      "color": [
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "name": "NotSupported",
+      "double_sided": false,
+      "alpha_mode": "OPAQUE",
+      "normal_map": false,
+      "emissive": [
+        0,
+        0,
+        0
+      ],
+      "textured": true,
+      "metallic": 0,
+      "roughness": 1,
+      "color": [
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "name": "Error",
+      "double_sided": false,
+      "alpha_mode": "OPAQUE",
+      "normal_map": false,
+      "emissive": [
+        0,
+        0,
+        0
+      ],
+      "textured": true,
+      "metallic": 0,
+      "roughness": 1,
+      "color": [
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "name": "Scale",
+      "double_sided": false,
+      "alpha_mode": "OPAQUE",
+      "normal_map": false,
+      "emissive": [
+        0,
+        0,
+        0
+      ],
+      "textured": true,
+      "metallic": 0,
+      "roughness": 1,
+      "color": [
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "name": "All",
+      "double_sided": false,
+      "alpha_mode": "OPAQUE",
+      "normal_map": false,
+      "emissive": [
+        0,
+        0,
+        0
+      ],
+      "textured": true,
+      "metallic": 0,
+      "roughness": 1,
+      "color": [
+        1,
+        1,
+        1
+      ]
+    }
+  ]
+}

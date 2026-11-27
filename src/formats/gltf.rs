@@ -1,65 +1,41 @@
 //! glTF 2.0, `.gltf` and `.glb`, read as the [`Document`] it already is. Nothing is decoded:
 //! extensions (known or not), extras, and meshopt or Draco compression pass through as they are.
 //!
-//! - A GLB file isn't read whole: its binary chunk stays in the file, read as needed. A GLB in
-//!   memory is used in place.
+//! - A GLB file is read whole, in one call, and its binary chunk shared from those bytes without a
+//!   copy. A GLB in memory shares its bytes the same way when they're held as [`Bytes`].
 //! - External buffers are found relative to the model's file (`..` too, but never an absolute
-//!   path); for a model in memory they come from [`Assets::read`]. A meshopt fallback buffer that isn't there holds nothing: views on it
-//!   decode from their compressed data.
+//!   path); for a model in memory they come from [`Assets::read_shared`]. A meshopt fallback
+//!   buffer that isn't there holds nothing: views on it decode from their compressed data.
 //! - Images named by URI (a data URI, or a file found as buffers are) move into a buffer, so the
-//!   document stands on its own. One that isn't found keeps its URI. An image file stays in the
-//!   file until its bytes are wanted (writing the GLB, most often): only its first bytes are read,
-//!   to know its type.
+//!   document stands on its own. A file that isn't where its URI says is looked for as every other format's
+//!   textures are ([`Assets::find`]): by file name beside the model or in the pack, in any case, or in another
+//!   image format, so another machine's absolute path or a `file:` URI finds its file. One that isn't found
+//!   keeps its URI.
+//! - A texture whose images are all in a format Polysmelt doesn't decode (KTX2, AVIF) isn't
+//!   drawn: `asset.extras.source.droppedTextures` counts them.
+//! - `asset.extras.source` gets what every reader writes there: the format and version, and glTF's
+//!   meters, +Y up, +Z forward and right-handedness, declared. A file that has a source already (a
+//!   model Polysmelt converted, read back) keeps it.
 //! - glTF 1.0 (and its binary GLB, `KHR_binary_glTF`) is upgraded to 2.0 first; see
 //!   [`super::gltf1`].
 
-use std::borrow::Cow;
-#[cfg(feature = "fs")]
-use std::fs::File;
-#[cfg(feature = "fs")]
-use std::io::{Read, Seek, SeekFrom};
 use std::path::{Component, Path};
 
 use serde_json::{Map, Value, json};
 
 use super::{Input, gltf1};
 use crate::assets::Assets;
-#[cfg(feature = "fs")]
-use crate::document::FileSpan;
 use crate::document::{Blob, Document, Keep};
 use crate::gltf as container;
 use crate::images::{Location, Reference};
 use crate::num::usize_of;
-use crate::{Context as _, Result};
-
-/// How much of the file the first read takes.
-#[cfg(feature = "fs")]
-const HEAD: usize = 64 * 1024;
-
-/// Files up to this size are read whole, in one call: the reads and seeks a binary chunk left in
-/// the file costs later outweigh the memory it saves.
-#[cfg(feature = "fs")]
-pub(crate) const WHOLE: u64 = 4 * 1024 * 1024;
-
-#[cfg(all(test, feature = "fs"))]
-thread_local! {
-    /// [`WHOLE`], which tests lower to read every file's binary chunk in pieces.
-    pub(crate) static WHOLE_AT: std::cell::Cell<u64> = const { std::cell::Cell::new(WHOLE) };
-}
-
-/// The size up to which a file is read whole.
-#[cfg(feature = "fs")]
-fn whole() -> u64 {
-    #[cfg(test)]
-    return WHOLE_AT.get();
-    #[cfg(not(test))]
-    WHOLE
-}
+use crate::source::{Axis, Fact, Handedness, SourceInfo};
+use crate::{Bytes, Context as _, ErrorKind, Result};
 
 /// Reads the glTF or GLB `input`.
-pub(crate) fn load<'a>(input: Input<'a>, assets: &'a dyn Assets, keep: Keep) -> Result<Document<'a>> {
+pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document> {
     let (json, mut bin) = match input.bytes() {
-        Some(b) if b.starts_with(b"glTF") => glb_in_memory(Cow::Borrowed(b))?,
+        Some(b) if b.starts_with(b"glTF") => glb_in_memory(b, |part| input.share(part))?,
         Some(b) => (gltf_json(b)?, None),
         #[cfg(feature = "fs")]
         None => open_file(input.path)?,
@@ -80,32 +56,26 @@ pub(crate) fn load<'a>(input: Input<'a>, assets: &'a dyn Assets, keep: Keep) -> 
         .to_owned();
     if version.starts_with('1') {
         // A 1.0 label on a 2.0 document: read as the 2.0 it is, the label kept as its source's.
-        let asset = &mut json["asset"];
-        asset["version"] = "2.0".into();
-        let extras = &mut asset["extras"];
-        if !extras.is_object() {
-            *extras = Value::Object(Map::new());
-        }
-        let source = &mut extras["source"];
-        if !source.is_object() {
-            *source = Value::Object(Map::new());
-        }
-        source["version"] = version.into();
+        json["asset"]["version"] = "2.0".into();
+        source(&mut json)["version"] = version.clone().into();
     } else {
-        ensure!(version.starts_with("2."), "glTF version {version:?} isn't 1.x or 2.x");
+        ensure!(
+            version.starts_with("2."),
+            Unsupported,
+            "glTF version {version:?} isn't 1.x or 2.x"
+        );
     }
-    let mut doc = Document {
-        json,
-        buffers: Vec::new(),
-        facts: Map::new(),
-        refs: crate::images::Refs::new(),
-        max_triangles: crate::mesh::MAX_TRIANGLES,
-        lines_and_points: true,
-        max_points: crate::mesh::MAX_POINTS,
-    };
-    let n = doc.json.get("buffers").and_then(Value::as_array).map_or(0, Vec::len);
+    if fix.is_none() {
+        own_source(&mut json, &version);
+    }
+    let dropped = undecodable_textures(&json);
+    if dropped > 0 {
+        source(&mut json)["droppedTextures"] = json!(dropped);
+    }
+    let mut doc = Document::new(json, Vec::new(), Map::new(), crate::images::Refs::new());
+    let n = doc.base.get("buffers").and_then(Value::as_array).map_or(0, Vec::len);
     for i in 0..n {
-        let b = &mut doc.json["buffers"][i];
+        let b = &mut doc.base_mut()["buffers"][i];
         let declared = b.get("byteLength").and_then(Value::as_u64).unwrap_or(0);
         let fallback = container::is_fallback(b);
         let blob = match b.get("uri").and_then(Value::as_str) {
@@ -118,12 +88,13 @@ pub(crate) fn load<'a>(input: Input<'a>, assets: &'a dyn Assets, keep: Keep) -> 
             None if i == 0 && bin.is_some() => bin.take().expect("checked"),
             None if fallback => Blob::Missing(declared),
             // An empty buffer needs no data (a placeholder some writers leave).
-            None if declared == 0 => Blob::Borrowed(&[]),
-            None => bail!("glTF buffer {i} has no data"),
+            None if declared == 0 => Blob::Bytes(Bytes::new()),
+            None => bail!(Corrupt, "glTF buffer {i} has no data"),
         };
         ensure!(
             blob.len() >= declared,
-            "glTF buffer {i} holds {} bytes but declares {declared}",
+            Truncated,
+            "glTF buffer {i} is cut short: it holds {} bytes but declares {declared}",
             blob.len()
         );
         if let Some(b) = b.as_object_mut() {
@@ -149,17 +120,97 @@ pub(crate) fn load<'a>(input: Input<'a>, assets: &'a dyn Assets, keep: Keep) -> 
     Ok(doc)
 }
 
-/// The most image files a document keeps open to read later; images past them are read now.
-#[cfg(feature = "fs")]
-const OPEN_IMAGES: usize = 256;
+/// The asset's `extras.source`, made if it isn't there. `json` has its `asset`.
+fn source(json: &mut Map<String, Value>) -> &mut Value {
+    let extras = &mut json["asset"]["extras"];
+    if !extras.is_object() {
+        *extras = Value::Object(Map::new());
+    }
+    let source = &mut extras["source"];
+    if !source.is_object() {
+        *source = Value::Object(Map::new());
+    }
+    source
+}
+
+/// Writes what a glTF 2.0 file says of itself by being one into its `asset.extras.source`, as every reader
+/// does: the format and `version`, glTF's meters, +Y up, +Z forward and right-handedness (all declared: the
+/// specification fixes them), its `generator` as the tool and its `copyright`. A file that carries a source
+/// already (one Polysmelt converted from another format, read back) keeps it.
+fn own_source(json: &mut Map<String, Value>, version: &str) {
+    let asset = json.get("asset");
+    if asset.and_then(|a| a.pointer("/extras/source/format")).is_some() {
+        return;
+    }
+    let text = |k: &str| asset.and_then(|a| a.get(k)).and_then(Value::as_str).map(str::to_owned);
+    let info = SourceInfo {
+        format: Some("glTF".into()),
+        version: Some(version.to_owned()),
+        meters_per_unit: Fact::Declared(1.0),
+        unit: Some("meter".into()),
+        up_axis: Fact::Declared(Axis::PosY),
+        forward_axis: Fact::Declared(Axis::PosZ),
+        handedness: Fact::Declared(Handedness::Right),
+        tool: text("generator"),
+        copyright: text("copyright"),
+        ..SourceInfo::default()
+    };
+    if let Value::Object(source) = source(json) {
+        info.write(source);
+    }
+}
+
+/// How many textures have images, none in a format Polysmelt decodes: KTX2
+/// (`KHR_texture_basisu`), AVIF (`EXT_texture_avif`), or WebP without the `webp` feature. Such
+/// a texture isn't drawn. An image's format is the type it declares, or its name's, not its
+/// bytes', so the count is the same however much of the file is read.
+fn undecodable_textures(json: &Map<String, Value>) -> usize {
+    let list = |key: &str| json.get(key).and_then(Value::as_array).map_or(&[][..], Vec::as_slice);
+    let images = list("images");
+    let undecodable = |source: &Value| {
+        let Some(img) = source.as_u64().and_then(|i| images.get(usize_of(i))) else {
+            return false;
+        };
+        let uri = img.get("uri").and_then(Value::as_str).unwrap_or("");
+        let named = if let Some(rest) = uri.strip_prefix("data:") {
+            rest.split([';', ',']).next().map(str::to_owned)
+        } else {
+            let name = container::percent_decode(uri).to_ascii_lowercase();
+            let known = [
+                (".ktx2", "image/ktx2"),
+                (".avif", "image/avif"),
+                (".webp", "image/webp"),
+            ];
+            known
+                .iter()
+                .find(|(ext, _)| name.ends_with(ext))
+                .map(|(_, m)| (*m).to_owned())
+        };
+        match img.get("mimeType").and_then(Value::as_str).or(named.as_deref()) {
+            Some("image/ktx2" | "image/avif") => true,
+            Some("image/webp") => !cfg!(feature = "webp"),
+            _ => false,
+        }
+    };
+    list("textures")
+        .iter()
+        .filter(|t| {
+            let extensions = t.get("extensions").and_then(Value::as_object);
+            let mut sources = t
+                .get("source")
+                .into_iter()
+                .chain(extensions.into_iter().flatten().filter_map(|(_, e)| e.get("source")))
+                .peekable();
+            sources.peek().is_some() && sources.all(undecodable)
+        })
+        .count()
+}
 
 /// Moves each image named by URI into a buffer of its own, when it's found and its type known.
-fn embed_images(doc: &mut Document<'_>, input: Input<'_>, assets: &dyn Assets) {
-    let n = doc.json.get("images").and_then(Value::as_array).map_or(0, Vec::len);
-    #[cfg(feature = "fs")]
-    let mut open = 0;
+fn embed_images(doc: &mut Document, input: Input<'_>, assets: &dyn Assets) {
+    let n = doc.base.get("images").and_then(Value::as_array).map_or(0, Vec::len);
     for i in 0..n {
-        let img = &doc.json["images"][i];
+        let img = &doc.base["images"][i];
         let Some(uri) = img.get("uri").and_then(Value::as_str) else {
             continue;
         };
@@ -171,29 +222,16 @@ fn embed_images(doc: &mut Document<'_>, input: Input<'_>, assets: &dyn Assets) {
                 .ok()
                 .and_then(|(named, bytes)| Some((typed(&bytes, named.as_deref())?, Blob::Bytes(bytes.into()))))
         } else {
-            let name = container::percent_decode(uri);
-            let named = container::mime_from_name(&name);
-            #[cfg(feature = "fs")]
-            let later = (input.bytes().is_none() && open < OPEN_IMAGES)
-                .then(|| image_file(input, &name))
-                .flatten()
-                .and_then(|(head, span)| Some((typed(&head, named)?, Blob::File(span))));
-            #[cfg(not(feature = "fs"))]
-            let later = None;
-            #[cfg(feature = "fs")]
-            if later.is_some() {
-                open += 1;
-            }
-            later.or_else(|| {
-                let bytes = read_external(input, assets, uri).ok()?.into_owned();
-                Some((typed(&bytes, named)?, Blob::Bytes(bytes.into())))
-            })
+            let named = container::mime_from_name(&container::percent_decode(uri));
+            read_image(input, assets, uri)
+                .ok()
+                .and_then(|bytes| Some((typed(&bytes, named)?, Blob::Bytes(bytes))))
         };
         let Some((mime, blob)) = found else { continue };
         let len = blob.len();
         let buffer = doc.push_blob(blob);
         let view = doc.push_view(json!({ "buffer": buffer, "byteLength": len }));
-        let img = doc.json["images"][i]
+        let img = doc.base_mut()["images"][i]
             .as_object_mut()
             .expect("an image with a uri is an object");
         img.remove("uri");
@@ -202,17 +240,10 @@ fn embed_images(doc: &mut Document<'_>, input: Input<'_>, assets: &dyn Assets) {
     }
 }
 
-/// The image file `name` (relative to the model) left in the file, with its first bytes, enough to
-/// tell its type.
-#[cfg(feature = "fs")]
-fn image_file(input: Input<'_>, name: &str) -> Option<(Vec<u8>, FileSpan)> {
-    FileSpan::open(&input.dir().join(checked(name).ok()?), 16)
-}
-
 /// Notes where each image named by URI (other than a `data:` one) is, without reading it. A file
 /// on disk is only looked for when the image's location is first asked.
-fn reference_images(doc: &mut Document<'_>, input: Input<'_>, assets: &dyn Assets) {
-    let images = doc.json.get("images").and_then(Value::as_array);
+fn reference_images(doc: &mut Document, input: Input<'_>, assets: &dyn Assets) {
+    let images = doc.base.get("images").and_then(Value::as_array);
     for (i, img) in images.into_iter().flatten().enumerate() {
         let Some(uri) = img
             .get("uri")
@@ -229,7 +260,11 @@ fn reference_images(doc: &mut Document<'_>, input: Input<'_>, assets: &dyn Asset
         let later = input.bytes().is_none();
         #[cfg(not(feature = "fs"))]
         let later = false;
-        let found = path.filter(|p| later || assets.read(p).is_some());
+        // What isn't where the URI says (or isn't a plain relative path: another machine's absolute path, a
+        // `file:` URI) is looked for as every reader's textures are.
+        let found = path
+            .filter(|p| later || assets.read(p).is_some())
+            .or_else(|| assets.find(uri, input.dir()));
         let location = found.map_or(Location::Missing, Location::File);
         let r = Reference {
             found: (later && matches!(location, Location::File(_))).then(std::sync::OnceLock::new),
@@ -251,109 +286,121 @@ fn checked(rel: &str) -> Result<&str> {
         && Path::new(rel)
             .components()
             .all(|c| matches!(c, Component::Normal(_) | Component::CurDir | Component::ParentDir));
-    ensure!(safe, "refusing to read {rel:?}: not a relative path");
+    ensure!(safe, Unsupported, "refusing to read {rel:?}: not a relative path");
     Ok(rel)
 }
 
-/// An external buffer: from the model's folder, left in its file, or for a model in memory from
-/// its assets.
-fn external<'a>(input: Input<'a>, assets: &'a dyn Assets, uri: &str) -> Result<Blob<'a>> {
-    #[cfg(feature = "fs")]
-    if input.bytes().is_none() {
-        let rel = container::percent_decode(uri);
-        let p = input.dir().join(checked(&rel)?);
-        let mut file = File::open(&p).map_err(|e| invalid!("glTF buffer {rel:?}: {e}"))?;
-        let len = file.metadata()?.len();
-        if len <= whole() {
-            // Small: read whole now, as the model itself is.
-            let mut all = Vec::new();
-            all.try_reserve_exact(usize_of(len))
-                .map_err(|_| invalid!("glTF buffer {rel:?} of {len} bytes"))?;
-            file.read_to_end(&mut all)
-                .map_err(|e| invalid!("glTF buffer {rel:?}: {e}"))?;
-            return Ok(Blob::Bytes(all.into()));
-        }
-        return Ok(Blob::File(FileSpan::new(file, 0, len, 0)));
-    }
-    Ok(match read_external(input, assets, uri)? {
-        Cow::Borrowed(b) => Blob::Borrowed(b),
-        Cow::Owned(v) => Blob::Bytes(v.into()),
-    })
+/// An external buffer: from the model's folder, or for a model in memory from its assets.
+fn external(input: Input<'_>, assets: &dyn Assets, uri: &str) -> Result<Blob> {
+    read_external(input, assets, uri).map(Blob::Bytes)
 }
 
 /// An external file the model names by URI, whole: from the model's folder, or for a model in
-/// memory from its assets.
-fn read_external<'a>(input: Input<'a>, assets: &'a dyn Assets, uri: &str) -> Result<Cow<'a, [u8]>> {
+/// memory from its assets (shared, not copied, when they hold it as [`Bytes`]).
+fn read_external(input: Input<'_>, assets: &dyn Assets, uri: &str) -> Result<Bytes> {
     let rel = container::percent_decode(uri);
     let p = input.dir().join(checked(&rel)?);
     #[cfg(feature = "fs")]
     if input.bytes().is_none() {
-        return Ok(Cow::Owned(
-            std::fs::read(&p).map_err(|e| invalid!("glTF file {rel:?}: {e}"))?,
-        ));
+        return read_file(&p, Some(&rel));
     }
     assets
-        .read(&p)
-        .with_context(|| format!("glTF file {rel:?} isn't among the assets"))
+        .read_shared(&p)
+        .ok_or_else(|| crate::Error::missing(format!("glTF file {rel:?} isn't among the assets")).at(&p))
+}
+
+/// An external image the model names by URI: the file the URI names, or else the one the shared resolver finds
+/// for it ([`Assets::find`]), as for every other format's textures: by file name beside the model or in the
+/// pack, whatever the case, or in another image format; another machine's absolute path and a `file:` URI are
+/// found by their file names.
+fn read_image(input: Input<'_>, assets: &dyn Assets, uri: &str) -> Result<Bytes> {
+    let exact = match read_external(input, assets, uri) {
+        Ok(bytes) => return Ok(bytes),
+        Err(e) => e,
+    };
+    let Some(p) = assets.find(uri, input.dir()) else {
+        return Err(exact);
+    };
+    #[cfg(feature = "fs")]
+    if input.bytes().is_none() {
+        return read_file(&p, Some(uri));
+    }
+    assets.read_shared(&p).ok_or(exact)
+}
+
+/// The file at `path`, whole, in one read into memory reserved for it (failing, rather than
+/// aborting, when there isn't that much). `asset` names a file the model refers to, as its
+/// reference has it.
+#[cfg(feature = "fs")]
+fn read_file(path: &Path, asset: Option<&str>) -> Result<Bytes> {
+    use std::io::Read as _;
+    let io = |e: std::io::Error| match asset {
+        Some(rel) => crate::Error::asset(e, path, format!("glTF file {rel:?}")),
+        None => crate::Error::from(e),
+    };
+    let mut file = std::fs::File::open(path).map_err(io)?;
+    let len = file.metadata().map_err(io)?.len();
+    let mut all = Vec::new();
+    all.try_reserve_exact(usize::try_from(len).unwrap_or(usize::MAX))
+        .map_err(|_| err!(LimitExceeded, "glTF file of {len} bytes"))?;
+    file.read_to_end(&mut all).map_err(io)?;
+    Ok(all.into())
 }
 
 /// Where a GLB's binary chunk is: offset and length.
 type Span = (u64, u64);
 
-/// A GLB's JSON and where its binary chunk is, from its first bytes. `read(off, len)` reads
-/// the container.
+/// A GLB's JSON and where its binary chunk is. `read(off, len)` reads the container.
 fn glb_layout<'b>(
     total: u64,
-    mut read: impl FnMut(u64, usize) -> Result<Cow<'b, [u8]>>,
+    read: impl Fn(u64, usize) -> Result<&'b [u8]>,
 ) -> Result<(Map<String, Value>, Option<Span>)> {
-    let head = read(0, 20).context("GLB is truncated")?;
+    let head = read(0, 20)?;
     let u32_at = |b: &[u8], at: usize| u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]]);
-    if u32_at(&head, 4) == 1 {
+    if u32_at(head, 4) == 1 {
         // glTF 1.0's binary glTF: the JSON's length and format (0, JSON) in the header, then
         // the body, unpadded, to the end.
-        ensure!(u32_at(&head, 16) == 0, "binary glTF 1.0 content isn't JSON");
-        let json_len = u64::from(u32_at(&head, 12));
-        let end = u64::from(u32_at(&head, 8)).min(total);
-        ensure!(20 + json_len <= end, "GLB is truncated");
+        ensure!(u32_at(head, 16) == 0, Corrupt, "binary glTF 1.0 content isn't JSON");
+        let json_len = u64::from(u32_at(head, 12));
+        let end = u64::from(u32_at(head, 8)).min(total);
+        ensure!(20 + json_len <= end, Truncated, "GLB is cut short");
         let text = read(20, usize_of(json_len))?;
-        let json = glb_json(&text)?;
+        let json = glb_json(text)?;
         return Ok((json, Some((20 + json_len, end - 20 - json_len))));
     }
-    ensure!(u32_at(&head, 4) == 2, "GLB version {} is not 1 or 2", u32_at(&head, 4));
-    ensure!(&head[16..20] == b"JSON", "GLB doesn't start with a JSON chunk");
-    let json_len = u64::from(u32_at(&head, 12));
-    ensure!(20 + json_len <= total, "GLB is truncated");
+    ensure!(
+        u32_at(head, 4) == 2,
+        Unsupported,
+        "GLB version {} is not 1 or 2",
+        u32_at(head, 4)
+    );
+    ensure!(&head[16..20] == b"JSON", Corrupt, "GLB doesn't start with a JSON chunk");
+    let json_len = u64::from(u32_at(head, 12));
+    ensure!(20 + json_len <= total, Truncated, "GLB is cut short");
     let text = read(20, usize_of(json_len))?;
-    let json = glb_json(&text)?;
+    let json = glb_json(text)?;
     let at = (20 + json_len).next_multiple_of(4);
     let mut bin = None;
     if at + 8 <= total {
         let h = read(at, 8)?;
         if &h[4..8] == b"BIN\0" {
             let base = at + 8;
-            bin = Some((base, u64::from(u32_at(&h, 0)).min(total - base)));
+            bin = Some((base, u64::from(u32_at(h, 0)).min(total - base)));
         }
     }
     Ok((json, bin))
 }
 
-/// A GLB in memory, as its JSON and binary chunk: borrowed bytes sliced, owned ones moved out
-/// without a copy.
-fn glb_in_memory(bytes: Cow<'_, [u8]>) -> Result<(Map<String, Value>, Option<Blob<'_>>)> {
+/// A GLB in memory, as its JSON and binary chunk, which `share` makes [`Bytes`] of (without a
+/// copy, when it can).
+fn glb_in_memory(bytes: &[u8], share: impl FnOnce(&[u8]) -> Bytes) -> Result<(Map<String, Value>, Option<Blob>)> {
     let total = bytes.len() as u64;
-    let all: &[u8] = &bytes;
     let (json, bin) = glb_layout(total, |off, len| {
-        all.get(usize_of(off)..usize_of(off).saturating_add(len))
-            .map(Cow::Borrowed)
-            .context("GLB is truncated")
+        bytes
+            .get(usize_of(off)..usize_of(off).saturating_add(len))
+            .context(ErrorKind::Truncated, "GLB is cut short")
     })?;
-    let bin = bin.map(|(base, len)| {
-        let (base, end) = (usize_of(base), usize_of(base + len));
-        match bytes {
-            Cow::Borrowed(b) => Blob::Borrowed(&b[base..end]),
-            Cow::Owned(v) => Blob::Bytes(crate::Bytes::from(v).slice(base..end)),
-        }
-    });
+    let bin = bin.map(|(base, len)| Blob::Bytes(share(&bytes[usize_of(base)..usize_of(base + len)])));
     Ok((json, bin))
 }
 
@@ -362,8 +409,10 @@ fn glb_json(text: &[u8]) -> Result<Map<String, Value>> {
     let text = text.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(text);
     // The chunk is padded with spaces, or by some writers with zeros.
     let end = text.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
-    let Value::Object(json) = crate::json::from_slice(&text[..end]).context("GLB JSON doesn't parse")? else {
-        bail!("glTF JSON is not an object")
+    let Value::Object(json) =
+        crate::json::from_slice(&text[..end]).context(ErrorKind::Corrupt, "GLB JSON doesn't parse")?
+    else {
+        bail!(Corrupt, "glTF JSON is not an object")
     };
     Ok(json)
 }
@@ -373,51 +422,25 @@ fn gltf_json(bytes: &[u8]) -> Result<Map<String, Value>> {
     let text = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
     match crate::json::from_slice(text) {
         Ok(Value::Object(m)) => Ok(m),
-        _ => bail!("not a glTF file: neither GLB nor glTF JSON"),
+        Ok(_) => bail!(UnknownFormat, "not a glTF file: neither GLB nor glTF JSON"),
+        Err(e) => match crate::Error::json(e, text, "glTF JSON") {
+            e if e.kind() == ErrorKind::UnknownFormat => {
+                bail!(UnknownFormat, "not a glTF file: neither GLB nor glTF JSON")
+            }
+            e => Err(e),
+        },
     }
 }
 
-/// The JSON and binary chunk of a glTF or GLB file, read in pieces: the binary chunk stays in
-/// the file.
+/// The JSON and binary chunk of a glTF or GLB file, read whole: the binary chunk is shared from
+/// the bytes read, not copied out of them.
 #[cfg(feature = "fs")]
-fn open_file(path: &Path) -> Result<(Map<String, Value>, Option<Blob<'static>>)> {
-    let mut file = File::open(path)?;
-    let total = file.metadata()?.len();
-    // One read for the header, the JSON and the binary chunk's header in the usual case,
-    // and the whole file when it's small. Read into spare capacity: nothing is zeroed first.
-    let first = if total <= whole() {
-        usize_of(total)
-    } else {
-        usize_of(total.min(HEAD as u64))
-    };
-    let mut head = Vec::new();
-    head.try_reserve_exact(first)
-        .map_err(|_| invalid!("glTF file of {total} bytes"))?;
-    (&mut file).take(first as u64).read_to_end(&mut head)?;
-    ensure!(head.len() == first, "glTF file is shorter than it says");
-    let glb = head.starts_with(b"glTF");
-    if glb && head.len() as u64 == total {
-        return glb_in_memory(Cow::Owned(head));
+fn open_file(path: &Path) -> Result<(Map<String, Value>, Option<Blob>)> {
+    let all = read_file(path, None)?;
+    if all.starts_with(b"glTF") {
+        return glb_in_memory(&all, |part| all.slice_ref(part));
     }
-    if !glb {
-        file.read_to_end(&mut head)?;
-        return Ok((gltf_json(&head)?, None));
-    }
-    let mut pos = head.len() as u64;
-    let read: &[u8] = &head;
-    let (json, bin) = glb_layout(total, |off, len| {
-        if let Some(b) = read.get(usize_of(off)..usize_of(off).saturating_add(len)) {
-            return Ok(Cow::Borrowed(b));
-        }
-        let mut b = vec![0; len];
-        file.seek(SeekFrom::Start(off))?;
-        file.read_exact(&mut b).context("GLB is truncated")?;
-        pos = off + len as u64;
-        Ok(Cow::Owned(b))
-    })?;
-    drop(head);
-    let bin = bin.map(|(base, len)| Blob::File(FileSpan::new(file, base, len, pos.wrapping_sub(base))));
-    Ok((json, bin))
+    Ok((gltf_json(&all)?, None))
 }
 
 #[cfg(all(test, feature = "fs"))]
@@ -455,8 +478,34 @@ mod tests {
     }
 
     /// The JSON without what writing may restate: views' default `byteOffset`, where in the
-    /// binary chunk each view sits, and empty buffers at the end, which no view can use.
+    /// binary chunk each view sits, and empty buffers at the end, which no view can use. Nor
+    /// the count of dropped textures, the one note reading adds.
     fn normalized(mut json: Value) -> Value {
+        if let Some(asset) = json.get_mut("asset").and_then(Value::as_object_mut) {
+            let extras = asset.get_mut("extras").and_then(Value::as_object_mut);
+            if let Some(source) = extras.and_then(|e| e.get_mut("source")?.as_object_mut()) {
+                source.remove("droppedTextures");
+                // What reading writes of the file itself.
+                if source.get("format") == Some(&serde_json::json!("glTF")) {
+                    for key in [
+                        "format",
+                        "version",
+                        "metersPerUnit",
+                        "unit",
+                        "upAxis",
+                        "forwardAxis",
+                        "handedness",
+                        "tool",
+                        "copyright",
+                    ] {
+                        source.remove(key);
+                    }
+                }
+            }
+            if asset.get("extras") == Some(&serde_json::json!({ "source": {} })) {
+                asset.remove("extras");
+            }
+        }
         if let Some(list) = json.get_mut("buffers").and_then(Value::as_array_mut) {
             while list.len() > 1 && list.last().and_then(|b| b["byteLength"].as_u64()) == Some(0) {
                 list.pop();
@@ -477,7 +526,8 @@ mod tests {
     fn glbs() -> Vec<PathBuf> {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/gltf");
         let mut out = Vec::new();
-        for case in std::fs::read_dir(root).unwrap().flatten() {
+        // Case folders: a license sits beside them.
+        for case in std::fs::read_dir(root).unwrap().flatten().filter(|e| e.path().is_dir()) {
             for f in std::fs::read_dir(case.path()).unwrap().flatten() {
                 if f.path().extension().is_some_and(|e| e == "glb") {
                     out.push(f.path());
@@ -513,10 +563,10 @@ mod tests {
 
     #[cfg(feature = "fs")]
     #[test]
-    fn image_files_left_in_place_are_written_as_they_are() {
-        // More images than are kept open, each its own bytes; some named wrongly, so only their
-        // first bytes tell their type.
-        let n = super::OPEN_IMAGES + 4;
+    fn image_files_are_written_as_they_are() {
+        // Many images, each its own bytes; some named wrongly, so only their first bytes tell
+        // their type.
+        let n = 260;
         let dir = tempfile::tempdir().unwrap();
         let png = |i: usize| {
             let mut b = b"\x89PNG\r\n\x1a\n".to_vec();
@@ -537,7 +587,7 @@ mod tests {
         std::fs::write(dir.path().join("j.png"), &jpeg).unwrap();
         images.push(serde_json::json!({ "uri": "j.png", "mimeType": "image/png" }));
         images.push(serde_json::json!({ "uri": "missing.png" }));
-        let gltf = serde_json::json!({ "asset": { "version": "2.0" }, "images": images });
+        let gltf = serde_json::json!({ "asset": { "version": "2.0" }, "images": images, "nodes": [{ "name": "n" }] });
         let path = dir.path().join("m.gltf");
         std::fs::write(&path, gltf.to_string()).unwrap();
         let doc = crate::formats::load(&path, "gltf", &Folder::new(dir.path()), Keep::ALL).unwrap();
@@ -563,9 +613,7 @@ mod tests {
     }
 
     #[test]
-    fn a_binary_chunk_left_in_its_file_reads_as_one_in_memory() {
-        // Every file read in pieces, as only big ones are otherwise.
-        super::WHOLE_AT.set(0);
+    fn a_glb_reads_the_same_from_its_file_and_from_memory() {
         let mut n = 0;
         for path in glbs() {
             let dir = path.parent().unwrap();
@@ -580,7 +628,7 @@ mod tests {
             }
             let name = path.file_name().unwrap().to_string_lossy().into_owned();
             let mem = crate::formats::load_bytes(&bytes, &name, "glb", &assets, Keep::ALL).unwrap();
-            let shown = |d: &Document<'_>| {
+            let shown = |d: &Document| {
                 format!(
                     "{:?}",
                     d.flatten(crate::document::Pose::Rest).map_err(|e| e.to_string())
@@ -590,7 +638,6 @@ mod tests {
             assert!(doc.to_glb().unwrap() == mem.to_glb().unwrap(), "{}", path.display());
             n += 1;
         }
-        super::WHOLE_AT.set(super::WHOLE);
         assert!(n > 20, "only {n} GLBs read");
     }
 
@@ -613,8 +660,8 @@ mod tests {
                 .as_array()
                 .is_some_and(|l| l.iter().any(|b| b.get("uri").is_some()));
             // Nor must one the repair pass rewrites, as it does invalid input.
-            let mut fixed = doc.json.clone();
-            let repaired = crate::flatten::repaired(&doc, &mut fixed).is_some() || fixed != doc.json;
+            let mut fixed = doc.json().clone();
+            let repaired = crate::flatten::repaired(&doc, &mut fixed, &mut None).is_some() || fixed != *doc.json();
             if original[4..8] != 1u32.to_le_bytes() && !in_files && !repaired {
                 let (b, bbin) = split(&written);
                 assert_eq!(normalized(a.clone()), normalized(b.clone()), "{name}: the JSON changed");
@@ -625,7 +672,7 @@ mod tests {
             }
             // And again, now exactly.
             let again = crate::formats::load_bytes(&written, "x.glb", "glb", &crate::assets::Memory::new(), Keep::ALL)
-                .and_then(|d: Document<'_>| d.to_glb())
+                .and_then(|d: Document| d.to_glb())
                 .unwrap();
             assert!(again == written, "{name}: a second round trip changed it");
             n += 1;
@@ -635,7 +682,8 @@ mod tests {
 
     #[test]
     fn a_json_chunk_padded_with_zeros_reads() {
-        let mut json = br#"{"asset":{"version":"2.0"},"scene":0,"scenes":[{}]}"#.to_vec();
+        let mut json =
+            br#"{"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],"nodes":[{"name":"n"}]}"#.to_vec();
         json.resize(json.len().next_multiple_of(4) + 4, 0);
         let len = u32::try_from(json.len()).unwrap();
         let glb = [
@@ -649,6 +697,6 @@ mod tests {
         .concat();
         let assets = crate::assets::Memory::new();
         let doc = crate::formats::load_bytes(&glb, "x.glb", "glb", &assets, Keep::ALL).unwrap();
-        assert_eq!(doc.json["scene"], 0);
+        assert_eq!(doc.json()["scene"], 0);
     }
 }

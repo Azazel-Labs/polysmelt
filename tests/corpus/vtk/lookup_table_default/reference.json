@@ -1,0 +1,16 @@
+{
+  "points": "626e9b4ee4828305",
+  "triangles": "df9c258beaf17c27",
+  "lines": "cbf29ce484222325",
+  "verts": "cbf29ce484222325",
+  "attributes": {
+    "_LEVEL": {
+      "width": 1,
+      "hash": "62552b9ea71e5908"
+    }
+  },
+  "soup": "02ff87c392969355",
+  "soup_attributes": [],
+  "boundary_faces": 0,
+  "surface_filter_triangles": 2
+}

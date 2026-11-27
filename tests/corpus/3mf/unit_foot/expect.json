@@ -14,14 +14,15 @@
       0.0
     ]
   },
-  "facts": {
-    "unit": "foot"
-  },
   "tolerance": 1e-05,
   "document": {
     "source": {
       "unit": "foot",
       "metersPerUnit": 0.3048
     }
+  },
+  "json": {
+    "/asset/extras/source/unit": "foot",
+    "/asset/extras/source/unitAsWritten": null
   }
 }

@@ -62,9 +62,9 @@
     "source": {
       "format": "OpenFlight",
       "version": "16.4",
-      "unit": "ft",
+      "unit": "foot",
       "metersPerUnit": 0.3048,
-      "upAxis": "Z"
+      "upAxis": "+Z"
     }
   }
 }

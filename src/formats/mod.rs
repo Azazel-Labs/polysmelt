@@ -1,23 +1,23 @@
-//! Model formats read natively: STL (binary and ASCII), PLY (ASCII and binary), `MagicaVoxel`
+//! The readers. Model formats read natively: STL (binary and ASCII), PLY (ASCII and binary), `MagicaVoxel`
 //! `.vox`, OBJ (with its MTL materials and textures), FBX (binary and ASCII), 3DS, 3MF, USD,
 //! glTF (`.gltf` and `.glb`), `SketchUp` (`.skp`), BVH motion capture, COLLADA (`.dae`, and
 //! the `.zae` and `.kmz` archives that hold one), VRM (`.vrm`, `.vrma`), OFF, X3D and VRML97
 //! (`.x3d`, `.x3dv`, `.wrl`, and gzipped `.x3dz`, `.wrz`), DXF meshes, gaussian splats
-//! (`.splat`, `.spz`, and PLY's own, as `KHR_gaussian_splatting`), point clouds (LAS and LAZ
+//! (`.splat`, `.spz`, `.sog`, and PLY's own, plain or compressed, as
+//! `KHR_gaussian_splatting`), point clouds (LAS and LAZ
 //! lidar, PCD, E57 scans, and text: `.xyz`, `.pts`, `.ptx`, `.asc`), AMF, `LightWave` objects
-//! (`.lwo`), AC3D (`.ac`), `OpenFlight` (`.flt`) and `OpenGEX` (`.ogex`). Game and animation formats: `MikuMikuDance` (`.pmx`, `.pmd`,
+//! (`.lwo`), AC3D (`.ac`), `OpenFlight` (`.flt`), `OpenGEX` (`.ogex`), Irrlicht meshes and scenes
+//! (`.irrmesh`, `.irr`), XGL (`.xgl`, and zipped `.zgl`), VTK (`.vtk`, `.vtp`, `.vtu`), 3D Tiles
+//! (`.b3dm`, `.i3dm`, `.pnts`, `.cmpt`, and a `tileset.json` of them), Gmsh (`.msh`) and Medit (`.mesh`,
+//! `.meshb`). Game and animation formats: `MikuMikuDance` (`.pmx`, `.pmd`,
 //! `.vmd`), `DirectX` `.x`, MD2, MD3, MD5 (`.md5mesh`, `.md5anim`), IQM, SMD (`.smd`, `.vta`),
 //! `MilkShape` 3D (`.ms3d`), `Blitz3D` (`.b3d`), OGRE (`.mesh`, `.skeleton`, and their `.xml` forms, with
 //! `.material` scripts), and motion capture: ASF/AMC, C3D, TRC and HTR.
 //! Each becomes a [`Document`]: glTF as it is, the others converted; textures are embedded so the
-//! document stands on its own. Each format is behind a cargo feature of its name (`3ds` and
-//! `3mf` for those two, `xyz` for the text point clouds, `ac3d` for `.ac`, `mmd` for PMX, PMD
-//! and VMD, `directx` for `.x`, `asf` for ASF and AMC). A [`Keep`] says what to keep; by
-//! default, everything.
+//! document stands on its own. Each format is behind a cargo feature (see [`Format`]). A [`Keep`]
+//! says what to keep; by default, everything.
 //!
-//! [`load_bytes`] reads a model already in memory, with the files it refers to found through
-//! [`Assets`] (such as [`Memory`](crate::assets::Memory)). [`load`] reads a file, and needs the
-//! `fs` feature.
+//! [`open`] and [`read`] are the ways in, and [`Loader`] for what they don't choose.
 
 use std::borrow::Cow;
 use std::io;
@@ -25,10 +25,10 @@ use std::path::Path;
 
 use serde_json::json;
 
-use crate::Result;
 use crate::assets::Assets;
 use crate::document::{Document, Keep};
 use crate::mesh::MAX_TRIANGLES;
+use crate::{Bytes, Result};
 
 #[cfg(feature = "ac3d")]
 mod ac3d;
@@ -42,10 +42,18 @@ mod b3d;
 mod bvh;
 #[cfg(feature = "c3d")]
 mod c3d;
-#[cfg(any(feature = "lwo", feature = "ac3d"))]
-mod crease;
+#[cfg(any(feature = "vtk", feature = "msh", feature = "medit"))]
+#[cfg_attr(
+    not(feature = "vtk"),
+    allow(dead_code, reason = "VTK's structured grids, lookup tables and cell kinds")
+)]
+mod cells;
+pub(crate) mod crease;
 #[cfg(feature = "dae")]
 mod dae;
+#[cfg(any(feature = "dxf", feature = "las", feature = "e57"))]
+mod dates;
+mod detect;
 #[cfg(feature = "directx")]
 mod directx;
 #[cfg(feature = "dxf")]
@@ -55,49 +63,29 @@ mod e57;
 #[cfg(feature = "fbx")]
 mod fbx;
 #[cfg(feature = "fbx")]
-pub mod fbx_ascii;
+mod fbx_ascii;
 #[cfg(feature = "fbx")]
 mod fbx_tree;
+#[cfg(feature = "fbx")]
+pub(crate) mod fbx_write;
 #[cfg(feature = "flt")]
 mod flt;
+mod format;
+pub(crate) mod frame;
 #[cfg(feature = "gltf")]
 pub(crate) mod gltf;
 #[cfg(feature = "gltf")]
 mod gltf1;
+#[cfg(any(feature = "irr", feature = "tiles"))]
+mod graft;
 #[cfg(feature = "htr")]
 mod htr;
+#[cfg(any(feature = "directx", feature = "xgl"))]
+mod inflate;
 #[cfg(feature = "iqm")]
 mod iqm;
-#[cfg(feature = "las")]
-mod las;
-#[cfg(feature = "lwo")]
-mod lwo;
-#[cfg(feature = "md2")]
-mod md2;
-#[cfg(feature = "md3")]
-mod md3;
-#[cfg(feature = "md5")]
-mod md5;
-#[cfg(feature = "mmd")]
-mod mmd;
-#[cfg(feature = "ms3d")]
-mod ms3d;
-#[cfg(any(feature = "dxf", feature = "fbx"))]
-mod nurbs;
-#[cfg(feature = "obj")]
-mod obj;
-#[cfg(feature = "off")]
-mod off;
-#[cfg(feature = "ogex")]
-mod ogex;
-#[cfg(feature = "ogre")]
-mod ogre;
-#[cfg(feature = "pcd")]
-mod pcd;
-#[cfg(feature = "ply")]
-mod ply;
-#[cfg(any(feature = "las", feature = "pcd", feature = "xyz", feature = "e57"))]
-mod points;
+#[cfg(feature = "irr")]
+mod irr;
 #[cfg(any(
     feature = "mmd",
     feature = "directx",
@@ -112,7 +100,17 @@ mod points;
     feature = "c3d",
     feature = "trc",
     feature = "htr",
-    feature = "ogre"
+    feature = "ogre",
+    feature = "irr",
+    feature = "xgl",
+    feature = "fbx",
+    feature = "usd",
+    feature = "vox",
+    feature = "3ds",
+    feature = "bvh",
+    feature = "dae",
+    feature = "flt",
+    feature = "ogex"
 ))]
 #[cfg_attr(
     not(all(
@@ -129,7 +127,98 @@ mod points;
         feature = "c3d",
         feature = "trc",
         feature = "htr",
-        feature = "ogre"
+        feature = "ogre",
+        feature = "irr",
+        feature = "xgl",
+        feature = "fbx",
+        feature = "usd",
+        feature = "vox",
+        feature = "3ds",
+        feature = "bvh",
+        feature = "dae",
+        feature = "flt",
+        feature = "ogex"
+    )),
+    allow(dead_code, reason = "each reader uses the parts its format needs")
+)]
+mod keys;
+#[cfg(feature = "las")]
+mod las;
+mod loader;
+#[cfg(feature = "lwo")]
+mod lwo;
+#[cfg(feature = "md2")]
+mod md2;
+#[cfg(feature = "md3")]
+mod md3;
+#[cfg(feature = "md5")]
+mod md5;
+#[cfg(feature = "medit")]
+mod medit;
+#[cfg(feature = "mmd")]
+mod mmd;
+#[cfg(feature = "ms3d")]
+mod ms3d;
+#[cfg(feature = "msh")]
+mod msh;
+#[cfg(any(feature = "dxf", feature = "fbx", feature = "usd"))]
+mod nurbs;
+#[cfg(feature = "obj")]
+mod obj;
+#[cfg(feature = "off")]
+mod off;
+#[cfg(feature = "ogex")]
+mod ogex;
+#[cfg(feature = "ogre")]
+mod ogre;
+#[cfg(feature = "pcd")]
+mod pcd;
+#[cfg(feature = "ply")]
+mod ply;
+#[cfg(any(
+    feature = "las",
+    feature = "pcd",
+    feature = "xyz",
+    feature = "e57",
+    feature = "tiles"
+))]
+mod points;
+#[cfg(any(
+    feature = "mmd",
+    feature = "directx",
+    feature = "md2",
+    feature = "md3",
+    feature = "md5",
+    feature = "iqm",
+    feature = "smd",
+    feature = "ms3d",
+    feature = "b3d",
+    feature = "asf",
+    feature = "c3d",
+    feature = "trc",
+    feature = "htr",
+    feature = "ogre",
+    feature = "irr",
+    feature = "xgl"
+))]
+#[cfg_attr(
+    not(all(
+        feature = "mmd",
+        feature = "directx",
+        feature = "md2",
+        feature = "md3",
+        feature = "md5",
+        feature = "iqm",
+        feature = "smd",
+        feature = "ms3d",
+        feature = "b3d",
+        feature = "asf",
+        feature = "c3d",
+        feature = "trc",
+        feature = "htr",
+        feature = "ogre",
+        feature = "irr",
+        feature = "xgl"
     )),
     allow(dead_code, reason = "each reader uses the parts its format needs")
 )]
@@ -138,6 +227,8 @@ mod scene;
 mod skp;
 #[cfg(feature = "smd")]
 mod smd;
+#[cfg(feature = "sog")]
+mod sog;
 #[cfg(feature = "splat")]
 mod splat;
 #[cfg(feature = "spz")]
@@ -155,10 +246,58 @@ mod stl;
     feature = "pcd",
     feature = "xyz",
     feature = "ac3d",
-    feature = "ogex"
+    feature = "ogex",
+    feature = "ogre",
+    feature = "smd",
+    feature = "irr",
+    feature = "xgl",
+    feature = "dae",
+    feature = "3mf",
+    feature = "amf",
+    feature = "fbx",
+    feature = "directx",
+    feature = "md5",
+    feature = "asf",
+    feature = "htr",
+    feature = "trc",
+    feature = "las",
+    feature = "e57",
+    feature = "vtk",
+    feature = "msh",
+    feature = "medit"
 ))]
 #[cfg_attr(
-    not(all(feature = "obj", feature = "ply", feature = "stl", feature = "bvh")),
+    not(all(
+        feature = "stl",
+        feature = "ply",
+        feature = "obj",
+        feature = "bvh",
+        feature = "off",
+        feature = "x3d",
+        feature = "dxf",
+        feature = "pcd",
+        feature = "xyz",
+        feature = "ac3d",
+        feature = "ogex",
+        feature = "ogre",
+        feature = "smd",
+        feature = "irr",
+        feature = "xgl",
+        feature = "dae",
+        feature = "3mf",
+        feature = "amf",
+        feature = "fbx",
+        feature = "directx",
+        feature = "md5",
+        feature = "asf",
+        feature = "htr",
+        feature = "trc",
+        feature = "las",
+        feature = "e57",
+        feature = "vtk",
+        feature = "msh",
+        feature = "medit"
+    )),
     allow(dead_code, reason = "each text reader uses its own part")
 )]
 mod stream;
@@ -166,6 +305,8 @@ mod stream;
 mod tds;
 #[cfg(feature = "3mf")]
 mod threemf;
+#[cfg(feature = "tiles")]
+mod tiles;
 #[cfg(feature = "trc")]
 mod trc;
 #[cfg(feature = "usd")]
@@ -174,76 +315,126 @@ mod usd;
 mod vox;
 #[cfg(feature = "gltf")]
 mod vrm;
+#[cfg(feature = "vtk")]
+mod vtk;
 #[cfg(any(feature = "las", feature = "e57"))]
 mod wkt;
 #[cfg(feature = "x3d")]
 mod x3d;
-#[cfg(any(feature = "fbx", feature = "usd", feature = "3ds", feature = "dae"))]
-mod xform;
+#[cfg_attr(
+    not(all(feature = "minimal", feature = "fbx", feature = "usd", feature = "dae")),
+    allow(
+        dead_code,
+        reason = "each reader uses the parts it needs; the flat mesh only the column-major ones"
+    )
+)]
+pub(crate) mod xform;
+#[cfg(feature = "xgl")]
+mod xgl;
+#[cfg_attr(
+    not(all(
+        feature = "dae",
+        feature = "x3d",
+        feature = "amf",
+        feature = "3mf",
+        feature = "ogre",
+        feature = "irr",
+        feature = "xgl",
+        feature = "vtk"
+    )),
+    allow(dead_code, reason = "each XML reader uses the parts it needs")
+)]
+mod xml;
 #[cfg(feature = "xyz")]
 mod xyz;
 
-/// The extensions [`load`] handles, whether or not this build has their feature.
-pub const EXTENSIONS: &[&str] = &[
+pub use format::Format;
+#[cfg(feature = "fs")]
+pub use loader::open;
+pub use loader::{Loader, read};
+
+/// The extensions read, whether or not this build has their feature: [`Format`]'s, and `xml`.
+pub(crate) const EXTENSIONS: &[&str] = &[
     "stl", "ply", "vox", "obj", "fbx", "3ds", "3mf", "usd", "usda", "usdc", "usdz", "gltf", "glb", "skp", "bvh", "dae",
-    "zae", "kmz", "off", "vrm", "vrma", "x3d", "x3dv", "x3dz", "wrl", "wrz", "dxf", "splat", "spz", "las", "laz",
-    "pcd", "xyz", "pts", "ptx", "asc", "e57", "amf", "lwo", "ac", "pmx", "pmd", "vmd", "x", "md2", "md3", "md5mesh",
-    "md5anim", "iqm", "smd", "vta", "ms3d", "b3d", "asf", "amc", "c3d", "trc", "htr", "mesh", "skeleton", "xml", "flt",
-    "ogex",
+    "zae", "kmz", "off", "vrm", "vrma", "x3d", "x3dv", "x3dz", "wrl", "wrz", "dxf", "splat", "spz", "sog", "las",
+    "laz", "pcd", "xyz", "pts", "ptx", "asc", "e57", "amf", "lwo", "ac", "pmx", "pmd", "vmd", "x", "md2", "md3",
+    "md5mesh", "md5anim", "iqm", "smd", "vta", "ms3d", "b3d", "asf", "amc", "c3d", "trc", "htr", "mesh", "skeleton",
+    "xml", "flt", "ogex", "irrmesh", "irr", "xgl", "zgl", "vtk", "vtp", "vtu", "b3dm", "i3dm", "pnts", "cmpt", "msh",
+    "meshb",
 ];
 
-/// Reads the model at `path`, whose format is named by `ext` (lowercase, without the dot),
-/// keeping what `keep` says.
-///
-/// # Errors
-///
-/// When the file can't be read, `ext` names no reader (or one whose feature is off), or the
-/// model doesn't parse.
+/// The format of a model whose bytes (all of them, or its start) are `bytes`, told from its
+/// signature or first words and named by the extension it's read under; `None` when they don't
+/// say. A binary STL, which has no signature, is told only from all of its bytes.
+fn detect(bytes: &[u8]) -> Option<&'static str> {
+    detect::sniff(&bytes[..bytes.len().min(detect::HEAD)], Some(bytes.len() as u64))
+}
+
+/// The extension a model with extension `ext` is read under when it's read as `format`: see
+/// [`Format::extension_for`]. With no format named, a `.mesh` file that starts as a Medit mesh does is read as one.
+fn extension_as<'e>(input: Input<'_>, ext: &'e str, format: Option<Format>) -> &'e str {
+    match format {
+        // `.mesh` is OGRE's extension and Medit's: a Medit mesh is told by how it starts.
+        None if ext.eq_ignore_ascii_case("mesh")
+            && input
+                .head(detect::HEAD)
+                .is_ok_and(|head| detect::sniff(&head, input.len()) == Some("meshb")) =>
+        {
+            "meshb"
+        }
+        None => ext,
+        Some(f) => f.extension_for(ext, || {
+            let head = input.head(detect::HEAD).ok()?;
+            detect::sniff(&head, input.len())
+        }),
+    }
+}
+
+/// For tests: [`load_as`] with the format named by `ext` alone.
+#[cfg(all(test, feature = "fs"))]
+pub(crate) fn load(path: &Path, ext: &str, assets: &dyn Assets, keep: Keep) -> Result<Document> {
+    load_as(path, ext, None, assets, keep)
+}
+
+/// Reads the model at `path` as `format`, or else as the format `ext` names (without the dot,
+/// in any case), keeping what `keep` says. An `ext` that names no format (or is empty) has the
+/// format told from the file's first bytes, and an `.xml` file is read as the format its root
+/// element names (COLLADA, X3D, AMF, OGRE, an Irrlicht mesh or scene, or XGL).
 #[cfg(feature = "fs")]
-pub fn load(path: &Path, ext: &str, assets: &dyn Assets, keep: Keep) -> Result<Document<'static>> {
+fn load_as(path: &Path, ext: &str, format: Option<Format>, assets: &dyn Assets, keep: Keep) -> Result<Document> {
     use std::io::Read as _;
     // Opening a file costs more than reading a small one, and readers look at a model more than
     // once (its start, then all of it): a small model is read whole, from one opening. glTF's
     // reader decides that for itself, and USD's opens the layers a file names from beside it.
-    if !matches!(ext, "gltf" | "glb" | "vrm" | "vrma" | "usd" | "usda" | "usdc" | "usdz")
+    let whole = !matches!(ext, "gltf" | "glb" | "vrm" | "vrma" | "usd" | "usda" | "usdc" | "usdz")
+        && !matches!(format, Some(Format::Gltf | Format::Vrm | Format::Usd));
+    if whole
         && let Ok(mut file) = std::fs::File::open(path)
         && let Ok(len) = file.metadata().map(|m| m.len())
         && len <= SMALL_FILE
     {
         let mut bytes = Vec::with_capacity(usize::try_from(len).unwrap_or(0));
-        file.read_to_end(&mut bytes)?;
-        let input = Input {
-            path,
-            data: Data::Bytes(&bytes),
-            limit: MAX_TRIANGLES,
-        };
-        return read(input, ext, assets, keep).map(Document::into_owned);
+        file.read_to_end(&mut bytes)
+            .map_err(|e| crate::Error::from(e).at(path))?;
+        let bytes = Bytes::from(bytes);
+        let input = Input::shared(&bytes, path);
+        return read_input(input, extension_as(input, ext, format), assets, keep).map_err(|e| e.at(path));
     }
-    read(Input::file(path), ext, assets, keep).map(Document::into_owned)
+    let input = Input::file(path);
+    read_input(input, extension_as(input, ext, format), assets, keep).map_err(|e| e.at(path))
 }
 
-/// The largest model [`load`] reads whole before parsing, rather than streaming it from the file.
+/// The largest model [`load_as`] reads whole before parsing, rather than streaming it from the file.
 #[cfg(feature = "fs")]
 const SMALL_FILE: u64 = 1 << 20;
 
-/// Reads a model already in memory, whose format is named by `ext` (lowercase, without the
-/// dot), keeping what `keep` says. `name` is the model's path among `assets`: the files it
-/// refers to (MTL libraries, textures, glTF buffers, USD layers) are found from its folder and
-/// read through [`Assets::read`]. A model that refers to nothing reads with any name and an
-/// empty [`Memory`](crate::assets::Memory). The document may borrow from `bytes` and `assets`
-/// (a GLB's binary chunk is used in place); [`Document::into_owned`] makes it outlive them.
-///
-/// # Errors
-///
-/// When `ext` names no reader (or one whose feature is off) or the model doesn't parse.
-pub fn load_bytes<'a>(
-    bytes: &'a [u8],
-    name: &'a str,
-    ext: &str,
-    assets: &'a dyn Assets,
-    keep: Keep,
-) -> Result<Document<'a>> {
-    read(Input::memory(bytes, name), ext, assets, keep)
+/// For tests: reads a model already in memory, whose format is named by `ext` (without the dot,
+/// in any case, or told from the bytes), keeping what `keep` says. `name` is the model's path
+/// among `assets`, which the files it refers to are read through.
+#[cfg(test)]
+#[allow(dead_code, reason = "the readers' tests read through it, each with its feature")]
+pub(crate) fn load_bytes(bytes: &[u8], name: &str, ext: &str, assets: &dyn Assets, keep: Keep) -> Result<Document> {
+    read_input(Input::memory(bytes, name), ext, assets, keep)
 }
 
 /// A model to read: its path (or, in memory, its name), where its bytes are, and the most
@@ -267,7 +458,10 @@ pub(crate) struct Input<'a> {
             feature = "dae",
             feature = "off",
             feature = "x3d",
-            feature = "dxf"
+            feature = "dxf",
+            feature = "vtk",
+            feature = "msh",
+            feature = "medit"
         )),
         allow(dead_code, reason = "only readers that build triangles check it")
     )]
@@ -279,16 +473,62 @@ enum Data<'a> {
     /// The file at the path, read as needed.
     #[cfg(feature = "fs")]
     File,
-    /// The whole model, in memory.
-    Bytes(&'a [u8]),
+    /// The whole model, in memory, and the [`Bytes`] holding it when there are any: what the
+    /// document keeps of it (a GLB's binary chunk) is shared from those rather than copied.
+    Bytes(&'a [u8], Option<&'a Bytes>),
 }
 
 /// A stream that seeks, for zip archives.
-#[cfg(any(feature = "3mf", feature = "usd", feature = "las", feature = "e57", feature = "amf"))]
+#[cfg(any(
+    feature = "3mf",
+    feature = "usd",
+    feature = "las",
+    feature = "e57",
+    feature = "amf",
+    feature = "sog"
+))]
 pub(crate) trait ReadSeek: io::Read + io::Seek {}
 
-#[cfg(any(feature = "3mf", feature = "usd", feature = "las", feature = "e57", feature = "amf"))]
+#[cfg(any(
+    feature = "3mf",
+    feature = "usd",
+    feature = "las",
+    feature = "e57",
+    feature = "amf",
+    feature = "sog"
+))]
 impl<T: io::Read + io::Seek> ReadSeek for T {}
+
+/// The largest ZIP entry [`inflate_capped`] reads: real `SketchUp` `model.dat` files and `.usdz` textures run to
+/// tens of megabytes.
+#[cfg(any(feature = "skp", feature = "usd", feature = "sog"))]
+const MAX_ENTRY_BYTES: u64 = 1 << 30;
+
+/// How far past its `compressed` size [`inflate_capped`] lets an entry inflate: real entries compress about 10:1,
+/// so twenty times that is a decompression bomb, not a model.
+#[cfg(any(feature = "skp", feature = "usd", feature = "sog"))]
+const MAX_RATIO: u64 = 200;
+
+/// The bytes of ZIP entry `name`, read from `inflated` (its data as it inflates), when they're no more than
+/// [`MAX_RATIO`] times its `compressed` size (and a megabyte) and [`MAX_ENTRY_BYTES`]: past that is an error, found
+/// before more than the cap is inflated.
+#[cfg(any(feature = "skp", feature = "usd", feature = "sog"))]
+pub(crate) fn inflate_capped(inflated: impl io::Read, compressed: u64, name: &str) -> Result<Vec<u8>> {
+    use crate::Context as _;
+    use io::Read as _;
+    let limit = MAX_ENTRY_BYTES.min(compressed.saturating_mul(MAX_RATIO).saturating_add(1 << 20));
+    let mut out = Vec::new();
+    inflated
+        .take(limit + 1)
+        .read_to_end(&mut out)
+        .with_context(crate::ErrorKind::Corrupt, || format!("inflating {name}"))?;
+    ensure!(
+        (out.len() as u64) <= limit,
+        LimitExceeded,
+        "ZIP entry {name} inflates implausibly far"
+    );
+    Ok(out)
+}
 
 #[allow(dead_code)]
 impl<'a> Input<'a> {
@@ -306,8 +546,47 @@ impl<'a> Input<'a> {
     pub fn memory(bytes: &'a [u8], name: &'a str) -> Self {
         Self {
             path: Path::new(name),
-            data: Data::Bytes(bytes),
+            data: Data::Bytes(bytes, None),
             limit: MAX_TRIANGLES,
+        }
+    }
+
+    /// A model in memory held as [`Bytes`], at `path`: what the document keeps of it is shared,
+    /// not copied.
+    pub fn shared(bytes: &'a Bytes, path: &'a Path) -> Self {
+        Self {
+            path,
+            data: Data::Bytes(bytes, Some(bytes)),
+            limit: MAX_TRIANGLES,
+        }
+    }
+
+    /// `part` of the model's bytes as [`Bytes`]: shared with the model's when it's held as
+    /// [`Bytes`], copied otherwise.
+    #[cfg_attr(
+        not(feature = "gltf"),
+        allow(dead_code, reason = "only the glTF reader keeps input bytes")
+    )]
+    pub fn share(&self, part: &[u8]) -> Bytes {
+        if let Data::Bytes(_, Some(owner)) = self.data {
+            let (all, sub) = (owner.as_ptr_range(), part.as_ptr_range());
+            if all.start <= sub.start && sub.end <= all.end {
+                return owner.slice_ref(part);
+            }
+        }
+        Bytes::copy_from_slice(part)
+    }
+
+    /// The model's length in bytes, when it can be told.
+    #[cfg_attr(
+        not(feature = "fs"),
+        allow(clippy::unnecessary_wraps, reason = "only a file's length can't be told")
+    )]
+    pub fn len(&self) -> Option<u64> {
+        match self.data {
+            Data::Bytes(b, _) => Some(b.len() as u64),
+            #[cfg(feature = "fs")]
+            Data::File => std::fs::metadata(self.path).ok().map(|m| m.len()),
         }
     }
 
@@ -323,7 +602,7 @@ impl<'a> Input<'a> {
     )]
     pub fn bytes(&self) -> Option<&'a [u8]> {
         match self.data {
-            Data::Bytes(b) => Some(b),
+            Data::Bytes(b, _) => Some(b),
             #[cfg(feature = "fs")]
             Data::File => None,
         }
@@ -336,7 +615,7 @@ impl<'a> Input<'a> {
     )]
     pub fn read(&self) -> io::Result<Cow<'a, [u8]>> {
         match self.data {
-            Data::Bytes(b) => Ok(Cow::Borrowed(b)),
+            Data::Bytes(b, _) => Ok(Cow::Borrowed(b)),
             #[cfg(feature = "fs")]
             Data::File => std::fs::read(self.path).map(Cow::Owned),
         }
@@ -349,7 +628,7 @@ impl<'a> Input<'a> {
     )]
     pub fn head(&self, n: usize) -> io::Result<Cow<'a, [u8]>> {
         match self.data {
-            Data::Bytes(b) => Ok(Cow::Borrowed(&b[..b.len().min(n)])),
+            Data::Bytes(b, _) => Ok(Cow::Borrowed(&b[..b.len().min(n)])),
             #[cfg(feature = "fs")]
             Data::File => {
                 use std::io::Read as _;
@@ -368,7 +647,7 @@ impl<'a> Input<'a> {
     )]
     pub fn blocks(&self) -> io::Result<stream::Blocks<'a>> {
         match self.data {
-            Data::Bytes(b) => Ok(stream::Blocks::slice(b)),
+            Data::Bytes(b, _) => Ok(stream::Blocks::slice(b)),
             #[cfg(feature = "fs")]
             Data::File => {
                 let file = std::fs::File::open(self.path)?;
@@ -379,57 +658,225 @@ impl<'a> Input<'a> {
     }
 
     /// The model as a stream that seeks.
-    #[cfg(any(feature = "3mf", feature = "usd", feature = "las", feature = "e57", feature = "amf"))]
+    #[cfg(any(
+        feature = "3mf",
+        feature = "usd",
+        feature = "las",
+        feature = "e57",
+        feature = "amf",
+        feature = "sog"
+    ))]
     #[cfg_attr(
         not(feature = "fs"),
         allow(clippy::unnecessary_wraps, reason = "only reading a file fails")
     )]
     pub fn seekable(&self) -> io::Result<Box<dyn ReadSeek + 'a>> {
         match self.data {
-            Data::Bytes(b) => Ok(Box::new(io::Cursor::new(b))),
+            Data::Bytes(b, _) => Ok(Box::new(io::Cursor::new(b))),
             #[cfg(feature = "fs")]
             Data::File => Ok(Box::new(std::fs::File::open(self.path)?)),
         }
     }
 }
 
-fn read<'a>(input: Input<'a>, ext: &str, assets: &'a dyn Assets, keep: Keep) -> Result<Document<'a>> {
+pub(crate) fn read_input(input: Input<'_>, ext: &str, assets: &dyn Assets, keep: Keep) -> Result<Document> {
+    let lower;
+    let mut ext = if ext.bytes().any(|b| b.is_ascii_uppercase()) {
+        lower = ext.to_ascii_lowercase();
+        lower.as_str()
+    } else {
+        ext
+    };
+    // A file with no bytes is empty, whatever format it was meant to be.
+    if input.len() == Some(0) {
+        let e = crate::Error::empty_file();
+        return Err(match EXTENSIONS.iter().find(|&&e| e == ext) {
+            Some(known) => e.in_format(feature_for(known)),
+            None => e,
+        });
+    }
+    if ext == "xml" || !EXTENSIONS.contains(&ext) {
+        let head = input.head(detect::HEAD)?;
+        let found = if ext == "xml" {
+            detect::xml(&head)
+        } else {
+            detect::sniff(&head, input.len())
+        };
+        match found {
+            Some(e) => ext = e,
+            None if ext.is_empty() => bail!(UnknownFormat, "can't tell this model's format from its first bytes"),
+            None => {}
+        }
+    }
     let limit = keep.triangles();
-    let mut doc = convert(Input { limit, ..input }, ext, assets, keep)?;
+    let named = |e: crate::Error| match EXTENSIONS.iter().find(|&&e| e == ext) {
+        Some(known) => e.in_format(feature_for(known)),
+        None => e,
+    };
+    let mut doc = convert(Input { limit, ..input }, ext, assets, keep).map_err(|e| named(same_kind(e, input, ext)))?;
     doc.max_triangles = limit;
+    // What the file says of itself is spelled the same way whatever read it.
+    let animated = match &doc.tables {
+        Some(t) => !t.animations.is_empty(),
+        None => doc
+            .base
+            .get("animations")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|a| !a.is_empty()),
+    };
+    if doc
+        .base
+        .get("asset")
+        .and_then(|a| a.pointer("/extras/source"))
+        .is_some()
+        && let Some(serde_json::Value::Object(source)) = doc
+            .base_mut()
+            .get_mut("asset")
+            .and_then(|a| a.pointer_mut("/extras/source"))
+    {
+        crate::source::normalize(source, animated);
+    }
+    // Whether there is anything to convert is the file's, not what `keep` leaves of it.
+    let c = doc.counts();
+    if c.triangles + c.points + c.lines == 0 && !has_scene(&doc) && !has_geometry(&doc) {
+        let e = crate::Error::nothing_to_convert("the file is well formed but has nothing to convert");
+        return Err(named(same_kind(e, input, ext)));
+    }
+    // Every scene hangs from one root node, whatever read it; sampled data and glTF itself are as they are.
+    if !doc.framed {
+        if matches!(
+            ext,
+            "gltf"
+                | "glb"
+                | "b3dm"
+                | "i3dm"
+                | "pnts"
+                | "cmpt"
+                | "vox"
+                | "splat"
+                | "spz"
+                | "sog"
+                | "las"
+                | "laz"
+                | "pcd"
+                | "xyz"
+                | "pts"
+                | "ptx"
+                | "asc"
+                | "e57"
+        ) {
+            frame::flat(&mut doc);
+        } else {
+            frame::root(&mut doc, frame::Frame::IDENTITY);
+        }
+    }
     doc.prune(keep);
-    if matches!(
-        ext,
-        "gltf"
-            | "glb"
-            | "fbx"
-            | "3ds"
-            | "usd"
-            | "usda"
-            | "usdc"
-            | "usdz"
-            | "skp"
-            | "dae"
-            | "zae"
-            | "kmz"
-            | "vrm"
-            | "vrma"
-    ) {
-        let c = doc.counts();
-        for (key, n) in [("triangles", c.triangles), ("points", c.points), ("lines", c.lines)] {
-            if n > 0 || key == "triangles" {
-                doc.facts.insert(key.into(), json!(n));
-            }
+    // What the document draws is counted the same way whatever read it.
+    let c = doc.counts();
+    for (key, n) in [("triangles", c.triangles), ("points", c.points), ("lines", c.lines)] {
+        if n > 0 || key == "triangles" {
+            doc.facts.insert(key.into(), json!(n));
+        } else {
+            doc.facts.remove(key);
         }
     }
     Ok(doc)
 }
 
-fn convert<'a>(input: Input<'a>, ext: &str, assets: &'a dyn Assets, keep: Keep) -> Result<Document<'a>> {
+/// Whether a document that draws nothing still has something to convert: a node that is named, has children, or
+/// carries a camera, a light, a skin or anything else but a mesh and a place to put it. Skeletons, motion, cameras
+/// and lights are all nodes like these. A document without one, drawing nothing, is
+/// [`Empty`](crate::ErrorKind::Empty) whatever read it.
+fn has_scene(doc: &Document) -> bool {
+    let nodes = doc.base.get("nodes").and_then(serde_json::Value::as_array);
+    // The root node a reader put over the scene is the reader's, not the file's.
+    let tops: Vec<u64> = doc
+        .base
+        .get("scenes")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|s| s.get("nodes").and_then(serde_json::Value::as_array))
+        .flatten()
+        .filter_map(serde_json::Value::as_u64)
+        .collect();
+    nodes.into_iter().flatten().zip(0u64..).any(|(n, i)| {
+        let root = tops.contains(&i) && n.get("name").and_then(serde_json::Value::as_str) == Some(frame::ROOT);
+        n.as_object().is_some_and(|n| {
+            n.keys().any(|k| match k.as_str() {
+                "mesh" | "translation" | "rotation" | "scale" | "matrix" => false,
+                "name" | "children" => !root,
+                _ => true,
+            })
+        })
+    })
+}
+
+/// Whether a document holds anything that could be drawn, placed in its scene or not: a primitive with at least
+/// one position. A glTF used as a library of meshes, with no node instancing them, has something to convert.
+/// Only asked of a document that draws nothing and has no scene, so the whole JSON is made at most then.
+fn has_geometry(doc: &Document) -> bool {
+    use serde_json::Value;
+    let json = doc.json();
+    let list = |k: &str| {
+        json.get(k)
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    };
+    let accessors = list("accessors");
+    list("meshes").iter().any(|m| {
+        m.get("primitives")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .any(|p| {
+                p.pointer("/attributes/POSITION")
+                    .and_then(Value::as_u64)
+                    .and_then(|a| accessors.get(usize::try_from(a).ok()?))
+                    .and_then(|a| a.get("count")?.as_u64())
+                    .is_some_and(|n| n > 0)
+            })
+    })
+}
+
+/// A reader's error, of the kind every reader gives the same failure. A file a reader couldn't read that has
+/// none of its format's signature isn't that format: [`UnknownFormat`](crate::ErrorKind::UnknownFormat),
+/// whether the reader called it corrupt, empty or cut short. A zip archive with no end record is cut short:
+/// [`Truncated`](crate::ErrorKind::Truncated), whichever of the zipped formats it holds.
+#[cold]
+fn same_kind(e: crate::Error, input: Input<'_>, ext: &str) -> crate::Error {
+    use crate::ErrorKind::{Corrupt, Empty, Truncated, UnknownFormat};
+    if !matches!(e.kind(), Corrupt | Empty | Truncated | UnknownFormat) {
+        return e;
+    }
+    let Ok(head) = input.head(detect::HEAD) else {
+        return e;
+    };
+    let zipped = matches!(ext, "3mf" | "usdz" | "usd" | "zae" | "kmz" | "dae" | "sog" | "amf");
+    if zipped && head.starts_with(b"PK\x03\x04") {
+        return match input.read() {
+            Ok(all) if detect::zip_cut_short(&all) && e.kind() != Truncated => {
+                e.of_kind(Truncated).within("the zip archive is cut short")
+            }
+            _ => e,
+        };
+    }
+    // A file of nothing but whitespace that a reader calls empty is empty, not some other format.
+    if e.kind() == Empty && head.iter().all(u8::is_ascii_whitespace) {
+        return e;
+    }
+    if e.kind() != UnknownFormat && detect::lacks_signature(ext, &head) {
+        return e.of_kind(UnknownFormat).within(format_args!("not a .{ext} file"));
+    }
+    e
+}
+
+fn convert(input: Input<'_>, ext: &str, assets: &dyn Assets, keep: Keep) -> Result<Document> {
     let _ = (input, assets, keep);
     match ext {
         #[cfg(feature = "stl")]
-        "stl" => stl::stl(input),
+        "stl" => stl::stl(input, keep),
         #[cfg(feature = "ply")]
         "ply" => ply::ply(input, assets, keep),
         #[cfg(feature = "vox")]
@@ -453,7 +900,7 @@ fn convert<'a>(input: Input<'a>, ext: &str, assets: &'a dyn Assets, keep: Keep) 
         #[cfg(feature = "dae")]
         "dae" | "zae" | "kmz" => dae::load(input, assets, keep),
         #[cfg(feature = "off")]
-        "off" => off::load(input),
+        "off" => off::load(input, keep),
         #[cfg(feature = "gltf")]
         "vrm" | "vrma" => vrm::load(input, assets, keep),
         #[cfg(feature = "x3d")]
@@ -462,8 +909,10 @@ fn convert<'a>(input: Input<'a>, ext: &str, assets: &'a dyn Assets, keep: Keep) 
         "splat" => splat::load(input, keep),
         #[cfg(feature = "spz")]
         "spz" => spz::load(input, keep),
+        #[cfg(feature = "sog")]
+        "sog" => sog::load(input, assets, keep),
         #[cfg(feature = "dxf")]
-        "dxf" => dxf::load(input),
+        "dxf" => dxf::load(input, keep),
         #[cfg(feature = "mmd")]
         "pmx" | "pmd" | "vmd" => mmd::load(input, ext, assets, keep),
         #[cfg(feature = "directx")]
@@ -499,7 +948,7 @@ fn convert<'a>(input: Input<'a>, ext: &str, assets: &'a dyn Assets, keep: Keep) 
         #[cfg(feature = "e57")]
         "e57" => e57::load(input, keep),
         #[cfg(feature = "amf")]
-        "amf" => amf::load(input),
+        "amf" => amf::load(input, keep),
         #[cfg(feature = "lwo")]
         "lwo" => lwo::load(input, assets, keep),
         #[cfg(feature = "ac3d")]
@@ -510,8 +959,20 @@ fn convert<'a>(input: Input<'a>, ext: &str, assets: &'a dyn Assets, keep: Keep) 
         "flt" => flt::load(input, assets, keep),
         #[cfg(feature = "ogex")]
         "ogex" => ogex::load(input, assets, keep),
-        e if EXTENSIONS.contains(&e) => bail!("built without the `{}` feature", feature_for(e)),
-        _ => bail!("not a model format handled here: .{ext}"),
+        #[cfg(feature = "irr")]
+        "irrmesh" | "irr" => irr::load(input, ext, assets, keep),
+        #[cfg(feature = "xgl")]
+        "xgl" | "zgl" => xgl::load(input, ext, assets, keep),
+        #[cfg(feature = "vtk")]
+        "vtk" | "vtp" | "vtu" => vtk::load(input, keep),
+        #[cfg(feature = "tiles")]
+        "b3dm" | "i3dm" | "pnts" | "cmpt" => tiles::load(input, assets, keep),
+        #[cfg(feature = "msh")]
+        "msh" => msh::load(input, keep),
+        #[cfg(feature = "medit")]
+        "meshb" => medit::load(input, keep),
+        e if EXTENSIONS.contains(&e) => bail!(FeatureDisabled, "built without the `{}` feature", feature_for(e)),
+        _ => bail!(UnknownFormat, "not a model format handled here: .{ext}"),
     }
 }
 
@@ -530,6 +991,11 @@ fn feature_for(ext: &str) -> &str {
         "pts" | "ptx" | "asc" => "xyz",
         "ac" => "ac3d",
         "mesh" | "skeleton" | "xml" => "ogre",
+        "irrmesh" => "irr",
+        "zgl" => "xgl",
+        "vtp" | "vtu" => "vtk",
+        "b3dm" | "i3dm" | "pnts" | "cmpt" => "tiles",
+        "meshb" => "medit",
         e => e,
     }
 }
@@ -551,7 +1017,7 @@ fn linear_colors(input: Input<'_>, ext: &str) -> bool {
 
 /// The color texture by naming convention for a model at `path` that names none, added to
 /// `images`.
-#[cfg(any(feature = "obj", feature = "3ds", feature = "fbx"))]
+#[cfg(any(feature = "obj", feature = "3ds", feature = "fbx", feature = "md2"))]
 fn color_texture(path: &Path, assets: &dyn Assets, images: &mut crate::images::Images) -> Option<usize> {
     let p = assets.color_texture_for(path)?;
     let name = p
@@ -619,9 +1085,9 @@ fn guess_texture(
 mod tests {
     use super::*;
     use crate::assets::{Folder, Memory};
-    use crate::mesh::Mesh;
     #[allow(unused_imports)]
-    use crate::mesh::{GRAY, to_glb};
+    use crate::mesh::GRAY;
+    use crate::mesh::Mesh;
     use serde_json::{Map, Value};
 
     /// Reads `path` with assets found under `root`, as (mesh, facts); and reads it again from
@@ -684,12 +1150,19 @@ vt 0 1
 
     #[test]
     fn missing_feature_and_unknown_extension() {
+        #[cfg_attr(
+            all(feature = "usd", feature = "gltf"),
+            allow(unused_variables, reason = "only for a missing feature")
+        )]
         let err = |ext| {
             load(Path::new("x"), ext, &Folder::new("."), Keep::ALL)
                 .unwrap_err()
                 .to_string()
         };
-        assert!(err("blend").contains("not a model format"));
+        // An unknown extension is sniffed first: bytes that say nothing leave it unknown.
+        let none = Memory::new();
+        let blend = super::load_bytes(b"BLENDER-v300 not modeled here", "x.blend", "blend", &none, Keep::ALL);
+        assert!(blend.unwrap_err().to_string().contains("not a model format"));
         #[cfg(not(feature = "usd"))]
         assert!(err("usdz").contains("without the `usd` feature"));
         #[cfg(not(feature = "gltf"))]
@@ -707,7 +1180,7 @@ vt 0 1
         bin.extend_from_slice(&[0, 0]);
         let (m, f) = load_bytes("a.stl", &bin);
         assert_eq!(f["triangles"], 1);
-        let glb = to_glb(&m.unwrap()).unwrap();
+        let glb = m.unwrap().to_glb().unwrap();
         assert!(glb.starts_with(b"glTF"));
 
         let ascii = "solid t\nfacet normal 0 0 1\nouter loop\nvertex 0 0 0\nvertex 1 0 0\nvertex 0 1 0\nendloop\nendfacet\nendsolid t\n";
@@ -822,7 +1295,7 @@ end_header
         assert_eq!(m.prims.len(), 2);
         assert_eq!(m.triangles(), 10 * 2);
         assert_eq!(m.materials[m.prims[0].material].color, [1.0, 0.0, 0.0, 1.0]);
-        assert!(to_glb(&m).unwrap().starts_with(b"glTF"));
+        assert!(m.to_glb().unwrap().starts_with(b"glTF"));
     }
 
     #[test]
@@ -1126,12 +1599,9 @@ f 1/1 3/3 4/4
 
     /// Reads `bytes` as model `name` from memory, taking at most `max` triangles.
     #[allow(dead_code)]
-    fn limited<'a>(name: &'a str, bytes: &'a [u8], max: usize) -> crate::Result<Document<'a>> {
+    fn limited<'a>(name: &'a str, bytes: &'a [u8], max: usize) -> crate::Result<Document> {
         static EMPTY: std::sync::LazyLock<Memory> = std::sync::LazyLock::new(Memory::new);
-        let keep = Keep {
-            max_triangles: max,
-            ..Keep::ALL
-        };
+        let keep = Keep::ALL.with_max_triangles(max);
         super::load_bytes(bytes, name, name.rsplit('.').next().unwrap(), &*EMPTY, keep)
     }
 
@@ -1344,6 +1814,33 @@ f 1/1 3/3 4/4
         assert_eq!(m.materials[m.prims[0].material].name, "Wood");
         assert_eq!(m.materials[m.prims[0].material].color_image, Some(0));
         assert_eq!(m.prims[0].uvs[0], [0.0, 1.0], "V flipped");
-        assert!(to_glb(&m).unwrap().starts_with(b"glTF"));
+        assert!(m.to_glb().unwrap().starts_with(b"glTF"));
+    }
+
+    #[cfg(all(feature = "dae", feature = "stl"))]
+    #[test]
+    fn a_format_is_told_from_the_bytes_when_the_extension_does_not_say() {
+        let corpus = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus");
+        let dae = std::fs::read(corpus.join("dae/accessor_stride_offset_unnamed/cube.dae")).unwrap();
+        let stl = std::fs::read(corpus.join("stl/binary_cube/cube.stl")).unwrap();
+        assert_eq!(super::detect(&dae), Some("dae"));
+        assert_eq!(super::detect(&stl), Some("stl"));
+        let triangles = |bytes: &[u8], ext: &str| {
+            let none = Memory::new();
+            let doc = super::load_bytes(bytes, "m", ext, &none, Keep::ALL).unwrap();
+            doc.counts().triangles
+        };
+        let want = triangles(&dae, "dae");
+        assert!(want > 0);
+        for ext in ["DAE", "xml", "XML", "", "model"] {
+            assert_eq!(triangles(&dae, ext), want, ".{ext}");
+        }
+        assert_eq!(triangles(&stl, ""), triangles(&stl, "stl"));
+        let err = super::load_bytes(b"1 2 3", "m", "", &Memory::new(), Keep::ALL).unwrap_err();
+        assert!(err.to_string().contains("can't tell"), "{err}");
+        let dir = tempfile::tempdir().unwrap();
+        let upper = dir.path().join("Cube.DAE");
+        std::fs::write(&upper, &dae).unwrap();
+        assert_eq!(crate::open(&upper).unwrap().counts().triangles, want);
     }
 }

@@ -1,0 +1,20 @@
+{
+  "spec": "3MF (3D Manufacturing Format core specification): a real file, one cylinder in six build items",
+  "source": "3MFConsortium/3mf-samples at 665e20dc4d77, examples/core/multiple_cylinders.3mf (BSD-2-Clause, see ../LICENSE-3mf-samples); expectations measured with lib3mf 2.5.0",
+  "tolerance": 1e-06,
+  "triangles": 528,
+  "bounds": {
+    "min": [
+      0.0,
+      0.0,
+      -0.040595
+    ],
+    "max": [
+      0.062,
+      0.02,
+      -2e-06
+    ]
+  },
+  "area": 0.011233,
+  "position_set": "positions.f32"
+}

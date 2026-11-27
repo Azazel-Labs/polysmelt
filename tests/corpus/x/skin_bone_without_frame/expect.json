@@ -52,7 +52,7 @@
   "rig": [
     {
       "node": "Ghost",
-      "parent": null,
+      "parent": "RootNode",
       "translation": [
         0,
         3,

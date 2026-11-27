@@ -20,7 +20,7 @@
     "lights": 0,
     "cameras": 0,
     "source": {
-      "missingTextures": 1
+      "droppedTextures": 1
     }
   }
 }

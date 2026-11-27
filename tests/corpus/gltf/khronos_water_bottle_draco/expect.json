@@ -1,0 +1,50 @@
+{
+  "spec": "KHR_draco_mesh_compression: Khronos sample WaterBottle, the same as its uncompressed variant",
+  "source": "KhronosGroup/glTF-Sample-Assets@e124e8d, Models/WaterBottle/glTF-Draco (CC0-1.0, Microsoft); textures scaled down to 64 pixels",
+  "file": "WaterBottle.gltf",
+  "triangles": 4510,
+  "vertices": 2549,
+  "area": 0.117681,
+  "bounds": {
+    "min": [
+      -0.05445,
+      -0.13022,
+      -0.05445
+    ],
+    "max": [
+      0.05445,
+      0.13022,
+      0.05445
+    ]
+  },
+  "material_count": 1,
+  "materials": [
+    {
+      "name": "BottleMat",
+      "double_sided": false,
+      "alpha_mode": "OPAQUE",
+      "normal_map": true,
+      "emissive": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "textured": true,
+      "metallic": 1,
+      "roughness": 1,
+      "color": [
+        1,
+        1,
+        1
+      ]
+    }
+  ],
+  "needs": "draco",
+  "same_as": {
+    "case": "khronos_water_bottle",
+    "positions": 6.49e-05,
+    "normals": 0.015,
+    "uvs": 0.000499
+  },
+  "tolerance": 0.001
+}

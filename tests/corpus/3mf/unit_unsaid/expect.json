@@ -47,9 +47,16 @@
       -1
     ]
   ],
+  "default_normals": true,
   "faces_outward": true,
   "winding_matches_normals": true,
-  "facts": {
-    "unit": "millimeter"
+  "document": {
+    "source": {
+      "unit": "millimeter",
+      "metersPerUnit": 0.001,
+      "assumed": [
+        "metersPerUnit"
+      ]
+    }
   }
 }

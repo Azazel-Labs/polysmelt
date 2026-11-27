@@ -5,33 +5,36 @@
   "facts": {
     "markers": 3,
     "frames": 2,
-    "frame_rate": 100.0,
-    "frame_time": 0.01,
-    "missing_samples": 1,
-    "up_axis_assumed": true
+    "missing_samples": 1
   },
   "document": {
-    "nodes": 4,
+    "nodes": 5,
     "animations": 1,
     "channels": 3,
     "node_names": [
       "markers",
       "LASI",
       "RASI",
-      "LKNE"
+      "LKNE",
+      "RootNode"
     ]
   },
   "json": {
     "/asset/extras/source/format": "C3D",
+    "/asset/extras/source/frameRate": 100.0,
+    "/asset/extras/source/metersPerUnit": null,
     "/scenes/0/nodes": [
-      0
+      4
     ],
-    "/animations/0/name": "motion",
+    "/asset/extras/source/converted": [
+      "upAxis"
+    ],
+    "/animations/0/name": "point_frames",
     "/animations/0/samplers/0/interpolation": "LINEAR"
   },
   "rig": [
     {
-      "node": "markers",
+      "node": "RootNode",
       "parent": null,
       "translation": [
         0,
@@ -43,6 +46,31 @@
         0.0,
         0.0,
         0.707107
+      ],
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ]
+    },
+    {
+      "node": "markers",
+      "parent": "RootNode",
+      "translation": [
+        0,
+        0,
+        0
+      ],
+      "rotation": [
+        0,
+        0,
+        0,
+        1
+      ],
+      "scale": [
+        1,
+        1,
+        1
       ]
     },
     {
@@ -55,9 +83,14 @@
         1
       ],
       "translation": [
-        0.1,
-        0.2,
-        0.3
+        100.000001,
+        200.000003,
+        300.000004
+      ],
+      "world": [
+        100.000001,
+        300.000066,
+        -200.000312
       ]
     },
     {
@@ -73,18 +106,28 @@
       "node": "LASI",
       "time": 0.0,
       "translation": [
-        0.1,
-        0.2,
-        0.3
+        100.000001,
+        200.000003,
+        300.000004
+      ],
+      "world": [
+        100.000001,
+        300.000066,
+        -200.000312
       ]
     },
     {
       "node": "LASI",
       "time": 0.01,
       "translation": [
-        0.11,
-        0.202,
-        0.2995
+        110.000002,
+        202.000003,
+        299.500004
+      ],
+      "world": [
+        110.000002,
+        299.500065,
+        -202.000313
       ]
     },
     {
@@ -97,9 +140,14 @@
         1
       ],
       "translation": [
-        -0.15,
-        0.2205,
-        0.31
+        -150.000002,
+        220.500003,
+        310.000005
+      ],
+      "world": [
+        -150.000002,
+        310.00006,
+        -220.500332
       ]
     },
     {
@@ -114,9 +162,14 @@
       "node": "RASI",
       "time": 0.0,
       "translation": [
-        -0.15,
-        0.2205,
-        0.31
+        -150.000002,
+        220.500003,
+        310.000005
+      ],
+      "world": [
+        -150.000002,
+        310.00006,
+        -220.500332
       ]
     },
     {
@@ -129,9 +182,14 @@
         1
       ],
       "translation": [
-        0.09,
-        0.18,
-        0.5
+        90.000001,
+        180.000003,
+        500.000007
+      ],
+      "world": [
+        90.000001,
+        500.000205,
+        -180.000424
       ]
     },
     {
@@ -147,18 +205,28 @@
       "node": "LKNE",
       "time": 0.0,
       "translation": [
-        0.09,
-        0.18,
-        0.5
+        90.000001,
+        180.000003,
+        500.000007
+      ],
+      "world": [
+        90.000001,
+        500.000205,
+        -180.000424
       ]
     },
     {
       "node": "LKNE",
       "time": 0.01,
       "translation": [
-        0.095,
-        0.181,
-        0.498
+        95.000001,
+        181.000003,
+        498.000007
+      ],
+      "world": [
+        95.000001,
+        498.000204,
+        -181.000423
       ]
     }
   ]

@@ -5,24 +5,25 @@
   "facts": {
     "joints": 2,
     "frames": 3,
-    "frame_rate": 10.0,
     "components": 3
   },
   "document": {
-    "nodes": 2,
+    "nodes": 3,
     "animations": 1,
     "channels": 3,
     "node_names": [
       "root",
-      "arm"
+      "arm",
+      "RootNode"
     ]
   },
   "json": {
-    "/animations/0/name": "wave"
+    "/animations/0/name": "wave",
+    "/asset/extras/source/frameRate": 10.0
   },
   "rig": [
     {
-      "node": "root",
+      "node": "RootNode",
       "parent": null,
       "translation": [
         0,
@@ -34,6 +35,26 @@
         0.0,
         0.0,
         0.7071067811865476
+      ],
+      "scale": [
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "node": "root",
+      "parent": "RootNode",
+      "translation": [
+        0,
+        0,
+        0
+      ],
+      "rotation": [
+        0,
+        0,
+        0,
+        1
       ],
       "keys": {
         "translation": [
@@ -70,6 +91,20 @@
         2,
         0,
         0
+      ],
+      "world": [
+        2,
+        0,
+        0
+      ]
+    },
+    {
+      "node": "arm",
+      "time": 0.2,
+      "world": [
+        2,
+        0,
+        -3
       ]
     },
     {

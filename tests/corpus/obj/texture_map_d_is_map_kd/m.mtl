@@ -1,0 +1,4 @@
+newmtl leaf
+Kd 1 1 1
+map_Kd albedo.png
+map_d albedo.png

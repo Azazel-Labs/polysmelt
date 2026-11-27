@@ -9,16 +9,25 @@
 //! glTF reads occlusion, roughness and metalness from one image's red, green and blue, so maps
 //! arranged otherwise are packed into a new PNG that way, when their pixels can be read (PNG, and
 //! the formats re-encoded as PNG). The maps are read for that even when the images' bytes aren't
-//! kept, so the textures are the same either way.
+//! kept, so the textures are the same either way. `Kd`, `Ks`, `Ns`, `d` and `illum` are the classic
+//! material every reader reads one way (`legacy_material`): `Ns` the highlight's exponent, `Ks` its
+//! color, none under `illum` 0 or 1. A file Blender wrote holds a roughness and a specular level
+//! there instead, which are read back as Blender wrote them. Faces with no material, or one no
+//! library has, take the default material.
 //!
 //! Corners without a normal get one made from their faces: smooth within a smoothing group
-//! (`s 1`, the default), across texture seams, and flat for faces after `s off`. Corners with a
-//! normal keep it.
+//! (`s 1`), across texture seams, and flat for faces after `s off`. Corners with a normal keep
+//! it. A mesh with no normals in a file with no `s` at all takes the default normals every
+//! format's does, made with a crease angle (see `crate::geometry`).
 //!
 //! Each object (`o`) or group (`g`) is a node drawing its own mesh, with a primitive per material
 //! and its points (`p`) and lines (`l`) as primitives of their own. Every MTL statement goes in
 //! its material's extras; the file's opening comments, its libraries and the statements not
-//! converted (free-form curves and surfaces) go in the asset's.
+//! converted (free-form curves and surfaces) go in the asset's. An opening comment naming the
+//! exporter (`# Blender 4.2.0`, `# Exported from ...`) is also the source's tool.
+//!
+//! OBJ names no units, so they're unknown. Its up axis is +Y by common practice (assumed, not
+//! declared); the geometry is kept as written.
 
 use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
@@ -32,16 +41,19 @@ use std::sync::{Arc, Mutex, mpsc};
 use serde_json::{Map, Value, json};
 
 use super::Input;
-use super::stream;
+use super::stream::{self, f32_from};
 
 use crate::Result;
 use crate::assets::Assets;
 use crate::document::{Builder, Document, Keep, Part};
 use crate::images::{Images, Source, gray};
 use crate::keep::spawn;
+use crate::legacy_material::{self, Highlight, Phong, Rgb, Transparency};
 use crate::material::{self, Alpha, Clearcoat, Factor, Full, Sheen, Specular, Tex, UvTransform};
-use crate::mesh::{Image, Material, Prim, quad, smooth_normals, srgb_to_linear, triangulate};
+use crate::mesh::{Image, Material, Prim, quad, srgb_to_linear, triangulate};
 use crate::num::u32_of;
+use crate::source::{Axis, Fact, SourceInfo};
+use crate::vec3;
 
 /// Marks a corner without a texture coordinate or normal.
 const NONE: u32 = u32::MAX;
@@ -127,16 +139,9 @@ struct MtlEntry {
     raw: Map<String, Value>,
 }
 
-/// Text as UTF-8 when it is, otherwise as Latin-1 (each byte one character).
+/// Text as every reader decodes it: UTF-8 when it is, otherwise Windows-1252.
 fn text(b: &[u8]) -> String {
-    match std::str::from_utf8(b) {
-        Ok(s) => s.to_owned(),
-        Err(_) => b.iter().map(|&c| char::from(c)).collect(),
-    }
-}
-
-fn trim(b: &[u8]) -> &[u8] {
-    b.trim_ascii()
+    crate::bytes::text(b).into_owned()
 }
 
 /// The first `\n` or `\r` in `rest`. Most bytes are past `\r`, so take one compare.
@@ -192,11 +197,7 @@ fn for_each_line(data: &[u8], mut f: impl FnMut(&[u8])) {
 fn split_key(line: &[u8]) -> (&[u8], &[u8]) {
     let line = line.trim_ascii_start();
     let end = line.iter().position(u8::is_ascii_whitespace).unwrap_or(line.len());
-    (&line[..end], trim(&line[end..]))
-}
-
-fn num(w: &[u8]) -> Option<f32> {
-    stream::f32_from(w)
+    (&line[..end], line[end..].trim_ascii())
 }
 
 /// Up to `N` leading numbers of `rest`, stopping at a comment; and how many there were.
@@ -221,7 +222,7 @@ fn nums<const N: usize>(rest: &[u8]) -> ([f32; N], usize) {
         if w[0] == b'#' {
             break;
         }
-        match num(w) {
+        match f32_from(w) {
             Some(x) => out[n] = x,
             None => break,
         }
@@ -425,7 +426,7 @@ fn map_ref(rest: &[u8]) -> Option<MapRef> {
         bump: 1.0,
         channel: Pick::Luma,
     };
-    let mut rest = trim(rest);
+    let mut rest = rest.trim_ascii();
     while rest.first() == Some(&b'-') {
         let (opt, after) = split_key(rest);
         let opt = opt.to_ascii_lowercase();
@@ -443,13 +444,13 @@ fn map_ref(rest: &[u8]) -> Option<MapRef> {
         for k in 0..args {
             let (w, after) = split_key(rest);
             // Optional arguments end at the first word that isn't a number.
-            if k > 0 && args == 3 && num(w).is_none() {
+            if k > 0 && args == 3 && f32_from(w).is_none() {
                 break;
             }
             values.push(w);
             rest = after;
         }
-        let n = |i: usize| values.get(i).and_then(|w| num(w)).filter(|x| x.is_finite());
+        let n = |i: usize| values.get(i).and_then(|w| f32_from(w)).filter(|x| x.is_finite());
         match opt.as_slice() {
             b"-o" => m.offset = [n(0).unwrap_or(0.0), n(1).unwrap_or(0.0)],
             b"-s" => m.scale = [n(0).unwrap_or(1.0), n(1).unwrap_or(1.0)],
@@ -651,32 +652,10 @@ fn statements(d: &[u8]) -> Option<usize> {
     }
 }
 
-/// An index as written: an optional sign and up to 18 digits.
-#[inline]
-fn int(w: &[u8]) -> Option<i64> {
-    let (neg, d) = match w.first()? {
-        b'-' => (true, &w[1..]),
-        b'+' => (false, &w[1..]),
-        _ => (false, w),
-    };
-    if d.is_empty() || d.len() > 18 {
-        return None;
-    }
-    let mut n: i64 = 0;
-    for &c in d {
-        let k = c.wrapping_sub(b'0');
-        if k > 9 {
-            return None;
-        }
-        n = n * 10 + i64::from(k);
-    }
-    Some(if neg { -n } else { n })
-}
-
 /// An OBJ index (1-based, or negative counting back from the last) into `len` items.
 #[inline]
 fn resolve(w: &[u8], len: usize) -> Option<u32> {
-    let n = int(w)?;
+    let n = stream::int::<i64>(w)?;
     let len = i64::try_from(len).ok()?;
     let i = if n < 0 { len + n } else { n - 1 };
     if (0..len).contains(&i) {
@@ -891,13 +870,6 @@ fn written_corners(s: &[u8], face: &mut Vec<Corner>) -> Option<(usize, bool, [u3
     }
 }
 
-/// A `vn` statement's normal, made unit length.
-#[inline]
-fn unit_normal(f: [f32; 3]) -> [f32; 3] {
-    let len = (f[0] * f[0] + f[1] * f[1] + f[2] * f[2]).sqrt();
-    if len > 0.0 { f.map(|c| c / len) } else { [0.0, 1.0, 0.0] }
-}
-
 /// One statement of a [`Piece`], or a run of them.
 #[derive(Clone, Copy)]
 enum Op {
@@ -1012,7 +984,7 @@ impl Piece {
             [b'v', b'n', b' ' | b'\t', ..] => {
                 let (f, n, next) = quick_nums::<3>(s, 3)?;
                 if n == 3 {
-                    self.nums.extend_from_slice(&unit_normal(f));
+                    self.nums.extend_from_slice(&vec3::unit_or(f, [0.0; 3]));
                     self.run(Op::Vn);
                 }
                 next
@@ -1557,6 +1529,9 @@ struct Reader {
     mrgb: usize,
     /// The normal index of a corner without one: [`MADE`] and the smoothing group.
     smooth: u32,
+    /// Whether the file has an `s` statement: it says how its faces are smoothed. Without one (and without
+    /// normals) a mesh takes the default normals every format's does.
+    smoothed: bool,
     vt: Vec<[f32; 2]>,
     vn: Vec<[f32; 3]>,
     /// Output vertices, found by position: the newest output vertex at each position, and for
@@ -1597,6 +1572,8 @@ struct Reader {
     /// Faces read, and the file offset of the first, for sizing the arrays.
     faces: usize,
     face_from: usize,
+    /// Faces left out for a corner naming something that isn't there.
+    dropped: usize,
     /// The comments before the first statement.
     comments: Vec<String>,
     /// Statements read but not converted, by keyword.
@@ -1619,6 +1596,7 @@ impl Reader {
             colors: Vec::new(),
             mrgb: 0,
             smooth: MADE | 1,
+            smoothed: false,
             vt: Vec::new(),
             vn: Vec::new(),
             first: Vec::new(),
@@ -1648,6 +1626,7 @@ impl Reader {
             lines: 0,
             faces: 0,
             face_from: 0,
+            dropped: 0,
             comments: Vec::new(),
             skipped: Vec::new(),
             spare: Vec::new(),
@@ -1713,17 +1692,20 @@ impl Reader {
             }
             b"f" | b"fo" => self.face(rest, at, size),
             b"s" => self.smoothing(rest),
-            b"mtllib" => self.libs.push(text(trim(rest))),
+            b"mtllib" => self.libs.push(text(rest.trim_ascii())),
             b"usemtl" => {
                 let next = self.materials.len();
-                self.material = *self.material_of.entry(text(trim(rest))).or_insert_with_key(|name| {
-                    self.materials.push(name.clone());
-                    next
-                });
+                self.material = *self
+                    .material_of
+                    .entry(text(rest.trim_ascii()))
+                    .or_insert_with_key(|name| {
+                        self.materials.push(name.clone());
+                        next
+                    });
                 self.current = None;
             }
             b"o" | b"g" => {
-                let name = text(trim(rest));
+                let name = text(rest.trim_ascii());
                 let name = (!name.is_empty()).then_some(name);
                 if key == b"o" {
                     self.object = name;
@@ -1751,7 +1733,7 @@ impl Reader {
         if key[0] == b'#' {
             let starting = self.v.is_empty() && self.libs.is_empty() && self.parts.is_empty();
             if starting && self.object.is_none() && self.group.is_none() && self.comments.len() < 64 {
-                self.comments.push(text(trim(&line[1..])));
+                self.comments.push(text(line[1..].trim_ascii()));
             }
             return;
         }
@@ -1775,14 +1757,19 @@ impl Reader {
     /// `s`: the smoothing group of the faces that follow, `off` or `0` for flat faces.
     #[cold]
     fn smoothing(&mut self, rest: &[u8]) {
-        let w = trim(rest).split(|&b| stream::space(b)).next().unwrap_or_default();
+        let w = rest
+            .trim_ascii()
+            .split(|&b| stream::space(b))
+            .next()
+            .unwrap_or_default();
         let group = if w.eq_ignore_ascii_case(b"off") {
             0
         } else {
             // Other words (`on`) are a group of their own.
-            int(w).map_or(1, |n| u32::try_from(n & 0x7FFF_FFFF).unwrap_or(1))
+            stream::int::<i64>(w).map_or(1, |n| u32::try_from(n & 0x7FFF_FFFF).unwrap_or(1))
         };
         self.smooth = MADE | group;
+        self.smoothed = true;
     }
 
     /// A `#MRGB` block: a mask and an RGB color per position, in order, as eight hex digits
@@ -1798,7 +1785,7 @@ impl Reader {
             let s = std::str::from_utf8(w).ok()?;
             u8::from_str_radix(s, 16).ok().map(|b| f32::from(b) / 255.0)
         };
-        for w in trim(rest).chunks_exact(8) {
+        for w in rest.trim_ascii().chunks_exact(8) {
             let (Some(r), Some(g), Some(b)) = (hex(&w[2..4]), hex(&w[4..6]), hex(&w[6..8])) else {
                 break;
             };
@@ -1914,6 +1901,8 @@ impl Reader {
         }
         if ok {
             self.add_face(&face, at, size);
+        } else {
+            self.dropped += 1;
         }
         self.face = face;
     }
@@ -2214,6 +2203,7 @@ impl Reader {
             })
         };
         if !some {
+            self.dropped += faces;
             return;
         }
         let group = u32_of(self.group());
@@ -2257,6 +2247,7 @@ impl Reader {
                     w[2] = smooth;
                 }
             } else if !resolve_face(&mut face, lens, smooth) {
+                self.dropped += 1;
                 continue;
             }
             self.add_face(&face, at, size);
@@ -2363,6 +2354,7 @@ impl Reader {
             g.2 += r.made;
             g.3 |= r.uv;
             self.faces += r.kept;
+            self.dropped += r.faces - r.kept;
             self.triangles += r.indices / 3;
         }
         let fresh = per_group.iter().map(|g| g.0).sum();
@@ -2556,7 +2548,8 @@ impl Reader {
     #[inline]
     fn normal(&mut self, f: [f32; 3], n: usize) {
         if n == 3 {
-            self.vn.push(unit_normal(f));
+            // One with no length stays zero, and takes its faces' as the primitive is written.
+            self.vn.push(vec3::unit_or(f, [0.0; 3]));
         }
     }
 
@@ -2800,13 +2793,7 @@ impl Reader {
 
 /// A triangle's normal, as long as twice its area.
 fn area_normal(a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> [f32; 3] {
-    let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
-    let v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
-    [
-        u[1] * v[2] - u[2] * v[1],
-        u[2] * v[0] - u[0] * v[2],
-        u[0] * v[1] - u[1] * v[0],
-    ]
+    vec3::cross(vec3::sub(b, a), vec3::sub(c, a))
 }
 
 fn add(to: &mut [f32; 3], n: [f32; 3]) {
@@ -2823,7 +2810,14 @@ fn trim_to_len<T>(v: &mut Vec<T>) {
 
 /// Points or lines on vertices of their own: the positions they use (with their colors), and
 /// for lines the pairs as indices into those.
-fn loose_prim(b: &mut Builder, at: &[u32], lines: bool, v: &[[f32; 3]], colors: &[[f32; 3]], scale: f32) -> Value {
+fn loose_prim(
+    b: &mut Builder,
+    at: &[u32],
+    lines: bool,
+    v: &[[f32; 3]],
+    colors: &[[f32; 3]],
+    scale: f32,
+) -> Option<Value> {
     let mut local: HashMap<u32, u32> = HashMap::new();
     let mut positions = Vec::new();
     let mut indices = Vec::with_capacity(at.len());
@@ -2834,8 +2828,18 @@ fn loose_prim(b: &mut Builder, at: &[u32], lines: bool, v: &[[f32; 3]], colors: 
         });
         indices.push(k);
     }
-    let pos: Vec<[f32; 3]> = positions.iter().map(|&p| v[p as usize]).collect();
+    let mut pos: Vec<[f32; 3]> = positions.iter().map(|&p| v[p as usize]).collect();
     let n = pos.len();
+    // A point or a segment at a position that isn't finite is dropped, as a triangle is.
+    let (mut segments, mut points) = if lines {
+        (indices, Vec::new())
+    } else {
+        (Vec::new(), indices)
+    };
+    b.sound(&mut pos, [&mut Vec::new(), &mut segments, &mut points]);
+    if segments.is_empty() && points.is_empty() {
+        return None;
+    }
     let mut attributes = json!({ "POSITION": b.positions(pos) });
     if !colors.is_empty() {
         let c: Vec<f32> = positions
@@ -2848,26 +2852,30 @@ fn loose_prim(b: &mut Builder, at: &[u32], lines: bool, v: &[[f32; 3]], colors: 
             .collect();
         attributes["COLOR_0"] = json!(b.accessor(Part::f32(c), 5126, n, "VEC4", Some(34962)));
     }
-    if lines {
-        let count = indices.len();
-        let i = b.accessor(Part::u32(indices), 5125, count, "SCALAR", Some(34963));
+    Some(if lines {
+        let count = segments.len();
+        let i = b.accessor(Part::u32(segments), 5125, count, "SCALAR", Some(34963));
         json!({ "attributes": attributes, "indices": i, "mode": 1 })
-    } else {
+    } else if points.len() == n {
         json!({ "attributes": attributes, "mode": 0 })
-    }
+    } else {
+        let count = points.len();
+        let i = b.accessor(Part::u32(points), 5125, count, "SCALAR", Some(34963));
+        json!({ "attributes": attributes, "indices": i, "mode": 0 })
+    })
 }
 
 /// OBJ, with MTL colors and textures (base color and normal map). Faces may mix corners with
 /// and without texture coordinates or normals. The file is read a block at a time, and each
 /// corner becomes a vertex of its part's primitive in its material as it's read.
-pub(crate) fn obj(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document<'static>> {
+pub(crate) fn obj(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document> {
     // UTF-16, as some Windows tools save text: read as the UTF-8 it says.
     if let Some(text) = utf16(&input.head(2)?)
         .map(|le| input.read().map(|all| String::from_utf16_lossy(&units(&all[2..], le))))
         .transpose()?
     {
         let utf8 = super::Input {
-            data: super::Data::Bytes(text.as_bytes()),
+            data: super::Data::Bytes(text.as_bytes(), None),
             ..input
         };
         return obj(utf8, assets, keep);
@@ -2877,7 +2885,7 @@ pub(crate) fn obj(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<D
     let dir = input.dir();
     let mut r = Reader::new(input.limit);
     // Threads only for models big enough to share out.
-    let threads = if size >= 2 * PIECE { keep.threads() } else { 1 };
+    let threads = if size >= 2 * PIECE { keep.thread_count() } else { 1 };
     let mut threaded = None;
     if threads > 1 {
         let (bytes, path) = (input.bytes(), input.path);
@@ -2901,6 +2909,7 @@ pub(crate) fn obj(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<D
             read += chunk.len();
             ensure!(
                 r.triangles <= r.limit,
+                LimitExceeded,
                 "too many triangles to convert (more than {})",
                 r.limit
             );
@@ -2915,9 +2924,18 @@ pub(crate) fn obj(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<D
         r.groups[g].points.extend(0..u32_of(r.v.len()));
         r.points = r.v.len();
     }
-    ensure!(r.triangles + r.points + r.lines > 0, "OBJ has no faces or vertices");
+    if r.triangles + r.points + r.lines == 0 {
+        // Lines, and none of them a statement OBJ has: some other kind of text.
+        ensure!(
+            r.skipped.is_empty() || !r.v.is_empty(),
+            UnknownFormat,
+            "not an OBJ file: none of its lines is an OBJ statement"
+        );
+        bail!(Empty, "OBJ has no faces or vertices");
+    }
     ensure!(
         r.triangles <= r.limit,
+        LimitExceeded,
         "too many triangles to convert (more than {})",
         r.limit
     );
@@ -2929,8 +2947,22 @@ pub(crate) fn obj(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<D
     } else {
         1.0
     };
+    // A mesh with no normals at all, in a file with no `s` to say how it's smoothed, takes the default normals
+    // as it's written: none are made for it here.
+    let plain: Vec<bool> = r
+        .groups
+        .iter()
+        .map(|g| !r.smoothed && g.made > 0 && g.made == g.prim.positions.len())
+        .collect();
+    for (g, _) in r.groups.iter_mut().zip(&plain).filter(|(_, plain)| **plain) {
+        g.made = 0;
+    }
     r.make_normals();
-    let mut b = Builder::default();
+    for (g, _) in r.groups.iter_mut().zip(&plain).filter(|(_, plain)| **plain) {
+        g.prim.normals = Vec::new();
+    }
+    let mut b = Builder::new(keep.crease_angle());
+    b.dropped = r.dropped;
     // Points and lines first, while the file's positions are here.
     let loose: Vec<Vec<Value>> = r
         .groups
@@ -2938,10 +2970,10 @@ pub(crate) fn obj(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<D
         .map(|g| {
             let mut out = Vec::new();
             if !g.points.is_empty() {
-                out.push(loose_prim(&mut b, &g.points, false, &r.v, &r.colors, scale));
+                out.extend(loose_prim(&mut b, &g.points, false, &r.v, &r.colors, scale));
             }
             if !g.lines.is_empty() {
-                out.push(loose_prim(&mut b, &g.lines, true, &r.v, &r.colors, scale));
+                out.extend(loose_prim(&mut b, &g.lines, true, &r.v, &r.colors, scale));
             }
             out
         })
@@ -2983,30 +3015,65 @@ pub(crate) fn obj(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<D
         textured[m] |= !g.prim.uvs.is_empty();
     }
     let mut images = Images::new(!keep.image_bytes, dir);
-    let mut image_of: HashMap<PathBuf, Option<usize>> = HashMap::new();
     // The images packed so far, by what they're packed from.
     let mut packs: HashMap<[Channel; 3], Option<usize>> = HashMap::new();
     let mut out_materials = Vec::new();
     let mut looks: Vec<Look> = Vec::new();
+    // Blender writes linear colors, and a roughness and specular level in Phong's fields.
+    let linear = super::linear_colors(input, "obj");
     for (m, &name) in used.iter().enumerate() {
         let name = &names[name];
         let entry = mtl.get(name);
-        // Without a material, vertex colors show as they are; otherwise the usual 0.8 gray.
-        let fallback = if has_colors { [1.0; 3] } else { [0.8; 3] };
-        let d = entry.and_then(|e| e.color).unwrap_or(fallback);
-        let mut mat = Material::plain(
-            if name.is_empty() { "default" } else { name },
-            [d[0], d[1], d[2], entry.and_then(|e| e.alpha).unwrap_or(1.0)],
-        );
+        // Faces with no material, or one no library has: the default, under the name they use.
+        let mut mat = legacy_material::default_material(has_colors);
+        if !name.is_empty() {
+            mat.name.clone_from(name);
+        }
+        // The highlight's `KHR_materials_specular` numbers, when they aren't glTF's own.
+        let mut highlight = None;
         if let Some(e) = entry {
-            mat.emissive = e.emissive.unwrap_or([0.0; 3]);
-            mat.metallic = e.metallic.unwrap_or(0.0);
-            // Blender's reading of the specular exponent when there's no roughness.
-            if let Some(r) = e
-                .roughness
-                .or(e.shininess.map(|ns| 1.0 - (ns.clamp(0.0, 1000.0) / 1000.0).sqrt()))
-            {
-                mat.roughness = r;
+            // Without a `Kd`, vertex colors show as they are; otherwise the usual 0.8 gray.
+            let fallback = if has_colors { [1.0; 3] } else { [0.8; 3] };
+            let mut phong = Phong::new(Rgb::of(e.color.unwrap_or(fallback), linear));
+            phong.opacity = e.alpha.unwrap_or(1.0);
+            phong.emissive = Rgb::of(e.emissive.unwrap_or([0.0; 3]), linear);
+            let pbr = e.roughness.is_some() || e.metallic.is_some();
+            // `Ns` is the specular exponent itself, 0 to 1000 (MTL specification, "Ns exponent"). Blender
+            // writes its roughness there instead, as Ns = 1000 (1 - roughness)^2: read back as the
+            // exponent of that roughness.
+            phong.exponent = e.shininess.map(|ns| {
+                let ns = ns.clamp(0.0, 1000.0);
+                if linear {
+                    #[allow(clippy::cast_possible_truncation, reason = "an exponent, far inside f32")]
+                    let n = legacy_material::exponent_of_roughness(f64::from(1.0 - (ns / 1000.0).sqrt())) as f32;
+                    n
+                } else {
+                    ns
+                }
+            });
+            if !pbr {
+                // `Ks` is the highlight's color. Blender writes its specular level there, where 0.5 is the
+                // 4% a dielectric reflects, glTF's whole highlight.
+                phong.specular = e.specular.map(|ks| {
+                    if linear {
+                        Rgb::Linear(ks.map(|c| c * 2.0))
+                    } else {
+                        Rgb::Srgb(ks)
+                    }
+                });
+                // `illum` 0 and 1 are the models without a highlight (MTL specification, "illum").
+                #[allow(clippy::float_cmp, reason = "illum is a whole number")]
+                {
+                    phong.highlight = !e.illum.is_some_and(|i| i == 0.0 || i == 1.0);
+                }
+            }
+            let out = phong.pbr();
+            out.set(&mut mat);
+            mat.extensions = None;
+            highlight = out.specular.filter(|_| !pbr);
+            if pbr {
+                mat.metallic = e.metallic.unwrap_or(0.0);
+                mat.roughness = e.roughness.unwrap_or(mat.roughness);
             }
         }
         let mut texture = |reference: Option<&MapRef>, make: Make<'_>| -> Option<Tex> {
@@ -3014,30 +3081,26 @@ pub(crate) fn obj(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<D
                 return None;
             }
             let reference = reference?;
-            let found = assets.find(&reference.file, dir)?;
+            let Some(found) = assets.find(&reference.file, dir) else {
+                images.miss(&reference.file);
+                return None;
+            };
             let image = match make {
-                Make::File => {
-                    (*image_of
-                        .entry(found.clone())
-                        .or_insert_with(|| images.file(assets, found, &reference.file)))?
-                }
+                Make::File => images.file(assets, found, &reference.file)?,
                 // An image already read shows whether it's gray; one only named is read to see.
-                Make::Gray => match image_of.get(&found) {
+                Make::Gray => match images.known(&found) {
                     Some(None) => return None,
-                    Some(&Some(i)) if matches!(&images.list[i], Source::Image(img) if !gray(&img.bytes)) => {
+                    Some(Some(i)) if matches!(&images.list[i], Source::Image(img) if !gray(&img.bytes)) => {
                         return None;
                     }
-                    Some(&Some(i)) if matches!(&images.list[i], Source::Image(_)) => i,
+                    Some(Some(i)) if matches!(&images.list[i], Source::Image(_)) => i,
                     _ => {
                         let img = assets.load_image(&found).filter(|img| gray(&img.bytes))?;
-                        (*image_of.entry(found.clone()).or_insert_with(|| {
-                            if keep.image_bytes {
-                                images.list.push(Source::Image(img));
-                                Some(images.list.len() - 1)
-                            } else {
-                                images.file(assets, found, &reference.file)
-                            }
-                        }))?
+                        if keep.image_bytes {
+                            images.read(found, img)
+                        } else {
+                            images.file(assets, found, &reference.file)?
+                        }
                     }
                 },
                 Make::Pack(planes) => {
@@ -3126,14 +3189,22 @@ pub(crate) fn obj(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<D
                 mat.metallic = 1.0;
             }
             look.metal_in_tex = holds[1];
-            // Opacity in the color texture's alpha: cut out there. A separate opacity file
-            // would need its pixels moved into the color texture's alpha.
+            // Opacity in the color texture's alpha (`map_d` naming the `map_Kd` file), the long-standing way
+            // to write cutout foliage: cut out at a half. A separate opacity file would need its pixels moved
+            // into the color texture's alpha.
             if let (Some(a), Some(c)) = (&e.alpha_map, &e.color_map)
                 && a.file == c.file
                 && mat.color_image.is_some()
             {
-                look.alpha = Some(Alpha::Mask(0.5));
-                mat.alpha_cutoff = Some(0.5);
+                let transparency = Transparency {
+                    texture_alpha: true,
+                    cutout: Some(0.5),
+                    ..Transparency::of(mat.color[3])
+                };
+                look.alpha = Some(transparency.mode());
+                if let Some(Alpha::Mask(c)) = look.alpha {
+                    mat.alpha_cutoff = Some(c);
+                }
             }
             // Glass lets light through rather than fading out.
             #[allow(clippy::float_cmp, reason = "illum is a whole number")]
@@ -3144,12 +3215,17 @@ pub(crate) fn obj(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<D
             }
             let pbr = e.roughness.is_some() || e.metallic.is_some();
             let spec_tex = texture(e.specular_map.as_ref(), Make::File);
-            if !pbr && (e.specular.is_some() || spec_tex.is_some()) {
-                // Phong's highlight, where half is glTF's usual.
+            // No highlight has no use for a texture coloring it.
+            let dark = highlight == Some(Highlight::NONE);
+            if !pbr && (highlight.is_some() || spec_tex.is_some()) {
+                let h = highlight.unwrap_or(Highlight {
+                    factor: 1.0,
+                    color: [1.0; 3],
+                });
                 look.specular = Some(Specular {
-                    factor: Factor::of(1.0),
-                    color: e.specular.unwrap_or([0.5; 3]).map(|c| c * 2.0),
-                    color_tex: spec_tex,
+                    factor: Factor::of(h.factor),
+                    color: h.color,
+                    color_tex: spec_tex.filter(|_| !dark),
                 });
             }
             // Every exporter writes Ni, often a placeholder of 1 (which would take the highlight away).
@@ -3180,13 +3256,7 @@ pub(crate) fn obj(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<D
         looks.push(look);
         out_materials.push(mat);
     }
-    let linear = super::linear_colors(input, "obj");
     if !linear {
-        for m in &mut out_materials {
-            for c in m.color[..3].iter_mut().chain(&mut m.emissive) {
-                *c = srgb_to_linear(*c);
-            }
-        }
         for s in looks.iter_mut().filter_map(|l| l.sheen.as_mut()) {
             s.color = s.color.map(srgb_to_linear);
         }
@@ -3230,7 +3300,7 @@ pub(crate) fn obj(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<D
             if prim.normals.len() == nv {
                 trim_to_len(&mut prim.normals);
             } else {
-                prim.normals = smooth_normals(&prim.positions, &prim.indices);
+                prim.normals = Vec::new();
             }
             if let Some(mut p) = b.primitive(prim) {
                 p["material"] = json!(m);
@@ -3262,12 +3332,19 @@ pub(crate) fn obj(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<D
         nodes.push(node);
     }
 
-    let mut source = json!({ "format": "OBJ" });
+    let mut source = json!({});
     if !libs.is_empty() {
         source["mtllib"] = json!(libs);
     }
-    if !comments.is_empty() {
-        source["comments"] = json!(comments);
+    let info = SourceInfo {
+        format: Some("OBJ".into()),
+        up_axis: Fact::Assumed(Axis::PosY),
+        tool: comments.iter().find_map(|c| exporter(c)),
+        comments,
+        ..SourceInfo::default()
+    };
+    if let Value::Object(m) = &mut source {
+        info.write(m);
     }
     if linear {
         source["linearColors"] = json!(true);
@@ -3314,6 +3391,28 @@ pub(crate) fn obj(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<D
     Ok(b.finish(json, facts))
 }
 
+/// The exporter an opening comment names: `Blender 4.2.0` (from `# Blender 4.2.0` or
+/// `# Blender v2.93.1 OBJ File: ''`), or what follows `Exported from`, `Exported by` or `Generated by`.
+fn exporter(comment: &str) -> Option<String> {
+    let c = comment.trim();
+    if let Some(rest) = c.strip_prefix("Blender ")
+        && rest.starts_with(|ch: char| ch.is_ascii_digit() || ch == 'v')
+    {
+        let end = c.find(" OBJ File").or_else(|| c.find(" MTL File")).unwrap_or(c.len());
+        return Some(c[..end].trim().to_owned());
+    }
+    let lower = c.to_ascii_lowercase();
+    ["exported from ", "exported by ", "generated by "]
+        .iter()
+        .find_map(|p| {
+            lower
+                .starts_with(p)
+                .then(|| c[p.len()..].trim())
+                .filter(|t| !t.is_empty())
+                .map(str::to_owned)
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3336,6 +3435,37 @@ mod tests {
     }
 
     #[test]
+    fn opening_comments_and_the_exporter_are_the_source_info() {
+        let text = b"# Blender v2.93.1 OBJ File: ''
+# www.blender.org
+v 0 0 0
+v 1 0 0
+v 0 1 0
+f 1 2 3
+# later
+";
+        let info = read_in(text, &Memory::new()).source_info();
+        assert_eq!(info.format.as_deref(), Some("OBJ"));
+        assert_eq!(info.tool.as_deref(), Some("Blender v2.93.1"));
+        assert_eq!(info.comments, ["Blender v2.93.1 OBJ File: ''", "www.blender.org"]);
+        assert_eq!(info.meters_per_unit, Fact::Unknown);
+        assert_eq!(info.up_axis, Fact::Assumed(Axis::PosY));
+        assert_eq!(info.converted, crate::source::Converted::default());
+        assert_eq!(exporter("Exported from Wings 3D 2.2"), Some("Wings 3D 2.2".into()));
+        assert_eq!(exporter("a cube"), None);
+        let info = read_in(
+            b"v 0 0 0
+v 1 0 0
+v 0 1 0
+f 1 2 3
+",
+            &Memory::new(),
+        )
+        .source_info();
+        assert!(info.tool.is_none() && info.comments.is_empty());
+    }
+
+    #[test]
     fn utf16_with_a_byte_order_mark_reads_as_utf8() {
         let text = "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
         for le in [true, false] {
@@ -3350,7 +3480,7 @@ mod tests {
         }
     }
 
-    fn read_in(bytes: &[u8], assets: &Memory) -> Document<'static> {
+    fn read_in(bytes: &[u8], assets: &Memory) -> Document {
         obj(Input::memory(bytes, "t.obj"), assets, Keep::ALL).unwrap()
     }
 
@@ -3646,14 +3776,17 @@ mod tests {
 
     #[test]
     fn threaded_loads_keep_to_the_triangle_limit() {
+        // Every position finite: a triangle on one that isn't counts toward the limit as it's read, and is
+        // dropped only as the document is written.
         let text = mixed_lines(17, 4000).repeat(40);
+        let text = text.replace("nan", "5").replace("inf", "7").replace("1e39", "1e3");
         assert!(text.len() > 2 * PIECE, "too small for threads");
         let load = |limit, threads| {
             let input = Input {
                 limit,
                 ..Input::memory(text.as_bytes(), "t.obj")
             };
-            obj(input, &Memory::new(), Keep { threads, ..Keep::ALL }).map(|d| d.to_glb().unwrap())
+            obj(input, &Memory::new(), Keep::ALL.with_threads(threads)).map(|d| d.to_glb().unwrap())
         };
         let one = load(usize::MAX, 1).unwrap();
         let triangles = mesh(&text).triangles();
@@ -3675,7 +3808,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("t.obj");
         std::fs::write(&path, &text).unwrap();
-        let keep = |threads| Keep { threads, ..Keep::ALL };
+        let keep = |threads| Keep::ALL.with_threads(threads);
         let glb = |input, keep| obj(input, &Memory::new(), keep).unwrap().to_glb().unwrap();
         let one = glb(Input::memory(text.as_bytes(), "t.obj"), keep(1));
         assert!(
@@ -3692,7 +3825,7 @@ mod tests {
         let text = mixed_lines(9, 4000).repeat(40);
         assert!(text.len() > 2 * PIECE, "too small for threads");
         let glb = |threads| {
-            let keep = Keep { threads, ..Keep::ALL };
+            let keep = Keep::ALL.with_threads(threads);
             obj(Input::memory(text.as_bytes(), "t.obj"), &Memory::new(), keep)
                 .unwrap()
                 .to_glb()
@@ -3790,7 +3923,7 @@ mod tests {
         let m = doc.flatten(crate::document::Pose::Rest).unwrap().unwrap();
         let p = &m.prims[0].positions;
         assert!(p.contains(&[0.0, 0.0, 1.0]) && !p.contains(&[9.0, 9.0, 9.0]), "{p:?}");
-        assert_eq!(doc.json["materials"][0]["name"], "red");
+        assert_eq!(doc.json()["materials"][0]["name"], "red");
         assert_eq!(m.materials[0].color, [1.0, 0.0, 0.0, 1.0]);
     }
 
@@ -3799,13 +3932,15 @@ mod tests {
 
     #[test]
     fn smoothing_groups_decide_which_faces_share_made_normals() {
-        // No `s`: smooth, so the fold's edge takes the faces' average.
-        let m = mesh(&format!("{FOLD}f 1 2 3\nf 1 4 2\n"));
+        // One group: smooth, so the fold's edge takes the faces' average.
+        let m = mesh(&format!("{FOLD}s 1\nf 1 2 3\nf 1 4 2\n"));
         assert_eq!(m.prims[0].positions.len(), 4);
         let h = std::f32::consts::FRAC_1_SQRT_2;
         assert!(near(normals_at(&m, [0.0; 3])[0], [0.0, h, h]));
-        // Flat, or two groups: each face its own.
+        // Flat, or two groups: each face its own. So too with no `s` at all, where the default normals keep a
+        // fold of a right angle hard.
         for text in [
+            format!("{FOLD}f 1 2 3\nf 1 4 2\n"),
             format!("{FOLD}s off\nf 1 2 3\nf 1 4 2\n"),
             format!("{FOLD}s 1\nf 1 2 3\ns 2\nf 1 4 2\n"),
         ] {
@@ -3832,7 +3967,7 @@ mod tests {
     #[test]
     fn made_normals_have_no_seam_where_texture_coordinates_split_a_vertex() {
         let m = mesh(&format!(
-            "{FOLD}vt 0 0\nvt 1 0\nvt 0 1\nvt 0.5 0.5\nf 1/1 2/2 3/3\nf 1/4 4/1 2/3\n"
+            "{FOLD}vt 0 0\nvt 1 0\nvt 0 1\nvt 0.5 0.5\ns 1\nf 1/1 2/2 3/3\nf 1/4 4/1 2/3\n"
         ));
         assert_eq!(m.prims[0].positions.len(), 6);
         let h = std::f32::consts::FRAC_1_SQRT_2;
@@ -3869,7 +4004,8 @@ mod tests {
         let text = "mtllib t.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 0 1\n\
                     usemtl leaf\nf 1/1 2/2 3/3\nusemtl glass\nf 1/1 3/3 2/2\n";
         let doc = read_in(text.as_bytes(), &assets);
-        let leaf = &doc.json["materials"][0];
+        // `map_d` naming the color texture: its alpha is the opacity, cut out at a half.
+        let leaf = &doc.json()["materials"][0];
         assert_eq!(leaf["alphaMode"], "MASK", "{leaf}");
         assert!(leaf["emissiveTexture"].is_object());
         assert_eq!(leaf["emissiveFactor"], json!([1.0, 1.0, 1.0]));
@@ -3877,7 +4013,7 @@ mod tests {
         assert!(leaf["occlusionTexture"].is_object());
         let alpha = &leaf["pbrMetallicRoughness"]["baseColorFactor"][3];
         assert!(alpha.is_null() || alpha == 1.0, "d wins over Tr: {leaf}");
-        let glass = &doc.json["materials"][1];
+        let glass = &doc.json()["materials"][1];
         assert_eq!(
             glass["extensions"]["KHR_materials_transmission"]["transmissionFactor"],
             0.75
@@ -3950,12 +4086,9 @@ mod tests {
         // Without image bytes the maps are read all the same to pack them: the same materials, the packed image
         // embedded and the file used as it is left unread.
         let full = doc(Keep::ALL);
-        let lazy = doc(Keep {
-            image_bytes: false,
-            ..Keep::ALL
-        });
-        assert_eq!(lazy.json["materials"], full.json["materials"]);
-        let uris: Vec<_> = (0..3).map(|i| lazy.json["images"][i]["uri"].as_str()).collect();
+        let lazy = doc(Keep::ALL.with_image_bytes(false));
+        assert_eq!(lazy.json()["materials"], full.json()["materials"]);
+        let uris: Vec<_> = (0..3).map(|i| lazy.json()["images"][i]["uri"].as_str()).collect();
         assert_eq!(uris, [None, None, Some("rma.png")]);
     }
 }

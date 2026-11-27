@@ -1,103 +1,11 @@
-//! Matrices and quaternions for placing nodes. Matrices are column-major, as glTF's and
-//! `OpenGEX`'s: `m[col * 4 + row]`. Quaternions are `[x, y, z, w]`.
+//! Placing nodes by matrices, column-major as glTF's and `OpenGEX`'s: `m[col * 4 + row]`.
 
-use serde_json::{Value, json};
+use serde_json::Value;
 
-pub(super) type M4 = [f64; 16];
-
-pub(super) const IDENTITY: M4 = [
-    1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
-];
-
-pub(super) fn mul(a: &M4, b: &M4) -> M4 {
-    let mut m = [0.0; 16];
-    for col in 0..4 {
-        for row in 0..4 {
-            m[col * 4 + row] = (0..4).map(|k| a[k * 4 + row] * b[col * 4 + k]).sum();
-        }
-    }
-    m
-}
-
-pub(super) fn translation(t: [f64; 3]) -> M4 {
-    let mut m = IDENTITY;
-    m[12..15].copy_from_slice(&t);
-    m
-}
-
-pub(super) fn scaling(s: [f64; 3]) -> M4 {
-    let mut m = IDENTITY;
-    m[0] = s[0];
-    m[5] = s[1];
-    m[10] = s[2];
-    m
-}
-
-/// The rotation of `angle` radians about unit `axis`, as a quaternion.
-pub(super) fn quat_axis(axis: [f64; 3], angle: f64) -> [f64; 4] {
-    let (s, c) = (angle * 0.5).sin_cos();
-    [axis[0] * s, axis[1] * s, axis[2] * s, c]
-}
-
-/// The rotation matrix of a unit quaternion.
-pub(super) fn quat_matrix(q: [f64; 4]) -> M4 {
-    let [x, y, z, w] = q;
-    [
-        1.0 - 2.0 * (y * y + z * z),
-        2.0 * (x * y + z * w),
-        2.0 * (x * z - y * w),
-        0.0,
-        2.0 * (x * y - z * w),
-        1.0 - 2.0 * (x * x + z * z),
-        2.0 * (y * z + x * w),
-        0.0,
-        2.0 * (x * z + y * w),
-        2.0 * (y * z - x * w),
-        1.0 - 2.0 * (x * x + y * y),
-        0.0,
-        0.0,
-        0.0,
-        0.0,
-        1.0,
-    ]
-}
-
-/// The quaternion product `a * b`: the rotation `b`, then `a`.
-pub(super) fn quat_mul(a: [f64; 4], b: [f64; 4]) -> [f64; 4] {
-    [
-        a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1],
-        a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
-        a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3],
-        a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2],
-    ]
-}
-
-/// A quaternion scaled to unit length; the identity when it has none.
-pub(super) fn quat_unit(q: [f64; 4]) -> [f64; 4] {
-    let l = q.iter().map(|v| v * v).sum::<f64>().sqrt();
-    if l > 1e-12 && l.is_finite() {
-        q.map(|v| v / l)
-    } else {
-        [0.0, 0.0, 0.0, 1.0]
-    }
-}
-
-pub(super) fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-
-pub(super) fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
-}
-
-pub(super) fn unit(v: [f64; 3]) -> Option<[f64; 3]> {
-    let l = dot(v, v).sqrt();
-    (l > 1e-12 && l.is_finite()).then(|| v.map(|c| c / l))
-}
+use crate::formats::xform::col::{IDENTITY, M4};
+use crate::formats::xform::set_trs;
+use crate::quat;
+use crate::vec3::{cross, dot, unit};
 
 /// The inverse of a matrix; `None` when it's singular.
 pub(super) fn inverse(m: &M4) -> Option<M4> {
@@ -190,63 +98,9 @@ pub(super) fn trs(m: &M4) -> ([f64; 3], [f64; 4], [f64; 3]) {
         .or_else(|| unit(cross([0.0, 1.0, 0.0], x)))
         .unwrap_or([0.0, 1.0, 0.0]);
     let z = cross(x, y);
-    let q = quat_of([x, y, z]);
+    let q = quat::positive_w(quat::from_rotation(|r, c| [x, y, z][c][r]));
     let s = s.map(|v| if v.is_finite() { v } else { 1.0 });
     (t, q, s)
-}
-
-/// The unit quaternion of a rotation's columns, `w` not negative.
-pub(super) fn quat_of(c: [[f64; 3]; 3]) -> [f64; 4] {
-    let (m00, m11, m22) = (c[0][0], c[1][1], c[2][2]);
-    let trace = m00 + m11 + m22;
-    let q = if trace > 0.0 {
-        let s = (trace + 1.0).sqrt() * 2.0;
-        [
-            (c[1][2] - c[2][1]) / s,
-            (c[2][0] - c[0][2]) / s,
-            (c[0][1] - c[1][0]) / s,
-            0.25 * s,
-        ]
-    } else if m00 > m11 && m00 > m22 {
-        let s = (1.0 + m00 - m11 - m22).sqrt() * 2.0;
-        [
-            0.25 * s,
-            (c[1][0] + c[0][1]) / s,
-            (c[2][0] + c[0][2]) / s,
-            (c[1][2] - c[2][1]) / s,
-        ]
-    } else if m11 > m22 {
-        let s = (1.0 + m11 - m00 - m22).sqrt() * 2.0;
-        [
-            (c[1][0] + c[0][1]) / s,
-            0.25 * s,
-            (c[2][1] + c[1][2]) / s,
-            (c[2][0] - c[0][2]) / s,
-        ]
-    } else {
-        let s = (1.0 + m22 - m00 - m11).sqrt() * 2.0;
-        [
-            (c[2][0] + c[0][2]) / s,
-            (c[2][1] + c[1][2]) / s,
-            0.25 * s,
-            (c[0][1] - c[1][0]) / s,
-        ]
-    };
-    let q = quat_unit(q);
-    if q[3] < 0.0 { q.map(|v| -v) } else { q }
-}
-
-/// Sets a node's translation, rotation and scale, those that aren't the identity's.
-pub(super) fn set_trs(j: &mut Value, (t, q, s): ([f64; 3], [f64; 4], [f64; 3])) {
-    if t.iter().any(|&v| v != 0.0) {
-        j["translation"] = json!(t);
-    }
-    if (q[3] - 1.0).abs() > 1e-12 {
-        j["rotation"] = json!(q);
-    }
-    if s.iter().any(|&v| (v - 1.0).abs() > 1e-12) {
-        j["scale"] = json!(s);
-    }
 }
 
 /// Sets a node's placement: its translation, rotation and scale, the nearest when the matrix
@@ -272,6 +126,7 @@ pub(super) fn is_identity(m: &M4) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::formats::xform::col::{mul, rotation, scaling, translation};
 
     fn close(a: &[f64], b: &[f64]) -> bool {
         a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-9)
@@ -279,10 +134,10 @@ mod tests {
 
     #[test]
     fn inverse_undoes_a_placement() {
-        let q = quat_unit([0.3, -0.2, 0.5, 0.8]);
+        let q = quat::unit([0.3, -0.2, 0.5, 0.8]);
         let m = mul(
             &translation([1.0, 2.0, 3.0]),
-            &mul(&quat_matrix(q), &scaling([2.0, 3.0, 0.5])),
+            &mul(&rotation(q), &scaling([2.0, 3.0, 0.5])),
         );
         let inv = inverse(&m).unwrap();
         assert!(close(&mul(&m, &inv), &IDENTITY));
@@ -296,15 +151,5 @@ mod tests {
         assert!(decompose(&shear).is_none());
         let (_, q, s) = trs(&scaling([-1.0, 1.0, 1.0]));
         assert!(close(&s, &[-1.0, 1.0, 1.0]) && close(&q, &[0.0, 0.0, 0.0, 1.0]));
-    }
-
-    #[test]
-    fn quaternion_products_compose_rotations() {
-        let a = quat_axis([0.0, 0.0, 1.0], 0.7);
-        let b = quat_axis([1.0, 0.0, 0.0], -1.1);
-        assert!(close(
-            &quat_matrix(quat_mul(a, b)),
-            &mul(&quat_matrix(a), &quat_matrix(b))
-        ));
     }
 }

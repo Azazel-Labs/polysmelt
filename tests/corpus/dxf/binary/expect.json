@@ -16,7 +16,8 @@
   "document": {
     "source": {
       "encoding": "binary",
-      "units": "centimeters"
+      "unit": "centimeter",
+      "metersPerUnit": 0.01
     }
   }
 }

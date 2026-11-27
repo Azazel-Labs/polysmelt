@@ -1,0 +1,45 @@
+<WORLD>
+<MAT ID="1">
+<AMB>0.2,0.2,0.2</AMB>
+<DIFF>1,0,0</DIFF>
+<SPEC>0,0,0</SPEC>
+<EMISS>0,0,0</EMISS>
+<SHINE>0</SHINE>
+<ALPHA>1</ALPHA>
+</MAT>
+<MESH>
+<P ID="0">0,0,0</P>
+<P ID="1">1,0,0</P>
+<P ID="2">1,1,0</P>
+<P ID="3">0,1,0</P>
+<P ID="4">0,0,2</P>
+<P ID="5">1,0,2</P>
+<P ID="6">1,1,2</P>
+<F>
+<MAT ID="9">
+<AMB>0.2,0.2,0.2</AMB>
+<DIFF>0,1,0</DIFF>
+<SPEC>0,0,0</SPEC>
+<EMISS>0,0,0</EMISS>
+<SHINE>0</SHINE>
+<ALPHA>1</ALPHA>
+</MAT>
+<FV1><PREF>0</PREF></FV1>
+<FV2><PREF>1</PREF></FV2>
+<FV3><PREF>2</PREF></FV3>
+</F>
+<PATCH>
+<MATREF>1</MATREF>
+<F>
+<FV1><PREF>0</PREF></FV1>
+<FV2><PREF>2</PREF></FV2>
+<FV3><PREF>3</PREF></FV3>
+</F>
+</PATCH>
+<F>
+<FV1><PREF>4</PREF></FV1>
+<FV2><PREF>5</PREF></FV2>
+<FV3><PREF>6</PREF></FV3>
+</F>
+</MESH>
+</WORLD>

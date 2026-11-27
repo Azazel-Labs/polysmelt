@@ -30,8 +30,9 @@ pub const REPEAT: u32 = 10497;
 pub const CLAMP: u32 = 33071;
 /// glTF's mirrored repeating wrap.
 pub const MIRROR: u32 = 33648;
-/// glTF's linear filter, and its linear filter between linearly filtered mipmaps.
+/// glTF's linear filter.
 pub const LINEAR: u32 = 9729;
+/// glTF's linear filter between linearly filtered mipmaps.
 pub const LINEAR_MIPMAP_LINEAR: u32 = 9987;
 
 /// A texture: an image, the texture coordinates it reads and how.
@@ -66,9 +67,11 @@ impl Tex {
 /// `KHR_texture_transform`: `uv' = translate(offset) * rotate(rotation) * scale(scale) * uv`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct UvTransform {
+    /// Added last, in texture coordinates.
     pub offset: [f32; 2],
     /// Radians, counter-clockwise.
     pub rotation: f32,
+    /// Multiplied first, along U and V.
     pub scale: [f32; 2],
 }
 
@@ -79,6 +82,13 @@ impl UvTransform {
         rotation: 0.0,
         scale: [1.0; 2],
     };
+}
+
+impl Default for UvTransform {
+    /// [`UvTransform::IDENTITY`].
+    fn default() -> Self {
+        Self::IDENTITY
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -92,7 +102,9 @@ pub(crate) enum Alpha {
 /// A factor and the texture that scales it. `T` is the texture: a [`Texture`] in the flat view's material.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Factor<T> {
+    /// The value, where the texture doesn't scale it.
     pub factor: f32,
+    /// The texture scaling it, if any.
     pub tex: Option<T>,
 }
 
@@ -151,6 +163,7 @@ pub struct Volume<T> {
     pub thickness: Factor<T>,
     /// How far light goes before it is tinted `attenuation_color`; `None` is forever.
     pub attenuation_distance: Option<f32>,
+    /// Linear RGB: the color white light becomes after `attenuation_distance`.
     pub attenuation_color: [f32; 3],
 }
 
@@ -168,6 +181,7 @@ pub struct Anisotropy<T> {
 pub struct Iridescence<T> {
     /// Its texture's red scales it.
     pub factor: Factor<T>,
+    /// The thin film's index of refraction.
     pub ior: f32,
     /// The thin film's thickness range in nanometers.
     pub thickness: [f32; 2],
@@ -447,7 +461,11 @@ impl Writer {
         if let Some(t) = self.tex(m.metallic_roughness_tex.as_ref(), None) {
             pbr.insert("metallicRoughnessTexture".into(), t);
         }
-        let mut mat = json!({ "name": m.name, "pbrMetallicRoughness": pbr });
+        // A material with no name has no name key, as a node or a mesh without one.
+        let mut mat = json!({ "pbrMetallicRoughness": pbr });
+        if !m.name.is_empty() {
+            mat["name"] = json!(m.name);
+        }
         if let Some(t) = self.tex(m.normal_tex.as_ref(), Some("scale")) {
             mat["normalTexture"] = t;
         }

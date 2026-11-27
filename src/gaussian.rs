@@ -12,7 +12,8 @@ use serde_json::{Map, Value, json};
 
 use crate::document::{Builder, Document, Part};
 use crate::mesh::srgb_to_linear;
-use crate::{Context as _, Result};
+use crate::source::SourceInfo;
+use crate::{Context as _, ErrorKind, Result};
 
 /// The extension's name, which also prefixes its attributes.
 pub(crate) const EXTENSION: &str = "KHR_gaussian_splatting";
@@ -28,7 +29,7 @@ pub(crate) const SH_C0: f32 = 0.282_094_8;
 
 /// How many coefficients a color channel has beyond the base one, for degrees 0 to 3.
 #[cfg_attr(
-    not(any(feature = "ply", feature = "splat", feature = "spz")),
+    not(any(feature = "ply", feature = "splat", feature = "spz", feature = "sog")),
     allow(dead_code, reason = "only the splat readers build splats")
 )]
 pub(crate) const REST: [usize; 4] = [0, 3, 8, 15];
@@ -36,7 +37,7 @@ pub(crate) const REST: [usize; 4] = [0, 3, 8, 15];
 /// The highest spherical-harmonic degree whose coefficients all fit in `rest` coefficients past
 /// the base one.
 #[cfg_attr(
-    not(any(feature = "ply", feature = "splat", feature = "spz")),
+    not(any(feature = "ply", feature = "splat", feature = "spz", feature = "sog")),
     allow(dead_code, reason = "only the splat readers build splats")
 )]
 pub(crate) fn degree_of(rest: usize) -> usize {
@@ -46,7 +47,7 @@ pub(crate) fn degree_of(rest: usize) -> usize {
 /// Gaussian splats, a column per property.
 #[derive(Default)]
 #[cfg_attr(
-    not(any(feature = "ply", feature = "splat", feature = "spz")),
+    not(any(feature = "ply", feature = "splat", feature = "spz", feature = "sog")),
     allow(dead_code, reason = "only the splat readers build splats")
 )]
 pub(crate) struct Splats {
@@ -67,7 +68,7 @@ pub(crate) struct Splats {
 }
 
 #[cfg_attr(
-    not(any(feature = "ply", feature = "splat", feature = "spz")),
+    not(any(feature = "ply", feature = "splat", feature = "spz", feature = "sog")),
     allow(dead_code, reason = "only the splat readers build splats")
 )]
 impl Splats {
@@ -75,14 +76,14 @@ impl Splats {
     /// where there isn't memory for them. Callers check `n` against the bytes they hold first.
     #[cfg_attr(
         not(any(feature = "ply", feature = "splat")),
-        allow(dead_code, reason = "SPZ sizes its columns as it unpacks them")
+        allow(dead_code, reason = "SPZ and SOG size their columns as they unpack them")
     )]
     pub fn with_capacity(n: usize, rest: usize) -> Result<Splats> {
         fn room<T>(n: usize) -> Result<Vec<T>> {
             let mut v = Vec::new();
             v.try_reserve_exact(n)
                 .ok()
-                .context("not enough memory for the splats")?;
+                .context(ErrorKind::LimitExceeded, "not enough memory for the splats")?;
             Ok(v)
         }
         let mut sh = Vec::with_capacity(rest);
@@ -199,9 +200,9 @@ impl Splats {
             .collect();
         let mut attributes = json!({ "POSITION": b.positions(self.positions) });
         let color = b.accessor(Part::u16(colors), 5123, n, "VEC4", Some(34962));
-        b.accessors[color]["normalized"] = json!(true);
+        b.accessors[color].normalized = true;
         attributes["COLOR_0"] = json!(color);
-        let mut float = |v: Vec<f32>, kind: &str| b.accessor(Part::f32(v), 5126, n, kind, Some(34962));
+        let mut float = |v: Vec<f32>, kind: &'static str| b.accessor(Part::f32(v), 5126, n, kind, Some(34962));
         attributes[ROTATION] = json!(float(self.rotations.into_flattened(), "VEC4"));
         attributes[SCALE] = json!(float(self.scales.into_flattened(), "VEC3"));
         attributes[OPACITY] = json!(float(self.opacities, "SCALAR"));
@@ -220,33 +221,65 @@ impl Splats {
     }
 
     /// A document of the splats alone, on one node turned by `rotation` (x, y, z, w) when given.
-    /// `source` goes in the asset's `extras.source`, and the facts get `points` and `splats`,
-    /// the splats drawn. Without splats, the document is empty.
+    /// `info` written over `source` (the format's own details) goes in the asset's
+    /// `extras.source`, and the facts get `points` and `splats`, the splats drawn. Without splats,
+    /// the document is empty but for those.
     #[cfg_attr(
-        not(any(feature = "splat", feature = "spz")),
-        allow(dead_code, reason = "PLY splats share a document with the file's other elements")
+        not(any(feature = "ply", feature = "splat", feature = "spz")),
+        allow(dead_code, reason = "SOG's splats carry custom columns")
     )]
     pub fn document(
         self,
-        source: Value,
+        info: &SourceInfo,
+        source: Map<String, Value>,
+        rotation: Option<[f32; 4]>,
+        facts: Map<String, Value>,
+    ) -> Document {
+        self.document_with(info, source, rotation, facts, Vec::new())
+    }
+
+    /// [`Splats::document`], the splats also carrying `custom`: named columns of a value a
+    /// splat, written as float attributes under the names given. A column of another length
+    /// than the splats, or named as an attribute already there, is left out.
+    pub fn document_with(
+        mut self,
+        info: &SourceInfo,
+        mut source: Map<String, Value>,
         rotation: Option<[f32; 4]>,
         mut facts: Map<String, Value>,
-    ) -> Document<'static> {
-        let mut b = Builder::default();
+        mut custom: Vec<(String, Vec<f32>)>,
+    ) -> Document {
+        let mut b = Builder::plain();
         let degree = degree_of(self.sh.len());
-        let Some(prim) = self.primitive(&mut b) else {
+        info.write(&mut source);
+        let all = self.len();
+        custom.retain(|(_, col)| col.len() == all);
+        // Splats dropped for a broken position take their other values with them.
+        if let Some(kept) = self.sanitize() {
+            for (_, col) in &mut custom {
+                retain(col, &kept);
+            }
+        }
+        let Some(mut prim) = self.primitive(&mut b) else {
             facts.insert("points".into(), json!(0));
             facts.insert("splats".into(), json!(0));
-            return Document::empty(facts);
+            let mut doc = Document::empty(facts);
+            doc.base_mut()["asset"]["extras"] = json!({ "source": source });
+            return doc;
         };
         let n = prim["attributes"]["POSITION"]
             .as_u64()
-            .and_then(|a| b.accessors[usize::try_from(a).ok()?]["count"].as_u64())
+            .and_then(|a| Some(b.accessors[usize::try_from(a).ok()?].count as u64))
             .unwrap_or(0);
+        for (name, col) in custom {
+            if prim["attributes"].get(&name).is_none() {
+                let count = col.len();
+                prim["attributes"][name] = json!(b.accessor(Part::f32(col), 5126, count, "SCALAR", Some(34962)));
+            }
+        }
         facts.insert("points".into(), json!(n));
         facts.insert("splats".into(), json!(n));
-        let mut source = source;
-        source["shDegree"] = json!(degree);
+        source.insert("shDegree".into(), json!(degree));
         let mut node = json!({ "mesh": 0 });
         if let Some(q) = rotation {
             node["rotation"] = json!(q);
@@ -264,7 +297,7 @@ impl Splats {
 
 /// Keeps the items of `v` whose entry in `keep` is true.
 #[cfg_attr(
-    not(any(feature = "ply", feature = "splat", feature = "spz")),
+    not(any(feature = "ply", feature = "splat", feature = "spz", feature = "sog")),
     allow(dead_code, reason = "only the splat readers build splats")
 )]
 pub(crate) fn retain<T>(v: &mut Vec<T>, keep: &[bool]) {
@@ -289,7 +322,7 @@ pub(crate) fn use_extension(json: &mut Map<String, Value>) {
 /// A unit quaternion (x, y, z, w) from components at any scale; the identity for a zero or
 /// broken one, which says nothing.
 #[cfg_attr(
-    not(any(feature = "ply", feature = "splat", feature = "spz")),
+    not(any(feature = "ply", feature = "splat", feature = "spz", feature = "sog")),
     allow(dead_code, reason = "only the splat readers build splats")
 )]
 pub(crate) fn rotation(x: f32, y: f32, z: f32, w: f32) -> [f32; 4] {
@@ -302,7 +335,10 @@ pub(crate) fn rotation(x: f32, y: f32, z: f32, w: f32) -> [f32; 4] {
 }
 
 /// The logistic function, which turns a stored logit into an opacity.
-#[cfg_attr(not(feature = "ply"), allow(dead_code, reason = "only PLY splats store logits"))]
+#[cfg_attr(
+    not(any(feature = "ply", feature = "sog")),
+    allow(dead_code, reason = "only PLY and version 1 SOG splats store logits")
+)]
 pub(crate) fn sigmoid(x: f32) -> f32 {
     1.0 / (1.0 + (-x).exp())
 }
@@ -475,10 +511,10 @@ mod tests {
             dc: vec![[f32::NAN, 1.0, 2.0]; 3],
             sh: vec![vec![[1.0; 3]; 3]; 4],
         };
-        let mut b = Builder::default();
+        let mut b = Builder::plain();
         let p = splats.primitive(&mut b).unwrap();
         let a = &p["attributes"];
-        assert_eq!(b.accessors[a["POSITION"].as_u64().unwrap() as usize]["count"], 2);
+        assert_eq!(b.accessors[a["POSITION"].as_u64().unwrap() as usize].count, 2);
         // Four columns hold degree 1 and part of degree 2: degree 1 stays.
         assert!(a.get("KHR_gaussian_splatting:SH_DEGREE_1_COEF_2").is_some());
         assert!(a.get("KHR_gaussian_splatting:SH_DEGREE_2_COEF_0").is_none());

@@ -55,12 +55,13 @@
         1.0
       ],
       "roughness": 0.5,
+      "metallic": 0.0,
       "alpha_mode": "MASK",
       "textured": true
     }
   ],
   "document": {
-    "nodes": 3,
+    "nodes": 4,
     "skins": 1,
     "joints": 2,
     "morph_targets": 2,
@@ -78,11 +79,13 @@
     ],
     "source": {
       "format": "PMX",
-      "version": 2.0,
-      "encoding": "UTF-16LE",
-      "name": "\u30e2\u30c7\u30eb",
+      "version": "2.0",
+      "textEncoding": "UTF-16LE",
+      "title": "\u30e2\u30c7\u30eb",
       "englishName": "model",
-      "comment": "\u30b3\u30e1\u30f3\u30c8"
+      "description": "\u30b3\u30e1\u30f3\u30c8",
+      "metersPerUnit": 0.08,
+      "handedness": "left"
     }
   },
   "facts": {
@@ -93,6 +96,9 @@
   },
   "json": {
     "/materials/0/doubleSided": true,
+    "/materials/0/extensions/KHR_materials_specular": {
+      "specularFactor": 0.214041
+    },
     "/meshes/0/extras/targetNames": [
       "smile",
       "half"
@@ -102,7 +108,7 @@
     "/meshes/0/extras/morphs/1/type": "bone",
     "/meshes/0/extras/morphs/1/offsets/0/translation": [
       0.0,
-      0.08,
+      1.0,
       -0.0
     ],
     "/asset/extras/source/materials/0/specularPower": 30.0,
@@ -113,11 +119,31 @@
   },
   "rig": [
     {
-      "node": "\u30bb\u30f3\u30bf\u30fc",
+      "node": "RootNode",
       "parent": null,
       "translation": [
+        0,
+        0,
+        0
+      ],
+      "rotation": [
+        0,
+        0,
+        0,
+        1
+      ],
+      "scale": [
+        0.08,
+        0.08,
+        0.08
+      ]
+    },
+    {
+      "node": "\u30bb\u30f3\u30bf\u30fc",
+      "parent": "RootNode",
+      "translation": [
         0.0,
-        0.8,
+        10.0,
         -0.0
       ],
       "rotation": [
@@ -125,6 +151,19 @@
         0,
         0,
         1
+      ],
+      "world": [
+        0.0,
+        0.8,
+        -0.0
+      ]
+    },
+    {
+      "node": "\u8155",
+      "world": [
+        0.0,
+        1.2,
+        -0.4
       ]
     },
     {
@@ -132,8 +171,8 @@
       "parent": "\u30bb\u30f3\u30bf\u30fc",
       "translation": [
         0.0,
-        0.4,
-        -0.4
+        5.0,
+        -5.0
       ]
     }
   ]

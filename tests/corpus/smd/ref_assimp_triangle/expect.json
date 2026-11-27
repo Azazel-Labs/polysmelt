@@ -1,0 +1,32 @@
+{
+  "spec": "Valve SMD (Studiomdl Data version 1): a real file, one triangle on one bone",
+  "source": "assimp/assimp at 711b4e9bbde2, test/models/SMD/triangle.smd (BSD-3-Clause, see ../LICENSE-assimp); expectations measured with assimp 6.0.5 (assimp-py 1.2.0)",
+  "triangles": 1,
+  "bounds": {
+    "min": [
+      0.0,
+      0.0,
+      -1.0
+    ],
+    "max": [
+      1.0,
+      0.0,
+      0.0
+    ]
+  },
+  "area": 0.5,
+  "position_set": "positions.f32",
+  "document": {
+    "joints": 1
+  },
+  "rig": [
+    {
+      "node": "TriangleTest0",
+      "world": [
+        0.0,
+        0.0,
+        0.0
+      ]
+    }
+  ]
+}

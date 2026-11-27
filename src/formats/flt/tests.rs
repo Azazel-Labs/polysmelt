@@ -205,15 +205,15 @@ const SQUARE: [Vertex; 4] = [
     ([0.0, 1.0, 0.0], [0.0, 1.0], None),
 ];
 
-fn read(b: &[u8], assets: &Memory) -> Result<Document<'static>> {
+fn read(b: &[u8], assets: &Memory) -> Result<Document> {
     load(Input::memory(b, "t.flt"), assets, Keep::ALL)
 }
 
-fn read_named(b: &[u8], name: &str, assets: &Memory) -> Result<Document<'static>> {
+fn read_named(b: &[u8], name: &str, assets: &Memory) -> Result<Document> {
     load(Input::memory(b, name), assets, Keep::ALL)
 }
 
-fn flat(doc: &Document<'_>) -> Mesh {
+fn flat(doc: &Document) -> Mesh {
     doc.flatten(Pose::Rest).unwrap().unwrap()
 }
 
@@ -244,11 +244,17 @@ fn one_square(version: i32, units: u8, fill: impl FnOnce(&mut Vec<u8>)) -> W {
 fn a_face_in_meters_and_y_up() {
     let w = one_square(1640, 4, |_| {});
     let doc = read(&w.bytes(), &Memory::new()).unwrap();
-    let src = &doc.json["asset"]["extras"]["source"];
+    let src = &doc.json()["asset"]["extras"]["source"];
     assert_eq!(src["format"], "OpenFlight");
     assert_eq!(src["version"], "16.4");
-    assert_eq!(src["unit"], "ft");
-    let nodes = doc.json["nodes"].as_array().unwrap();
+    assert_eq!(src["unit"], "foot");
+    let info = doc.source_info();
+    assert_eq!(info.meters_per_unit, Fact::Declared(0.3048));
+    assert_eq!(info.up_axis, Fact::Declared(Axis::PosZ));
+    assert!(info.converted.units && info.converted.up_axis);
+    assert_eq!(info.created, None);
+    assert_eq!(info.georeference, None);
+    let nodes = doc.json()["nodes"].as_array().unwrap();
     assert_eq!(nodes[0]["name"], "db");
     assert_eq!(nodes[1]["name"], "g1");
     assert_eq!(nodes[2]["name"], "o1");
@@ -299,7 +305,7 @@ fn materials_colors_and_draw_types() {
         put(r, 40, &32768u16.to_be_bytes());
     });
     let doc = read(&w.bytes(), &Memory::new()).unwrap();
-    let mf = &doc.json["materials"][0];
+    let mf = &doc.json()["materials"][0];
     assert_eq!(mf["alphaMode"], "BLEND");
     let m = flat(&doc);
     let c = m.prims[0].colors[0];
@@ -346,7 +352,7 @@ fn levels_of_detail_switches_and_matrices() {
     w.push().face("c", &v, |_| {}).pop();
     w.pop();
     let doc = read(&w.bytes(), &Memory::new()).unwrap();
-    let nodes = doc.json["nodes"].as_array().unwrap();
+    let nodes = doc.json()["nodes"].as_array().unwrap();
     let names: Vec<&str> = nodes.iter().map(|n| n["name"].as_str().unwrap()).collect();
     assert!(names.contains(&"near") && !names.contains(&"far"), "{names:?}");
     assert!(names.contains(&"on") && !names.contains(&"off"), "{names:?}");
@@ -357,7 +363,7 @@ fn levels_of_detail_switches_and_matrices() {
     assert_eq!(moved["translation"], json!([5.0, 0.0, 0.0]));
     let near = nodes.iter().find(|n| n["name"] == "near").unwrap();
     assert_eq!(near["extras"]["openflight"]["switchIn"], json!(100.0));
-    let src = &doc.json["asset"]["extras"]["source"];
+    let src = &doc.json()["asset"]["extras"]["source"];
     assert_eq!(src["droppedLevelsOfDetail"], 1);
     assert_eq!(src["switchedOff"], 1);
     assert_eq!(flat(&doc).triangles(), 6);
@@ -391,12 +397,12 @@ fn instances_replicas_and_cycles() {
     // Two instances and four replicas.
     assert_eq!(m.triangles(), 12);
     // The instances share their mesh.
-    let meshes = doc.json["meshes"].as_array().unwrap();
+    let meshes = doc.json()["meshes"].as_array().unwrap();
     assert_eq!(meshes.len(), 2);
     let c = corners(&m);
     // The last replica, three moves along Y (−Z in glTF).
     assert!(c.iter().any(|&p| close(p, [1.0, 0.0, -7.0])), "{c:?}");
-    assert_eq!(doc.json["asset"]["extras"]["source"]["cycles"], 1);
+    assert_eq!(doc.json()["asset"]["extras"]["source"]["cycles"], 1);
 }
 
 #[test]
@@ -430,8 +436,8 @@ fn external_references_with_units_and_palettes() {
     // The child's feet become meters.
     let c = corners(&m);
     assert!(c.iter().any(|&p| close(p, [0.3048, 0.0, -0.3048])), "{c:?}");
-    let src = &doc.json["asset"]["extras"]["source"];
-    assert_eq!(src["missingFiles"], 1);
+    let src = &doc.json()["asset"]["extras"]["source"];
+    assert_eq!(src["missingFiles"].as_array().map(Vec::len), Some(1), "{src}");
     assert_eq!(src["cycles"], 2);
     assert!(doc.to_glb().is_ok());
 }
@@ -468,14 +474,14 @@ fn sgi_textures_are_embedded() {
     assert_eq!(m.images[0].mime, "image/png");
     assert_eq!(m.materials[0].color_image, Some(0));
     // The transparent pixel blends the material.
-    assert_eq!(doc.json["materials"][0]["alphaMode"], "BLEND");
+    assert_eq!(doc.json()["materials"][0]["alphaMode"], "BLEND");
     // Coordinates flip v: the file's (1, 1) corner is glTF's (1, 0).
     let p = &m.prims[0];
     let k = p.positions.iter().position(|&q| close(q, [1.0, 0.0, -1.0])).unwrap();
     assert_eq!(p.uvs[k], [1.0, 0.0]);
     // Missing, the texture is counted and the face kept.
     let doc = read(&w.bytes(), &Memory::new()).unwrap();
-    assert_eq!(doc.json["asset"]["extras"]["source"]["droppedTextures"], 1);
+    assert_eq!(doc.json()["asset"]["extras"]["source"]["droppedTextures"], 1);
 }
 
 #[test]
@@ -501,12 +507,12 @@ fn light_sources_become_lights() {
     });
     w.pop();
     let doc = read(&w.bytes(), &Memory::new()).unwrap();
-    let lights = &doc.json["extensions"]["KHR_lights_punctual"]["lights"];
+    let lights = &doc.json()["extensions"]["KHR_lights_punctual"]["lights"];
     assert_eq!(lights[0]["type"], "spot");
     assert_eq!(lights[0]["name"], "lamp");
     let outer = lights[0]["spot"]["outerConeAngle"].as_f64().unwrap();
     assert!((outer - 30f64.to_radians()).abs() < 1e-6);
-    let node = doc.json["nodes"]
+    let node = doc.json()["nodes"]
         .as_array()
         .unwrap()
         .iter()
@@ -578,14 +584,14 @@ fn animated_groups_take_turns() {
     }
     w.pop().pop();
     let doc = read(&w.bytes(), &Memory::new()).unwrap();
-    let anim = &doc.json["animations"][0];
+    let anim = &doc.json()["animations"][0];
     assert_eq!(anim["channels"].as_array().unwrap().len(), 3);
     assert_eq!(anim["samplers"][0]["interpolation"], "STEP");
     // At rest, only the first shows.
     assert_eq!(flat(&doc).triangles(), 6);
-    let nodes = doc.json["nodes"].as_array().unwrap();
+    let nodes = doc.json()["nodes"].as_array().unwrap();
     let frames: Vec<&Value> = (0..3)
-        .map(|k| nodes.iter().find(|n| n["name"] == format!("frame {k}")).unwrap())
+        .map(|k| nodes.iter().find(|n| n["name"] == format!("frame{k}")).unwrap())
         .collect();
     assert!(frames[0].get("scale").is_none());
     assert_eq!(frames[1]["scale"], json!([0.0, 0.0, 0.0]));
@@ -668,7 +674,12 @@ fn hostile_files_never_panic() {
     }
     wide.instance(61, 20).pop();
     let doc = read(&wide.bytes(), &assets).unwrap();
-    assert!(doc.json["asset"]["extras"]["source"]["droppedNodes"].as_u64().unwrap() > 0);
+    assert!(
+        doc.json()["asset"]["extras"]["source"]["droppedNodes"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
     // Nested past the depth limit, they stop there.
     let mut tall = W::new(1640, 0);
     let v = tall.vertices(&SQUARE);
@@ -679,7 +690,7 @@ fn hostile_files_never_panic() {
     }
     tall.instance(61, 39).pop();
     let doc = read(&tall.bytes(), &assets).unwrap();
-    assert_eq!(doc.json["asset"]["extras"]["source"]["tooDeep"], 1);
+    assert_eq!(doc.json()["asset"]["extras"]["source"]["tooDeep"], 1);
     assert_eq!(flat(&doc).triangles(), 2);
     // A replicate of 32767 copies, each a replicate of 32767.
     let mut rep = W::new(1640, 0);
@@ -693,5 +704,65 @@ fn hostile_files_never_panic() {
     rep.group("b").matrix(m).rec(60, &[0x7F, 0xFF, 0, 0]).push();
     rep.face("f", &v, |_| {}).pop().pop().pop();
     let doc = read(&rep.bytes(), &assets).unwrap();
-    assert!(doc.json["asset"]["extras"]["source"]["droppedNodes"].as_u64().unwrap() > 0);
+    assert!(
+        doc.json()["asset"]["extras"]["source"]["droppedNodes"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+}
+
+#[test]
+fn the_header_says_when_and_where() {
+    let mut w = one_square(1640, 0, |_| {});
+    // The header record's body follows its 4 bytes of opcode and length.
+    let body = |at: usize| at - 4;
+    let h = &mut w.b[4..];
+    put(h, body(20), b"Tue Mar 05 14:30:00 2024");
+    put(h, body(92), &4i32.to_be_bytes());
+    put(
+        h,
+        body(188),
+        &[47.0f64.to_be_bytes(), (-123.0f64).to_be_bytes()].concat(),
+    );
+    put(
+        h,
+        body(204),
+        &[48.0f64.to_be_bytes(), (-122.0f64).to_be_bytes()].concat(),
+    );
+    put(
+        h,
+        body(220),
+        &[47.5f64.to_be_bytes(), (-122.5f64).to_be_bytes()].concat(),
+    );
+    put(h, body(276), &10i16.to_be_bytes());
+    let doc = read(&w.bytes(), &Memory::new()).unwrap();
+    let info = doc.source_info();
+    assert_eq!(info.format.as_deref(), Some("OpenFlight"));
+    assert_eq!(info.unit.as_deref(), Some("meter"));
+    assert_eq!(info.meters_per_unit, Fact::Declared(1.0));
+    assert!(!info.converted.units && info.converted.up_axis);
+    assert_eq!(info.created.as_deref(), Some("2024-03-05T14:30:00"));
+    let g = info.georeference.unwrap();
+    assert_eq!(g["latitude"], 47.5);
+    assert_eq!(g["longitude"], -122.5);
+    assert_eq!(g["southwest"], json!([47.0, -123.0]));
+    assert_eq!(g["projection"], "UTM");
+    assert_eq!(g["ellipsoid"], "WGS 84");
+    assert_eq!(g["utmZone"], 10);
+    assert!(doc.json()["asset"]["extras"]["source"].get("date").is_none());
+}
+
+#[test]
+fn a_face_with_a_corner_that_isnt_there_is_dropped_whole() {
+    let mut w = W::new(1640, 0);
+    let v = w.vertices(&SQUARE);
+    w.push().group("g1").push().object("o1", 0).push();
+    w.face("good", &v, |_| {});
+    // Its last corner names no vertex of the palette: not drawn as a triangle of the other three.
+    w.face("bad", &[v[0], v[1], v[2], 9999], |_| {});
+    w.pop().pop().pop();
+    let doc = read(&w.bytes(), &Memory::new()).unwrap();
+    assert_eq!(flat(&doc).triangles(), 2);
+    assert_eq!(doc.json()["asset"]["extras"]["source"]["droppedGeometry"], 1);
 }

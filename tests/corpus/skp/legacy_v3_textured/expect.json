@@ -1,8 +1,10 @@
 {
   "spec": "SketchUp .skp (closed; as openskp reads it): one face painted with a textured material, its PNG stored inline (SketchUp 3)",
   "source": "saved by SketchUp, from openskp's test fixtures (packages/cpp/tests/fixtures)",
-  "facts": {
-    "application": "SketchUp 3"
+  "document": {
+    "source": {
+      "tool": "SketchUp 3"
+    }
   },
   "triangles": 2,
   "area": 0.258064,

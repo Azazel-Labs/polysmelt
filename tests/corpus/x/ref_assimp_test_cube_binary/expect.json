@@ -1,0 +1,19 @@
+{
+  "spec": "DirectX .x (X File Format Reference, DirectX 9 SDK): a real file, a cube in binary",
+  "source": "assimp/assimp at 711b4e9bbde2, test/models/X/test_cube_binary.x (BSD-3-Clause, see ../LICENSE-assimp); expectations measured with assimp 6.0.5 (assimp-py 1.2.0)",
+  "triangles": 12,
+  "bounds": {
+    "min": [
+      -1.0,
+      -1.0,
+      -1.0
+    ],
+    "max": [
+      1.0,
+      1.0,
+      1.000001
+    ]
+  },
+  "area": 23.999998,
+  "position_set": "positions.f32"
+}

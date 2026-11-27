@@ -1,0 +1,40 @@
+<?xml version="1.0"?>
+<irr_scene>
+<attributes>
+</attributes>
+<node type="cube">
+<attributes>
+<string name="Name" value="box" />
+<float name="Size" value="1" />
+</attributes>
+</node>
+<node type="light">
+<attributes>
+<string name="Name" value="lamp" />
+<vector3d name="Position" value="0, 10, 0" />
+<enum name="LightType" value="Point" />
+<colorf name="DiffuseColor" value="1, 0.5, 0.25, 1" />
+<float name="Radius" value="50" />
+</attributes>
+</node>
+<node type="light">
+<attributes>
+<string name="Name" value="spot" />
+<vector3d name="Position" value="0, 10, 5" />
+<enum name="LightType" value="Spot" />
+<float name="OuterCone" value="40" />
+<float name="InnerCone" value="20" />
+</attributes>
+</node>
+<node type="camera">
+<attributes>
+<string name="Name" value="eye" />
+<vector3d name="Position" value="0, 0, -10" />
+<vector3d name="Target" value="0, 0, 0" />
+<float name="Fovy" value="0.8" />
+<float name="Aspect" value="1.5" />
+<float name="ZNear" value="0.5" />
+<float name="ZFar" value="500" />
+</attributes>
+</node>
+</irr_scene>

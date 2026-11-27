@@ -9,18 +9,18 @@
     "joints": 2,
     "frames": 3,
     "animations": 2,
-    "meshes": 1,
-    "frame_rate_guessed": true
+    "meshes": 1
   },
   "document": {
-    "nodes": 3,
+    "nodes": 4,
     "skins": 1,
     "joints": 2,
     "animations": 2,
     "node_names": [
       "root",
       "arm",
-      "quad"
+      "quad",
+      "RootNode"
     ],
     "attributes": [
       "POSITION",
@@ -39,7 +39,10 @@
       "loop": true
     },
     "/animations/1/name": "hold",
-    "/animations/1/extras": null,
+    "/animations/1/extras": {
+      "frameRate": 30.0
+    },
+    "/asset/extras/source/frameRate": 10.0,
     "/meshes/0/primitives/0/attributes/TANGENT": null
   },
   "uvs_include": [
@@ -96,13 +99,33 @@
   ],
   "rig": [
     {
-      "node": "root",
+      "node": "RootNode",
       "parent": null,
+      "translation": [
+        0,
+        0,
+        0
+      ],
       "rotation": [
         -0.7071067811865476,
         0.0,
         0.0,
         0.7071067811865476
+      ],
+      "scale": [
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "node": "root",
+      "parent": "RootNode",
+      "rotation": [
+        0,
+        0,
+        0,
+        1
       ],
       "scale": [
         1,

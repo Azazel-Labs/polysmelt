@@ -13,18 +13,20 @@
 //!
 //! - `Frame` is a node, its `FrameTransformMatrix` the node's transform. A mesh outside any frame hangs from a node
 //!   of its own; a frame's reference to a named mesh instances it there.
-//! - `Mesh` becomes a mesh with a primitive per material. Faces of more than three corners are cut into fans.
+//! - `Mesh` becomes a mesh with a primitive per material. Faces of more than three corners are cut into
+//!   triangles in their plane, so one that isn't convex keeps its outline; one naming a vertex that isn't there
+//!   is dropped and counted (`droppedGeometry` in the source extras).
 //!   `MeshNormals` keeps its own face list, so a corner's vertex is its position and its normal together.
 //!   `MeshTextureCoords` (several sets), `MeshVertexColors` (sRGB, made linear), and the texture coordinates,
 //!   normals and colors in `DeclData` that the mesh doesn't already give, are carried, as are extra texture
 //!   coordinate sets in `FVFData`. Tangents and binormals in `DeclData` are dropped: glTF computes its own.
 //! - `MeshMaterialList` gives each face a material, by an index into the materials it holds or refers to; a list
 //!   shorter than the faces repeats its last index. `Material` is its face color (sRGB, made linear, alpha as
-//!   opacity), its emissive color, and its specular power as roughness (`1 - sqrt(power / 1000)`, as for OBJ); the
-//!   specular color is dropped. `TextureFilename` is the base color texture and `NormalmapFilename` the normal map.
+//!   opacity), its emissive color, and its specular power and color as the highlight (the classic material every
+//!   reader reads one way, `legacy_material`). Faces with no material take the default one. `TextureFilename` is the base color texture and `NormalmapFilename` the normal map.
 //! - `SkinWeights` names a bone (a frame), the vertices it moves with their weights, and the offset matrix from the
-//!   mesh into the bone, which is the joint's inverse bind matrix. A skinned mesh hangs from a root node of its own,
-//!   since a skin places it. A bone no frame is named for becomes a root node where its offset puts it, and
+//!   mesh into the bone, which is the joint's inverse bind matrix. A skinned mesh hangs from a node of its own beside the
+//!   file's frames, since a skin places it. A bone no frame is named for becomes a node there where its offset puts it, and
 //!   vertices no bone moves are bound to the mesh's frame, so they stay where it puts them.
 //! - `AnimationSet` is an animation and each `Animation` in it animates the frame it refers to. `AnimationKey`s of
 //!   type 0 (rotation, a quaternion stored w first), 1 (scale), 2 (translation) and 3 or 4 (a matrix, decomposed)
@@ -36,6 +38,11 @@
 //! scene is mirrored through the XY plane, and faces (clockwise in front, as Direct3D draws them) keep facing out.
 //! Texture coordinates start at the top left, as glTF's do.
 //!
+//! The source info gives the header's version, Direct3D's left-handedness (declared: the format is Direct3D's) and
+//! Y up (assumed: a convention the file doesn't state), its handedness converted, and units of unknown length. Its `frameRate` is `AnimTicksPerSecond`, or an assumed
+//! 4800 when the file has animations and doesn't say. The encoding (`ascii` or `binary`, with `compressed` beside it when it is) and float size
+//! are kept as `encoding` and `floatSize`.
+//!
 //! Nothing is allocated from a count the file gives without the data to back it, objects can nest only so deep,
 //! and inflating stops at the size the file declares and at a gigabyte. A file that doesn't parse is an error.
 
@@ -44,26 +51,29 @@ use std::path::Path as FsPath;
 
 use serde_json::json;
 
-use super::scene::{self, Animation, Bin, Channel, IDENTITY, Interp, M4, MAX_INFLUENCES, Node, Path, Primitive};
+use super::inflate::{MAX_INFLATED, inflate};
+use super::scene::{self, Animation, Channel, IDENTITY, Interp, M4, Node, Path, Primitive};
 use super::scene::{Scene, SceneMesh, Skin};
+use super::stream::f64_from;
 use crate::assets::Assets;
+use crate::bytes::Bin;
 use crate::document::{Document, Keep};
 use crate::images::Images;
-use crate::mesh::{Material, srgb_to_linear};
+use crate::legacy_material::{Phong, Rgb};
+use crate::mesh::srgb_to_linear;
 use crate::num::{f32_of, u32_of};
-use crate::{Context, Result};
+use crate::source::{Axis, Fact, Handedness};
+use crate::{Context, ErrorKind, Result};
 
 /// How deep data objects may nest.
 const MAX_DEPTH: usize = 256;
-/// The most bytes a compressed file may inflate to.
-const MAX_INFLATED: usize = 1 << 30;
-/// Ticks per second when the file doesn't say.
+/// Ticks per second when the file doesn't say: Direct3D's own default, which its animation controller takes for
+/// a file with no `AnimTicksPerSecond` (D3DX documents 4800). So that, not the readers' shared assumption.
 const DEFAULT_TICKS: f64 = 4800.0;
-/// The most texture coordinate sets a mesh keeps.
-const MAX_UV_SETS: usize = 8;
+use super::scene::MAX_UV_SETS;
 
 /// Reads the model.
-pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document<'static>> {
+pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document> {
     let data = input.read()?;
     let file = parse_file(&data)?;
     let mut b = Build::new(assets, keep, input.dir());
@@ -73,24 +83,32 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         images,
         stats,
         ticks,
+        animated,
         ..
     } = b;
     ensure!(
         !scene.nodes.is_empty(),
+        Empty,
         "the .x file is empty: it has no frames or meshes"
     );
     scene.images = images.list;
     scene.mirror_z();
-    scene.source.insert("format".into(), json!("DirectX"));
-    scene.source.insert("version".into(), json!(file.version));
+    scene.info.format = Some("DirectX".into());
+    scene.info.version = Some(file.version);
+    scene.info.up_axis = Fact::Assumed(Axis::PosY);
+    scene.info.handedness = Fact::Declared(Handedness::Left);
+    scene.info.frame_rate = match ticks {
+        Some(t) => Fact::Declared(t),
+        None if animated => Fact::Assumed(DEFAULT_TICKS),
+        None => Fact::Unknown,
+    };
     scene.source.insert("encoding".into(), json!(file.encoding));
+    if file.compressed {
+        scene.source.insert("compressed".into(), json!(true));
+    }
     scene
         .source
         .insert("floatSize".into(), json!(if file.double { 64 } else { 32 }));
-    if let Some(t) = ticks {
-        let t = whole(t).map_or_else(|| json!(t), |n| json!(n));
-        scene.source.insert("ticksPerSecond".into(), t);
-    }
     scene.facts.insert("frames".into(), json!(stats.frames));
     scene.facts.insert("meshes".into(), json!(stats.meshes));
     if stats.skinned > 0 {
@@ -121,6 +139,8 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
 struct File {
     version: String,
     encoding: &'static str,
+    /// Whether the body is MSZIP-compressed (`tzip`, `bzip`).
+    compressed: bool,
     double: bool,
     objects: Vec<Obj>,
 }
@@ -129,6 +149,7 @@ struct File {
 fn parse_file(data: &[u8]) -> Result<File> {
     ensure!(
         data.len() >= 16 && data[..4] == *b"xof ",
+        UnknownFormat,
         "not a DirectX .x file (no xof header)"
     );
     let major = std::str::from_utf8(&data[4..6])
@@ -144,11 +165,11 @@ fn parse_file(data: &[u8]) -> Result<File> {
     let format = data[8..12].to_ascii_lowercase();
     let double = &data[12..16] == b"0064";
     let (encoding, binary, compressed) = match &format[..] {
-        b"txt " => ("text", false, false),
+        b"txt " => ("ascii", false, false),
         b"bin " => ("binary", true, false),
-        b"tzip" => ("compressed text", false, true),
-        b"bzip" => ("compressed binary", true, true),
-        _ => bail!("unknown .x encoding {:?}", scene::text(&data[8..12])),
+        b"tzip" => ("ascii", false, true),
+        b"bzip" => ("binary", true, true),
+        _ => bail!(Unsupported, "unknown .x encoding {:?}", scene::text(&data[8..12])),
     };
     let inflated;
     let body = if compressed {
@@ -169,6 +190,7 @@ fn parse_file(data: &[u8]) -> Result<File> {
     Ok(File {
         version,
         encoding,
+        compressed,
         double,
         objects,
     })
@@ -182,233 +204,26 @@ fn mszip(data: &[u8]) -> Result<Vec<u8>> {
     let mut b = Bin::new(data, "compressed .x");
     let total = crate::num::usize_of(u64::from(b.u32()?));
     let want = total.saturating_sub(16);
-    ensure!(want <= MAX_INFLATED, "compressed .x file too big ({total} bytes)");
+    ensure!(
+        want <= MAX_INFLATED,
+        LimitExceeded,
+        "compressed .x file too big ({total} bytes)"
+    );
     let mut out = Vec::with_capacity(want.min(1 << 20));
     while out.len() < want && b.left() >= 4 {
         let size = usize::from(b.u16()?);
         let packed = usize::from(b.u16()?);
-        ensure!(packed >= 2, "bad block in a compressed .x file");
+        ensure!(packed >= 2, Corrupt, "bad block in a compressed .x file");
         let block = b.bytes(packed)?;
-        ensure!(block[..2] == *b"CK", "bad block in a compressed .x file (no CK)");
+        ensure!(
+            block[..2] == *b"CK",
+            Corrupt,
+            "bad block in a compressed .x file (no CK)"
+        );
         let limit = size.min(want - out.len());
         inflate(&block[2..], &mut out, limit)?;
     }
     Ok(out)
-}
-
-/// Reads a deflate stream's bits, least significant first.
-struct Bits<'a> {
-    data: &'a [u8],
-    at: usize,
-    buf: usize,
-    count: u32,
-}
-
-impl Bits<'_> {
-    /// The next `n` bits (at most 16).
-    fn get(&mut self, n: u32) -> Result<usize> {
-        while self.count < n {
-            let byte = *self.data.get(self.at).context("compressed .x data cut short")?;
-            self.at += 1;
-            self.buf |= usize::from(byte) << self.count;
-            self.count += 8;
-        }
-        let v = self.buf & ((1usize << n) - 1);
-        self.buf >>= n;
-        self.count -= n;
-        Ok(v)
-    }
-
-    /// The next bit, as an integer.
-    fn bit(&mut self) -> Result<i32> {
-        Ok(i32::from(self.get(1)? != 0))
-    }
-}
-
-/// A canonical Huffman code: how many codes there are of each length, and the symbols in code order.
-struct Huff {
-    count: [u16; 16],
-    symbols: Vec<u16>,
-}
-
-impl Huff {
-    /// The code for these code lengths (each below 16); an over-subscribed set is an error.
-    fn new(lengths: &[u8]) -> Result<Self> {
-        let mut count = [0u16; 16];
-        for &l in lengths {
-            count[usize::from(l)] += 1;
-        }
-        let mut left = 1i32;
-        for &c in &count[1..] {
-            left = (left << 1) - i32::from(c);
-            ensure!(left >= 0, "bad Huffman code in a compressed .x file");
-        }
-        let mut offsets = [0u16; 16];
-        for len in 1..15 {
-            offsets[len + 1] = offsets[len] + count[len];
-        }
-        let mut symbols = vec![0u16; lengths.len()];
-        for (s, &l) in (0u16..).zip(lengths) {
-            if l != 0 {
-                let o = &mut offsets[usize::from(l)];
-                symbols[usize::from(*o)] = s;
-                *o += 1;
-            }
-        }
-        Ok(Self { count, symbols })
-    }
-
-    /// Decodes one symbol.
-    fn decode(&self, bits: &mut Bits<'_>) -> Result<u16> {
-        let (mut code, mut first, mut index) = (0i32, 0i32, 0i32);
-        for &c in &self.count[1..] {
-            code |= bits.bit()?;
-            let count = i32::from(c);
-            if code - count < first {
-                let i = usize::try_from(index + code - first).ok();
-                return i
-                    .and_then(|i| self.symbols.get(i))
-                    .copied()
-                    .context("bad Huffman code in a compressed .x file");
-            }
-            index += count;
-            first = (first + count) << 1;
-            code <<= 1;
-        }
-        bail!("bad Huffman code in a compressed .x file")
-    }
-}
-
-const LENGTH_BASE: [u16; 29] = [
-    3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258,
-];
-const LENGTH_EXTRA: [u8; 29] = [
-    0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0,
-];
-const DIST_BASE: [u16; 30] = [
-    1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145,
-    8193, 12289, 16385, 24577,
-];
-const DIST_EXTRA: [u8; 30] = [
-    0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13,
-];
-/// The order code length code lengths come in.
-const CODE_ORDER: [usize; 19] = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15];
-
-/// Inflates the raw deflate stream `data` onto `out`, adding at most `limit` bytes; what `out` already holds is the
-/// window a match may reach back into.
-fn inflate(data: &[u8], out: &mut Vec<u8>, limit: usize) -> Result<()> {
-    let end = out.len().saturating_add(limit);
-    let mut bits = Bits {
-        data,
-        at: 0,
-        buf: 0,
-        count: 0,
-    };
-    loop {
-        let last = bits.get(1)? == 1;
-        match bits.get(2)? {
-            0 => {
-                // Stored: aligned to a byte, a length and its complement, then the bytes.
-                bits.buf = 0;
-                bits.count = 0;
-                let mut b = Bin::new(data, "compressed .x");
-                b.seek(bits.at)?;
-                let len = b.u16()?;
-                let not = b.u16()?;
-                ensure!(len == !not, "bad stored block in a compressed .x file");
-                let len = usize::from(len);
-                ensure!(len <= end - out.len(), "compressed .x block inflates past its size");
-                out.extend_from_slice(b.bytes(len)?);
-                bits.at = b.at;
-            }
-            1 => {
-                let mut lengths = [0u8; 288];
-                lengths[..144].fill(8);
-                lengths[144..256].fill(9);
-                lengths[256..280].fill(7);
-                lengths[280..].fill(8);
-                let lit = Huff::new(&lengths)?;
-                let dist = Huff::new(&[5; 30])?;
-                codes(&mut bits, out, end, &lit, &dist)?;
-            }
-            2 => {
-                let (lit, dist) = dynamic(&mut bits)?;
-                codes(&mut bits, out, end, &lit, &dist)?;
-            }
-            _ => bail!("bad block type in a compressed .x file"),
-        }
-        if last || (out.len() >= end && bits.at >= data.len()) {
-            return Ok(());
-        }
-    }
-}
-
-/// Reads a dynamic block's literal and distance codes.
-fn dynamic(bits: &mut Bits<'_>) -> Result<(Huff, Huff)> {
-    let nlen = bits.get(5)? + 257;
-    let ndist = bits.get(5)? + 1;
-    let ncode = bits.get(4)? + 4;
-    ensure!(nlen <= 286 && ndist <= 30, "bad dynamic block in a compressed .x file");
-    let mut lengths = [0u8; 320];
-    for &k in &CODE_ORDER[..ncode] {
-        lengths[k] = u8::try_from(bits.get(3)?).unwrap_or(0);
-    }
-    let lencode = Huff::new(&lengths[..19])?;
-    lengths = [0u8; 320];
-    let mut at = 0;
-    while at < nlen + ndist {
-        let sym = lencode.decode(bits)?;
-        if sym < 16 {
-            lengths[at] = u8::try_from(sym).unwrap_or(0);
-            at += 1;
-            continue;
-        }
-        let (value, repeat) = match sym {
-            16 => {
-                ensure!(at > 0, "bad dynamic block in a compressed .x file");
-                (lengths[at - 1], 3 + bits.get(2)?)
-            }
-            17 => (0, 3 + bits.get(3)?),
-            _ => (0, 11 + bits.get(7)?),
-        };
-        ensure!(at + repeat <= nlen + ndist, "bad dynamic block in a compressed .x file");
-        lengths[at..at + repeat].fill(value);
-        at += repeat;
-    }
-    ensure!(
-        lengths[256] != 0,
-        "bad dynamic block in a compressed .x file (no end code)"
-    );
-    Ok((Huff::new(&lengths[..nlen])?, Huff::new(&lengths[nlen..nlen + ndist])?))
-}
-
-/// Decodes a compressed block's literals and matches until its end code, up to `end` bytes in all.
-fn codes(bits: &mut Bits<'_>, out: &mut Vec<u8>, end: usize, lit: &Huff, dist: &Huff) -> Result<()> {
-    loop {
-        let sym = lit.decode(bits)?;
-        if let Ok(byte) = u8::try_from(sym) {
-            ensure!(out.len() < end, "compressed .x block inflates past its size");
-            out.push(byte);
-            continue;
-        }
-        if sym == 256 {
-            return Ok(());
-        }
-        let i = usize::from(sym - 257);
-        ensure!(i < 29, "bad length code in a compressed .x file");
-        let len = usize::from(LENGTH_BASE[i]) + bits.get(u32::from(LENGTH_EXTRA[i]))?;
-        let d = usize::from(dist.decode(bits)?);
-        ensure!(d < 30, "bad distance code in a compressed .x file");
-        let back = usize::from(DIST_BASE[d]) + bits.get(u32::from(DIST_EXTRA[d]))?;
-        ensure!(back <= out.len(), "compressed .x data reaches back too far");
-        ensure!(len <= end - out.len(), "compressed .x block inflates past its size");
-        let from = out.len() - back;
-        for k in 0..len {
-            let byte = out[from + k];
-            out.push(byte);
-        }
-    }
 }
 
 // --- Tokens and objects --------------------------------------------------------------------------------------------
@@ -560,7 +375,7 @@ impl<'a> Lexer<'a> {
                 // Punctuation, and the type keywords of template declarations.
                 12..=20 | 40..=53 => {}
                 31 => return Ok(Tok::Word(b"template")),
-                _ => bail!("unknown token {id} in a binary .x file"),
+                _ => bail!(Corrupt, "unknown token {id} in a binary .x file"),
             }
         }
     }
@@ -610,7 +425,7 @@ fn parse(lex: &mut Lexer<'_>) -> Result<Vec<Obj>> {
                     match lex.next()? {
                         Tok::Close | Tok::End => break,
                         Tok::Word(w) | Tok::Str(w) => name = scene::text(w),
-                        Tok::Open => bail!("an object inside a reference in a .x file"),
+                        Tok::Open => bail!(Corrupt, "an object inside a reference in a .x file"),
                         Tok::Num(_) | Tok::Guid => {}
                     }
                 }
@@ -623,7 +438,7 @@ fn parse(lex: &mut Lexer<'_>) -> Result<Vec<Obj>> {
                     stack[top - 1].kids.push(o);
                 }
             }
-            Tok::Word(w) if numeric(w) => word_value(&mut stack[top], w),
+            Tok::Word(w) if numeric(w) || not_finite(w) => word_value(&mut stack[top], w),
             Tok::Word(w) => {
                 // An object's header: a template name, then an optional name and GUID, then `{`.
                 let header = match lex.peek(0)? {
@@ -647,7 +462,11 @@ fn parse(lex: &mut Lexer<'_>) -> Result<Vec<Obj>> {
                     skip_object(lex)?;
                     continue;
                 }
-                ensure!(stack.len() <= MAX_DEPTH, "objects nest too deeply in a .x file");
+                ensure!(
+                    stack.len() <= MAX_DEPTH,
+                    LimitExceeded,
+                    "objects nest too deeply in a .x file"
+                );
                 stack.push(Obj {
                     kind: scene::text(w),
                     name: name.map(scene::text).unwrap_or_default(),
@@ -688,14 +507,14 @@ fn numeric(w: &[u8]) -> bool {
         .is_some_and(|&c| c.is_ascii_digit() || matches!(c, b'-' | b'+' | b'.'))
 }
 
-/// A bare word among an object's values: a number, or 0 for the forms some writers give a NaN or infinity
-/// (`-1.#IND00`, `1.#QNAN0`), or else a string.
+/// A bare word among an object's values: a number, or else a string. A value that isn't finite is a number
+/// too, read as 0 so the values after it stay in their places, in any of the forms writers give one: `nan`,
+/// `inf` and `infinity` (signed or not, in any case, `nan(ind)` too) and the older `-1.#IND00`, `1.#QNAN0` and
+/// `1.#INF00`.
 fn word_value(o: &mut Obj, w: &[u8]) {
     if numeric(w) {
-        if let Ok(s) = std::str::from_utf8(w)
-            && let Ok(x) = s.parse::<f64>()
-        {
-            o.nums.push(x);
+        if let Some(x) = f64_from(w) {
+            o.nums.push(if x.is_finite() { x } else { 0.0 });
             return;
         }
         if w.contains(&b'#') {
@@ -703,7 +522,21 @@ fn word_value(o: &mut Obj, w: &[u8]) {
             return;
         }
     }
+    if not_finite(w) {
+        o.nums.push(0.0);
+        return;
+    }
     o.strs.push(scene::text(w));
+}
+
+/// Whether a word spells a NaN or an infinity as C and its kin print them.
+fn not_finite(w: &[u8]) -> bool {
+    let w = w.strip_prefix(b"-").or_else(|| w.strip_prefix(b"+")).unwrap_or(w);
+    let is = |s: &[u8]| w.eq_ignore_ascii_case(s);
+    is(b"nan")
+        || is(b"inf")
+        || is(b"infinity")
+        || (w.len() > 4 && w[..4].eq_ignore_ascii_case(b"nan(") && w.ends_with(b")"))
 }
 
 /// A whole number from 0 to `u32::MAX`.
@@ -752,10 +585,9 @@ impl<'a> Nums<'a> {
     }
 
     fn f64(&mut self) -> Result<f64> {
-        let x = *self
-            .v
-            .get(self.at)
-            .with_context(|| format!("{} in a .x file is cut short", self.what))?;
+        let x = *self.v.get(self.at).with_context(ErrorKind::Truncated, || {
+            format!("{} in a .x file is cut short", self.what)
+        })?;
         self.at += 1;
         Ok(x)
     }
@@ -775,11 +607,14 @@ impl<'a> Nums<'a> {
 
     /// A count of items `width` numbers each, refused when there aren't the numbers to hold them.
     fn count(&mut self, width: usize) -> Result<usize> {
-        let n = whole(self.f64()?).with_context(|| format!("{} in a .x file has a bad count", self.what))?;
+        let n = whole(self.f64()?).with_context(ErrorKind::Corrupt, || {
+            format!("{} in a .x file has a bad count", self.what)
+        })?;
         let n = crate::num::usize_of(u64::from(n));
         ensure!(
             n.saturating_mul(width) <= self.left(),
-            "{} in a .x file counts {n} items, more than it holds",
+            Truncated,
+            "{} in a .x file is cut short: it counts {n} items, more than it holds",
             self.what
         );
         Ok(n)
@@ -856,6 +691,8 @@ struct Build<'a> {
     referenced: Vec<usize>,
     triangles: usize,
     ticks: Option<f64>,
+    /// Whether the file has animations, kept or not.
+    animated: bool,
     stats: Stats,
 }
 
@@ -876,6 +713,7 @@ impl<'a> Build<'a> {
             referenced: Vec::new(),
             triangles: 0,
             ticks: None,
+            animated: false,
             stats: Stats::default(),
         }
     }
@@ -917,6 +755,7 @@ impl<'a> Build<'a> {
         for (m, frame) in std::mem::take(&mut self.pending) {
             self.place(m, frame)?;
         }
+        self.animated = !sets.is_empty() || !loose.is_empty();
         if self.keep.animations {
             let ticks = self.ticks.unwrap_or(DEFAULT_TICKS);
             for s in sets {
@@ -1035,10 +874,8 @@ impl<'a> Build<'a> {
                 }
             }
         }
-        for l in &mut lists {
-            l.sort_by(|a, b| b.1.total_cmp(&a.1));
-            l.truncate(MAX_INFLUENCES);
-        }
+        // Two bones can name one frame: their weights add up before the strongest are kept.
+        lists.iter_mut().for_each(scene::strongest);
         // Vertices no bone moves stay with the mesh's frame: a joint at the frame (or at a node under it, when the
         // frame is a bone already) with no offset.
         let used = |p: &u32| lists.get(*p as usize).is_some_and(Vec::is_empty);
@@ -1058,7 +895,7 @@ impl<'a> Build<'a> {
         for (p, src) in mesh.prims.iter_mut().zip(&sources) {
             let influences = src.iter().map(|&v| lists[v as usize].len()).max().unwrap_or(0).max(1);
             p.influences = influences;
-            p.rest_joint = rest;
+            p.rest_joint = Some(rest);
             p.joints = vec![0; src.len() * influences];
             p.weights = vec![0.0; src.len() * influences];
             for (i, &v) in src.iter().enumerate() {
@@ -1110,6 +947,7 @@ impl<'a> Build<'a> {
         let limit = self.keep.triangles();
         ensure!(
             self.triangles <= limit,
+            LimitExceeded,
             "too many triangles to convert (more than {limit})"
         );
 
@@ -1184,9 +1022,16 @@ impl<'a> Build<'a> {
         let mut sources: Vec<Vec<u32>> = Vec::new();
         let mut welds: Vec<HashMap<(u32, u32), u32>> = Vec::new();
         let mut by_slot: HashMap<Option<usize>, usize> = HashMap::new();
+        let mut outline: Vec<[f32; 3]> = Vec::new();
+        let mut cut: Vec<[u32; 3]> = Vec::new();
         for (f, &(start, n)) in faces.iter().enumerate() {
             let cs = &corners[start..start + n];
-            if n < 3 || cs.iter().any(|&c| c as usize >= nv) {
+            if n < 3 {
+                continue;
+            }
+            // A face naming a vertex that isn't there is left out, and counted.
+            if cs.iter().any(|&c| c as usize >= nv) {
+                self.scene.dropped += 1;
                 continue;
             }
             let slot = slots.get(f).copied().flatten();
@@ -1204,8 +1049,13 @@ impl<'a> Build<'a> {
             for (k, &c) in cs.iter().enumerate() {
                 tri.push(corner(p, src, weld, &attrs, c, start + k));
             }
-            for k in 1..n - 1 {
-                p.indices.extend([tri[0], tri[k], tri[k + 1]]);
+            // Cut into triangles in its plane, so one that isn't convex keeps its outline.
+            outline.clear();
+            outline.extend(cs.iter().map(|&c| attrs.positions[c as usize]));
+            cut.clear();
+            crate::mesh::triangulate(&outline, &mut cut);
+            for t in &cut {
+                p.indices.extend(t.map(|k| tri[k as usize]));
             }
         }
 
@@ -1253,16 +1103,14 @@ impl<'a> Build<'a> {
             return i;
         }
         let v = |k: usize, d: f32| o.nums.get(k).map_or(d, |&x| f32_of(x));
-        let lin = |k: usize| srgb_to_linear(v(k, 1.0).clamp(0.0, 1.0));
-        let mut mat = Material::plain(&o.name, [lin(0), lin(1), lin(2), v(3, 1.0).clamp(0.0, 1.0)]);
-        let power = v(4, 0.0);
-        let power = if power.is_finite() {
-            power.clamp(0.0, 1000.0)
-        } else {
-            0.0
-        };
-        mat.roughness = 1.0 - (power / 1000.0).sqrt();
-        mat.emissive = [8, 9, 10].map(|k| srgb_to_linear(v(k, 0.0).clamp(0.0, 1.0)));
+        // The `Material` template: face color (RGBA), power, specular color and emissive color. The power is
+        // Direct3D's `D3DMATERIAL9.Power`, the exponent of its Blinn-Phong highlight.
+        let mut phong = Phong::new(Rgb::Srgb([v(0, 1.0), v(1, 1.0), v(2, 1.0)]));
+        phong.opacity = v(3, 1.0);
+        phong.exponent = Some(v(4, 0.0));
+        phong.specular = Some(Rgb::Srgb([5, 6, 7].map(|k| v(k, 0.0))));
+        phong.emissive = Rgb::Srgb([8, 9, 10].map(|k| v(k, 0.0)));
+        let mut mat = phong.pbr().material(&o.name);
         if self.keep.textures && self.keep.materials {
             if let Some(f) = o.kid("TextureFilename").and_then(|t| t.strs.first()) {
                 mat.color_image = self.texture(f);
@@ -1280,8 +1128,7 @@ impl<'a> Build<'a> {
     /// The image a texture file name refers to, when it's found.
     fn texture(&mut self, name: &str) -> Option<usize> {
         let name = name.replace("\\\\", "\\");
-        let path = self.assets.find(&name, self.dir)?;
-        self.images.file(self.assets, path, &name)
+        self.images.find(self.assets, &[name], &[self.dir])
     }
 
     /// Adds an animation set: a channel for each kind of key each `Animation` gives its frame.

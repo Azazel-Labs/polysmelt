@@ -21,24 +21,28 @@
 //! ignored.
 //!
 //! Values stay as written: BVH is Y up, as glTF is, and doesn't record its units (centimeters or inches, mostly), so
-//! nothing is scaled.
+//! nothing is scaled. The source info has the up axis `+Y` assumed, the units unknown, and `frameRate` one over the
+//! `Frame Time:`, declared, or assumed when the time is taken as a thirtieth.
 //!
 //! Rows are lines. A row with fewer numbers than there are channels, or with anything among them that isn't a finite
 //! number (a damaged frame, or the last one cut short by the end of the file), is left out, and the frames around it
 //! keep their times. Numbers past the channels are ignored, and so are rows past the `Frames:` count; a file with fewer
 //! rows than it declares keeps the ones it has. A header without a `Frames:` line reads rows to the end of the file. A
 //! `Frame Time:` that isn't a positive number of seconds, or is missing, is taken as a thirtieth of a second (some
-//! writers put 0), and noted in the facts. A hierarchy that doesn't parse is an error. Nothing is allocated from a
+//! writers put 0). A hierarchy that doesn't parse is an error. Nothing is allocated from a
 //! count the file gives: the nodes are capped, and the rows take room as they're read. Nesting is followed with a
 //! stack of open joints, not recursion, so any depth parses.
 
 use serde_json::{Map, Value, json};
 
 use super::Input;
-use super::stream::{self, f32_from, f64_from};
+use super::keys::{self, Path};
+use super::stream::{self, f32_from, f64_from, trim};
 use crate::Result;
 use crate::document::{Builder, Document, Keep};
 use crate::num::{f32_of, usize_of};
+use crate::quat;
+use crate::source::{Axis, Fact, SourceInfo};
 
 /// Nodes (joints and end sites) a file may have: far past any skeleton.
 const MAX_NODES: usize = 65_536;
@@ -159,13 +163,7 @@ struct Hierarchy {
 
 /// Up to 40 characters of `s`, for an error message.
 fn show(s: &[u8]) -> String {
-    String::from_utf8_lossy(s).chars().take(40).collect()
-}
-
-fn trim(s: &[u8]) -> &[u8] {
-    let start = s.iter().position(|&b| !stream::space(b)).unwrap_or(s.len());
-    let end = s.iter().rposition(|&b| !stream::space(b)).map_or(start, |e| e + 1);
-    &s[start..end]
+    crate::bytes::text(s).chars().take(40).collect()
 }
 
 /// The next token of `s` and what follows it. A brace is a token of its own, wherever it is.
@@ -203,13 +201,17 @@ impl Hierarchy {
     fn current(&self, what: &str, no: usize) -> Result<usize> {
         match self.open.last() {
             Some(&j) => Ok(j),
-            None => bail!("BVH line {no}: {what} outside any joint's braces"),
+            None => bail!(Corrupt, "BVH line {no}: {what} outside any joint's braces"),
         }
     }
 
     /// Adds a joint under the innermost open one (or as a root), waiting for its `{`.
     fn add(&mut self, name: String, end: bool) -> Result<()> {
-        ensure!(self.joints.len() < MAX_NODES, "BVH has more than {MAX_NODES} joints");
+        ensure!(
+            self.joints.len() < MAX_NODES,
+            LimitExceeded,
+            "BVH has more than {MAX_NODES} joints"
+        );
         let i = self.joints.len();
         match self.open.last() {
             Some(&p) => self.joints[p].children.push(i),
@@ -236,7 +238,11 @@ impl Hierarchy {
                 Want::Keyword => {}
                 Want::Offset(k) => {
                     let Some(v) = finite(tok) else {
-                        bail!("BVH line {no}: OFFSET needs three numbers, not `{}`", show(tok));
+                        bail!(
+                            Corrupt,
+                            "BVH line {no}: OFFSET needs three numbers, not `{}`",
+                            show(tok)
+                        );
                     };
                     let j = self.current("OFFSET", no)?;
                     self.joints[j].offset[k] = v;
@@ -247,6 +253,7 @@ impl Hierarchy {
                     let n = std::str::from_utf8(tok).ok().and_then(|s| s.parse::<usize>().ok());
                     let Some(n) = n.filter(|&n| n <= MAX_CHANNELS) else {
                         bail!(
+                            Corrupt,
                             "BVH line {no}: CHANNELS needs a count up to {MAX_CHANNELS}, not `{}`",
                             show(tok)
                         );
@@ -269,6 +276,7 @@ impl Hierarchy {
             if !self.started {
                 ensure!(
                     tok.eq_ignore_ascii_case(b"HIERARCHY"),
+                    UnknownFormat,
                     "not a BVH file: it starts with `{}`, not HIERARCHY",
                     show(tok)
                 );
@@ -279,6 +287,7 @@ impl Hierarchy {
                 && tok != b"{"
             {
                 bail!(
+                    Corrupt,
                     "BVH line {no}: `{{` should follow joint `{}`, not `{}`",
                     self.joints[j].name,
                     show(tok)
@@ -287,21 +296,30 @@ impl Hierarchy {
             let is = |k: &[u8]| tok.eq_ignore_ascii_case(k);
             if tok == b"{" {
                 let Some(j) = self.pending.take() else {
-                    bail!("BVH line {no}: `{{` opens no joint");
+                    bail!(Corrupt, "BVH line {no}: `{{` opens no joint");
                 };
                 self.open.push(j);
             } else if tok == b"}" {
-                ensure!(self.open.pop().is_some(), "BVH line {no}: `}}` closes no joint");
+                ensure!(
+                    self.open.pop().is_some(),
+                    Corrupt,
+                    "BVH line {no}: `}}` closes no joint"
+                );
             } else if is(b"ROOT") || is(b"JOINT") {
                 if is(b"ROOT") {
                     if let Some(&j) = self.open.last() {
                         bail!(
+                            Corrupt,
                             "BVH line {no}: ROOT inside joint `{}` (a `}}` is missing)",
                             self.joints[j].name
                         );
                     }
                 } else {
-                    ensure!(!self.open.is_empty(), "BVH line {no}: JOINT outside any joint's braces");
+                    ensure!(
+                        !self.open.is_empty(),
+                        Corrupt,
+                        "BVH line {no}: JOINT outside any joint's braces"
+                    );
                 }
                 // The name is the rest of the line, up to a `{` on it.
                 let cut = rest.iter().position(|&b| b == b'{').unwrap_or(rest.len());
@@ -310,17 +328,17 @@ impl Hierarchy {
                 let name = if name.is_empty() {
                     format!("joint{}", self.joints.len())
                 } else {
-                    String::from_utf8_lossy(name).into_owned()
+                    crate::bytes::text(name).into_owned()
                 };
                 self.add(name, false)?;
             } else if is(b"End") {
                 let site = token(rest).filter(|(t, _)| t.eq_ignore_ascii_case(b"Site"));
                 let Some((_, after)) = site else {
-                    bail!("BVH line {no}: `End` should be followed by `Site`");
+                    bail!(Corrupt, "BVH line {no}: `End` should be followed by `Site`");
                 };
                 rest = after;
                 let Some(&parent) = self.open.last() else {
-                    bail!("BVH line {no}: End Site outside any joint's braces");
+                    bail!(Corrupt, "BVH line {no}: End Site outside any joint's braces");
                 };
                 let name = format!("{}_end", self.joints[parent].name);
                 self.add(name, true)?;
@@ -331,6 +349,7 @@ impl Hierarchy {
                 let j = self.current("CHANNELS", no)?;
                 ensure!(
                     self.joints[j].channels.is_empty(),
+                    Corrupt,
                     "BVH line {no}: joint `{}` lists CHANNELS twice",
                     self.joints[j].name
                 );
@@ -340,7 +359,7 @@ impl Hierarchy {
                 self.finish()?;
                 return Ok(true);
             } else {
-                bail!("BVH line {no}: `{}` isn't part of a BVH hierarchy", show(tok));
+                bail!(Corrupt, "BVH line {no}: `{}` isn't part of a BVH hierarchy", show(tok));
             }
         }
         Ok(false)
@@ -348,18 +367,20 @@ impl Hierarchy {
 
     /// Checks the hierarchy is complete, at `MOTION` or the end of the file.
     fn finish(&self) -> Result<()> {
-        ensure!(self.started, "not a BVH file: it's empty");
+        ensure!(self.started, Empty, "not a BVH file: it's empty");
         if let Some(j) = self.pending.or(self.open.last().copied()) {
             bail!(
-                "BVH hierarchy ends inside joint `{}`: a brace is missing, or the file is cut short",
+                Truncated,
+                "BVH hierarchy is cut short inside joint `{}`, or a brace is missing",
                 self.joints[j].name
             );
         }
         ensure!(
             self.want == Want::Keyword,
-            "BVH hierarchy ends inside an OFFSET or CHANNELS"
+            Truncated,
+            "BVH hierarchy is cut short inside an OFFSET or CHANNELS"
         );
-        ensure!(!self.roots.is_empty(), "BVH hierarchy has no ROOT");
+        ensure!(!self.roots.is_empty(), Corrupt, "BVH hierarchy has no ROOT");
         Ok(())
     }
 }
@@ -412,7 +433,11 @@ impl Motion {
             if let Some(rest) = after_word(t, b"frames") {
                 let v = value(rest);
                 let Some(n) = std::str::from_utf8(v).ok().and_then(|s| s.parse::<u64>().ok()) else {
-                    bail!("BVH line {no}: the Frames count `{}` isn't a whole number", show(v));
+                    bail!(
+                        Corrupt,
+                        "BVH line {no}: the Frames count `{}` isn't a whole number",
+                        show(v)
+                    );
                 };
                 self.frames = Some(n);
             } else if let Some(rest) = after_word(t, b"frame").and_then(|r| after_word(trim(r), b"time")) {
@@ -425,6 +450,7 @@ impl Motion {
                 self.begin(columns, room, store);
             } else {
                 bail!(
+                    Corrupt,
                     "BVH line {no}: MOTION should go on with `Frames:` and `Frame Time:`, not `{}`",
                     show(t)
                 );
@@ -492,26 +518,6 @@ impl Motion {
     }
 }
 
-/// The Hamilton product `a·b` of quaternions `[x, y, z, w]`: rotating by `b`, then by `a`.
-fn mul(a: [f64; 4], b: [f64; 4]) -> [f64; 4] {
-    let [ax, ay, az, aw] = a;
-    let [bx, by, bz, bw] = b;
-    [
-        aw * bx + ax * bw + ay * bz - az * by,
-        aw * by - ax * bz + ay * bw + az * bx,
-        aw * bz + ax * by - ay * bx + az * bw,
-        aw * bw - ax * bx - ay * by - az * bz,
-    ]
-}
-
-/// The rotation by `degrees` about axis `axis` (0, 1 or 2 for X, Y or Z).
-fn about(axis: usize, degrees: f64) -> [f64; 4] {
-    let (s, c) = (degrees.to_radians() * 0.5).sin_cos();
-    let mut q = [0.0, 0.0, 0.0, c];
-    q[axis] = s;
-    q
-}
-
 /// Key times for the kept rows: row k at k frame times, each later than the last even where single precision
 /// would round two together.
 fn key_times(kept: &[u64], frame_time: f64) -> Vec<f32> {
@@ -529,7 +535,7 @@ fn key_times(kept: &[u64], frame_time: f64) -> Vec<f32> {
     times
 }
 
-pub(super) fn load(input: Input<'_>, keep: Keep) -> Result<Document<'static>> {
+pub(super) fn load(input: Input<'_>, keep: Keep) -> Result<Document> {
     let mut blocks = input.blocks()?;
     let size = blocks.size_hint();
     let mut h = Hierarchy::new();
@@ -573,7 +579,7 @@ pub(super) fn load(input: Input<'_>, keep: Keep) -> Result<Document<'static>> {
     }
 
     let joints = &h.joints;
-    let mut b = Builder::default();
+    let mut b = Builder::plain();
     let nodes: Vec<Value> = joints
         .iter()
         .map(|j| {
@@ -588,14 +594,13 @@ pub(super) fn load(input: Input<'_>, keep: Keep) -> Result<Document<'static>> {
         })
         .collect();
 
-    let mut animations = Vec::new();
     if keep.animations
         && let Some(m) = &motion
         && let Some(frame_time) = m.frame_time
         && !m.kept.is_empty()
         && h.columns > 0
     {
-        let input = b.floats(key_times(&m.kept, frame_time), "SCALAR", true);
+        let times = key_times(&m.kept, frame_time);
         let frames = m.kept.len();
         // The rows are read once, in order, for every track.
         let mut tracks = Vec::new();
@@ -630,7 +635,7 @@ pub(super) fn load(input: Input<'_>, keep: Keep) -> Result<Document<'static>> {
                 }
                 let mut q = [0.0, 0.0, 0.0, 1.0];
                 for &(col, axis) in &track.columns {
-                    q = mul(q, about(axis, f64::from(row[col])));
+                    q = quat::mul(q, quat::about(axis, f64::from(row[col]).to_radians()));
                 }
                 let len = q.iter().map(|c| c * c).sum::<f64>().sqrt();
                 // Each quaternion on the same side as the last, so slerp takes the short way.
@@ -641,50 +646,59 @@ pub(super) fn load(input: Input<'_>, keep: Keep) -> Result<Document<'static>> {
                 track.out.extend(q.map(f32_of));
             }
         }
-        let (mut channels, mut samplers) = (Vec::new(), Vec::new());
-        for track in tracks {
-            let (path, kind) = match track.kind {
-                Kind::Position => ("translation", "VEC3"),
-                Kind::Rotation => ("rotation", "VEC4"),
-                Kind::Scale => ("scale", "VEC3"),
-            };
-            let output = b.floats(track.out, kind, false);
-            channels.push(json!({ "sampler": samplers.len(), "target": { "node": track.node, "path": path } }));
-            samplers.push(json!({ "input": input, "output": output, "interpolation": "LINEAR" }));
-        }
-        if !channels.is_empty() {
-            animations.push(json!({ "name": "motion", "channels": channels, "samplers": samplers }));
-        }
+        // The keys go through the readers' one finisher: a motion whose first rows were dropped still starts at 0.
+        let tracks = tracks
+            .into_iter()
+            .map(|track| {
+                let path = match track.kind {
+                    Kind::Position => Path::Translation,
+                    Kind::Rotation => Path::Rotation,
+                    Kind::Scale => Path::Scale,
+                };
+                keys::Track::linear(track.node, path, times.clone(), track.out)
+            })
+            .collect();
+        let mut writer = keys::Writer::new(keep.extras);
+        writer.animation(&mut b, keys::clip_name(input.path), None, tracks);
+        writer.finish(&mut b);
     }
 
     let mut facts = Map::new();
     facts.insert("joints".into(), json!(joints.iter().filter(|j| !j.end).count()));
     facts.insert("channels".into(), json!(h.columns));
-    let mut source = json!({ "format": "BVH", "upAxis": "Y" });
+    let mut info = SourceInfo {
+        format: Some("BVH".into()),
+        // Y up by the format's convention; the file doesn't say.
+        up_axis: Fact::Assumed(Axis::PosY),
+        ..SourceInfo::default()
+    };
+    let mut source = Map::new();
     if let Some(m) = &motion {
         facts.insert("frames".into(), json!(m.kept.len()));
         if let Some(t) = m.frame_time {
-            facts.insert("frame_time".into(), json!(t));
-            source["frameTime"] = json!(t);
+            info.frame_rate = if m.guessed_time {
+                Fact::Assumed(1.0 / t)
+            } else {
+                Fact::Declared(1.0 / t)
+            };
         }
         if m.dropped > 0 {
             facts.insert("dropped_frames".into(), json!(m.dropped));
         }
-        if m.guessed_time {
-            facts.insert("frame_time_guessed".into(), json!(true));
-        }
         if let Some(n) = m.frames {
-            source["frames"] = json!(n);
+            source.insert("frames".into(), json!(n));
+            // Fewer rows than the file says it has: it is cut short.
+            if usize::try_from(n).is_ok_and(|n| n > m.kept.len() + usize::try_from(m.dropped).unwrap_or(usize::MAX)) {
+                source.insert("truncated".into(), json!(true));
+            }
         }
     }
+    info.write(&mut source);
     let mut json = Map::new();
     json.insert("asset".into(), json!({ "extras": { "source": source } }));
     json.insert("scene".into(), json!(0));
     json.insert("scenes".into(), json!([{ "nodes": h.roots }]));
     json.insert("nodes".into(), Value::Array(nodes));
-    if !animations.is_empty() {
-        json.insert("animations".into(), Value::Array(animations));
-    }
     Ok(b.finish(json, facts))
 }
 
@@ -692,9 +706,9 @@ pub(super) fn load(input: Input<'_>, keep: Keep) -> Result<Document<'static>> {
 mod tests {
     use super::*;
     use crate::assets::Memory;
-    use crate::rig::Path;
+    use crate::rig::Property;
 
-    fn read(text: &str) -> Result<Document<'static>> {
+    fn read(text: &str) -> Result<Document> {
         load(Input::memory(text.as_bytes(), "t.bvh"), Keep::ALL)
     }
 
@@ -748,24 +762,33 @@ Frame Time: 0.5
     #[test]
     fn two_joints() {
         let doc = read(TWO).unwrap();
-        let nodes = doc.json["nodes"].as_array().unwrap();
+        let nodes = doc.json()["nodes"].as_array().unwrap();
         let names: Vec<_> = nodes.iter().map(|n| n["name"].as_str().unwrap()).collect();
         assert_eq!(names, ["Hips", "Spine", "Spine_end"]);
         assert_eq!(nodes[0]["translation"], json!([0.0, 90.0, 0.0]));
         assert_eq!(nodes[0]["children"], json!([1]));
-        assert_eq!(doc.json["scenes"][0]["nodes"], json!([0]));
+        assert_eq!(doc.json()["scenes"][0]["nodes"], json!([0]));
         assert_eq!(doc.facts["joints"], json!(2));
         assert_eq!(doc.facts["channels"], json!(9));
         assert_eq!(doc.facts["frames"], json!(2));
-        assert_eq!(doc.facts["frame_time"], json!(0.5));
+        let info = doc.source_info();
+        assert_eq!(info.format.as_deref(), Some("BVH"));
+        assert_eq!(info.frame_rate, Fact::Declared(2.0));
+        assert_eq!(info.up_axis, Fact::Assumed(Axis::PosY));
+        assert_eq!(info.meters_per_unit, Fact::Unknown);
+        assert_eq!(info.converted, crate::source::Converted::default());
 
         let rig = doc.rig().unwrap();
         assert_eq!(rig.animations.len(), 1);
         let channels = &rig.animations[0].channels;
-        let paths: Vec<_> = channels.iter().map(|c| (c.node, c.path)).collect();
+        let paths: Vec<_> = channels.iter().map(|c| (c.node, c.property)).collect();
         assert_eq!(
             paths,
-            [(0, Path::Translation), (0, Path::Rotation), (1, Path::Rotation)]
+            [
+                (0, Property::Translation),
+                (0, Property::Rotation),
+                (1, Property::Rotation)
+            ]
         );
         assert_eq!(channels[0].times, [0.0, 0.5]);
         assert_eq!(channels[0].values, [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
@@ -818,10 +841,10 @@ Frame Time: 0.5
         let crlf = format!("\u{feff}{}", TWO.replace('\n', "\r\n").replace("  ", "\t"));
         let a = read(&crlf).unwrap();
         let b = read(TWO).unwrap();
-        assert_eq!(a.json["nodes"], b.json["nodes"]);
+        assert_eq!(a.json()["nodes"], b.json()["nodes"]);
         assert_eq!(a.facts, b.facts);
         let cr = read(&TWO.replace('\n', "\r")).unwrap();
-        assert_eq!(cr.json["nodes"], b.json["nodes"]);
+        assert_eq!(cr.json()["nodes"], b.json()["nodes"]);
         assert_eq!(cr.facts, b.facts);
     }
 
@@ -829,12 +852,12 @@ Frame Time: 0.5
     fn spellings() {
         let text = "hierarchy\nroot My Hips (1){\noffset 1e1 -0 2.5E-1\nchannels 1 xROTATION\nend site{ offset 0 1 0 }}\nmotion\nframes:1\nframe time:\t0.0333\n-1.5e+1\n";
         let doc = read(text).unwrap();
-        let nodes = doc.json["nodes"].as_array().unwrap();
+        let nodes = doc.json()["nodes"].as_array().unwrap();
         assert_eq!(nodes[0]["name"], "My Hips (1)");
         assert_eq!(nodes[1]["name"], "My Hips (1)_end");
         assert_eq!(nodes[0]["translation"], json!([10.0, -0.0, 0.25]));
         assert_eq!(doc.facts["frames"], json!(1));
-        assert_eq!(doc.json["animations"][0]["channels"].as_array().unwrap().len(), 1);
+        assert_eq!(doc.json()["animations"][0]["channels"].as_array().unwrap().len(), 1);
     }
 
     #[test]
@@ -862,12 +885,12 @@ Frame Time: 0.5
     fn no_motion_and_no_frames() {
         let hierarchy = TWO.split("MOTION").next().unwrap();
         let doc = read(hierarchy).unwrap();
-        assert!(doc.json.get("animations").is_none());
+        assert!(doc.json().get("animations").is_none());
         assert!(doc.facts.get("frames").is_none());
         assert_eq!(doc.facts["channels"], json!(9));
         let zero = format!("{hierarchy}MOTION\nFrames: 0\nFrame Time: 0.1\n");
         let doc = read(&zero).unwrap();
-        assert!(doc.json.get("animations").is_none());
+        assert!(doc.json().get("animations").is_none());
         assert_eq!(doc.facts["frames"], json!(0));
         // Fewer rows than declared keeps what's there.
         let doc = read(&format!("{hierarchy}MOTION\nFrames: 9\nFrame Time: 0.1\n")).unwrap();
@@ -890,10 +913,9 @@ Frame Time: 0.5
         }
         for time in ["0", "-1", "inf", "soon"] {
             let doc = read(&TWO.replace("Frame Time: 0.5", &format!("Frame Time: {time}"))).unwrap();
-            assert_eq!(doc.facts["frame_time"], json!(DEFAULT_FRAME_TIME), "{time}");
-            assert_eq!(doc.facts["frame_time_guessed"], json!(true));
+            assert_eq!(doc.source_info().frame_rate, Fact::Assumed(30.0), "{time}");
         }
-        assert!(read(TWO).unwrap().facts.get("frame_time_guessed").is_none());
+        assert_eq!(read(TWO).unwrap().source_info().frame_rate, Fact::Declared(2.0));
     }
 
     #[test]
@@ -913,15 +935,15 @@ Frame Time: 0.5
         let doc = read(text).unwrap();
         let rig = doc.rig().unwrap();
         let channels = &rig.animations[0].channels;
-        let paths: Vec<_> = channels.iter().map(|c| (c.node, c.path)).collect();
+        let paths: Vec<_> = channels.iter().map(|c| (c.node, c.property)).collect();
         assert_eq!(
             paths,
             [
-                (0, Path::Translation),
-                (0, Path::Rotation),
-                (0, Path::Scale),
-                (1, Path::Rotation),
-                (1, Path::Scale)
+                (0, Property::Translation),
+                (0, Property::Rotation),
+                (0, Property::Scale),
+                (1, Property::Rotation),
+                (1, Property::Scale)
             ]
         );
         assert_eq!(channels[2].values, [1.0, 1.0, 1.0, 2.0, 3.0, 0.5]);
@@ -952,20 +974,19 @@ Frame Time: 0.5
         ))
         .unwrap();
         assert_eq!(doc.facts["frames"], json!(3));
-        assert!(doc.json["asset"]["extras"]["source"].get("frames").is_none());
+        assert!(doc.json()["asset"]["extras"]["source"].get("frames").is_none());
         assert_eq!(doc.rig().unwrap().animations[0].channels[0].times, [0.0, 0.5, 1.0]);
         // No Frame Time line: a thirtieth of a second, noted.
         let doc = read(&format!("{hierarchy}MOTION\nFrames: 2\n{rows}")).unwrap();
         assert_eq!(doc.facts["frames"], json!(2));
-        assert_eq!(doc.facts["frame_time"], json!(DEFAULT_FRAME_TIME));
-        assert_eq!(doc.facts["frame_time_guessed"], json!(true));
+        assert_eq!(doc.source_info().frame_rate, Fact::Assumed(30.0));
         // Neither: the rows alone.
         let doc = read(&format!("{hierarchy}MOTION\n{rows}")).unwrap();
         assert_eq!(doc.facts["frames"], json!(2));
         // A MOTION section with nothing in it has no frames.
         let doc = read(&format!("{hierarchy}MOTION\n")).unwrap();
         assert_eq!(doc.facts["frames"], json!(0));
-        assert!(doc.json.get("animations").is_none());
+        assert!(doc.json().get("animations").is_none());
     }
 
     #[test]
@@ -975,7 +996,7 @@ Frame Time: 0.5
             ("ROOT a\n{\n}\n", "HIERARCHY"),
             ("HIERARCHY\n", "no ROOT"),
             ("HIERARCHY\nJOINT a\n{\n}\n", "JOINT outside"),
-            ("HIERARCHY\nROOT a\n{\nOFFSET 0 0 0\n", "ends inside joint `a`"),
+            ("HIERARCHY\nROOT a\n{\nOFFSET 0 0 0\n", "is cut short inside joint `a`"),
             ("HIERARCHY\nROOT a\nOFFSET 0 0 0\n", "`{` should follow"),
             ("HIERARCHY\nROOT a\n{\nOFFSET 0 0\n}\n", "OFFSET needs three numbers"),
             ("HIERARCHY\nROOT a\n{\n}\n}\n", "closes no joint"),
@@ -990,9 +1011,12 @@ Frame Time: 0.5
                 "twice",
             ),
             ("HIERARCHY\nROOT a\n{\nWIDGET 1\n}\n", "WIDGET"),
-            ("HIERARCHY\nROOT a\n{\nMOTION\nFrames: 0\n", "ends inside joint"),
+            ("HIERARCHY\nROOT a\n{\nMOTION\nFrames: 0\n", "is cut short inside joint"),
             ("HIERARCHY\nOFFSET 0 0 0\n", "outside"),
-            ("HIERARCHY\nROOT a\n{\nCHANNELS 2 Xrotation\n}\n", "ends inside joint"),
+            (
+                "HIERARCHY\nROOT a\n{\nCHANNELS 2 Xrotation\n}\n",
+                "is cut short inside joint",
+            ),
         ];
         for (text, want) in cases {
             let e = error(text);
@@ -1002,7 +1026,7 @@ Frame Time: 0.5
         let text = "HIERARCHY\nROOT a\n{\nCHANNELS 2 Xrotation Wiggle\n}\nMOTION\nFrames: 1\nFrame Time: 1\n90 7\n";
         let doc = read(text).unwrap();
         assert_eq!(doc.facts["channels"], json!(2));
-        assert_eq!(doc.json["animations"][0]["channels"].as_array().unwrap().len(), 1);
+        assert_eq!(doc.json()["animations"][0]["channels"].as_array().unwrap().len(), 1);
     }
 
     #[test]
@@ -1017,7 +1041,8 @@ Frame Time: 0.5
         text.push_str("MOTION\nFrames: 1\nFrame Time: 1\n45\n");
         let assets = Memory::new();
         let doc = crate::formats::load_bytes(text.as_bytes(), "t.bvh", "bvh", &assets, Keep::ALL).unwrap();
-        assert_eq!(doc.json["nodes"].as_array().unwrap().len(), MAX_NODES);
+        // The file's nodes, and the root node over them.
+        assert_eq!(doc.json()["nodes"].as_array().unwrap().len(), MAX_NODES + 1);
         assert_eq!(doc.facts["joints"], json!(depth));
         // One more joint is too many.
         let text = text.replacen("JOINT j\n", "JOINT k\n{\n}\nJOINT j\n", 1);
@@ -1029,20 +1054,17 @@ Frame Time: 0.5
         let text = TWO.replace("Frames: 2", &format!("Frames: {}", u64::MAX));
         let doc = read(&text).unwrap();
         assert_eq!(doc.facts["frames"], json!(2));
-        assert_eq!(doc.json["asset"]["extras"]["source"]["frames"], json!(u64::MAX));
+        assert_eq!(doc.json()["asset"]["extras"]["source"]["frames"], json!(u64::MAX));
     }
 
     #[test]
     fn keeping_no_animations_keeps_the_facts() {
         let all = read(TWO).unwrap();
-        let keep = Keep {
-            animations: false,
-            ..Keep::ALL
-        };
+        let keep = Keep::ALL.with_animations(false);
         let none = load(Input::memory(TWO.as_bytes(), "t.bvh"), keep).unwrap();
-        assert!(none.json.get("animations").is_none());
+        assert!(none.json().get("animations").is_none());
         assert_eq!(all.facts, none.facts);
-        assert_eq!(all.json["nodes"], none.json["nodes"]);
+        assert_eq!(all.json()["nodes"], none.json()["nodes"]);
     }
 
     #[test]

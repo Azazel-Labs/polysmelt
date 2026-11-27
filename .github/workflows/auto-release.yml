@@ -102,10 +102,12 @@ jobs:
           # The lockfiles update offline, so download what they resolve against first.
           cargo fetch --locked
           cargo fetch --locked --manifest-path bench/Cargo.toml
+          cargo fetch --locked --manifest-path demo/Cargo.toml
           sed -i '/^\[package\]/,/^\[/ s/^version = ".*"/version = "'"$VERSION"'"/' Cargo.toml
           # Only polysmelt's own entries change; third-party versions stay as locked.
           cargo update --offline -p polysmelt
           cargo update --offline -p polysmelt --manifest-path bench/Cargo.toml
+          cargo update --offline -p polysmelt --manifest-path demo/Cargo.toml
           git config user.name "$RELEASER"
           git config user.email "$RELEASER_ID+$RELEASER@users.noreply.github.com"
           # Main already having the version needs no commit.

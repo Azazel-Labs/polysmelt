@@ -296,9 +296,9 @@ dependencies = [
 
 [[package]]
 name = "draco-core"
-version = "2.4.0"
+version = "2.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fa21a1941edd7f12ff743ed02af570cc0974355c26fc587626b33253d00a9968"
+checksum = "f8988cf631934c7cb351b4947a7d41eaca56241ec0670101b517c70aaf071e5c"
 dependencies = [
  "bytemuck",
 ]
@@ -924,13 +924,14 @@ dependencies = [
 
 [[package]]
 name = "polysmelt"
-version = "0.15.2"
+version = "0.21.0"
 dependencies = [
  "base64 0.22.1",
  "bytemuck",
  "bytes",
  "draco-core",
  "e57",
+ "fdeflate",
  "flate2",
  "image-webp",
  "laz",
@@ -938,7 +939,6 @@ dependencies = [
  "openusd-schemas",
  "quick-xml 0.41.0",
  "serde_json",
- "thiserror",
  "zip 9.8.2",
 ]
 

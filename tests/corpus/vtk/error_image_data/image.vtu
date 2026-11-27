@@ -1,0 +1,15 @@
+<?xml version="1.0"?>
+<VTKFile type="ImageData" version="0.1" byte_order="LittleEndian" header_type="UInt32" compressor="vtkZLibDataCompressor">
+  <ImageData WholeExtent="0 1 0 1 0 1" Origin="1 -2 0.5" Spacing="0.5 1 0.25" Direction="1 0 0 0 1 0 0 0 1">
+  <Piece Extent="0 1 0 1 0 1">
+    <PointData Scalars="density">
+      <DataArray type="Float32" Name="density" format="ascii" RangeMin="0" RangeMax="3.5">
+        0 0.5 1 1.5 2 2.5
+        3 3.5
+      </DataArray>
+    </PointData>
+    <CellData>
+    </CellData>
+  </Piece>
+  </ImageData>
+</VTKFile>

@@ -14,19 +14,19 @@ const PNG: &[u8] = &[
     0x1D, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
 ];
 
-fn read(text: &str) -> Result<Document<'static>> {
+fn read(text: &str) -> Result<Document> {
     load(Input::memory(text.as_bytes(), "t.ogex"), &Memory::new(), Keep::ALL)
 }
 
-fn read_with(text: &str, assets: &Memory) -> Result<Document<'static>> {
+fn read_with(text: &str, assets: &Memory) -> Result<Document> {
     load(Input::memory(text.as_bytes(), "t.ogex"), assets, Keep::ALL)
 }
 
-fn flat(doc: &Document<'_>) -> Mesh {
+fn flat(doc: &Document) -> Mesh {
     doc.flatten(Pose::Rest).unwrap().unwrap()
 }
 
-fn at(doc: &Document<'_>, time: f32) -> Mesh {
+fn at(doc: &Document, time: f32) -> Mesh {
     doc.flatten(Pose::Animation { index: 0, time }).unwrap().unwrap()
 }
 
@@ -34,8 +34,8 @@ fn close(a: [f32; 3], b: [f32; 3]) -> bool {
     a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-3)
 }
 
-fn source<'d>(doc: &'d Document<'_>) -> &'d Value {
-    &doc.json["asset"]["extras"]["source"]
+fn source(doc: &Document) -> &Value {
+    &doc.json()["asset"]["extras"]["source"]
 }
 
 /// A geometry object of one triangle, its vertices `positions`, with whatever `more` adds
@@ -92,8 +92,15 @@ fn a_cube_in_centimeters_and_z_up() {
     assert_eq!(doc.facts["triangles"], json!(2));
     let src = source(&doc);
     assert_eq!(src["format"], "OpenGEX");
-    assert_eq!(src["upAxis"], "Z");
+    assert_eq!(src["upAxis"], "+Z");
     assert!((src["metersPerUnit"].as_f64().unwrap() - 0.01).abs() < 1e-12);
+    let info = doc.source_info();
+    assert_eq!(info.meters_per_unit, Fact::Declared(0.01));
+    assert_eq!(info.unit.as_deref(), Some("centimeter"));
+    assert_eq!(info.up_axis, Fact::Declared(Axis::PosZ));
+    assert_eq!(info.forward_axis, Fact::Unknown);
+    assert_eq!(info.handedness, Fact::Declared(Handedness::Right));
+    assert!(info.converted.units && info.converted.up_axis && !info.converted.handedness);
     let m = flat(&doc);
     assert_eq!(m.triangles(), 2);
     let p = &m.prims[0];
@@ -109,7 +116,7 @@ fn a_cube_in_centimeters_and_z_up() {
     assert_eq!(p.colors[0], [1.0, 0.0, 0.0, 1.0]);
     assert_eq!(m.materials[p.material].name, "Red");
     assert_eq!(
-        doc.json["nodes"]
+        doc.json()["nodes"]
             .as_array()
             .unwrap()
             .iter()
@@ -153,7 +160,29 @@ fn strips_fans_lines_points_and_clockwise_faces() {
             assert!(z > 0.0, "{t:?}");
         }
     }
-    assert_eq!(source(&doc)["upAxis"], "Y");
+    let info = doc.source_info();
+    assert_eq!(info.up_axis, Fact::Declared(Axis::PosY));
+    // No distance metric: a meter, by the format's default.
+    assert_eq!(info.meters_per_unit, Fact::Assumed(1.0));
+    assert_eq!(info.converted, Converted::default());
+}
+
+#[test]
+fn the_metrics_say_what_is_assumed() {
+    let doc = read(&format!(
+        r#"Metric (key = "forward") {{ string {{ "-y" }} }}
+        GeometryNode {{ ObjectRef {{ ref {{ $g }} }} }}
+        {}"#,
+        triangle("g", TRI, "")
+    ))
+    .unwrap();
+    let info = doc.source_info();
+    assert_eq!(info.format.as_deref(), Some("OpenGEX"));
+    assert_eq!(info.meters_per_unit, Fact::Assumed(1.0));
+    assert_eq!(info.unit.as_deref(), Some("meter"));
+    assert_eq!(info.up_axis, Fact::Assumed(Axis::PosZ));
+    assert_eq!(info.forward_axis, Fact::Declared(Axis::NegY));
+    assert!(info.converted.up_axis && !info.converted.units);
 }
 
 #[test]
@@ -188,7 +217,7 @@ fn materials_and_textures() {
         .with("paint.png", PNG.to_vec())
         .with("bumps.png", PNG.to_vec());
     let doc = read_with(&text, &assets).unwrap();
-    let j = &doc.json;
+    let j = &doc.json();
     let mat = &j["materials"][0];
     assert_eq!(mat["name"], "Painted");
     let pbr = &mat["pbrMetallicRoughness"];
@@ -204,7 +233,7 @@ fn materials_and_textures() {
     // A high specular power is a smooth surface.
     assert!(pbr["roughnessFactor"].as_f64().unwrap() < 0.5);
     assert!(mat["emissiveFactor"][1].as_f64().unwrap() > 0.4);
-    assert_eq!(source(&doc)["missingTextures"], json!(1));
+    assert_eq!(source(&doc)["droppedTextures"], json!(1));
     // The second texture coordinate set is there for the texture, and the first padded.
     let prim = &j["meshes"][0]["primitives"][0];
     assert!(prim["attributes"]["TEXCOORD_1"].is_number());
@@ -224,7 +253,7 @@ fn shared_objects_are_instances() {
         triangle("g", TRI, "")
     );
     let doc = read(&text).unwrap();
-    assert_eq!(doc.json["meshes"].as_array().unwrap().len(), 1);
+    assert_eq!(doc.json()["meshes"].as_array().unwrap().len(), 1);
     let m = flat(&doc);
     assert_eq!(m.triangles(), 2);
     let xs: Vec<f32> = m.prims.iter().flat_map(|p| p.positions.iter().map(|q| q[0])).collect();
@@ -256,7 +285,7 @@ fn morph_targets_and_weights() {
         }
     "#;
     let doc = read(text).unwrap();
-    let j = &doc.json;
+    let j = &doc.json();
     assert_eq!(j["meshes"][0]["extras"]["targetNames"], json!(["lift"]));
     assert_eq!(j["meshes"][0]["primitives"][0]["targets"].as_array().unwrap().len(), 1);
     let m = flat(&doc);
@@ -293,7 +322,7 @@ fn skins_bind_through_the_skeleton() {
         } }
     "#;
     let doc = read(text).unwrap();
-    let j = &doc.json;
+    let j = &doc.json();
     assert_eq!(j["skins"].as_array().unwrap().len(), 1);
     let m = flat(&doc);
     // v' = bone * inverse(bind) * skin * v: moved 2 up by the skin and 1 along x by the bone;
@@ -322,8 +351,8 @@ fn animated(transforms: &str, animation: &str) -> String {
     )
 }
 
-fn sampler<'d>(doc: &'d Document<'_>, path: &str) -> &'d Value {
-    let a = &doc.json["animations"][0];
+fn sampler<'d>(doc: &'d Document, path: &str) -> &'d Value {
+    let a = &doc.json()["animations"][0];
     let c = a["channels"]
         .as_array()
         .unwrap()
@@ -487,7 +516,7 @@ fn clips_are_separate_animations() {
         triangle("g", TRI, "")
     );
     let doc = read(&text).unwrap();
-    let a = doc.json["animations"].as_array().unwrap();
+    let a = doc.json()["animations"].as_array().unwrap();
     assert_eq!(a.len(), 2);
     assert_eq!(a[1]["name"], "walk");
     assert_eq!(a[1]["extras"]["rate"], json!(60.0));
@@ -522,7 +551,7 @@ fn lights_and_cameras() {
         triangle("g", TRI, "")
     );
     let doc = read(&text).unwrap();
-    let j = &doc.json;
+    let j = &doc.json();
     let lights = j["extensions"]["KHR_lights_punctual"]["lights"].as_array().unwrap();
     assert_eq!(lights.len(), 2);
     assert_eq!(lights[0]["type"], "directional");
@@ -530,11 +559,20 @@ fn lights_and_cameras() {
     assert!(lights[0]["intensity"].as_f64().unwrap() > 3.0);
     assert_eq!(lights[1]["type"], "spot");
     let cam = &j["cameras"][0]["perspective"];
-    assert!(cam["yfov"].as_f64().unwrap() > 0.0);
+    // "fov" is the angle across: 0.97 across a 16:9 frame is 2 atan(tan(0.485) 9 / 16) up and down.
+    let (yfov, aspect) = (cam["yfov"].as_f64().unwrap(), cam["aspectRatio"].as_f64().unwrap());
+    assert!((aspect - 16.0 / 9.0).abs() < 1e-12);
+    assert!((yfov - 0.576_352_569).abs() < 1e-6, "{yfov}");
+    assert!((2.0 * ((yfov * 0.5).tan() * aspect).atan() - 0.97).abs() < 1e-6);
     assert_eq!(cam["znear"], json!(1.5));
-    // An object that's never placed, or a file with nothing in it, has no geometry.
-    assert!(read("CameraObject { }").is_err());
+    // A file of objects and no nodes places each under the root; one with nothing in it, or only an empty
+    // geometry object, has no geometry.
+    let lone = read("CameraObject $c { }").unwrap();
+    assert_eq!(lone.json()["cameras"].as_array().map(Vec::len), Some(1));
+    assert_eq!(lone.json()["nodes"][1]["camera"], json!(0));
+    assert!(lone.to_glb().is_ok());
     assert!(read("").is_err());
+    assert!(read("GeometryObject { Mesh { } }").is_err());
     assert!(doc.to_glb().is_ok());
 }
 
@@ -613,4 +651,40 @@ fn hostile_files_never_panic() {
     ] {
         let _ = read(junk);
     }
+}
+
+#[test]
+fn a_quad_that_isnt_convex_keeps_its_outline() {
+    // An arrowhead, its notch at the second corner: cut from the first corner it would cover three times its
+    // area.
+    let text = r#"
+        GeometryNode $n { ObjectRef { ref { $g } } }
+        GeometryObject $g { Mesh (primitive = "quads") {
+            VertexArray (attrib = "position") { float[3] { {2, 0, 0}, {0.5, 0.5, 0}, {0, 2, 0}, {0, 0, 0} } }
+            IndexArray { unsigned_int16[4] { {0, 1, 2, 3} } }
+        } }
+    "#;
+    let doc = read(text).unwrap();
+    let m = flat(&doc);
+    assert_eq!(m.triangles(), 2);
+    let mut area = 0.0;
+    for p in &m.prims {
+        for t in p.indices.chunks(3) {
+            let [a, b, c] = [0, 1, 2].map(|k| p.positions[t[k] as usize]);
+            let (u, v) = ([0, 1, 2].map(|k| b[k] - a[k]), [0, 1, 2].map(|k| c[k] - a[k]));
+            let n = [
+                u[1] * v[2] - u[2] * v[1],
+                u[2] * v[0] - u[0] * v[2],
+                u[0] * v[1] - u[1] * v[0],
+            ];
+            area += 0.5 * (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+        }
+    }
+    assert!((area - 1.0).abs() < 1e-5, "{area}");
+    // Without normals in the file, the default ones.
+    assert!(
+        doc.json()["meshes"][0]["primitives"][0]["attributes"]
+            .get("NORMAL")
+            .is_some()
+    );
 }

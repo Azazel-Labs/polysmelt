@@ -59,7 +59,8 @@
         0.050876,
         0.0
       ],
-      "roughness": 0.5
+      "roughness": 0.492479,
+      "metallic": 0.0
     }
   ],
   "facts": {
@@ -69,13 +70,14 @@
   },
   "json": {
     "/asset/extras/source/format": "MS3D",
-    "/asset/extras/source/version": 4,
+    "/asset/extras/source/version": "4",
     "/asset/extras/source/frameRate": 24.0,
     "/asset/extras/source/alphamaps": [
       "mask.png"
     ],
     "/meshes/0/extras/groups": [
       "plane"
-    ]
+    ],
+    "/materials/0/extensions/KHR_materials_specular": null
   }
 }

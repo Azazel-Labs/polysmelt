@@ -1,0 +1,19 @@
+{
+  "spec": "DXF (DXF Reference, 2013 edition): a real file, two POINT entities and nothing else",
+  "source": "assimp/assimp at 711b4e9bbde2, test/models/DXF/points.dxf (BSD-3-Clause, see ../LICENSE-assimp); expectations measured with ezdxf 1.4.5",
+  "triangles": 0,
+  "points": 2,
+  "bounds": {
+    "min": [
+      -4.0,
+      0.25,
+      -5.5
+    ],
+    "max": [
+      1.0,
+      3.0,
+      -2.0
+    ]
+  },
+  "position_set": "positions.f32"
+}

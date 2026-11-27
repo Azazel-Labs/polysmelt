@@ -2,22 +2,30 @@
 //! corner, groups of triangles sharing a material, and a skeleton of joints with keyframes.
 //!
 //! The groups become the primitives of one mesh (their names kept in its `extras.groups`), the materials glTF
-//! materials (diffuse color with the transparency as alpha, emissive color, shininess as roughness, the texture as
+//! materials (diffuse color with the transparency as alpha, emissive color, specular color and shininess as the
+//! highlight, the texture as
 //! the color image), and the joints nodes posed by Euler angles in radians applied X, then Y, then Z. Each vertex
 //! moves with its joint, or with up to four joints by the weights the format's later versions add. Keyframes, in
-//! seconds, turn and move a joint from where it stands at rest. `MilkShape` is Y up and right-handed, as glTF is.
+//! seconds, turn and move a joint from where it stands at rest, in its rest frame (a move is turned by the rest
+//! rotation). `MilkShape` is Y up and right-handed, as glTF is
+//! (declared in the source info: the program's space is every file's); its units' length is unknown. The model's comment is
+//! the source info's `comments`; the groups', materials' and joints' comments are skipped.
 
 use std::collections::HashMap;
 
 use serde_json::json;
 
-use super::scene::{self, Animation, Bin, Channel, Interp, Node, Path as Key, Primitive, Scene, SceneMesh, Skin};
+use super::scene::{self, Animation, Channel, Interp, Node, Path as Key, Primitive, Scene, SceneMesh, Skin};
 use crate::Result;
 use crate::assets::Assets;
+use crate::bytes::Bin;
 use crate::document::{Document, Keep};
 use crate::images::Images;
-use crate::mesh::{Material, srgb_to_linear};
-use crate::num::u32_of;
+use crate::legacy_material::{Phong, Rgb, Transparency};
+use crate::material::Alpha;
+use crate::num::{f32_of, u32_of};
+use crate::quat;
+use crate::source::{Axis, Fact, Handedness};
 
 const MAGIC: &[u8; 10] = b"MS3D000000";
 
@@ -58,6 +66,7 @@ struct Joint {
 struct Mat {
     name: String,
     diffuse: [f32; 4],
+    specular: [f32; 4],
     emissive: [f32; 4],
     shininess: f32,
     transparency: f32,
@@ -80,10 +89,12 @@ struct Ms3d {
     alpha_ref: f32,
     /// The extra weights' version, when the file has them.
     weights_version: Option<i32>,
+    /// The model's comment, from the extra data.
+    comment: Option<String>,
 }
 
 /// Reads a `.ms3d` file.
-pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document<'static>> {
+pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document> {
     let bytes = input.read()?;
     let m = parse(&bytes)?;
     let stem = input
@@ -100,16 +111,21 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
     for mat in &m.materials {
         // Colors as the file has them are display values; glTF's are linear.
         let unit = |c: f32, default: f32| if c.is_finite() { c.clamp(0.0, 1.0) } else { default };
-        let alpha = unit(mat.transparency, 1.0);
-        let d = mat.diffuse.map(|c| srgb_to_linear(unit(c, 1.0)));
-        let mut out = Material::plain(&mat.name, [d[0], d[1], d[2], alpha]);
-        out.emissive = std::array::from_fn(|k| srgb_to_linear(unit(mat.emissive[k], 0.0)));
-        out.roughness = 1.0 - (unit(mat.shininess / 128.0, 0.0)).sqrt();
-        if keep.textures
-            && !mat.texture.is_empty()
-            && let Some(path) = assets.find(&mat.texture, dir)
-        {
-            out.color_image = images.file(assets, path, &mat.texture);
+        let rgb =
+            |c: [f32; 4], default: f32| Rgb::Srgb([unit(c[0], default), unit(c[1], default), unit(c[2], default)]);
+        // OpenGL's material: `shininess`, 0 to 128, is the Blinn-Phong exponent and `specular` its color.
+        let mut phong = Phong::new(rgb(mat.diffuse, 1.0));
+        phong.opacity = unit(mat.transparency, 1.0);
+        phong.emissive = rgb(mat.emissive, 0.0);
+        phong.specular = Some(rgb(mat.specular, 0.0));
+        phong.exponent = Some(if mat.shininess.is_finite() {
+            mat.shininess.clamp(0.0, 128.0)
+        } else {
+            0.0
+        });
+        let mut out = phong.pbr().material(&mat.name);
+        if keep.textures && !mat.texture.is_empty() {
+            out.color_image = images.find(assets, &[&mat.texture], &[dir]);
             // The texture tints the glow as it does the rest of the lighting.
             if out.emissive.iter().any(|&c| c > 0.0) {
                 out.emissive_image = out.color_image;
@@ -117,8 +133,12 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         }
         // Cut out where the texture's alpha falls below the model's alpha reference.
         let textured = !mat.texture.is_empty() || !mat.alphamap.is_empty();
-        if textured && m.transparency_mode == 1 && m.alpha_ref.is_finite() {
-            out.alpha_cutoff = Some(m.alpha_ref.clamp(0.0, 1.0));
+        let transparency = Transparency {
+            cutout: (textured && m.transparency_mode == 1 && m.alpha_ref.is_finite()).then_some(m.alpha_ref),
+            ..Transparency::of(out.color[3])
+        };
+        if let Alpha::Mask(cutoff) = transparency.mode() {
+            out.alpha_cutoff = Some(cutoff);
         }
         scene.materials.push(out);
     }
@@ -132,7 +152,7 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
     for j in &m.joints {
         let mut n = Node::named(j.name.clone(), by_name.get(j.parent.as_str()).copied());
         n.translation = j.position;
-        n.rotation = scene::normalize(euler(j.rotation));
+        n.rotation = quat::normalize(euler(j.rotation));
         scene.add(n);
     }
     let joints = m.joints.len();
@@ -188,7 +208,7 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
             // A vertex no joint moves stays where it is: bound to a joint of its own, after the file's.
             let width = links.iter().map(Vec::len).max().unwrap_or(0).max(1);
             p.influences = width;
-            p.rest_joint = u32_of(joints);
+            p.rest_joint = Some(u32_of(joints));
             for l in &links {
                 for k in 0..width {
                     let (j, w) = l.get(k).copied().unwrap_or((0, 0.0));
@@ -200,9 +220,7 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         prims.push(p);
         groups.push(json!(g.name));
     }
-    if dropped > 0 {
-        facts.insert("dropped_triangles".into(), json!(dropped));
-    }
+    scene.dropped = dropped;
     let has_mesh = prims.iter().any(|p| !p.indices.is_empty());
     if has_mesh {
         scene.meshes.push(SceneMesh {
@@ -232,14 +250,16 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         scene.add(node);
     }
 
-    // Keys: a joint's turn after its rest rotation, its move added to its rest position.
+    // Keys are in the joint's rest frame, as MilkShape's own viewer plays them: the joint's local matrix is its
+    // rest matrix times the key's (a turn, then a move). So a key's turn follows the rest rotation, and its move
+    // is turned by the rest rotation before it is added to the rest position.
     let mut channels = Vec::new();
     for (i, j) in m.joints.iter().enumerate() {
         let rest = euler(j.rotation);
         if !j.turns.is_empty() {
             let mut values = Vec::with_capacity(j.turns.len() * 4);
             for (_, r) in &j.turns {
-                values.extend(scene::normalize(scene::quat_mul(rest, euler(*r))));
+                values.extend(quat::normalize(quat::mul(rest, euler(*r))));
             }
             channels.push(Channel {
                 node: i,
@@ -253,7 +273,10 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
             let values = j
                 .moves
                 .iter()
-                .flat_map(|(_, v)| std::array::from_fn::<f32, 3, _>(|k| j.position[k] + v[k]))
+                .flat_map(|(_, v)| {
+                    let v = quat::rotate(rest, v.map(f64::from));
+                    std::array::from_fn::<f32, 3, _>(|k| f32_of(f64::from(j.position[k]) + v[k]))
+                })
                 .collect();
             channels.push(Channel {
                 node: i,
@@ -265,22 +288,26 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         }
     }
     if !channels.is_empty() {
+        // The file gives its one animation no name, so it has none.
         scene.animations.push(Animation {
-            name: stem,
+            name: String::new(),
             channels,
             extras: None,
         });
     }
-    ensure!(!scene.nodes.is_empty(), "MS3D file has no triangles or joints");
+    ensure!(!scene.nodes.is_empty(), Empty, "MS3D file has no triangles or joints");
 
     facts.insert("joints".into(), json!(joints));
     facts.insert("groups".into(), json!(m.groups.len()));
     let mut source = serde_json::Map::new();
-    source.insert("format".into(), json!("MS3D"));
-    source.insert("version".into(), json!(m.version));
+    scene.info.format = Some("MS3D".into());
+    scene.info.version = Some(m.version.to_string());
+    scene.info.up_axis = Fact::Declared(Axis::PosY);
+    scene.info.handedness = Fact::Declared(Handedness::Right);
     if m.fps.is_finite() && m.fps > 0.0 {
-        source.insert("frameRate".into(), json!(m.fps));
+        scene.info.frame_rate = Fact::Declared(f64::from(m.fps));
     }
+    scene.info.comments.extend(m.comment);
     source.insert("frames".into(), json!(m.frames));
     if let Some(v) = m.weights_version {
         source.insert("weightsVersion".into(), json!(v));
@@ -301,11 +328,7 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
 
 /// The rotation Euler angles make: about X, then Y, then Z.
 fn euler(r: [f32; 3]) -> [f64; 4] {
-    let [x, y, z] = r.map(f64::from);
-    scene::quat_mul(
-        scene::about(2, z),
-        scene::quat_mul(scene::about(1, y), scene::about(0, x)),
-    )
+    quat::euler_xyz(r.map(f64::from))
 }
 
 /// A vertex's joints and weights. Without extra weights, its joint takes all; with them, its joint and the first
@@ -337,7 +360,7 @@ fn weights(v: &Vertex, joints: usize, extra: bool) -> Vec<(u32, f32)> {
 
 /// A fixed-size name field as text.
 fn field(b: &mut Bin<'_>, n: usize) -> Result<String> {
-    Ok(scene::text(b.fixed_str(n)?).trim().to_owned())
+    Ok(crate::bytes::name(b.fixed_str(n)?).trim_start().to_owned())
 }
 
 /// Reads the file.
@@ -345,12 +368,14 @@ fn parse(data: &[u8]) -> Result<Ms3d> {
     let mut b = Bin::new(data, "MS3D");
     ensure!(
         data.len() >= 14 && &data[..10] == MAGIC,
+        UnknownFormat,
         "isn't a MilkShape 3D file: it doesn't start with MS3D000000"
     );
     b.skip(10)?;
     let version = b.i32()?;
     ensure!(
         (3..=4).contains(&version),
+        Unsupported,
         "MS3D version {version} isn't one this reader knows (3 or 4)"
     );
 
@@ -419,6 +444,7 @@ fn parse(data: &[u8]) -> Result<Ms3d> {
         transparency_mode: 0,
         alpha_ref: 0.0,
         weights_version: None,
+        comment: None,
     };
     // A file may end after its groups or its materials.
     if b.left() == 0 {
@@ -430,7 +456,7 @@ fn parse(data: &[u8]) -> Result<Ms3d> {
         let name = field(&mut b, 32)?;
         let _ambient = b.vec4()?;
         let diffuse = b.vec4()?;
-        let _specular = b.vec4()?;
+        let specular = b.vec4()?;
         let emissive = b.vec4()?;
         let shininess = b.f32()?;
         let transparency = b.f32()?;
@@ -440,6 +466,7 @@ fn parse(data: &[u8]) -> Result<Ms3d> {
         m.materials.push(Mat {
             name,
             diffuse,
+            specular,
             emissive,
             shininess,
             transparency,
@@ -510,7 +537,12 @@ fn extras(b: &mut Bin<'_>, m: &mut Ms3d) -> Result<()> {
     }
     if b.i32()? != 0 {
         let len = b.i32()?;
-        b.skip(usize::try_from(len).unwrap_or(usize::MAX))?;
+        let text = b.bytes(usize::try_from(len).unwrap_or(usize::MAX))?;
+        let text = scene::text(text.split(|&c| c == 0).next().unwrap_or_default());
+        let text = text.trim();
+        if !text.is_empty() {
+            m.comment = Some(text.to_owned());
+        }
     }
     if b.left() < 4 {
         return Ok(());
@@ -587,6 +619,11 @@ mod tests {
 
     /// A triangle bound to joint 0, a group and a material, a parent and a child joint, with keys.
     fn sample(extra_weights: bool) -> Vec<u8> {
+        sample_with(extra_weights, [0.0; 3], [0.0, 2.0, 0.0])
+    }
+
+    /// [`sample`] with the hip's rest rotation (Euler angles) and the move of its one position key.
+    fn sample_with(extra_weights: bool, hip_rest: [f32; 3], hip_move: [f32; 3]) -> Vec<u8> {
         let mut w = Writer::new();
         w.u16(3);
         for (p, j) in [([0.0, 0.0, 0.0], 0i8), ([1.0, 0.0, 0.0], 1), ([0.0, 1.0, 0.0], -1)] {
@@ -617,10 +654,10 @@ mod tests {
         w.f(&[24.0, 0.0]).i32(10);
         w.u16(2);
         w.out.push(0);
-        w.s("hip", 32).s("", 32).f(&[0.0; 3]).f(&[0.0, 1.0, 0.0]).u16(2).u16(1);
+        w.s("hip", 32).s("", 32).f(&hip_rest).f(&[0.0, 1.0, 0.0]).u16(2).u16(1);
         w.f(&[0.0, 0.0, 0.0, 0.0])
             .f(&[1.0, 0.0, 0.0, std::f32::consts::FRAC_PI_2]);
-        w.f(&[0.5, 0.0, 2.0, 0.0]);
+        w.f(&[0.5]).f(&hip_move);
         w.out.push(0);
         w.s("knee", 32)
             .s("hip", 32)
@@ -639,14 +676,14 @@ mod tests {
         w.out
     }
 
-    fn read(bytes: &[u8]) -> Result<Document<'static>> {
+    fn read(bytes: &[u8]) -> Result<Document> {
         load(super::super::Input::memory(bytes, "t.ms3d"), &Memory::new(), Keep::ALL)
     }
 
     #[test]
     fn a_skinned_triangle_with_a_material_and_keys() {
         let doc = read(&sample(false)).unwrap();
-        let j = &doc.json;
+        let j = &doc.json();
         assert_eq!(doc.facts["joints"], json!(2));
         assert_eq!(doc.facts["triangles"], json!(1));
         assert_eq!(j["materials"][0]["name"], "skin");
@@ -665,13 +702,54 @@ mod tests {
     }
 
     #[test]
+    fn a_position_key_moves_in_the_joints_rest_frame() {
+        let moved = |rest: [f32; 3], by: [f32; 3]| {
+            let doc = read(&sample_with(false, rest, by)).unwrap();
+            let rig = doc.rig().unwrap();
+            let hip = rig.find("hip").unwrap();
+            let c = rig.animations[0]
+                .channels
+                .iter()
+                .find(|c| c.node == hip && c.property == crate::rig::Property::Translation)
+                .unwrap();
+            [c.values[0], c.values[1], c.values[2]]
+        };
+        let near = |a: [f32; 3], b: [f32; 3]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-6);
+        // Unturned at rest, the move is added to the rest position (0, 1, 0) as it is.
+        assert!(near(moved([0.0; 3], [1.0, 0.0, 0.0]), [1.0, 1.0, 0.0]));
+        // Turned a quarter about Z at rest, the joint's own X is the parent's Y.
+        let quarter = std::f32::consts::FRAC_PI_2;
+        let got = moved([0.0, 0.0, quarter], [1.0, 0.0, 0.0]);
+        assert!(near(got, [0.0, 2.0, 0.0]), "{got:?}");
+        // And a quarter about X takes its Y to the parent's Z.
+        let got = moved([quarter, 0.0, 0.0], [0.0, 3.0, 0.0]);
+        assert!(near(got, [0.0, 1.0, 3.0]), "{got:?}");
+    }
+
+    #[test]
     fn extra_weights_split_a_vertex() {
         let doc = read(&sample(true)).unwrap();
         let mesh = doc.flatten(crate::document::Pose::Rest).unwrap().unwrap();
         let p = &mesh.prims[0];
         let w = p.skin_weights[0];
         assert!((w[0] - 0.5).abs() < 1e-3 && (w[1] - 0.5).abs() < 1e-3, "{w:?}");
-        assert_eq!(doc.json["asset"]["extras"]["source"]["weightsVersion"], json!(1));
+        assert_eq!(doc.json()["asset"]["extras"]["source"]["weightsVersion"], json!(1));
+    }
+
+    #[test]
+    fn source_info_has_the_rate_and_the_model_comment() {
+        let mut w = Writer { out: sample(false) };
+        w.i32(1).i32(0).i32(0).i32(0).i32(1).i32(12);
+        w.out.extend(b"made by hand");
+        let doc = read(&w.out).unwrap();
+        let info = doc.source_info();
+        assert_eq!(info.format.as_deref(), Some("MS3D"));
+        assert_eq!(info.version.as_deref(), Some("4"));
+        assert_eq!(info.frame_rate, Fact::Declared(24.0));
+        assert_eq!(info.up_axis, Fact::Declared(Axis::PosY));
+        assert_eq!(info.meters_per_unit, Fact::Unknown);
+        assert_eq!(info.comments, ["made by hand"]);
+        assert_eq!(info.converted, crate::source::Converted::default());
     }
 
     #[test]
@@ -711,7 +789,7 @@ mod tests {
         let tri = 14 + 2 + 45 + 2 + 2;
         v[tri..tri + 2].copy_from_slice(&9u16.to_le_bytes());
         let doc = read(&v).unwrap();
-        assert_eq!(doc.facts["dropped_triangles"], json!(1));
+        assert_eq!(doc.json()["asset"]["extras"]["source"]["droppedGeometry"], json!(1));
     }
 
     #[test]

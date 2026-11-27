@@ -5,11 +5,10 @@
   "facts": {
     "joints": 4,
     "channels": 12,
-    "frames": 2,
-    "frame_time": 0.04
+    "frames": 2
   },
   "document": {
-    "nodes": 7,
+    "nodes": 8,
     "animations": 1,
     "channels": 4,
     "node_names": [
@@ -25,15 +24,28 @@
   "json": {
     "/asset/extras/source/format": "BVH",
     "/scenes/0/nodes": [
-      0
+      7
     ],
-    "/animations/0/name": "motion",
+    "/nodes/7": {
+      "name": "RootNode",
+      "children": [
+        0
+      ]
+    },
+    "/nodes/7/rotation": null,
+    "/nodes/7/scale": null,
+    "/asset/extras/source/converted": null,
+    "/asset/extras/source/frameRate": 25.0,
+    "/asset/extras/source/assumed": [
+      "upAxis"
+    ],
+    "/animations/0/name": "end_site_variants",
     "/animations/0/samplers/0/interpolation": "LINEAR"
   },
   "rig": [
     {
       "node": "Root",
-      "parent": null,
+      "parent": "RootNode",
       "translation": [
         0,
         0,

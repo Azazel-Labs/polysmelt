@@ -19,9 +19,9 @@ use std::path::{Path, PathBuf};
 
 use polysmelt::assets::{Folder, Memory};
 use polysmelt::document::{Document, Keep, Pose};
-use polysmelt::formats::{self, EXTENSIONS};
 use polysmelt::images::Location;
 use polysmelt::mesh::Mesh;
+use polysmelt::{Format, Loader};
 use serde_json::{Map, Value};
 
 fn corpus() -> PathBuf {
@@ -49,6 +49,8 @@ fn enabled(ext: &str) -> bool {
         "dxf" => cfg!(feature = "dxf"),
         "splat" => cfg!(feature = "splat"),
         "spz" => cfg!(feature = "spz"),
+        // An unzipped SOG is its `meta.json`.
+        "sog" | "json" => cfg!(feature = "sog"),
         "pmx" | "pmd" | "vmd" => cfg!(feature = "mmd"),
         "x" => cfg!(feature = "directx"),
         "md2" => cfg!(feature = "md2"),
@@ -73,7 +75,22 @@ fn enabled(ext: &str) -> bool {
         "mesh" | "skeleton" | "xml" => cfg!(feature = "ogre"),
         "flt" => cfg!(feature = "flt"),
         "ogex" => cfg!(feature = "ogex"),
+        "irrmesh" | "irr" => cfg!(feature = "irr"),
+        "xgl" | "zgl" => cfg!(feature = "xgl"),
+        "vtk" | "vtp" | "vtu" => cfg!(feature = "vtk"),
+        "b3dm" | "i3dm" | "pnts" | "cmpt" => cfg!(feature = "tiles"),
+        "msh" => cfg!(feature = "msh"),
+        "meshb" => cfg!(feature = "medit"),
         _ => false,
+    }
+}
+
+/// Whether this build reads `case`'s model. A `.mesh` file is OGRE's, or in Medit's corpus a Medit mesh.
+fn reads(case: &Case) -> bool {
+    if case.name.starts_with("medit/") {
+        cfg!(feature = "medit")
+    } else {
+        enabled(&reader_of(&case.file))
     }
 }
 
@@ -100,6 +117,11 @@ fn has_feature(name: &str) -> bool {
         ("tiff", cfg!(feature = "tiff")),
         ("psd", cfg!(feature = "psd")),
         ("dds", cfg!(feature = "dds")),
+        // Formats a case needs beyond the one its extension names: a scene's mesh file, or `.xml` read by its root.
+        ("obj", cfg!(feature = "obj")),
+        ("irr", cfg!(feature = "irr")),
+        ("xgl", cfg!(feature = "xgl")),
+        ("tiles", cfg!(feature = "tiles")),
     ];
     features.iter().any(|&(f, on)| on && f == name)
 }
@@ -107,16 +129,28 @@ fn has_feature(name: &str) -> bool {
 /// Every model extension a full build reads, so cases are found in builds without some readers.
 const ALL_EXTENSIONS: &[&str] = &[
     "stl", "ply", "vox", "obj", "3ds", "fbx", "3mf", "usd", "usda", "usdc", "usdz", "gltf", "glb", "skp", "bvh", "dae",
-    "zae", "kmz", "off", "vrm", "vrma", "x3d", "x3dv", "x3dz", "wrl", "wrz", "dxf", "splat", "spz", "las", "laz",
-    "pcd", "xyz", "pts", "ptx", "asc", "e57", "amf", "lwo", "ac", "pmx", "pmd", "vmd", "x", "md2", "md3", "md5mesh",
-    "md5anim", "iqm", "smd", "vta", "ms3d", "b3d", "asf", "amc", "c3d", "trc", "htr", "mesh", "skeleton", "xml", "flt",
-    "ogex",
+    "zae", "kmz", "off", "vrm", "vrma", "x3d", "x3dv", "x3dz", "wrl", "wrz", "dxf", "splat", "spz", "sog", "las",
+    "laz", "pcd", "xyz", "pts", "ptx", "asc", "e57", "amf", "lwo", "ac", "pmx", "pmd", "vmd", "x", "md2", "md3",
+    "md5mesh", "md5anim", "iqm", "smd", "vta", "ms3d", "b3d", "asf", "amc", "c3d", "trc", "htr", "mesh", "skeleton",
+    "xml", "flt", "ogex", "irrmesh", "irr", "xgl", "zgl", "vtk", "vtp", "vtu", "b3dm", "i3dm", "pnts", "cmpt", "msh",
+    "meshb",
 ];
 
 fn ext_of(p: &Path) -> String {
     p.extension()
         .map(|e| e.to_string_lossy().to_lowercase())
         .unwrap_or_default()
+}
+
+/// The extension whose reader reads a case's model: its own, but for a `.json`, which is an unzipped SOG's
+/// `meta.json` or else a 3D Tiles tileset, read as the tiles are.
+fn reader_of(p: &Path) -> String {
+    let ext = ext_of(p);
+    if ext == "json" && p.file_name().is_some_and(|n| n != "meta.json") {
+        "cmpt".into()
+    } else {
+        ext
+    }
 }
 
 /// A case: its folder, model file and expectations.
@@ -136,9 +170,14 @@ fn cases(format: &str) -> Vec<Case> {
         .filter(|p| p.is_dir())
         .collect();
     dirs.sort();
-    dirs.into_iter()
-        .map(|dir| {
-            let name = format!("{format}/{}", dir.file_name().unwrap().to_string_lossy());
+    dirs.into_iter().map(|dir| case_at(format, dir)).collect()
+}
+
+/// The case in folder `dir` of `format`'s corpus.
+fn case_at(format: &str, dir: PathBuf) -> Case {
+    let name = format!("{format}/{}", dir.file_name().unwrap().to_string_lossy());
+    {
+        {
             let text = std::fs::read_to_string(dir.join("expect.json"))
                 .unwrap_or_else(|e| panic!("{name}: no expect.json: {e}"));
             let expect: Map<String, Value> =
@@ -171,8 +210,8 @@ fn cases(format: &str) -> Vec<Case> {
                 file,
                 expect,
             }
-        })
-        .collect()
+        }
+    }
 }
 
 fn floats(v: &Value) -> Vec<f32> {
@@ -186,6 +225,20 @@ fn close(a: &[f32], b: &[f32], tol: f32) -> bool {
 }
 
 /// A path under `root`, `/`-separated and relative to it.
+/// The first of `points` that isn't within `tol` of any of `among`, by `close`'s measure.
+fn outside(points: &[[f32; 3]], among: &[[f32; 3]], tol: f32) -> Option<[f32; 3]> {
+    let mut sorted = among.to_vec();
+    sorted.sort_by(|a, b| a[0].total_cmp(&b[0]));
+    points.iter().copied().find(|p| {
+        let reach = 2.0 * tol * (1.0 + p[0].abs());
+        let from = sorted.partition_point(|q| q[0] < p[0] - reach);
+        !sorted[from..]
+            .iter()
+            .take_while(|q| q[0] <= p[0] + reach)
+            .any(|q| close(p, q, tol))
+    })
+}
+
 fn relative(p: &Path, root: &Path) -> String {
     p.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/")
 }
@@ -206,21 +259,23 @@ fn same_from_memory(case: &Case, ext: &str, from_file: &polysmelt::Result<Loaded
     }
     let bytes = std::fs::read(&case.file).unwrap();
     let name = relative(&case.file, &case.dir);
-    let from_memory = formats::load_bytes(&bytes, &name, ext, &memory, Keep::ALL).and_then(flattened);
-    let glb = |d: &Document<'_>| d.to_glb().ok();
+    let _ = ext;
+    let from_memory = Loader::new().assets(memory).read(bytes, &name).and_then(flattened);
+    let glb = |d: &Document| d.to_glb().ok();
     match (from_file, &from_memory) {
         (Ok(a), Ok(b)) if glb(&a.0) == glb(&b.0) && a.0.facts == b.0.facts => Ok(()),
         (Ok(_), Ok(_)) => Err("reads differently from memory".into()),
-        (Err(_), Err(_)) => Ok(()),
+        (Err(a), Err(b)) if a.kind() == b.kind() => Ok(()),
+        (Err(a), Err(b)) => Err(format!("fails from memory with {b:?}, from its file with {a:?}")),
         (Ok(_), Err(err)) => Err(format!("fails to load from memory: {err}")),
         (Err(_), Ok(_)) => Err("loads from memory, though not from its file".into()),
     }
 }
 
 /// A case's document and the mesh it flattens to.
-type Loaded<'a> = (Document<'a>, Option<Mesh>);
+type Loaded = (Document, Option<Mesh>);
 
-fn flattened(doc: Document<'_>) -> polysmelt::Result<Loaded<'_>> {
+fn flattened(doc: Document) -> polysmelt::Result<Loaded> {
     let mesh = doc.flatten(Pose::Rest)?;
     Ok((doc, mesh))
 }
@@ -229,9 +284,9 @@ fn flattened(doc: Document<'_>) -> polysmelt::Result<Loaded<'_>> {
 /// `joints` across skins, `morph_targets` across meshes' first primitives, `channels` across animations), and
 /// `node_names` and primitive `attributes` that must be there, and `source`, fields the asset's
 /// `extras.source` must hold.
-fn document(e: &Map<String, Value>, doc: &Document<'_>) -> Result<(), String> {
+fn document(e: &Map<String, Value>, doc: &Document) -> Result<(), String> {
     let Some(want) = e.get("document") else { return Ok(()) };
-    let j = &doc.json;
+    let j = doc.json();
     let list = |k: &str| j.get(k).and_then(Value::as_array).cloned().unwrap_or_default();
     let sum = |k: &str, f: &dyn Fn(&Value) -> usize| list(k).iter().map(f).sum::<usize>();
     let len = |v: Option<&Value>| v.and_then(Value::as_array).map_or(0, Vec::len);
@@ -293,6 +348,94 @@ fn document(e: &Map<String, Value>, doc: &Document<'_>) -> Result<(), String> {
     Ok(())
 }
 
+/// What every reader's geometry is held to, in the document as it's read: no position that isn't finite, no
+/// index naming a vertex that isn't there, and unit normals on every triangle primitive. glTF files are read as
+/// they are, so only what's read from the other formats is held to it.
+///
+/// With `"default_normals": true`, the file has no normals and nothing to say how it's shaded, so its normals
+/// are the default ones, made with a crease angle of 30 degrees: each is a sum of normals of triangles within
+/// that angle of each triangle that uses its vertex, so it can't be further than that from any of them.
+fn geometry(case: &Case, doc: &Document) -> Result<(), String> {
+    let smooth = case.expect.get("default_normals").and_then(Value::as_bool) == Some(true);
+    let as_read = ["gltf/", "vrm/", "tiles/"].iter().any(|f| case.name.starts_with(f));
+    if as_read && !smooth {
+        return Ok(());
+    }
+    let json = doc.json();
+    let meshes = json.get("meshes").and_then(Value::as_array);
+    let prims = meshes
+        .into_iter()
+        .flatten()
+        .filter_map(|m| m.get("primitives").and_then(Value::as_array))
+        .flatten();
+    for prim in prims {
+        let attribute = |name: &str| prim.pointer(&format!("/attributes/{name}")).and_then(Value::as_u64);
+        let Some(position) = attribute("POSITION") else {
+            continue;
+        };
+        let read = |a: u64| doc.read_floats(a as usize).map_err(|e| format!("accessor {a}: {e}"));
+        let (_, pos) = read(position)?;
+        if let Some(x) = pos.iter().find(|x| !x.is_finite()) {
+            return Err(format!("a position holds {x}"));
+        }
+        let pos: Vec<[f64; 3]> = pos.chunks_exact(3).map(|p| [p[0], p[1], p[2]].map(f64::from)).collect();
+        let indices = match prim.get("indices").and_then(Value::as_u64) {
+            Some(a) => doc.read_indices(a as usize).map_err(|e| format!("indices {a}: {e}"))?,
+            None => (0..pos.len() as u32).collect(),
+        };
+        if let Some(i) = indices.iter().find(|&&i| i as usize >= pos.len()) {
+            return Err(format!("index {i} names no vertex of {}", pos.len()));
+        }
+        if prim.get("mode").and_then(Value::as_u64).unwrap_or(4) != 4 {
+            continue;
+        }
+        let Some(normal) = attribute("NORMAL") else {
+            return Err("a triangle primitive has no NORMAL".into());
+        };
+        let (_, normals) = read(normal)?;
+        if normals.len() != pos.len() * 3 {
+            return Err(format!("{} normals for {} vertices", normals.len() / 3, pos.len()));
+        }
+        let normals: Vec<[f64; 3]> = normals
+            .chunks_exact(3)
+            .map(|n| [n[0], n[1], n[2]].map(f64::from))
+            .collect();
+        let length = |v: [f64; 3]| (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+        if let Some(n) = normals.iter().find(|n| (length(**n) - 1.0).abs() > 1e-3) {
+            return Err(format!("normal {n:?} isn't unit length"));
+        }
+        if !smooth {
+            continue;
+        }
+        // No vertex's normal is further than the crease angle from the normal of a triangle that uses it.
+        let limit = (30.0f64 + 0.5).to_radians().cos();
+        for t in indices.chunks_exact(3) {
+            let [a, b, c] = [t[0], t[1], t[2]].map(|i| pos[i as usize]);
+            let (u, v) = ([0, 1, 2].map(|k| b[k] - a[k]), [0, 1, 2].map(|k| c[k] - a[k]));
+            let f = [
+                u[1] * v[2] - u[2] * v[1],
+                u[2] * v[0] - u[0] * v[2],
+                u[0] * v[1] - u[1] * v[0],
+            ];
+            let l = length(f);
+            if l <= 0.0 {
+                continue;
+            }
+            for &i in t {
+                let n = normals[i as usize];
+                let dot = (f[0] * n[0] + f[1] * n[1] + f[2] * n[2]) / l;
+                if dot < limit {
+                    return Err(format!(
+                        "vertex {i}'s normal {n:?} is {:.1} degrees from one of its triangles', past the crease angle",
+                        dot.clamp(-1.0, 1.0).acos().to_degrees()
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// `json` (or another `key`): values the glTF JSON holds, by JSON pointer
 /// (`/materials/0/extensions/KHR_materials_ior/ior`). Numbers match to within 1e-4 (relative), arrays and objects
 /// member by member; `null` means the pointer must lead nowhere.
@@ -333,7 +476,7 @@ fn pointers(e: &Map<String, Value>, key: &str, json: &Map<String, Value>) -> Res
 }
 
 /// `poses`: the bounds of what's drawn in animation `animation` at `time` seconds.
-fn poses(e: &Map<String, Value>, doc: &Document<'_>, tol: f32) -> Result<(), String> {
+fn poses(e: &Map<String, Value>, doc: &Document, tol: f32) -> Result<(), String> {
     for p in e.get("poses").and_then(Value::as_array).into_iter().flatten() {
         let index = p["animation"].as_u64().unwrap_or(0) as usize;
         let time = p["time"].as_f64().unwrap_or(0.0) as f32;
@@ -363,11 +506,21 @@ fn poses(e: &Map<String, Value>, doc: &Document<'_>, tol: f32) -> Result<(), Str
 /// `parent` (a name, or `null` for a root), its `translation`, `rotation` (either sign) and `scale` in the rest pose,
 /// or with `time` (seconds) in animation `animation` (0 by default) at that time, and its `keys`: per path
 /// (`translation`, `rotation`, `scale`), the channel's key count, its key times, or `null` for no channel.
-fn rig(e: &Map<String, Value>, doc: &Document<'_>, tol: f32) -> Result<(), String> {
-    let Some(entries) = e.get("rig").and_then(Value::as_array) else {
+fn rig(e: &Map<String, Value>, doc: &Document, tol: f32) -> Result<(), String> {
+    if !e.contains_key("rig") && !e.contains_key("animation_spans") {
         return Ok(());
-    };
+    }
+    let none = Vec::new();
+    let entries = e.get("rig").and_then(Value::as_array).unwrap_or(&none);
     let rig = doc.rig().map_err(|err| format!("no rig: {err}"))?;
+    // `animation_spans`: each animation's first and last key times, in seconds.
+    if let Some(spans) = e.get("animation_spans").and_then(Value::as_array) {
+        let got: Vec<[f32; 2]> = rig.animations.iter().map(|a| a.span().into()).collect();
+        let same = got.len() == spans.len() && got.iter().zip(spans).all(|(g, w)| close(g, &floats(w), tol));
+        if !same {
+            return Err(format!("animations span {got:?}, expected {spans:?}"));
+        }
+    }
     for entry in entries {
         let name = entry["node"].as_str().ok_or("a rig entry needs \"node\"")?;
         let node = rig.find(name).ok_or_else(|| format!("rig has no node {name:?}"))?;
@@ -380,15 +533,24 @@ fn rig(e: &Map<String, Value>, doc: &Document<'_>, tol: f32) -> Result<(), Strin
             }
         }
         let animation = entry["animation"].as_u64().unwrap_or(0) as usize;
-        let (trs, when) = match entry.get("time").and_then(Value::as_f64) {
+        let (pose, when) = match entry.get("time").and_then(Value::as_f64) {
             Some(t) => {
                 if animation >= rig.animations.len() {
                     return Err(format!("{name}: no animation {animation}"));
                 }
-                (rig.pose(Some(animation), t as f32)[node], format!("at {t}"))
+                (rig.pose(Some(animation), t as f32), format!("at {t}"))
             }
-            None => (rig.nodes[node].rest, "at rest".to_owned()),
+            None => (rig.nodes.iter().map(|n| n.rest).collect(), "at rest".to_owned()),
         };
+        let trs = pose[node];
+        // `world`: where the node's origin is in the scene, its parents' transforms applied.
+        if let Some(want) = entry.get("world") {
+            let m = rig.world(&pose)[node];
+            let (got, want) = ([m[12], m[13], m[14]], floats(want));
+            if !close(&got, &want, tol) {
+                return Err(format!("{name} {when}: its origin is at {got:?}, expected {want:?}"));
+            }
+        }
         let negated = trs.rotation.map(|c| -c);
         for (key, got, alt) in [
             ("translation", &trs.translation[..], None),
@@ -403,15 +565,15 @@ fn rig(e: &Map<String, Value>, doc: &Document<'_>, tol: f32) -> Result<(), Strin
         }
         for (path, want) in entry.get("keys").and_then(Value::as_object).into_iter().flatten() {
             let target = match path.as_str() {
-                "translation" => polysmelt::rig::Path::Translation,
-                "rotation" => polysmelt::rig::Path::Rotation,
-                "scale" => polysmelt::rig::Path::Scale,
+                "translation" => polysmelt::rig::Property::Translation,
+                "rotation" => polysmelt::rig::Property::Rotation,
+                "scale" => polysmelt::rig::Property::Scale,
                 _ => return Err(format!("{name}: no such path as {path:?}")),
             };
             let channel = rig
                 .animations
                 .get(animation)
-                .and_then(|a| a.channels.iter().find(|c| c.node == node && c.path == target));
+                .and_then(|a| a.channels.iter().find(|c| c.node == node && c.property == target));
             let ok = match (channel, want) {
                 (None, Value::Null) => true,
                 (Some(c), Value::Number(n)) => n.as_u64() == Some(c.times.len() as u64),
@@ -430,18 +592,25 @@ fn rig(e: &Map<String, Value>, doc: &Document<'_>, tol: f32) -> Result<(), Strin
 /// `Document::decode`: the case decoded, written as a GLB and read back, has no compression or quantization left
 /// and flattens to the mesh it did.
 fn decoded(case: &Case, ext: &str, want: Option<&Mesh>, tol: f32) -> Result<(), String> {
-    let mut doc = formats::load(&case.file, ext, &Folder::new(&case.dir), Keep::ALL).map_err(|e| e.to_string())?;
+    let _ = ext;
+    let mut doc = Loader::new()
+        .assets(Folder::new(&case.dir))
+        .open(&case.file)
+        .map_err(|e| e.to_string())?;
     doc.decode().map_err(|err| format!("doesn't decode: {err}"))?;
-    // The gltf crate refuses attribute names it doesn't know, KHR_gaussian_splatting's among them.
-    let splats = doc
-        .json
-        .get("extensionsUsed")
-        .and_then(Value::as_array)
-        .is_some_and(|used| used.iter().any(|e| e == "KHR_gaussian_splatting"));
-    if !splats && let Some(why) = agrees_with_gltf_crate(&doc)? {
+    // The gltf crate refuses attribute names and animation targets it doesn't know (KHR_gaussian_splatting's,
+    // KHR_animation_pointer's), and any required extension but the texture ones it's built with here.
+    let listed = |key: &str| {
+        let list = doc.json().get(key).and_then(Value::as_array);
+        list.into_iter().flatten().filter_map(Value::as_str)
+    };
+    let foreign = listed("extensionsUsed").any(|e| e == "KHR_gaussian_splatting" || e == "KHR_animation_pointer")
+        || listed("extensionsRequired")
+            .any(|e| !["KHR_texture_basisu", "EXT_texture_webp", "MSFT_texture_dds"].contains(&e));
+    if !foreign && let Some(why) = agrees_with_gltf_crate(&doc)? {
         return Err(format!("decoded, the gltf crate can't read it: {why}"));
     }
-    let text = serde_json::to_string(&doc.json).unwrap();
+    let text = serde_json::to_string(doc.json()).unwrap();
     for name in [
         "EXT_meshopt_compression",
         "KHR_meshopt_compression",
@@ -453,12 +622,12 @@ fn decoded(case: &Case, ext: &str, want: Option<&Mesh>, tol: f32) -> Result<(), 
         }
     }
     let accessors = doc
-        .json
+        .json()
         .get("accessors")
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let prims = doc.json.get("meshes").and_then(Value::as_array).into_iter().flatten();
+    let prims = doc.json().get("meshes").and_then(Value::as_array).into_iter().flatten();
     for p in prims.flat_map(|m| m["primitives"].as_array().cloned().unwrap_or_default()) {
         let targets = p.get("targets").and_then(Value::as_array).cloned().unwrap_or_default();
         for set in std::iter::once(&p["attributes"]).chain(&targets) {
@@ -474,12 +643,11 @@ fn decoded(case: &Case, ext: &str, want: Option<&Mesh>, tol: f32) -> Result<(), 
     let glb = doc
         .to_glb()
         .map_err(|err| format!("decoded, it doesn't write as GLB: {err}"))?;
-    if !splats {
+    if !foreign {
         gltf::Gltf::from_slice(&glb).map_err(|err| format!("decoded, the gltf crate rejects it: {err}"))?;
     }
-    let none = Memory::new();
-    let back = formats::load_bytes(&glb, "decoded.glb", "glb", &none, Keep::ALL)
-        .map_err(|err| format!("decoded, its GLB doesn't read back: {err}"))?;
+    let back =
+        polysmelt::read(glb, "decoded.glb").map_err(|err| format!("decoded, its GLB doesn't read back: {err}"))?;
     let got = back
         .flatten(Pose::Rest)
         .map_err(|err| format!("decoded, it doesn't flatten: {err}"))?;
@@ -516,7 +684,7 @@ fn decoded(case: &Case, ext: &str, want: Option<&Mesh>, tol: f32) -> Result<(), 
 }
 
 /// Writes the case's document as a GLB under `target/conformance/`, for the Khronos validator.
-fn keep_glb(case: &Case, doc: &Document<'_>) -> Result<(), String> {
+fn keep_glb(case: &Case, doc: &Document) -> Result<(), String> {
     let rel = relative(&case.dir, &corpus());
     let out = Path::new(env!("CARGO_TARGET_TMPDIR"))
         .join("conformance")
@@ -543,9 +711,9 @@ fn keep_mesh_glb(case: &Case, bytes: &[u8]) {
 /// Every accessor with a buffer view reads the same through [`Document::read_floats`] as through the
 /// gltf crate, normalized integers mapped as glTF says. A document the gltf crate rejects or
 /// panics on is skipped, returning why: those are the gltf crate's to fix.
-fn agrees_with_gltf_crate(doc: &Document<'_>) -> Result<Option<String>, String> {
+fn agrees_with_gltf_crate(doc: &Document) -> Result<Option<String>, String> {
     use gltf::accessor::{DataType, Dimensions, util::Iter};
-    let Ok(root) = serde_json::from_value::<gltf::json::Root>(Value::Object(doc.json.clone())) else {
+    let Ok(root) = serde_json::from_value::<gltf::json::Root>(Value::Object(doc.json().clone())) else {
         return Ok(Some("its JSON doesn't parse as gltf::json::Root".into()));
     };
     let Ok(g) = gltf::Document::from_json(root) else {
@@ -558,7 +726,7 @@ fn agrees_with_gltf_crate(doc: &Document<'_>) -> Result<Option<String>, String> 
     let get = |b: gltf::Buffer<'_>| buffers.get(b.index()).map(Vec::as_slice);
     let compressed = |a: &gltf::Accessor<'_>| {
         a.view().is_some_and(|v| {
-            let j = &doc.json["bufferViews"][v.index()];
+            let j = &doc.json()["bufferViews"][v.index()];
             j.get("extensions").is_some()
         })
     };
@@ -657,7 +825,7 @@ fn agrees_with_gltf_crate(doc: &Document<'_>) -> Result<Option<String>, String> 
 /// centroid, skinned meshes posed by their joints.
 /// `Pose::Bind` draws what `Pose::Rest` does, triangle for triangle and with the same joints,
 /// unskinned primitives exactly as they are.
-fn bind_pose(doc: &Document<'_>, rest: Option<&Mesh>) -> Result<(), String> {
+fn bind_pose(doc: &Document, rest: Option<&Mesh>) -> Result<(), String> {
     let bind = doc.flatten(Pose::Bind).map_err(|e| format!("bind pose: {e}"))?;
     let (Some(rest), Some(bind)) = (rest, bind.as_ref()) else {
         return match (rest.is_some(), bind.is_some()) {
@@ -676,7 +844,7 @@ fn bind_pose(doc: &Document<'_>, rest: Option<&Mesh>) -> Result<(), String> {
         if r.indices != b.indices || r.skin_joints != b.skin_joints || r.skin_weights != b.skin_weights {
             return Err(format!("bind pose primitive {k}: different triangles or joints"));
         }
-        if !r.skinned() && (r.positions != b.positions || r.normals != b.normals) {
+        if !r.is_skinned() && (r.positions != b.positions || r.normals != b.normals) {
             return Err(format!("bind pose moved unskinned primitive {k}"));
         }
     }
@@ -684,8 +852,7 @@ fn bind_pose(doc: &Document<'_>, rest: Option<&Mesh>) -> Result<(), String> {
 }
 
 fn round_trip(mesh: &Mesh, bytes: &[u8], tol: f32) -> Result<(), String> {
-    let none = Memory::new();
-    let back = formats::load_bytes(bytes, "mesh.glb", "glb", &none, Keep::ALL)
+    let back = polysmelt::read(bytes.to_vec(), "mesh.glb")
         .map_err(|err| format!("the mesh's GLB doesn't read back: {err}"))?
         .flatten(Pose::Rest)
         .map_err(|err| format!("the mesh's GLB doesn't flatten: {err}"))?;
@@ -717,17 +884,228 @@ fn round_trip(mesh: &Mesh, bytes: &[u8], tol: f32) -> Result<(), String> {
     Ok(())
 }
 
+/// How far apart two meshes' values may be and still be the same: each is the largest difference in any
+/// component.
+#[derive(Clone, Copy, Debug)]
+struct Tolerances {
+    positions: f32,
+    normals: f32,
+    uvs: f32,
+    colors: f32,
+}
+
+impl Tolerances {
+    /// `same_as`'s `positions`, `normals`, `uvs` and `colors`, each `1e-5` when it isn't given.
+    fn of(v: &Value) -> Self {
+        let get = |key: &str| v.get(key).and_then(Value::as_f64).unwrap_or(1e-5) as f32;
+        Self {
+            positions: get("positions"),
+            normals: get("normals"),
+            uvs: get("uvs"),
+            colors: get("colors"),
+        }
+    }
+}
+
+/// A triangle's corners: position, normal, texture coordinates and color, zeros for what its primitive lacks.
+type Corners = [[f32; 12]; 3];
+
+/// A mesh's triangles, each with its material and which of normals, texture coordinates and colors it has.
+fn soup(mesh: &Mesh) -> Vec<(usize, [bool; 3], Corners)> {
+    let mut out = Vec::new();
+    for p in &mesh.prims {
+        let has = [!p.normals.is_empty(), !p.uvs.is_empty(), !p.colors.is_empty()];
+        let corner = |i: u32| {
+            let i = i as usize;
+            let mut c = [0f32; 12];
+            c[..3].copy_from_slice(&p.positions[i]);
+            if has[0] {
+                c[3..6].copy_from_slice(&p.normals[i]);
+            }
+            if has[1] {
+                c[6..8].copy_from_slice(&p.uvs[i]);
+            }
+            if has[2] {
+                c[8..].copy_from_slice(&p.colors[i]);
+            }
+            c
+        };
+        for t in p.indices.chunks_exact(3) {
+            out.push((p.material, has, [corner(t[0]), corner(t[1]), corner(t[2])]));
+        }
+    }
+    out
+}
+
+/// Whether two meshes draw the same: the same materials and images, and the same triangles in each material,
+/// in any order and starting at any corner but wound the same way, every value within `tol`. Vertices may be
+/// shared differently. On success, the largest differences found between matched corners.
+fn same_mesh(got: &Mesh, want: &Mesh, tol: Tolerances) -> Result<Tolerances, String> {
+    if got.materials != want.materials {
+        let at = got.materials.iter().zip(&want.materials).position(|(a, b)| a != b);
+        return Err(match at {
+            Some(i) => format!(
+                "material {i} is {:?}, expected {:?}",
+                got.materials[i], want.materials[i]
+            ),
+            None => format!("{} materials, expected {}", got.materials.len(), want.materials.len()),
+        });
+    }
+    if got.images != want.images {
+        return Err(format!(
+            "{} images that aren't the other's {}",
+            got.images.len(),
+            want.images.len()
+        ));
+    }
+    let (a, b) = (soup(got), soup(want));
+    if a.len() != b.len() {
+        return Err(format!("{} triangles, expected {}", a.len(), b.len()));
+    }
+    // The other's triangles by where their centers are, in cells much larger than the tolerance: a match is
+    // in the same cell or one beside it.
+    let cell = (tol.positions * 8.0).max(1e-9);
+    let key = |t: &Corners| -> [i64; 3] {
+        std::array::from_fn(|k| (f64::from(t[0][k] + t[1][k] + t[2][k]) / 3.0 / f64::from(cell)).floor() as i64)
+    };
+    let mut cells: std::collections::HashMap<(usize, [i64; 3]), Vec<usize>> = std::collections::HashMap::new();
+    for (i, (m, _, t)) in b.iter().enumerate() {
+        cells.entry((*m, key(t))).or_default().push(i);
+    }
+    let limits: [f32; 12] = std::array::from_fn(|k| match k {
+        0..3 => tol.positions,
+        3..6 => tol.normals,
+        6..8 => tol.uvs,
+        _ => tol.colors,
+    });
+    // How far apart two triangles are in each value, at the first rotation that fits; `None` past `limits`.
+    // The differences are the largest over the corners.
+    let apart = |x: &Corners, y: &Corners| -> Option<[f32; 12]> {
+        (0..3).find_map(|r| {
+            let mut worst = [0f32; 12];
+            for c in 0..3 {
+                for k in 0..12 {
+                    let d = (x[c][k] - y[(c + r) % 3][k]).abs();
+                    // A NaN is never the same.
+                    if d.is_nan() || d > limits[k] {
+                        return None;
+                    }
+                    worst[k] = worst[k].max(d);
+                }
+            }
+            Some(worst)
+        })
+    };
+    let mut used = vec![false; b.len()];
+    let mut worst = [0f32; 12];
+    let mut unmatched = Vec::new();
+    for (m, has, t) in &a {
+        let k = key(t);
+        let near = (0..27).map(|n| [k[0] + n % 3 - 1, k[1] + n / 3 % 3 - 1, k[2] + n / 9 - 1]);
+        // The closest of those that fit, so a fine mesh's neighboring triangles aren't taken for each other.
+        let found = near
+            .filter_map(|cell| cells.get(&(*m, cell)))
+            .flatten()
+            .filter(|&&i| !used[i] && b[i].1 == *has)
+            .filter_map(|&i| Some((i, apart(t, &b[i].2)?)))
+            .min_by(|x, y| x.1[..3].iter().sum::<f32>().total_cmp(&y.1[..3].iter().sum()));
+        match found {
+            Some((i, d)) => {
+                used[i] = true;
+                for k in 0..12 {
+                    worst[k] = worst[k].max(d[k]);
+                }
+            }
+            None => unmatched.push((*m, *t)),
+        }
+    }
+    if let Some((m, t)) = unmatched.first() {
+        return Err(format!(
+            "{} of {} triangles aren't in the other mesh within {tol:?}, the first in material {m} at {:?}, {:?}, {:?}",
+            unmatched.len(),
+            a.len(),
+            &t[0][..3],
+            &t[1][..3],
+            &t[2][..3]
+        ));
+    }
+    let most = |r: std::ops::Range<usize>| worst[r].iter().fold(0f32, |a, &b| a.max(b));
+    Ok(Tolerances {
+        positions: most(0..3),
+        normals: most(3..6),
+        uvs: most(6..8),
+        colors: most(8..12),
+    })
+}
+
+/// `same_as`: the case's flat mesh is the same as the one another case of its format makes (`case`), as
+/// [`same_mesh`] compares them, within the tolerances it gives.
+fn same_as(case: &Case, mesh: &Mesh) -> Result<(), String> {
+    let Some(s) = case.expect.get("same_as") else {
+        return Ok(());
+    };
+    let name = s
+        .get("case")
+        .and_then(Value::as_str)
+        .ok_or("`same_as` names no `case`")?;
+    let format = case.name.split('/').next().unwrap();
+    let other = case_at(format, corpus().join(format).join(name));
+    let want = Loader::new()
+        .assets(Folder::new(&other.dir))
+        .open(&other.file)
+        .and_then(|doc| doc.flatten(Pose::Rest))
+        .map_err(|err| format!("{}, which it should be the same as, fails to load: {err}", other.name))?
+        .ok_or_else(|| format!("{}, which it should be the same as, draws nothing", other.name))?;
+    let worst = same_mesh(mesh, &want, Tolerances::of(s)).map_err(|why| format!("not the same as {name}: {why}"))?;
+    println!("{}: the same as {name}, at most {worst:?} apart", case.name);
+    Ok(())
+}
+
+/// What an error says, without the path it names first: `error` is matched against this, so a
+/// case's folder name can't match it.
+fn message(err: &polysmelt::Error) -> String {
+    let text = err.to_string();
+    match err.path().map(|p| format!("{}: ", p.display())) {
+        Some(prefix) => text.strip_prefix(&prefix).map_or(text.clone(), str::to_owned),
+        None => text,
+    }
+}
+
 /// Runs one case, returning what's wrong with it.
 fn run(case: &Case) -> Result<(), String> {
     let e = &case.expect;
     let ext = ext_of(&case.file);
     let tol = e.get("tolerance").and_then(Value::as_f64).unwrap_or(1e-4) as f32;
-    let loaded = formats::load(&case.file, &ext, &Folder::new(&case.dir), Keep::ALL).and_then(flattened);
+    let loaded = Loader::new().assets(Folder::new(&case.dir)).open(&case.file);
+    // An error from loading names the file it was reading: the model or one it refers to.
+    let named = loaded
+        .as_ref()
+        .err()
+        .map(|err| err.path().is_some_and(|p| p.starts_with(&case.dir)));
+    let loaded = loaded.and_then(flattened);
     same_from_memory(case, &ext, &loaded)?;
     if let Some(want) = e.get("error").and_then(Value::as_str) {
+        let kind = e
+            .get("error_kind")
+            .and_then(Value::as_str)
+            .ok_or("has an `error` but no `error_kind`")?;
         return match loaded {
-            Err(err) if err.to_string().to_lowercase().contains(&want.to_lowercase()) => Ok(()),
-            Err(err) => Err(format!("failed with {err:?}, expected an error containing {want:?}")),
+            Err(err) if !message(&err).to_lowercase().contains(&want.to_lowercase()) => {
+                Err(format!("failed with {err:?}, expected an error containing {want:?}"))
+            }
+            // Without every default feature, a case can stop at the feature it needs before
+            // it reaches the data the case is about.
+            Err(err)
+                if format!("{:?}", err.kind()) != kind
+                    && (cfg!(feature = "default") || err.kind() != polysmelt::ErrorKind::FeatureDisabled) =>
+            {
+                Err(format!("failed with {err:?}, expected an error of kind {kind}"))
+            }
+            Err(err) if named == Some(false) => Err(format!(
+                "failed with {err:?}, expected the error to name a file in {}",
+                case.dir.display()
+            )),
+            Err(_) => Ok(()),
             Ok(_) => Err(format!("loaded, expected an error containing {want:?}")),
         };
     }
@@ -745,7 +1123,8 @@ fn run(case: &Case) -> Result<(), String> {
         }
     }
     document(e, &doc)?;
-    pointers(e, "json", &doc.json)?;
+    geometry(case, &doc)?;
+    pointers(e, "json", doc.json())?;
     poses(e, &doc, tol)?;
     rig(e, &doc, tol)?;
     decoded(case, &ext, mesh.as_ref(), tol)?;
@@ -756,7 +1135,8 @@ fn run(case: &Case) -> Result<(), String> {
         };
     }
     let mesh = mesh.ok_or("produced no mesh")?;
-    let bytes = polysmelt::mesh::to_glb(&mesh).map_err(|err| format!("to_glb failed: {err}"))?;
+    same_as(case, &mesh)?;
+    let bytes = mesh.to_glb().map_err(|err| format!("to_glb failed: {err}"))?;
     keep_mesh_glb(case, &bytes);
     round_trip(&mesh, &bytes, tol)?;
     // `flat_json`: the same, in the JSON of the flat mesh's GLB.
@@ -848,6 +1228,31 @@ fn run(case: &Case) -> Result<(), String> {
             return Err(format!(
                 "bounds are {min:?}..{max:?}, expected {want_min:?}..{want_max:?}"
             ));
+        }
+    }
+    // `position_set`: the distinct positions drawn are the ones another tool read from the file, whatever
+    // their order and however either tool welds them.
+    if let Some(name) = e.get("position_set").and_then(Value::as_str) {
+        let bytes = std::fs::read(case.dir.join(name)).map_err(|err| format!("position_set {name}: {err}"))?;
+        let want: Vec<[f32; 3]> = bytes
+            .as_chunks::<12>()
+            .0
+            .iter()
+            .map(|c| [0, 4, 8].map(|k| f32::from_le_bytes([c[k], c[k + 1], c[k + 2], c[k + 3]])))
+            .collect();
+        let drawn: Vec<[f32; 3]> = g
+            .prims
+            .iter()
+            .flat_map(|p| {
+                let used = p.indices.iter().chain(&p.lines).chain(&p.points);
+                used.map(|&i| p.positions[i as usize])
+            })
+            .collect();
+        if let Some(p) = outside(&drawn, &want, tol) {
+            return Err(format!("position {p:?} is none of the {} in {name}", want.len()));
+        }
+        if let Some(p) = outside(&want, &drawn, tol) {
+            return Err(format!("no position matches {p:?} of {name}"));
         }
     }
     let flag = |key: &str, has: bool| -> Result<(), String> {
@@ -1061,7 +1466,7 @@ fn check(format: &str) {
     let mut ran = 0;
     for case in &cases {
         let needs = case.expect.get("needs").and_then(Value::as_str);
-        if !enabled(&ext_of(&case.file)) || needs.is_some_and(|f| !has_feature(f)) {
+        if !reads(case) || needs.is_some_and(|f| !has_feature(f)) {
             continue;
         }
         ran += 1;
@@ -1150,6 +1555,11 @@ fn splat() {
 #[test]
 fn spz() {
     check("spz");
+}
+
+#[test]
+fn sog() {
+    check("sog");
 }
 #[test]
 fn mmd() {
@@ -1244,7 +1654,188 @@ fn ogex() {
     check("ogex");
 }
 
-/// Every extension `formats::load` takes has cases, and every format a corpus folder.
+#[test]
+fn irr() {
+    check("irr");
+}
+
+#[test]
+fn xgl() {
+    check("xgl");
+}
+
+/// Khronos sample models too large for the corpus, read from a folder laid out as the samples' `Models` folder
+/// is: `POLYSMELT_KHRONOS_SAMPLES`, or `target/khronos-samples`, which `python tools/corpus/khronos.py --large`
+/// fills. A model that isn't there is passed over, so the test checks nothing on a fresh checkout.
+///
+/// A compressed variant must flatten to the mesh its plain one does, as `same_as` cases must, and a model
+/// whose animation points at materials is drawn the same at any time: a flat mesh has no animated materials.
+#[test]
+fn khronos_large_samples() {
+    /// The tolerances for a variant, given it and its plain model's largest extent.
+    type Step = dyn Fn(&Document, f32) -> Tolerances;
+    if !enabled("gltf") {
+        return;
+    }
+    let root = std::env::var_os("POLYSMELT_KHRONOS_SAMPLES").map_or_else(
+        || Path::new(env!("CARGO_MANIFEST_DIR")).join("target/khronos-samples"),
+        PathBuf::from,
+    );
+    let open = |rel: &str| -> Option<Document> {
+        let path = root.join(rel);
+        if !path.is_file() {
+            println!("khronos_large_samples: no {}, passed over", path.display());
+            return None;
+        }
+        let dir = path.parent().unwrap();
+        Some(
+            Loader::new()
+                .assets(Folder::new(dir))
+                .open(&path)
+                .unwrap_or_else(|err| panic!("{rel}: {err}")),
+        )
+    };
+    let flat = |doc: &Document, rel: &str, pose: Pose| -> Mesh {
+        let mesh = doc.flatten(pose).unwrap_or_else(|err| panic!("{rel}: {err}"));
+        mesh.unwrap_or_else(|| panic!("{rel} draws nothing"))
+    };
+    // The largest extent of what a mesh draws: what Draco and gltfpack spread their position bits over.
+    let extent = |mesh: &Mesh| -> f32 {
+        let (mut min, mut max) = ([f32::MAX; 3], [f32::MIN; 3]);
+        for v in mesh.prims.iter().flat_map(|p| &p.positions) {
+            for k in 0..3 {
+                min[k] = min[k].min(v[k]);
+                max[k] = max[k].max(v[k]);
+            }
+        }
+        (0..3).map(|k| max[k] - min[k]).fold(0.0, f32::max)
+    };
+    // Half a step, and a little for the arithmetic, of: Draco's 11-bit positions over the mesh's extent,
+    // 8-bit normals and 10-bit texture coordinates, as the corpus's Draco samples have; gltfpack's integer
+    // positions, a step of which is the scale of the node it puts each mesh on, and 12-bit texture
+    // coordinates. Its normals are 8 bits on an octahedron (meshopt's filter), as far as 0.018 off.
+    let draco = |_: &Document, size: f32| Tolerances {
+        positions: 0.51 * size / 2047.0,
+        normals: 0.015,
+        uvs: 0.51 / 1023.0,
+        colors: 1e-5,
+    };
+    let gltfpack = |variant: &Document, _: f32| {
+        let nodes = variant.json().get("nodes").and_then(Value::as_array);
+        let scales = nodes
+            .into_iter()
+            .flatten()
+            .filter(|n| n.get("mesh").is_some())
+            .flat_map(|n| floats(&n["scale"]));
+        Tolerances {
+            positions: 0.51 * scales.fold(0.0, f32::max),
+            normals: 0.02,
+            uvs: 0.51 / 4095.0,
+            colors: 1e-5,
+        }
+    };
+    let pairs: [(&str, &str, &str, &Step); 3] = [
+        (
+            "Corset/glTF/Corset.gltf",
+            "Corset/glTF-Draco/Corset.gltf",
+            "draco",
+            &draco,
+        ),
+        (
+            "DragonAttenuation/glTF/DragonAttenuation.gltf",
+            "DragonAttenuation/glTF-Meshopt/DragonAttenuation.gltf",
+            "",
+            &gltfpack,
+        ),
+        (
+            "DragonAttenuation/glTF/DragonAttenuation.gltf",
+            "DragonAttenuation/glTF-Meshopt-EXT/DragonAttenuation.gltf",
+            "",
+            &gltfpack,
+        ),
+    ];
+    for (plain, variant, needs, step) in pairs {
+        if !needs.is_empty() && !has_feature(needs) {
+            continue;
+        }
+        let (Some(a), Some(b)) = (open(plain), open(variant)) else {
+            continue;
+        };
+        let mut want = flat(&a, plain, Pose::Rest);
+        let mut got = flat(&b, variant, Pose::Rest);
+        assert_eq!(got.triangles(), b.counts().triangles, "{variant}");
+        // gltfpack leaves the texture coordinates of a material with no color texture in the quantized
+        // mesh's own space, which a flat mesh keeps as they are: its other textures carry the transform
+        // that undoes the quantization. They aren't compared.
+        for mesh in [&mut want, &mut got] {
+            let Mesh { prims, materials, .. } = mesh;
+            for p in prims.iter_mut().filter(|p| materials[p.material].color_image.is_none()) {
+                p.uvs.clear();
+            }
+        }
+        // It leaves a volume's thickness in that space too, which the node scales (as KHR_materials_volume
+        // has it) and so does the flat mesh: the same but for the rounding of the scales it went through.
+        for (g, w) in got.materials.iter_mut().zip(&want.materials) {
+            let g = g.extensions.as_mut().and_then(|e| e.volume.as_mut());
+            let w = w.extensions.as_ref().and_then(|e| e.volume.as_ref());
+            if let (Some(g), Some(w)) = (g, w) {
+                let (a, b) = (g.thickness.factor, w.thickness.factor);
+                assert!(
+                    (a - b).abs() <= 1e-5 * b.abs(),
+                    "{variant}: a volume {a} thick, {b} in {plain}"
+                );
+                g.thickness.factor = b;
+            }
+        }
+        let worst = same_mesh(&got, &want, step(&b, extent(&want)))
+            .unwrap_or_else(|why| panic!("{variant} isn't the same as {plain}: {why}"));
+        println!("{variant}: the same as {plain}, at most {worst:?} apart");
+    }
+    for rel in [
+        "AnimationPointerUVs/glTF/AnimationPointerUVs.gltf",
+        "PotOfCoalsAnimationPointer/glTF/PotOfCoalsAnimationPointer.gltf",
+    ] {
+        let Some(doc) = open(rel) else { continue };
+        let rest = flat(&doc, rel, Pose::Rest);
+        assert_eq!(rest.triangles(), doc.counts().triangles, "{rel}");
+        let animations = doc
+            .json()
+            .get("animations")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+        assert!(animations > 0, "{rel} has no animation");
+        for index in 0..animations {
+            for time in [0.0, 0.7, 2.3] {
+                let posed = flat(&doc, rel, Pose::Animation { index, time });
+                assert!(posed == rest, "{rel}: animation {index} at {time} moves the mesh");
+            }
+        }
+        println!("{rel}: {} triangles, the same at any time", rest.triangles());
+    }
+}
+
+#[test]
+fn vtk() {
+    check("vtk");
+}
+
+#[test]
+fn tiles() {
+    check("tiles");
+}
+
+#[test]
+fn msh() {
+    check("msh");
+}
+
+#[test]
+fn medit() {
+    check("medit");
+}
+
+/// Every extension a [`Format`] has has cases (and `.xml`, read as the format its root names), and every format a
+/// corpus folder.
 #[test]
 fn corpus_covers_every_extension() {
     let mut seen = std::collections::HashSet::new();
@@ -1257,7 +1848,8 @@ fn corpus_covers_every_extension() {
             seen.insert(ext_of(&case.file));
         }
     }
-    let missing: Vec<_> = EXTENSIONS.iter().filter(|e| !seen.contains(**e)).collect();
+    let extensions = Format::all().flat_map(Format::extensions).copied().chain(["xml"]);
+    let missing: Vec<_> = extensions.filter(|e| !seen.contains(*e)).collect();
     assert!(missing.is_empty(), "no conformance cases for {missing:?}");
 }
 
@@ -1265,33 +1857,19 @@ fn corpus_covers_every_extension() {
 /// skip (material libraries, texture files, shaders) changes nothing that's kept.
 #[test]
 fn reading_less_matches_pruning() {
-    let none = Keep {
-        animations: false,
-        skins: false,
-        morph_targets: false,
-        materials: false,
-        textures: false,
-        cameras: false,
-        lights: false,
-        extras: false,
-        image_bytes: false,
-        ..Keep::ALL
-    };
+    let none = Keep::ALL
+        .with_animations(false)
+        .with_skins(false)
+        .with_morph_targets(false)
+        .with_materials(false)
+        .with_textures(false)
+        .with_cameras(false)
+        .with_lights(false)
+        .with_extras(false)
+        .with_image_bytes(false);
     let keeps = [
-        (
-            "no textures",
-            Keep {
-                textures: false,
-                ..Keep::ALL
-            },
-        ),
-        (
-            "no materials",
-            Keep {
-                materials: false,
-                ..Keep::ALL
-            },
-        ),
+        ("no textures", Keep::ALL.with_textures(false)),
+        ("no materials", Keep::ALL.with_materials(false)),
         ("meshes", Keep::MESHES),
         ("nothing", none),
     ];
@@ -1301,18 +1879,17 @@ fn reading_less_matches_pruning() {
             continue;
         }
         for case in cases(&dir.file_name().to_string_lossy()) {
-            let ext = ext_of(&case.file);
             let needs = case.expect.get("needs").and_then(Value::as_str);
-            if !enabled(&ext) || needs.is_some_and(|f| !has_feature(f)) || case.expect.contains_key("error") {
+            if !reads(&case) || needs.is_some_and(|f| !has_feature(f)) || case.expect.contains_key("error") {
                 continue;
             }
-            let assets = Folder::new(&case.dir);
+            let loader = Loader::new().assets(Folder::new(&case.dir));
             for (label, keep) in keeps {
-                let Ok(mut full) = formats::load(&case.file, &ext, &assets, Keep::ALL) else {
+                let Ok(mut full) = loader.open(&case.file) else {
                     continue;
                 };
                 full.prune(keep);
-                let less = match formats::load(&case.file, &ext, &assets, keep) {
+                let less = match loader.clone().keep(keep).open(&case.file) {
                     Ok(d) => d,
                     Err(e) => {
                         failures.push(format!("{} ({label}): {e}", case.name));
@@ -1328,13 +1905,13 @@ fn reading_less_matches_pruning() {
                     skip.push("materials");
                 }
                 let differ: Vec<String> = less
-                    .json
+                    .json()
                     .keys()
-                    .chain(full.json.keys())
-                    .filter(|k| !skip.contains(&k.as_str()) && less.json.get(*k) != full.json.get(*k))
+                    .chain(full.json().keys())
+                    .filter(|k| !skip.contains(&k.as_str()) && less.json().get(*k) != full.json().get(*k))
                     .map(|k| {
-                        let show = |d: &Document<'_>| {
-                            d.json.get(k).map_or_else(
+                        let show = |d: &Document| {
+                            d.json().get(k).map_or_else(
                                 || "none".to_owned(),
                                 |v| v.to_string().chars().take(300).collect::<String>(),
                             )
@@ -1342,15 +1919,15 @@ fn reading_less_matches_pruning() {
                         format!("{k}: {} vs pruned {}", show(&less), show(&full))
                     })
                     .collect();
-                let names = |d: &Document<'_>| -> Vec<Value> {
-                    d.json
+                let names = |d: &Document| -> Vec<Value> {
+                    d.json()
                         .get("materials")
                         .and_then(Value::as_array)
                         .map_or_else(Vec::new, |m| {
                             m.iter().map(|m| m.get("name").cloned().unwrap_or_default()).collect()
                         })
                 };
-                let flat = |d: &Document<'_>| d.flatten(Pose::Rest).ok().flatten().map(|m| format!("{:?}", m.prims));
+                let flat = |d: &Document| d.flatten(Pose::Rest).ok().flatten().map(|m| format!("{:?}", m.prims));
                 if !differ.is_empty() {
                     failures.push(format!("{} ({label}): {}", case.name, differ.join("; ")));
                 } else if names(&less) != names(&full) {
@@ -1378,26 +1955,23 @@ fn reading_less_matches_pruning() {
 /// its handle, to the image the full read has, and the rest of the document is the same.
 #[test]
 fn unread_images_load_as_read_ones() {
-    let light = Keep {
-        image_bytes: false,
-        ..Keep::ALL
-    };
+    let light = Keep::ALL.with_image_bytes(false);
     let (mut failures, mut pending) = (Vec::new(), 0);
     for dir in std::fs::read_dir(corpus()).unwrap().flatten() {
         if !dir.path().is_dir() || dir.file_name() == "tools" {
             continue;
         }
         for case in cases(&dir.file_name().to_string_lossy()) {
-            let ext = ext_of(&case.file);
             let needs = case.expect.get("needs").and_then(Value::as_str);
-            if !enabled(&ext) || needs.is_some_and(|f| !has_feature(f)) || case.expect.contains_key("error") {
+            if !reads(&case) || needs.is_some_and(|f| !has_feature(f)) || case.expect.contains_key("error") {
                 continue;
             }
             let assets = Folder::new(&case.dir);
-            let Ok(full) = formats::load(&case.file, &ext, &assets, Keep::ALL) else {
+            let loader = Loader::new().assets(assets.clone());
+            let Ok(full) = loader.open(&case.file) else {
                 continue;
             };
-            let mut less = match formats::load(&case.file, &ext, &assets, light) {
+            let mut less = match loader.keep(light).open(&case.file) {
                 Ok(d) => d,
                 Err(e) => {
                     failures.push(format!("{}: {e}", case.name));
@@ -1407,7 +1981,7 @@ fn unread_images_load_as_read_ones() {
             let mut bad = |why: String| failures.push(format!("{}: {why}", case.name));
             for h in less.images().filter(polysmelt::images::ImageHandle::is_pending) {
                 pending += 1;
-                let uri = less.json["images"][h.index()].get("uri").and_then(Value::as_str);
+                let uri = less.json()["images"][h.index()].get("uri").and_then(Value::as_str);
                 if uri.is_none() {
                     bad(format!("image {} is pending without a uri", h.index()));
                 }
@@ -1421,7 +1995,7 @@ fn unread_images_load_as_read_ones() {
                 bad(format!("unread images don't write: {e}"));
             }
             let unread = less.embed_images(&assets);
-            let read = |d: &Document<'_>| -> Vec<Option<(polysmelt::Bytes, &'static str)>> {
+            let read = |d: &Document| -> Vec<Option<(polysmelt::Bytes, &'static str)>> {
                 d.images()
                     .map(|h| h.load(&assets).ok().map(|i| (i.bytes, i.mime)))
                     .collect()
@@ -1440,10 +2014,10 @@ fn unread_images_load_as_read_ones() {
             }
             let skip = ["accessors", "bufferViews", "buffers", "images"];
             let differ: Vec<&String> = less
-                .json
+                .json()
                 .keys()
-                .chain(full.json.keys())
-                .filter(|k| !skip.contains(&k.as_str()) && less.json.get(*k) != full.json.get(*k))
+                .chain(full.json().keys())
+                .filter(|k| !skip.contains(&k.as_str()) && less.json().get(*k) != full.json().get(*k))
                 .collect();
             if !differ.is_empty() {
                 bad(format!("{differ:?} differ"));

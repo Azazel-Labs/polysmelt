@@ -9,10 +9,11 @@
 //!
 //! Nothing is allocated from a size a file states: pixels take room as they decode, and an image whose data falls
 //! short is padded only when at least half of it is there (or it's small), so a header claiming a huge image over a
-//! few bytes of data makes nothing. Images are capped at 2^28 pixels.
+//! few bytes of data makes nothing. Images are capped at [`MAX_PIXELS`].
 
 use std::path::Path;
 
+use crate::images::{FREE, MAX_PIXELS};
 use crate::mesh::Image;
 use crate::num::usize_of;
 
@@ -30,11 +31,6 @@ mod psd;
 mod tga;
 #[cfg(feature = "tiff")]
 mod tiff;
-
-/// Pixels an image may have: 16384 by 16384.
-const MAX_PIXELS: usize = 1 << 28;
-/// Bytes an image may take whatever data it has: a small image needs no proof.
-const FREE: usize = 1 << 22;
 
 /// `bytes`, a texture file named `name`, as a PNG (or the PNG or JPEG a BMP wraps), when it's a format a feature
 /// decodes. The format comes from the bytes; TGA, which has no signature, from its name (or its version 2 footer).
@@ -219,6 +215,17 @@ fn masked(v: u32, mask: u32) -> u8 {
     }
     scale((v & mask) >> mask.trailing_zeros(), mask.count_ones())
 }
+
+#[cfg(all(
+    test,
+    feature = "tga",
+    feature = "bmp",
+    feature = "gif",
+    feature = "tiff",
+    feature = "psd",
+    feature = "dds"
+))]
+mod against;
 
 #[cfg(test)]
 mod tests {

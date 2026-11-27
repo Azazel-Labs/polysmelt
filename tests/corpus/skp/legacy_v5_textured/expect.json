@@ -1,8 +1,10 @@
 {
   "spec": "SketchUp .skp (closed; as openskp reads it): one face painted with a textured material (SketchUp 5)",
   "source": "saved by SketchUp, from openskp's test fixtures (packages/cpp/tests/fixtures)",
-  "facts": {
-    "application": "SketchUp 5"
+  "document": {
+    "source": {
+      "tool": "SketchUp 5"
+    }
   },
   "triangles": 2,
   "uvs": true,

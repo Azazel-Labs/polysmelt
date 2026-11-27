@@ -1,0 +1,46 @@
+{
+  "spec": "Doom 3 MD5 (version 10): a real file, a cube bound to two joints",
+  "source": "assimp/assimp at 711b4e9bbde2, test/models/MD5/SimpleCube.md5mesh (BSD-3-Clause, see ../LICENSE-assimp); expectations measured with assimp 6.0.5 (assimp-py 1.2.0)",
+  "triangles": 12,
+  "bounds": {
+    "min": [
+      -32.000012,
+      -32.000015,
+      -32.000007
+    ],
+    "max": [
+      32.000008,
+      32.000003,
+      32.000007
+    ]
+  },
+  "area": 24576.000663,
+  "position_set": "positions.f32",
+  "document": {
+    "node_names": [
+      "origin",
+      "root",
+      "joint1"
+    ]
+  },
+  "rig": [
+    {
+      "node": "root",
+      "world": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "parent": "origin"
+    },
+    {
+      "node": "joint1",
+      "world": [
+        0.02497,
+        31.98033,
+        0.0
+      ],
+      "parent": "root"
+    }
+  ]
+}

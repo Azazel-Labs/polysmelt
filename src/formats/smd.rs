@@ -6,7 +6,8 @@
 //! parent bone, or with the bones its links weight, the parent taking whatever weight they leave. A file with more
 //! than one frame becomes an animation at 30 frames a second. A `.vta` file becomes a point cloud, its first frame
 //! the points and each later frame a morph target. Rotations are Euler angles in radians, applied X, then Y, then
-//! Z. SMD is Z up and right-handed: the scene is turned to Y up.
+//! Z. SMD is Z up and right-handed: the scene stays so under the document's `RootNode`, which turns it to Y up. In the source info, the up axis (`+Z`), handedness
+//! and frame rate are assumed, as the format's convention; game units are kept unscaled, and their length unknown.
 
 use std::collections::HashMap;
 
@@ -15,15 +16,19 @@ use serde_json::json;
 use super::scene::{
     self, Animation, Channel, Interp, M4, Node, Path as Key, Primitive, Scene, SceneMesh, Skin, Target,
 };
+use super::stream::{self, f32_from, f64_from};
 use crate::Result;
 use crate::assets::Assets;
 use crate::document::{Document, Keep};
 use crate::images::Images;
-use crate::mesh::Material;
+use crate::mesh::{FastMap, Material};
 use crate::num::{f32_of, u32_of};
+use crate::quat;
+use crate::source::{Axis, Fact, Handedness};
 
-/// Frames a second: the compilers' default.
-const FPS: f64 = 30.0;
+/// Frames a second: the compilers' default (studiomdl plays a `$sequence` at 30 unless its `fps` option says
+/// otherwise), which is the readers' shared assumption too.
+const FPS: f64 = super::keys::ASSUMED_FRAME_RATE;
 
 /// The most morph target values (targets times points) a `.vta` file may make, against a file whose frames and
 /// points multiply past what memory holds.
@@ -83,7 +88,7 @@ struct Smd {
 }
 
 /// Reads an `.smd` or `.vta` file (`ext`).
-pub(crate) fn load(input: super::Input<'_>, ext: &str, assets: &dyn Assets, keep: Keep) -> Result<Document<'static>> {
+pub(crate) fn load(input: super::Input<'_>, ext: &str, assets: &dyn Assets, keep: Keep) -> Result<Document> {
     let bytes = input.read()?;
     let text = scene::text(&bytes);
     let smd = parse(&text, keep.triangles())?;
@@ -114,10 +119,10 @@ pub(crate) fn load(input: super::Input<'_>, ext: &str, assets: &dyn Assets, keep
     let bones = smd.bones.len();
 
     let mut facts = serde_json::Map::new();
-    let mut source = serde_json::Map::new();
-    source.insert("format".into(), json!(if vta { "VTA" } else { "SMD" }));
-    source.insert("version".into(), json!(smd.version));
-    source.insert("upAxis".into(), json!("Z"));
+    scene.info.format = Some((if vta { "VTA" } else { "SMD" }).into());
+    scene.info.version = Some(smd.version.to_string());
+    scene.info.up_axis = Fact::Assumed(Axis::PosZ);
+    scene.info.handedness = Fact::Assumed(Handedness::Right);
     facts.insert("bones".into(), json!(bones));
     facts.insert("frames".into(), json!(frames.len()));
 
@@ -128,24 +133,21 @@ pub(crate) fn load(input: super::Input<'_>, ext: &str, assets: &dyn Assets, keep
         let mut images = Images::new(!keep.image_bytes, input.dir());
         for name in &smd.materials {
             let mut m = Material::plain(name, [1.0; 4]);
-            if keep.textures
-                && let Some(path) = assets.find(name, input.dir())
-            {
-                m.color_image = images.file(assets, path, name);
+            if keep.textures {
+                m.color_image = images.find(assets, &[name], &[input.dir()]);
             }
             scene.materials.push(m);
         }
         scene.images = images.list;
         reference(&mut scene, &smd.ids, bones, &smd.triangles, &stem);
     }
-    if smd.dropped > 0 {
-        facts.insert("dropped_triangles".into(), json!(smd.dropped));
-    }
+    scene.dropped = smd.dropped;
 
     if !vta && frames.len() > 1 {
         let channels = animation(&frames, bones);
         if !channels.is_empty() {
-            source.insert("frameRate".into(), json!(FPS));
+            // The rate is the compiler script's to give; the file has none.
+            scene.info.frame_rate = Fact::Assumed(FPS);
             scene.animations.push(Animation {
                 name: stem,
                 channels,
@@ -155,21 +157,17 @@ pub(crate) fn load(input: super::Input<'_>, ext: &str, assets: &dyn Assets, keep
     }
     ensure!(
         !scene.nodes.is_empty(),
+        Empty,
         "SMD file has no skeleton, triangles or vertex animation"
     );
-    scene.rotate_roots(scene::Z_UP_TO_Y_UP);
-    scene.source = source;
+    scene.turn(scene::Z_UP_TO_Y_UP);
     scene.facts = facts;
     scene.finish(keep)
 }
 
 /// The rotation Euler angles `p[3..6]` (radians) make: about X, then Y, then Z.
 fn euler(p: Pose) -> [f32; 4] {
-    let [x, y, z] = [p[3], p[4], p[5]].map(f64::from);
-    scene::normalize(scene::quat_mul(
-        scene::about(2, z),
-        scene::quat_mul(scene::about(1, y), scene::about(0, x)),
-    ))
+    quat::normalize(quat::euler_xyz([p[3], p[4], p[5]].map(f64::from)))
 }
 
 /// Frames in time order, two frames at one time made one (the later poses winning), and each frame's poses in bone
@@ -197,12 +195,19 @@ fn settle_frames(mut frames: Vec<Frame>) -> Vec<Frame> {
 fn reference(scene: &mut Scene, ids: &HashMap<i64, usize>, bones: usize, triangles: &[Triangle], name: &str) {
     struct Build {
         prim: Primitive,
-        seen: HashMap<Vec<u32>, u32>,
-        links: Vec<Vec<(u32, f32)>>,
+        /// The first vertex with each position, normal and texture coordinate, by their bits.
+        seen: FastMap<[u32; 8], u32>,
+        /// The next vertex with the same position, normal and texture coordinate as each, differing in its links;
+        /// `u32::MAX` after the last.
+        next: Vec<u32>,
+        /// Each vertex's run of `flat`, its joints and weights.
+        links: Vec<(u32, u32)>,
+        flat: Vec<(u32, f32)>,
     }
     let skinned = bones > 0;
     let mut builds: Vec<Build> = Vec::new();
     let mut prim_of: HashMap<usize, usize> = HashMap::new();
+    let mut links: Vec<(u32, f32)> = Vec::new();
     for t in triangles {
         let b = *prim_of.entry(t.material).or_insert_with(|| {
             builds.push(Build {
@@ -211,32 +216,59 @@ fn reference(scene: &mut Scene, ids: &HashMap<i64, usize>, bones: usize, triangl
                     uvs: vec![Vec::new()],
                     ..Primitive::default()
                 },
-                seen: HashMap::new(),
+                seen: FastMap::default(),
+                next: Vec::new(),
                 links: Vec::new(),
+                flat: Vec::new(),
             });
             builds.len() - 1
         });
         let build = &mut builds[b];
         for v in &t.corners {
-            let links = if skinned { influence(v, ids) } else { Vec::new() };
-            let mut key: Vec<u32> = v
-                .position
-                .iter()
-                .chain(&v.normal)
-                .chain(&v.uv)
-                .map(|c| c.to_bits())
-                .collect();
-            for &(j, w) in &links {
-                key.push(j);
-                key.push(w.to_bits());
+            links.clear();
+            if skinned {
+                influence(v, ids, &mut links);
             }
+            let [x, y, z] = v.position.map(f32::to_bits);
+            let [nx, ny, nz] = v.normal.map(f32::to_bits);
+            let [s, t] = v.uv.map(f32::to_bits);
+            let key = [x, y, z, nx, ny, nz, s, t];
             let next = u32_of(build.prim.positions.len());
-            let index = *build.seen.entry(key).or_insert(next);
+            // A vertex is used again only when its links match bit for bit too.
+            let same = |l: &[(u32, f32)]| {
+                l.len() == links.len()
+                    && l.iter()
+                        .zip(&links)
+                        .all(|(a, b)| a.0 == b.0 && a.1.to_bits() == b.1.to_bits())
+            };
+            let index = match build.seen.get(&key) {
+                None => {
+                    build.seen.insert(key, next);
+                    next
+                }
+                Some(&first) => {
+                    let mut at = first;
+                    loop {
+                        let (start, len) = build.links[at as usize];
+                        if same(&build.flat[start as usize..][..len as usize]) {
+                            break at;
+                        }
+                        let after = build.next[at as usize];
+                        if after == u32::MAX {
+                            build.next[at as usize] = next;
+                            break next;
+                        }
+                        at = after;
+                    }
+                }
+            };
             if index == next {
+                build.next.push(u32::MAX);
                 build.prim.positions.push(v.position);
                 build.prim.normals.push(v.normal);
                 build.prim.uvs[0].push([v.uv[0], 1.0 - v.uv[1]]);
-                build.links.push(links);
+                build.links.push((u32_of(build.flat.len()), u32_of(links.len())));
+                build.flat.extend_from_slice(&links);
             }
             build.prim.indices.push(index);
         }
@@ -244,11 +276,12 @@ fn reference(scene: &mut Scene, ids: &HashMap<i64, usize>, bones: usize, triangl
     let mut prims = Vec::with_capacity(builds.len());
     for mut b in builds {
         if skinned {
-            let width = b.links.iter().map(Vec::len).max().unwrap_or(0).max(1);
+            let width = b.links.iter().map(|l| l.1 as usize).max().unwrap_or(0).max(1);
             b.prim.influences = width;
             b.prim.joints = Vec::with_capacity(width * b.links.len());
             b.prim.weights = Vec::with_capacity(width * b.links.len());
-            for l in &b.links {
+            for &(start, len) in &b.links {
+                let l = &b.flat[start as usize..][..len as usize];
                 for k in 0..width {
                     let (j, w) = l.get(k).copied().unwrap_or((0, 0.0));
                     b.prim.joints.push(j);
@@ -280,8 +313,7 @@ fn reference(scene: &mut Scene, ids: &HashMap<i64, usize>, bones: usize, triangl
 
 /// A vertex's joints and weights: its links to known bones with weight, and its parent bone with whatever weight
 /// they leave; a bone linked twice is one, and at most [`scene::MAX_INFLUENCES`] are kept, the heaviest.
-fn influence(v: &Vertex, ids: &HashMap<i64, usize>) -> Vec<(u32, f32)> {
-    let mut out: Vec<(u32, f32)> = Vec::new();
+fn influence(v: &Vertex, ids: &HashMap<i64, usize>, out: &mut Vec<(u32, f32)>) {
     let mut sum = 0.0f32;
     for &(bone, w) in &v.links {
         if let Some(&j) = ids.get(&bone)
@@ -297,23 +329,13 @@ fn influence(v: &Vertex, ids: &HashMap<i64, usize>) -> Vec<(u32, f32)> {
     {
         out.push((u32_of(p), 1.0 - sum));
     }
-    out.sort_by_key(|l| l.0);
-    let mut merged: Vec<(u32, f32)> = Vec::with_capacity(out.len());
-    for (j, w) in out {
-        match merged.last_mut() {
-            Some(last) if last.0 == j => last.1 += w,
-            _ => merged.push((j, w)),
-        }
-    }
-    merged.sort_by(|a, b| b.1.total_cmp(&a.1));
-    merged.truncate(scene::MAX_INFLUENCES);
-    merged
+    scene::strongest(out);
 }
 
-/// The bones' keys, frame by frame from the first frame's time: a bone a frame leaves out holds its last pose.
+/// The bones' keys, frame by frame at the frames' own times (the shared writer has the animation start at 0, and
+/// notes what it took off): a bone a frame leaves out holds its last pose.
 fn animation(frames: &[Frame], bones: usize) -> Vec<Channel> {
-    let start = frames.first().map_or(0.0, |f| f.time);
-    let time = |f: &Frame| f32_of((f.time - start) / FPS);
+    let time = |f: &Frame| f32_of(f.time / FPS);
     let mut keys: Vec<Vec<(usize, Pose)>> = (0..bones).map(|_| Vec::new()).collect();
     for (k, f) in frames.iter().enumerate() {
         for &(bone, pose) in &f.poses {
@@ -380,7 +402,7 @@ fn vertex_animation(scene: &mut Scene, shapes: Vec<Shape>, name: &str) -> Result
     }
     let base_at = settled.iter().position(|s| s.time == 0.0).unwrap_or(0);
     let Some(base) = settled.get(base_at) else {
-        bail!("VTA file has no vertex animation");
+        bail!(Empty, "VTA file has no vertex animation");
     };
     let mut index: HashMap<i64, usize> = HashMap::new();
     let mut positions = Vec::new();
@@ -397,10 +419,15 @@ fn vertex_animation(scene: &mut Scene, shapes: Vec<Shape>, name: &str) -> Result
             normals[i] = n;
         }
     }
-    ensure!(!positions.is_empty(), "VTA file has no vertices in its first frame");
+    ensure!(
+        !positions.is_empty(),
+        Empty,
+        "VTA file has no vertices in its first frame"
+    );
     let count = settled.len() - 1;
     ensure!(
         count.saturating_mul(positions.len()) <= MAX_TARGET_VALUES,
+        LimitExceeded,
         "VTA file has too many frames of too many vertices to convert ({count} of {})",
         positions.len()
     );
@@ -425,7 +452,7 @@ fn vertex_animation(scene: &mut Scene, shapes: Vec<Shape>, name: &str) -> Result
             t.normals.clear();
         }
         targets.push(t);
-        names.push(s.name.clone().unwrap_or_else(|| format!("frame {}", s.time)));
+        names.push(s.name.clone().unwrap_or_else(|| format!("frame{}", s.time)));
     }
     let n = positions.len();
     let prim = Primitive {
@@ -464,27 +491,75 @@ fn lines(text: &str) -> Vec<(usize, &str)> {
     out
 }
 
+/// A line's words, split where `str::split_whitespace` splits them: an ASCII line (nearly every one) by its bytes.
+enum Words<'a> {
+    Ascii(&'a str),
+    Other(std::str::SplitWhitespace<'a>),
+}
+
+fn words_of(line: &str) -> Words<'_> {
+    if line.is_ascii() {
+        Words::Ascii(line)
+    } else {
+        Words::Other(line.split_whitespace())
+    }
+}
+
+impl<'a> Iterator for Words<'a> {
+    type Item = &'a str;
+
+    #[inline]
+    fn next(&mut self) -> Option<&'a str> {
+        match self {
+            Words::Ascii(rest) => {
+                // The ASCII characters `char::is_whitespace` takes.
+                let space = |c: &u8| matches!(c, b'\t'..=b'\r' | b' ');
+                let b = rest.as_bytes();
+                let Some(start) = b.iter().position(|c| !space(c)) else {
+                    *rest = "";
+                    return None;
+                };
+                let end = b[start..].iter().position(space).map_or(b.len(), |k| start + k);
+                let word = &rest[start..end];
+                *rest = &rest[end..];
+                Some(word)
+            }
+            Words::Other(w) => w.next(),
+        }
+    }
+}
+
 /// A line without the comment that ends it.
 fn code(line: &str) -> &str {
-    line.find("//").map_or(line, |i| line[..i].trim_end())
+    let b = line.as_bytes();
+    let mut from = 0;
+    while let Some(k) = b[from..].iter().position(|&c| c == b'/') {
+        let i = from + k;
+        if b.get(i + 1) == Some(&b'/') {
+            return line[..i].trim_end();
+        }
+        from = i + 1;
+    }
+    line
 }
 
 /// Whether the line ends a section.
 fn is_end(line: &str) -> bool {
-    code(line).eq_ignore_ascii_case("end")
+    // Lines come trimmed: most start with something other than an `e`, which settles it.
+    line.as_bytes().first().is_some_and(|c| c.eq_ignore_ascii_case(&b'e')) && code(line).eq_ignore_ascii_case("end")
 }
 
 /// The finite numbers of `words`, as many as parse in a row.
 fn numbers<'a>(words: impl Iterator<Item = &'a str>) -> Vec<f32> {
     words
-        .map_while(|w| w.parse::<f32>().ok().filter(|x| x.is_finite()))
+        .map_while(|w| f32_from(w.as_bytes()).filter(|x| x.is_finite()))
         .collect()
 }
 
 /// An integer, written plainly or as a whole float (`3.000000`).
 fn integer(w: &str) -> Option<i64> {
-    w.parse::<i64>().ok().or_else(|| {
-        let f = w.parse::<f64>().ok()?;
+    stream::int(w.as_bytes()).or_else(|| {
+        let f = f64_from(w.as_bytes())?;
         #[allow(clippy::cast_possible_truncation, reason = "checked to be a whole number in range")]
         (f.fract() == 0.0 && f.abs() < 9.0e15).then_some(f as i64)
     })
@@ -495,28 +570,29 @@ fn parse(text: &str, limit: usize) -> Result<Smd> {
     let lines = lines(text);
     let mut s = Smd::default();
     let Some(&(n, first)) = lines.first() else {
-        bail!("SMD file is empty");
+        bail!(Empty, "SMD file is empty");
     };
-    let mut words = code(first).split_whitespace();
+    let mut words = words_of(code(first));
     ensure!(
         words.next().is_some_and(|w| w.eq_ignore_ascii_case("version")),
+        UnknownFormat,
         "isn't an SMD file: it doesn't start with a version line"
     );
     s.version = match words.next().and_then(integer) {
         Some(v) => v,
-        None => bail!("SMD line {n}: the version isn't a number"),
+        None => bail!(Corrupt, "SMD line {n}: the version isn't a number"),
     };
     let mut i = 1;
     while i < lines.len() {
         let (n, line) = lines[i];
         i += 1;
-        let head = code(line).split_whitespace().next().unwrap_or("").to_ascii_lowercase();
+        let head = words_of(code(line)).next().unwrap_or("").to_ascii_lowercase();
         i = match head.as_str() {
             "nodes" => nodes(&lines, i, &mut s)?,
             "skeleton" => skeleton(&lines, i, &mut s)?,
             "triangles" => triangles(&lines, i, &mut s, limit)?,
             "vertexanimation" => vertex_frames(&lines, i, &mut s)?,
-            "version" => bail!("SMD line {n}: a second version line"),
+            "version" => bail!(Corrupt, "SMD line {n}: a second version line"),
             // A section this reader doesn't know: passed over to its end.
             _ => lines[i..]
                 .iter()
@@ -535,7 +611,7 @@ fn nodes(lines: &[(usize, &str)], mut i: usize, s: &mut Smd) -> Result<usize> {
             break;
         }
         let Some((id, name, parent)) = node_line(code(line)) else {
-            bail!("SMD line {n}: a node needs an id, a name and a parent");
+            bail!(Corrupt, "SMD line {n}: a node needs an id, a name and a parent");
         };
         if s.ids.contains_key(&id) {
             continue;
@@ -558,7 +634,7 @@ fn node_line(t: &str) -> Option<(i64, String, i64)> {
         }
         None => rest.split_once(char::is_whitespace)?,
     };
-    let parent = integer(rest.split_whitespace().next()?)?;
+    let parent = integer(words_of(rest).next()?)?;
     Some((id, name.to_owned(), parent))
 }
 
@@ -570,15 +646,15 @@ fn skeleton(lines: &[(usize, &str)], mut i: usize, s: &mut Smd) -> Result<usize>
         if is_end(line) {
             break;
         }
-        let mut words = code(line).split_whitespace();
+        let mut words = words_of(code(line));
         let first = words.next().unwrap_or("");
         if first.eq_ignore_ascii_case("time") {
             let Some(time) = words
                 .next()
-                .and_then(|w| w.parse::<f64>().ok())
+                .and_then(|w| f64_from(w.as_bytes()))
                 .filter(|t| t.is_finite())
             else {
-                bail!("SMD line {n}: the time isn't a number");
+                bail!(Corrupt, "SMD line {n}: the time isn't a number");
             };
             s.frames.push(Frame {
                 time,
@@ -588,7 +664,10 @@ fn skeleton(lines: &[(usize, &str)], mut i: usize, s: &mut Smd) -> Result<usize>
         }
         let v = numbers(words);
         let (Some(bone), true) = (integer(first), v.len() >= 6) else {
-            bail!("SMD line {n}: a bone's pose needs its id, a position and a rotation");
+            bail!(
+                Corrupt,
+                "SMD line {n}: a bone's pose needs its id, a position and a rotation"
+            );
         };
         let Some(&b) = s.ids.get(&bone) else {
             continue;
@@ -610,39 +689,51 @@ fn skeleton(lines: &[(usize, &str)], mut i: usize, s: &mut Smd) -> Result<usize>
 /// The `triangles` section from line `i`: a material line and three vertex lines each. Returns the line after its
 /// end.
 fn triangles(lines: &[(usize, &str)], mut i: usize, s: &mut Smd, limit: usize) -> Result<usize> {
-    let mut by_name: HashMap<String, usize> = s.materials.iter().enumerate().map(|(k, m)| (m.clone(), k)).collect();
+    let mut by_name: FastMap<String, usize> = s.materials.iter().enumerate().map(|(k, m)| (m.clone(), k)).collect();
+    // Triangles run in long stretches of one material.
+    let mut last: Option<(&str, usize)> = None;
     while let Some(&(_, line)) = lines.get(i) {
         i += 1;
         if is_end(line) {
             return Ok(i);
         }
-        let mut corners = Vec::with_capacity(3);
-        while corners.len() < 3 {
+        let mut corners: [Option<Vertex>; 3] = [None, None, None];
+        for c in &mut corners {
             let Some(&(n, v)) = lines.get(i) else { break };
             if is_end(v) {
                 break;
             }
             i += 1;
             match vertex(code(v)) {
-                Some(v) => corners.push(v),
-                None => bail!("SMD line {n}: a vertex needs its parent bone, position and normal"),
+                Some(v) => *c = Some(v),
+                None => bail!(
+                    Corrupt,
+                    "SMD line {n}: a vertex needs its parent bone, position and normal"
+                ),
             }
         }
-        let Ok(corners) = <[Vertex; 3]>::try_from(corners) else {
+        let [Some(a), Some(b), Some(c)] = corners else {
             s.dropped += 1;
             continue;
         };
+        let corners = [a, b, c];
         ensure!(
             s.triangles.len() < limit,
+            LimitExceeded,
             "too many triangles to convert (more than {limit})"
         );
-        let material = if let Some(&m) = by_name.get(line) {
+        let material = if let Some((name, m)) = last
+            && name == line
+        {
+            m
+        } else if let Some(&m) = by_name.get(line) {
             m
         } else {
             s.materials.push(line.to_owned());
             by_name.insert(line.to_owned(), s.materials.len() - 1);
             s.materials.len() - 1
         };
+        last = Some((line, material));
         s.triangles.push(Triangle { material, corners });
     }
     Ok(i)
@@ -650,14 +741,14 @@ fn triangles(lines: &[(usize, &str)], mut i: usize, s: &mut Smd, limit: usize) -
 
 /// `parent x y z nx ny nz u v [links (bone weight)...]`; the texture coordinates and links are optional.
 fn vertex(t: &str) -> Option<Vertex> {
-    let mut words = t.split_whitespace();
+    let mut words = words_of(t);
     let parent = integer(words.next()?)?;
     let mut f = [0.0f32; 8];
     let mut got = 0;
     for slot in &mut f {
         match words
             .next()
-            .and_then(|w| w.parse::<f32>().ok())
+            .and_then(|w| f32_from(w.as_bytes()))
             .filter(|x| x.is_finite())
         {
             Some(x) => {
@@ -677,7 +768,7 @@ fn vertex(t: &str) -> Option<Vertex> {
         for _ in 0..count.max(0) {
             let (Some(b), Some(w)) = (
                 words.next().and_then(integer),
-                words.next().and_then(|w| w.parse::<f32>().ok()),
+                words.next().and_then(|w| f32_from(w.as_bytes())),
             ) else {
                 break;
             };
@@ -701,15 +792,15 @@ fn vertex_frames(lines: &[(usize, &str)], mut i: usize, s: &mut Smd) -> Result<u
         if is_end(line) {
             break;
         }
-        let mut words = code(line).split_whitespace();
+        let mut words = words_of(code(line));
         let first = words.next().unwrap_or("");
         if first.eq_ignore_ascii_case("time") {
             let Some(time) = words
                 .next()
-                .and_then(|w| w.parse::<f64>().ok())
+                .and_then(|w| f64_from(w.as_bytes()))
                 .filter(|t| t.is_finite())
             else {
-                bail!("SMD line {n}: the time isn't a number");
+                bail!(Corrupt, "SMD line {n}: the time isn't a number");
             };
             let name = line
                 .find('#')
@@ -725,7 +816,7 @@ fn vertex_frames(lines: &[(usize, &str)], mut i: usize, s: &mut Smd) -> Result<u
         }
         let v = numbers(words);
         let (Some(id), true) = (integer(first), v.len() >= 3) else {
-            bail!("SMD line {n}: a vertex needs its id and position");
+            bail!(Corrupt, "SMD line {n}: a vertex needs its id and position");
         };
         let normal = if v.len() >= 6 { [v[3], v[4], v[5]] } else { [0.0; 3] };
         if s.shapes.is_empty() {
@@ -750,7 +841,7 @@ mod tests {
     use crate::assets::Memory;
     use serde_json::Value;
 
-    fn read(text: &str, name: &str) -> Result<Document<'static>> {
+    fn read(text: &str, name: &str) -> Result<Document> {
         let ext = name.rsplit('.').next().unwrap_or("");
         load(
             super::super::Input::memory(text.as_bytes(), name),
@@ -788,7 +879,7 @@ end
     #[test]
     fn a_reference_file_is_a_skinned_mesh() {
         let doc = read(REFERENCE, "t.smd").unwrap();
-        let j = &doc.json;
+        let j = &doc.json();
         assert_eq!(j["skins"].as_array().unwrap().len(), 1);
         assert_eq!(j["skins"][0]["joints"].as_array().unwrap().len(), 2);
         assert_eq!(j["nodes"][0]["name"], "root bone");
@@ -817,14 +908,17 @@ end
     fn links_take_their_weight_and_the_parent_the_rest() {
         let v = vertex("1 0 0 0 0 0 1 0 0 2 0 0.25 1 0.5").unwrap();
         let ids: HashMap<i64, usize> = [(0, 0), (1, 1)].into_iter().collect();
-        let mut l = influence(&v, &ids);
+        let mut l = Vec::new();
+        influence(&v, &ids, &mut l);
         l.sort_by_key(|x| x.0);
         assert_eq!(l.len(), 2);
         assert!((l[0].1 - 0.25).abs() < 1e-6);
         assert!((l[1].1 - 0.75).abs() < 1e-6);
         // A link to a missing bone is dropped; its weight goes to the parent.
         let v = vertex("0 0 0 0 0 0 1 0 0 1 7 0.5").unwrap();
-        assert_eq!(influence(&v, &ids), vec![(0, 1.0)]);
+        l.clear();
+        influence(&v, &ids, &mut l);
+        assert_eq!(l, vec![(0, 1.0)]);
         // A huge count with nothing after it ends with the line.
         let v = vertex("0 0 0 0 0 0 1 0 0 999999999999 1 0.5").unwrap();
         assert_eq!(v.links.len(), 1);
@@ -857,12 +951,18 @@ end
         let c = a
             .channels
             .iter()
-            .find(|c| c.node == arm && c.path == crate::rig::Path::Rotation)
+            .find(|c| c.node == arm && c.property == crate::rig::Property::Rotation)
             .unwrap();
         // Held at frame 1, where the file leaves it out.
         assert_eq!(c.times.len(), 3);
         assert!((c.times[2] - 2.0 / 30.0).abs() < 1e-6);
-        assert_eq!(doc.json["asset"]["extras"]["source"]["frameRate"], json!(30.0));
+        let info = doc.source_info();
+        assert_eq!(info.format.as_deref(), Some("SMD"));
+        assert_eq!(info.version.as_deref(), Some("1"));
+        assert_eq!(info.frame_rate, crate::source::Fact::Assumed(30.0));
+        assert_eq!(info.up_axis, crate::source::Fact::Assumed(crate::source::Axis::PosZ));
+        assert_eq!(info.meters_per_unit, crate::source::Fact::Unknown);
+        assert!(info.converted.up_axis);
     }
 
     #[test]
@@ -888,11 +988,11 @@ time 2
 end
 ";
         let doc = read(text, "face.vta").unwrap();
-        let j = &doc.json;
+        let j = &doc.json();
         let m = &j["meshes"][0];
         assert_eq!(m["primitives"][0]["mode"], json!(0));
         assert_eq!(m["primitives"][0]["targets"].as_array().unwrap().len(), 2);
-        assert_eq!(m["extras"]["targetNames"], json!(["smile", "frame 2"]));
+        assert_eq!(m["extras"]["targetNames"], json!(["smile", "frame2"]));
         assert_eq!(doc.facts["morph_targets"], json!(2));
         assert!(j.get("animations").is_none());
     }
@@ -911,7 +1011,7 @@ end
         let cut = &REFERENCE[..REFERENCE.find("1 0 1 0 0 0 1").unwrap()];
         let doc = read(cut, "t.smd");
         let doc = doc.unwrap();
-        assert_eq!(doc.facts["dropped_triangles"], json!(1));
+        assert_eq!(doc.json()["asset"]["extras"]["source"]["droppedGeometry"], json!(1));
         // Every prefix reads or fails without panicking.
         for k in 0..REFERENCE.len() {
             if REFERENCE.is_char_boundary(k) {
@@ -942,7 +1042,12 @@ end
 ";
         let doc = read(text, "t.smd").unwrap();
         assert_eq!(doc.facts["bones"], json!(3));
-        assert!(doc.json["skins"][0]["joints"].as_array().is_some_and(|j| j.len() == 3));
+        assert!(
+            doc.json()["skins"][0]["joints"]
+                .as_array()
+                // The three bones, and the mesh's own node for the vertex whose parent bone doesn't exist.
+                .is_some_and(|j| j.len() == 4)
+        );
     }
 
     #[test]
@@ -950,6 +1055,72 @@ end
         let text = "// exported\r\nversion 1\r\nnodes\r\n0\t\"root\"\t-1\r\nend\r\nflexcontrol\r\nx y z\r\nend\r\nskeleton\r\ntime 0 // rest\r\n0 0 0 0 0 0 0\r\nend\r\ntriangles\r\nmat\r\n0 0 0 0 0 0 1 0 0\r\n0 1 0 0 0 0 1 1 0\r\n0 0 1 0 0 0 1 0 1\r\nend\r\n";
         let doc = read(text, "t.smd").unwrap();
         assert_eq!(doc.facts["triangles"], json!(1));
-        assert_eq!(doc.json["materials"][0]["name"], Value::from("mat"));
+        assert_eq!(doc.json()["materials"][0]["name"], Value::from("mat"));
+    }
+
+    #[test]
+    fn numbers_read_as_the_standard_parser_reads_them() {
+        let bits = |v: Option<f32>| v.map(f32::to_bits);
+        for s in [
+            "0",
+            "1",
+            "-1",
+            "+1",
+            "1.5",
+            "-0",
+            "+.5",
+            ".5",
+            "5.",
+            "1e3",
+            "1E-1",
+            "-2.5E+2",
+            "007",
+            "0.000001",
+            "3.000000",
+            "-2.0",
+            "1e2",
+            "9223372036854775807",
+            "-9223372036854775808",
+            "9223372036854775808",
+            "123456789012345678901234",
+            "inf",
+            "nan",
+            "1.#INF",
+            "",
+            "x",
+            "1,5",
+            "0x10",
+        ] {
+            assert_eq!(bits(f32_from(s.as_bytes())), bits(s.parse().ok()), "{s:?}");
+            assert_eq!(
+                f64_from(s.as_bytes()).map(f64::to_bits),
+                s.parse::<f64>().ok().map(f64::to_bits),
+                "{s:?}"
+            );
+            let old = s.parse::<i64>().ok().or_else(|| {
+                let f = s.parse::<f64>().ok()?;
+                #[allow(clippy::cast_possible_truncation, reason = "checked to be a whole number in range")]
+                (f.fract() == 0.0 && f.abs() < 9.0e15).then_some(f as i64)
+            });
+            assert_eq!(integer(s), old, "{s:?}");
+        }
+        // And in a file: a triangle whose numbers are spelled every which way.
+        let text = "version 1
+nodes
++0 \"root\" -1
+end
+skeleton
+time 0.
+0 +0 .0 0E0 0 0 0
+end
+triangles
+mat
+0 0 0 0 0 0 1 0 0
++0 1. +0 -0 0 0 1E+0 1.0 0 1 +0 1.000000
+000 0 1e0 0 0 0 1 0 1
+end
+";
+        let doc = read(text, "t.smd").unwrap();
+        assert_eq!(doc.facts["triangles"], json!(1));
     }
 }

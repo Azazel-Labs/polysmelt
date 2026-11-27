@@ -8,10 +8,11 @@ use serde_json::Value;
 use super::{Reader, floats, index, items, list, list_of};
 use crate::document::Document;
 use crate::num::f32_of;
-use crate::rig::{Animation, Channel, Interpolation, Node, Path, Rig, Skin, Trs};
-use crate::{Context as _, Result};
+use crate::quat;
+use crate::rig::{Animation, Channel, Interpolation, Node, Property, Rig, Skin, Trs};
+use crate::{Context as _, ErrorKind, Result};
 
-impl Document<'_> {
+impl Document {
     /// The document's nodes, skins and animations, accessors read. A document loaded with a
     /// [`Keep`](crate::document::Keep) that drops animation, skins or morphs has none of those.
     ///
@@ -20,8 +21,8 @@ impl Document<'_> {
     /// When a skin or animation names an accessor, buffer or node that doesn't exist, or
     /// whose data runs past its buffer.
     pub fn rig(&self) -> Result<Rig> {
-        let mut r = Reader::bare(self);
-        let json = &self.json;
+        let mut r = Reader::whole(self);
+        let json = self.json();
         let name = |v: &Value| v.get("name").and_then(Value::as_str).map(str::to_owned);
 
         let raw = list(json, "nodes");
@@ -48,13 +49,14 @@ impl Document<'_> {
         for (k, s) in list(json, "skins").iter().enumerate() {
             let joints = list_of(s, "joints");
             if let Some(&j) = joints.iter().find(|&&j| j >= nodes.len()) {
-                bail!("glTF skin {k} names node {j}, which doesn't exist");
+                bail!(Corrupt, "glTF skin {k} names node {j}, which doesn't exist");
             }
             let inverse_bind = match index(s, "inverseBindMatrices") {
                 Some(a) => {
                     let m = r.read::<16>(a, IDENTITY)?;
                     ensure!(
                         m.len() >= joints.len(),
+                        Corrupt,
                         "glTF skin {k} has {} inverse bind matrices for {} joints",
                         m.len(),
                         joints.len()
@@ -72,32 +74,36 @@ impl Document<'_> {
         }
 
         let mut animations = Vec::new();
+        let file_rate = self.source_info().frame_rate.value().copied();
         // Key times by accessor: channels mostly share them, every bone keyed on the same frames.
         let mut read_times: HashMap<usize, Vec<f32>> = HashMap::new();
         for (k, a) in list(json, "animations").iter().enumerate() {
             let samplers = items(a, "samplers");
             let mut channels = Vec::new();
             for ch in items(a, "channels") {
-                let Some((node, path)) = ch.get("target").and_then(super::node_target) else {
+                let Some((node, path)) = ch.get("target").and_then(super::animation::node_target) else {
                     // A channel for another extension's target, or none.
                     continue;
                 };
-                let path = match path {
-                    "translation" => Path::Translation,
-                    "rotation" => Path::Rotation,
-                    "scale" => Path::Scale,
-                    "weights" => Path::Weights,
+                let property = match path {
+                    "translation" => Property::Translation,
+                    "rotation" => Property::Rotation,
+                    "scale" => Property::Scale,
+                    "weights" => Property::Weights,
                     _ => continue,
                 };
                 ensure!(
                     node < nodes.len(),
+                    Corrupt,
                     "glTF animation {k} animates node {node}, which doesn't exist"
                 );
                 let s = index(ch, "sampler")
                     .and_then(|s| samplers.get(s))
-                    .with_context(|| format!("glTF animation {k}: a channel names a missing sampler"))?;
+                    .with_context(ErrorKind::Corrupt, || {
+                        format!("glTF animation {k}: a channel names a missing sampler")
+                    })?;
                 let (Some(input), Some(output)) = (index(s, "input"), index(s, "output")) else {
-                    bail!("glTF animation {k}: a sampler has no input or output");
+                    bail!(Corrupt, "glTF animation {k}: a sampler has no input or output");
                 };
                 let interpolation = match s.get("interpolation").and_then(Value::as_str).unwrap_or("LINEAR") {
                     "STEP" => Interpolation::Step,
@@ -108,22 +114,24 @@ impl Document<'_> {
                     Entry::Occupied(t) => t.get().clone(),
                     Entry::Vacant(v) => v.insert(r.read::<1>(input, [0.0])?.into_flattened()).clone(),
                 };
-                let values = match path {
-                    Path::Translation | Path::Scale => r.read::<3>(output, [0.0; 3])?.into_flattened(),
-                    Path::Rotation => r.read::<4>(output, [0.0, 0.0, 0.0, 1.0])?.into_flattened(),
-                    Path::Weights => r.read::<1>(output, [0.0])?.into_flattened(),
+                let values = match property {
+                    Property::Translation | Property::Scale => r.read::<3>(output, [0.0; 3])?.into_flattened(),
+                    Property::Rotation => r.read::<4>(output, [0.0, 0.0, 0.0, 1.0])?.into_flattened(),
+                    Property::Weights => r.read::<1>(output, [0.0])?.into_flattened(),
                 };
                 channels.push(Channel {
                     node,
-                    path,
+                    property,
                     interpolation,
                     times,
                     values,
                 });
             }
+            let own_rate = a.pointer("/extras/frameRate").and_then(Value::as_f64);
             animations.push(Animation {
                 name: name(a),
                 channels,
+                frame_rate: own_rate.or(file_rate).filter(|r| r.is_finite() && *r > 0.0),
             });
         }
         Ok(Rig {
@@ -168,30 +176,8 @@ fn decompose(m: &[f64; 16]) -> Trs {
     }
     let unit = |v: [f64; 3], k: f64| if k == 0.0 { [0.0; 3] } else { v.map(|c| c / k) };
     let (x, y, z) = (unit(x, s[0]), unit(y, s[1]), unit(z, s[2]));
-    // Element (row, column) of the rotation.
-    let (m00, m01, m02) = (x[0], y[0], z[0]);
-    let (m10, m11, m12) = (x[1], y[1], z[1]);
-    let (m20, m21, m22) = (x[2], y[2], z[2]);
-    let trace = m00 + m11 + m22;
-    let q = if trace > 0.0 {
-        let k = 0.5 / (trace + 1.0).sqrt();
-        [(m21 - m12) * k, (m02 - m20) * k, (m10 - m01) * k, 0.25 / k]
-    } else if m00 > m11 && m00 > m22 {
-        let k = 2.0 * (1.0 + m00 - m11 - m22).sqrt();
-        [0.25 * k, (m01 + m10) / k, (m02 + m20) / k, (m21 - m12) / k]
-    } else if m11 > m22 {
-        let k = 2.0 * (1.0 + m11 - m00 - m22).sqrt();
-        [(m01 + m10) / k, 0.25 * k, (m12 + m21) / k, (m02 - m20) / k]
-    } else {
-        let k = 2.0 * (1.0 + m22 - m00 - m11).sqrt();
-        [(m02 + m20) / k, (m12 + m21) / k, 0.25 * k, (m10 - m01) / k]
-    };
-    let ql = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]).sqrt();
-    let q = if ql > 0.0 {
-        q.map(|c| c / ql)
-    } else {
-        [0.0, 0.0, 0.0, 1.0]
-    };
+    // The rotation's columns are x, y and z.
+    let q = quat::unit(quat::of_rotation_reciprocal(|r, c| [x, y, z][c][r]));
     Trs {
         translation: [m[12], m[13], m[14]].map(f32_of),
         rotation: q.map(f32_of),

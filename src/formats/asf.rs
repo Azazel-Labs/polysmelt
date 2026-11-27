@@ -22,7 +22,8 @@
 //! `:RADIANS`, which override the ASF's angle unit for the motion, and `:SAMPLES-PER-SECOND`) come frames: a frame
 //! number alone on a line, then a line per bone with its name and a value per dof (per `order` entry for the root).
 //! Frame k (counting the frames as they come, not by their numbers) is at k / 120 seconds, the rate motion capture
-//! studios record AMC at, unless `:SAMPLES-PER-SECOND` gives another; a guessed rate is noted in the facts. A bone
+//! studios record AMC at, unless `:SAMPLES-PER-SECOND` gives another (the source info's `frameRate`, assumed when the
+//! file doesn't give it). A bone
 //! moves by `C·M·C⁻¹`, where `C` is the rotation its `axis` gives and `M` the product of its dof rotations; both
 //! apply their rotations in the order listed (`rx ry rz` is Rz·Ry·Rx on column vectors). The root's `C` comes from
 //! its `orientation`, and its translation columns set its position outright. A bone's translation dofs move it along
@@ -38,7 +39,10 @@
 //! motion's own name (`walk.asf` for `walk.amc`), then by the name up to its last `_` (`02.asf` for `02_01.amc`, as
 //! subject-and-trial collections name them). Not finding it is an error.
 //!
-//! Lengths become meters (an inch is 0.0254 m, divided by `length`); the format is Y up, as glTF is. Nothing is
+//! Lengths stay in the file's unit, and the document's `RootNode` scales them to meters (an inch is 0.0254 m,
+//! divided by `length`): the source info's `metersPerUnit`, declared
+//! when `:units` gives `length` and assumed (an inch) when it doesn't. The skeleton's `name` is its `title` and its
+//! `version` the source's. Capture is Y up, as glTF is; the file doesn't say so, so `+Y` is assumed. Nothing is
 //! allocated from a count the file gives: the bones are capped, and keys take room as lines are read.
 
 use std::collections::HashMap;
@@ -47,16 +51,21 @@ use serde_json::{Map, Value, json};
 
 use super::Input;
 use super::scene::{self, Animation, Channel, Interp, Node, Path, Scene};
+use super::stream::f64_from;
 use crate::Result;
 use crate::assets::Assets;
 use crate::document::{Document, Keep};
 use crate::num::f32_of;
+use crate::quat;
+use crate::source::{Axis, Fact};
 
 /// Bones a skeleton may have: far past any capture rig.
 const MAX_BONES: usize = 32_768;
 /// Dofs one bone (or the root's `order`) may list. The format defines seven.
 const MAX_DOFS: usize = 64;
-/// Frames per second when the motion doesn't say.
+/// Frames per second when the motion doesn't say. The format has no rate of its own; nearly every ASF/AMC file
+/// is from, or made to go with, the CMU Graphics Lab Motion Capture Database, which documents its motions as
+/// captured at 120 Hz. So that, not the readers' shared assumption, is the default here.
 const DEFAULT_RATE: f64 = 120.0;
 /// Meters in an inch, the unit ASF lengths are in once divided by `length`.
 const INCH: f64 = 0.0254;
@@ -130,7 +139,7 @@ impl Bone {
     fn frame(&self, radians: f64) -> [f64; 4] {
         let mut q = [0.0, 0.0, 0.0, 1.0];
         for &a in &self.order {
-            q = scene::quat_mul(scene::about(a, self.axis[a] * radians), q);
+            q = quat::mul(quat::about(a, self.axis[a] * radians), q);
         }
         q
     }
@@ -143,6 +152,8 @@ struct Skeleton {
     version: Option<String>,
     /// `:units length`: lengths times 1/`length` are inches.
     length: f64,
+    /// Whether `:units` gave `length` (else it's 1, inches).
+    length_given: bool,
     mass: Option<f64>,
     /// Whether angles are in radians (`angle rad`), not degrees.
     radians: bool,
@@ -173,9 +184,10 @@ fn show(s: &str) -> String {
 
 /// A number the line needs.
 fn number(tok: Option<&str>, what: &str, no: usize) -> Result<f64> {
-    match tok.and_then(|t| t.parse::<f64>().ok()).filter(|v| v.is_finite()) {
+    match tok.and_then(|t| f64_from(t.as_bytes())).filter(|v| v.is_finite()) {
         Some(v) => Ok(v),
         None => bail!(
+            Corrupt,
             "ASF line {no}: {what} needs a number, not `{}`",
             show(tok.unwrap_or("the end of the line"))
         ),
@@ -214,6 +226,7 @@ fn parse_asf(text: &str) -> Result<Skeleton> {
         name: None,
         version: None,
         length: 1.0,
+        length_given: false,
         mass: None,
         radians: false,
         root: Bone::new("root".into()),
@@ -238,6 +251,7 @@ fn parse_asf(text: &str) -> Result<Skeleton> {
             in_limits = false;
             ensure!(
                 bone.is_none(),
+                Corrupt,
                 "ASF line {no}: `{}` inside a bone's begin … end",
                 show(first)
             );
@@ -262,16 +276,22 @@ fn parse_asf(text: &str) -> Result<Skeleton> {
         }
         let key = first.to_ascii_lowercase();
         match section {
-            Section::None => bail!("not an ASF file: it starts with `{}`, not a `:` section", show(first)),
+            Section::None => bail!(
+                UnknownFormat,
+                "not an ASF file: it starts with `{}`, not a `:` section",
+                show(first)
+            ),
             Section::Other => {}
             Section::Units => match key.as_str() {
                 "length" => {
                     let v = number(tokens.next(), "length", no)?;
                     ensure!(
                         v.is_finite() && v > 0.0,
+                        Corrupt,
                         "ASF line {no}: the length unit must be above 0, not {v}"
                     );
                     sk.length = v;
+                    sk.length_given = true;
                 }
                 "mass" => sk.mass = Some(number(tokens.next(), "mass", no)?),
                 "angle" => {
@@ -279,7 +299,11 @@ fn parse_asf(text: &str) -> Result<Skeleton> {
                     sk.radians = match unit.as_str() {
                         "deg" | "degree" | "degrees" => false,
                         "rad" | "radian" | "radians" => true,
-                        _ => bail!("ASF line {no}: the angle unit `{}` isn't deg or rad", show(&unit)),
+                        _ => bail!(
+                            Corrupt,
+                            "ASF line {no}: the angle unit `{}` isn't deg or rad",
+                            show(&unit)
+                        ),
                     };
                 }
                 _ => {}
@@ -289,6 +313,7 @@ fn parse_asf(text: &str) -> Result<Skeleton> {
                     sk.root.dof_names = tokens.map(str::to_owned).collect();
                     ensure!(
                         sk.root.dof_names.len() <= MAX_DOFS,
+                        LimitExceeded,
                         "ASF line {no}: the root's order lists more than {MAX_DOFS} columns"
                     );
                     sk.root.dofs = sk.root.dof_names.iter().map(|d| Dof::parse(d)).collect();
@@ -297,6 +322,7 @@ fn parse_asf(text: &str) -> Result<Skeleton> {
                     let order = tokens.next().unwrap_or("");
                     let Some(order) = axis_order(order).filter(|o| !o.is_empty()) else {
                         bail!(
+                            Corrupt,
                             "ASF line {no}: the root's axis `{}` isn't an order of X, Y and Z",
                             show(order)
                         );
@@ -309,14 +335,22 @@ fn parse_asf(text: &str) -> Result<Skeleton> {
             },
             Section::Bones => {
                 if key == "begin" {
-                    ensure!(bone.is_none(), "ASF line {no}: `begin` inside a bone's begin … end");
-                    ensure!(sk.bones.len() < MAX_BONES, "ASF has more than {MAX_BONES} bones");
+                    ensure!(
+                        bone.is_none(),
+                        Corrupt,
+                        "ASF line {no}: `begin` inside a bone's begin … end"
+                    );
+                    ensure!(
+                        sk.bones.len() < MAX_BONES,
+                        LimitExceeded,
+                        "ASF has more than {MAX_BONES} bones"
+                    );
                     bone = Some(Bone::new(String::new()));
                     in_limits = false;
                     continue;
                 }
                 let Some(b) = bone.as_mut() else {
-                    bail!("ASF line {no}: `{}` outside a bone's begin … end", show(first));
+                    bail!(Corrupt, "ASF line {no}: `{}` outside a bone's begin … end", show(first));
                 };
                 if key == "end" {
                     let mut b = bone.take().unwrap_or_else(|| Bone::new(String::new()));
@@ -325,6 +359,7 @@ fn parse_asf(text: &str) -> Result<Skeleton> {
                     }
                     ensure!(
                         !b.name.eq_ignore_ascii_case("root") && !names.contains_key(&b.name),
+                        Corrupt,
                         "ASF line {no}: bone `{}` is defined twice",
                         show(&b.name)
                     );
@@ -343,11 +378,16 @@ fn parse_asf(text: &str) -> Result<Skeleton> {
                         let bound = |t: &str| match t.parse::<f64>() {
                             Ok(v) if v.is_finite() => Ok(Some(v)),
                             Ok(v) if v.is_infinite() => Ok(None),
-                            _ => Err(invalid!("ASF line {no}: a limit needs a number, not `{}`", show(t))),
+                            _ => Err(err!(
+                                Corrupt,
+                                "ASF line {no}: a limit needs a number, not `{}`",
+                                show(t)
+                            )),
                         };
                         let [lo, hi] = [pair[0], pair.get(1).copied().unwrap_or("")];
                         ensure!(
                             b.limits.len() < MAX_DOFS,
+                            LimitExceeded,
                             "ASF line {no}: bone `{}` has more than {MAX_DOFS} limits",
                             show(&b.name)
                         );
@@ -360,7 +400,7 @@ fn parse_asf(text: &str) -> Result<Skeleton> {
                     "id" => b.id = tokens.next().map(str::to_owned),
                     "name" => {
                         let name = line[first.len()..].trim();
-                        ensure!(!name.is_empty(), "ASF line {no}: a bone's name is empty");
+                        ensure!(!name.is_empty(), Corrupt, "ASF line {no}: a bone's name is empty");
                         name.clone_into(&mut b.name);
                     }
                     "direction" => {
@@ -373,7 +413,11 @@ fn parse_asf(text: &str) -> Result<Skeleton> {
                         b.axis = three(&mut tokens, "axis", no)?;
                         if let Some(o) = tokens.next() {
                             let Some(order) = axis_order(o).filter(|o| !o.is_empty()) else {
-                                bail!("ASF line {no}: axis order `{}` isn't an order of X, Y and Z", show(o));
+                                bail!(
+                                    Corrupt,
+                                    "ASF line {no}: axis order `{}` isn't an order of X, Y and Z",
+                                    show(o)
+                                );
                             };
                             b.order = order;
                         }
@@ -382,6 +426,7 @@ fn parse_asf(text: &str) -> Result<Skeleton> {
                         b.dof_names = tokens.map(str::to_owned).collect();
                         ensure!(
                             b.dof_names.len() <= MAX_DOFS,
+                            LimitExceeded,
                             "ASF line {no}: bone `{}` lists more than {MAX_DOFS} dofs",
                             show(&b.name)
                         );
@@ -399,10 +444,11 @@ fn parse_asf(text: &str) -> Result<Skeleton> {
             }
         }
     }
-    ensure!(seen, "not an ASF file: it has no `:` sections");
+    ensure!(seen, UnknownFormat, "not an ASF file: it has no `:` sections");
     if let Some(b) = bone {
         bail!(
-            "ASF ends inside bone `{}`: an `end` is missing, or the file is cut short",
+            Truncated,
+            "ASF file is cut short inside bone `{}`, or its `end` is missing",
             show(&b.name)
         );
     }
@@ -546,15 +592,10 @@ fn rotation(dofs: &[Dof], values: &[f64], radians: f64) -> [f64; 4] {
     let mut q = [0.0, 0.0, 0.0, 1.0];
     for (d, v) in dofs.iter().zip(values) {
         if let Dof::Rotate(a) = *d {
-            q = scene::quat_mul(scene::about(a, v * radians), q);
+            q = quat::mul(quat::about(a, v * radians), q);
         }
     }
     q
-}
-
-/// `q` turned around: the inverse of a unit quaternion.
-fn conjugate(q: [f64; 4]) -> [f64; 4] {
-    [-q[0], -q[1], -q[2], q[3]]
 }
 
 /// Reads an AMC motion for `sk`, whose nodes are in `rig`, as an animation.
@@ -616,8 +657,8 @@ fn parse_amc(text: &str, sk: &Skeleton, rig: &Rig, scene: &Scene) -> (Option<Ani
         let bone = if b == root { &sk.root } else { &sk.bones[b] };
         values.clear();
         for t in tokens.by_ref().take(bone.dofs.len()) {
-            match t.parse::<f64>() {
-                Ok(v) if v.is_finite() => values.push(v),
+            match f64_from(t.as_bytes()) {
+                Some(v) if v.is_finite() => values.push(v),
                 _ => break,
             }
         }
@@ -638,9 +679,9 @@ fn parse_amc(text: &str, sk: &Skeleton, rig: &Rig, scene: &Scene) -> (Option<Ani
         track.frames.push(f);
         let c = bone.frame(skeleton_angle);
         let m = rotation(&bone.dofs, &values, angle);
-        let q = scene::quat_mul(scene::quat_mul(c, m), conjugate(c));
+        let q = quat::mul(quat::mul(c, m), quat::conjugate(c));
         if bone.dofs.iter().any(|d| matches!(d, Dof::Rotate(_))) {
-            track.rotations.extend(scene::normalize(q));
+            track.rotations.extend(quat::normalize(q));
         }
         if bone.dofs.iter().any(|d| matches!(d, Dof::Translate(_))) {
             let node = if b == root { rig.root } else { rig.nodes[b] };
@@ -656,7 +697,7 @@ fn parse_amc(text: &str, sk: &Skeleton, rig: &Rig, scene: &Scene) -> (Option<Ani
             let at = if b == root {
                 t
             } else {
-                let along = scene::rotate(c, t);
+                let along = quat::rotate(c, t);
                 [rest[0] + along[0], rest[1] + along[1], rest[2] + along[2]]
             };
             track.translations.extend(at.map(f32_of));
@@ -694,7 +735,7 @@ fn parse_amc(text: &str, sk: &Skeleton, rig: &Rig, scene: &Scene) -> (Option<Ani
         }
     }
     let animation = (!channels.is_empty()).then(|| Animation {
-        name: "motion".into(),
+        name: String::new(),
         channels,
         extras: None,
     });
@@ -742,7 +783,7 @@ fn file_name(reference: &str) -> &str {
     reference.rsplit(['/', '\\']).next().unwrap_or(reference)
 }
 
-pub(crate) fn load(input: Input<'_>, ext: &str, assets: &dyn Assets, keep: Keep) -> Result<Document<'static>> {
+pub(crate) fn load(input: Input<'_>, ext: &str, assets: &dyn Assets, keep: Keep) -> Result<Document> {
     let bytes = input.read()?;
     let text = decode(&bytes);
     let amc = ext.eq_ignore_ascii_case("amc");
@@ -759,6 +800,7 @@ pub(crate) fn load(input: Input<'_>, ext: &str, assets: &dyn Assets, keep: Keep)
         }
         let Some((asf, path)) = found else {
             bail!(
+                MissingAsset,
                 "AMC motion needs its ASF skeleton beside it, and none was found (looked for {})",
                 names.iter().map(|n| file_name(n)).collect::<Vec<_>>().join(", ")
             );
@@ -772,18 +814,25 @@ pub(crate) fn load(input: Input<'_>, ext: &str, assets: &dyn Assets, keep: Keep)
     let mut scene = Scene::default();
     let rig = build(&sk, &mut scene);
     let mut source = Map::new();
-    source.insert("format".into(), json!(if amc { "AMC" } else { "ASF" }));
-    source.insert("upAxis".into(), json!("Y"));
+    let info = &mut scene.info;
+    info.format = Some(if amc { "AMC" } else { "ASF" }.into());
+    info.version.clone_from(&sk.version);
+    info.title.clone_from(&sk.name);
+    let meters = INCH / sk.length;
+    info.meters_per_unit = if sk.length_given {
+        Fact::Declared(meters)
+    } else {
+        Fact::Assumed(meters)
+    };
+    if (sk.length - 1.0).abs() < 1e-12 {
+        info.unit = Some("inch".into());
+    }
+    // Motion capture stands Y up, as the format's own examples do, but the file doesn't say so.
+    info.up_axis = Fact::Assumed(Axis::PosY);
     source.insert("length".into(), json!(sk.length));
     source.insert("angle".into(), json!(if sk.radians { "rad" } else { "deg" }));
     if let Some(m) = sk.mass {
         source.insert("mass".into(), json!(m));
-    }
-    if let Some(n) = &sk.name {
-        source.insert("name".into(), json!(n));
-    }
-    if let Some(v) = &sk.version {
-        source.insert("version".into(), json!(v));
     }
     if let Some(f) = &skeleton_file {
         source.insert("skeleton".into(), json!(f));
@@ -801,28 +850,36 @@ pub(crate) fn load(input: Input<'_>, ext: &str, assets: &dyn Assets, keep: Keep)
     }
     if amc {
         let (animation, motion) = parse_amc(&text, &sk, &rig, &scene);
+        ensure!(
+            motion.frames > 0 || motion.dropped + motion.unknown == 0,
+            UnknownFormat,
+            "not an AMC motion: none of its lines starts a frame"
+        );
         let facts = &mut scene.facts;
         facts.insert("frames".into(), json!(motion.frames));
-        facts.insert("frame_time".into(), json!(motion.frame_time));
-        if !motion.rate_given {
-            facts.insert("frame_time_guessed".into(), json!(true));
-        }
         if motion.dropped > 0 {
             facts.insert("dropped_lines".into(), json!(motion.dropped));
         }
         if motion.unknown > 0 {
             facts.insert("unknown_bone_lines".into(), json!(motion.unknown));
         }
-        source.insert("frameTime".into(), json!(motion.frame_time));
+        let rate = 1.0 / motion.frame_time;
+        scene.info.frame_rate = if motion.rate_given {
+            Fact::Declared(rate)
+        } else {
+            Fact::Assumed(rate)
+        };
         source.insert("frames".into(), json!(motion.frames));
         if keep.animations
-            && let Some(a) = animation
+            && let Some(mut a) = animation
         {
+            // A motion file is one clip, named as its file is.
+            a.name = super::keys::clip_name(input.path).unwrap_or_default();
             scene.animations.push(a);
         }
     }
     scene.source = source;
-    scene.scale(f32_of(INCH / sk.length));
+    scene.unit(INCH / sk.length);
     scene.finish(keep)
 }
 
@@ -873,7 +930,7 @@ mod tests {
   end
 ";
 
-    fn asf(text: &str) -> Result<Document<'static>> {
+    fn asf(text: &str) -> Result<Document> {
         load(
             Input::memory(text.as_bytes(), "t.asf"),
             "asf",
@@ -882,12 +939,12 @@ mod tests {
         )
     }
 
-    fn amc(asf_text: &str, motion: &str) -> Result<Document<'static>> {
-        let assets = Memory::new().with("t.asf", asf_text.as_bytes());
+    fn amc(asf_text: &str, motion: &str) -> Result<Document> {
+        let assets = Memory::new().with("t.asf", asf_text.to_owned());
         load(Input::memory(motion.as_bytes(), "t.amc"), "amc", &assets, Keep::ALL)
     }
 
-    fn error(r: Result<Document<'static>>) -> String {
+    fn error(r: Result<Document>) -> String {
         match r {
             Ok(_) => panic!("read without error"),
             Err(e) => e.to_string(),
@@ -901,9 +958,12 @@ mod tests {
     #[test]
     fn skeleton() {
         let doc = asf(ASF).unwrap();
-        let nodes = doc.json["nodes"].as_array().unwrap();
+        let nodes = doc.json()["nodes"].as_array().unwrap();
         let names: Vec<_> = nodes.iter().map(|n| n["name"].as_str().unwrap()).collect();
-        assert_eq!(names, ["root", "upper", "lower", "lower_end"]);
+        assert_eq!(names, ["root", "upper", "lower", "lower_end", "RootNode"]);
+        // The root node is the only top-level one, over the skeleton's root, and has nothing to convert.
+        assert_eq!(doc.json()["scenes"][0]["nodes"], json!([4]));
+        assert_eq!(nodes[4], json!({ "name": "RootNode", "children": [0] }));
         // `length 0.0254` makes a unit a meter.
         assert_eq!(nodes[2]["translation"], json!([2.0, 0.0, 0.0]));
         assert_eq!(nodes[3]["translation"], json!([0.0, 3.0, 0.0]));
@@ -916,8 +976,16 @@ mod tests {
             json!([[-180.0, 180.0], [null, null], [-90.0, 90.0]])
         );
         assert_eq!(nodes[2]["extras"]["dof"], json!(["rz", "l"]));
-        assert_eq!(doc.json["asset"]["extras"]["source"]["format"], "ASF");
-        assert!(doc.json.get("animations").is_none());
+        assert_eq!(doc.json()["asset"]["extras"]["source"]["format"], "ASF");
+        assert!(doc.json().get("animations").is_none());
+        let info = doc.source_info();
+        // `length 0.0254` makes the unit a meter, as the file declares.
+        assert_eq!(info.meters_per_unit, Fact::Declared(1.0));
+        assert_eq!(info.up_axis, Fact::Assumed(Axis::PosY));
+        assert_eq!(info.frame_rate, Fact::Unknown);
+        assert_eq!(info.title.as_deref(), Some("test"));
+        assert_eq!(info.version.as_deref(), Some("1.10"));
+        assert!(!info.converted.units && !info.converted.up_axis);
     }
 
     #[test]
@@ -925,8 +993,9 @@ mod tests {
         let text = "#!OML:ASF elsewhere/t.asf\n:FULLY-SPECIFIED\n:DEGREES\n1\nroot 1 2 3 0 0 0\nupper 0 0 0\nlower 0 0\n2\nroot 1 2 3 0 0 0\nupper 90 0 0\nlower 45 0.5\n";
         let doc = amc(ASF, text).unwrap();
         assert_eq!(doc.facts["frames"], json!(2));
-        assert_eq!(doc.facts["frame_time_guessed"], json!(true));
-        assert_eq!(doc.json["asset"]["extras"]["source"]["skeleton"], "t.asf");
+        assert!(doc.facts.get("frame_time_guessed").is_none());
+        assert_eq!(doc.source_info().frame_rate, Fact::Assumed(120.0));
+        assert_eq!(doc.json()["asset"]["extras"]["source"]["skeleton"], "t.asf");
         let rig = doc.rig().unwrap();
         let a = &rig.animations[0];
         assert_eq!(a.channels.len(), 4);
@@ -949,7 +1018,7 @@ mod tests {
         let motion = ":DEGREES\n1\nroot 0 0 0 0 0 0\n";
         let assets = Memory::new().with("02.asf", ASF.as_bytes());
         let doc = load(Input::memory(motion.as_bytes(), "02_01.amc"), "amc", &assets, Keep::ALL).unwrap();
-        assert_eq!(doc.json["asset"]["extras"]["source"]["skeleton"], "02.asf");
+        assert_eq!(doc.json()["asset"]["extras"]["source"]["skeleton"], "02.asf");
         let e = error(load(
             Input::memory(motion.as_bytes(), "x.amc"),
             "amc",
@@ -963,8 +1032,9 @@ mod tests {
     fn radians_and_rate() {
         let text = ":RADIANS\n:SAMPLES-PER-SECOND 60\n1\nlower 1.5707963267948966 0\n2\nlower 0 0\n";
         let doc = amc(ASF, text).unwrap();
-        assert_eq!(doc.facts["frame_time"], json!(1.0 / 60.0));
-        assert!(doc.facts.get("frame_time_guessed").is_none());
+        let info = doc.source_info();
+        assert_eq!(info.frame_rate, Fact::Declared(60.0));
+        assert_eq!(info.format.as_deref(), Some("AMC"));
         let rig = doc.rig().unwrap();
         let s = std::f32::consts::FRAC_1_SQRT_2;
         assert!(near(&rig.pose(Some(0), 0.0)[2].rotation, &[0.0, 0.0, s, s]));
@@ -1001,7 +1071,7 @@ mod tests {
         let cases = [
             ("", "no `:` sections"),
             ("hello\n", "not an ASF file"),
-            (":bonedata\nbegin\nname a\n", "ends inside bone"),
+            (":bonedata\nbegin\nname a\n", "is cut short inside bone"),
             (":bonedata\nname a\n", "outside a bone"),
             (":bonedata\nbegin\nname a\nlength x\nend\n", "length needs a number"),
             (":bonedata\nbegin\nname a\ndirection 1 0\nend\n", "direction needs"),
@@ -1036,13 +1106,10 @@ mod tests {
     fn keeping_no_animations_keeps_the_facts() {
         let text = "1\nroot 1 2 3 0 0 0\n";
         let assets = Memory::new().with("t.asf", ASF.as_bytes());
-        let keep = Keep {
-            animations: false,
-            ..Keep::ALL
-        };
+        let keep = Keep::ALL.with_animations(false);
         let none = load(Input::memory(text.as_bytes(), "t.amc"), "amc", &assets, keep).unwrap();
         let all = amc(ASF, text).unwrap();
-        assert!(none.json.get("animations").is_none());
+        assert!(none.json().get("animations").is_none());
         assert_eq!(none.facts, all.facts);
     }
 }

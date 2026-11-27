@@ -1,0 +1,94 @@
+{
+  "points": "626e9b4ee4828305",
+  "triangles": "df9c258beaf17c27",
+  "lines": "cbf29ce484222325",
+  "verts": "cbf29ce484222325",
+  "attributes": {
+    "_MY_VALUE": {
+      "width": 1,
+      "hash": "8faa0a18faf0fb98"
+    },
+    "_PAIR": {
+      "width": 2,
+      "hash": "cbf6dd919c9d82cb"
+    },
+    "_FLAGS": {
+      "width": 1,
+      "hash": "6caca7af0c990ec8"
+    },
+    "_PUSH": {
+      "width": 3,
+      "hash": "a41a22ab20eea278"
+    },
+    "TEXCOORD_0": {
+      "width": 2,
+      "values": [
+        0.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    "NORMAL": {
+      "width": 3,
+      "values": [
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    },
+    "_STRAIN_0": {
+      "width": 1,
+      "hash": "8faa0a18faf0fb98"
+    },
+    "_STRAIN_1": {
+      "width": 1,
+      "hash": "88201fb960ff6465"
+    },
+    "_STRAIN_2": {
+      "width": 1,
+      "hash": "88201fb960ff6465"
+    },
+    "_STRAIN_3": {
+      "width": 1,
+      "hash": "88201fb960ff6465"
+    },
+    "_STRAIN_4": {
+      "width": 1,
+      "hash": "8faa0a18faf0fb98"
+    },
+    "_STRAIN_5": {
+      "width": 1,
+      "hash": "88201fb960ff6465"
+    },
+    "_STRAIN_6": {
+      "width": 1,
+      "hash": "88201fb960ff6465"
+    },
+    "_STRAIN_7": {
+      "width": 1,
+      "hash": "88201fb960ff6465"
+    },
+    "_STRAIN_8": {
+      "width": 1,
+      "hash": "8faa0a18faf0fb98"
+    }
+  },
+  "soup": "02ff87c392969355",
+  "soup_attributes": [],
+  "boundary_faces": 0,
+  "surface_filter_triangles": 2
+}

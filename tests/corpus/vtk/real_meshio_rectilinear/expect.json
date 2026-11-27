@@ -1,0 +1,31 @@
+{
+  "spec": "VTK File Formats: a real file: legacy RECTILINEAR_GRID",
+  "source": "meshio's test meshes (tests/meshes), MIT license, see ../LICENSE-meshio; expectations computed with VTK 9.7.2",
+  "triangles": 240,
+  "bounds": {
+    "min": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "max": [
+      1.0,
+      1.0,
+      1.0
+    ]
+  },
+  "area": 6.0,
+  "facts": {
+    "triangles": 240
+  },
+  "document": {
+    "attributes": [
+      "_PRESSURE1",
+      "_PRESSURE2",
+      "_TEMP1",
+      "_TEMP2"
+    ]
+  },
+  "colors": false,
+  "uvs": false
+}

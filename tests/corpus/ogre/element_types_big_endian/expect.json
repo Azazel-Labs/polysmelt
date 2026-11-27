@@ -77,7 +77,7 @@
     "source": {
       "format": "OGRE",
       "version": "MeshSerializer_v1.100",
-      "byteOrder": "big-endian"
+      "byteOrder": "big"
     }
   }
 }

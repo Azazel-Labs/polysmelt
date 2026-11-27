@@ -3,11 +3,11 @@
 //! PNG. Anything else is dropped, and the face keeps its material's color.
 
 use super::glb::image_mime;
+use crate::bytes::{u16_at, u32_at};
+use crate::images::MAX_PIXELS;
 
 /// The widest or tallest image decoded. Real textures are a few thousand pixels across.
 const MAX_SIDE: usize = 16_384;
-/// The most pixels decoded, 64 million, which is 256 MB of RGBA.
-const MAX_PIXELS: usize = 1 << 26;
 
 /// `bytes` as a PNG or JPEG file: unchanged when it already is one, re-encoded as PNG when it is a BMP or TGA this
 /// can decode, `None` otherwise.
@@ -60,14 +60,6 @@ impl Rgba {
         let rgb: Vec<u8> = self.pixels.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect();
         crate::png::encode(w, h, 3, &rgb)
     }
-}
-
-fn u16_at(d: &[u8], at: usize) -> Option<u16> {
-    Some(u16::from_le_bytes(d.get(at..at.checked_add(2)?)?.try_into().ok()?))
-}
-
-fn u32_at(d: &[u8], at: usize) -> Option<u32> {
-    Some(u32::from_le_bytes(d.get(at..at.checked_add(4)?)?.try_into().ok()?))
 }
 
 fn usize_at(d: &[u8], at: usize) -> Option<usize> {

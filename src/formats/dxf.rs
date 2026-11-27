@@ -27,8 +27,15 @@
 //! a drawing aren't wound any one way. Layers turned off or frozen and paper space are left out.
 //!
 //! The drawing sits under a `RootNode` that turns it from Z-up to glTF's Y-up and scales it to
-//! meters by `$INSUNITS` (unitless drawings are left as they are). Text, hatches, dimensions
-//! and ACIS solids and surfaces aren't read: the asset's `extras.source.skipped` counts them.
+//! meters by `$INSUNITS` (unitless drawings are left as they are, their units unknown): model
+//! space's own entities are one unnamed node under it, and each block reference a node beside it. Text,
+//! hatches, dimensions and ACIS solids and surfaces aren't read: the asset's
+//! `extras.source.skipped` counts them.
+//!
+//! The source info has the drawing's `$ACADVER` as its version, its `$INSUNITS` as declared
+//! units, Z up and right-handed (the world coordinate system's, declared), `$LASTSAVEDBY` as its author, and its creation and
+//! update dates (`$TDUCREATE` and `$TDUUPDATE` in UTC, else the local `$TDCREATE` and
+//! `$TDUPDATE`) in ISO 8601. `$MEASUREMENT` is kept as `measurement`, imperial or metric.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::f64::consts::{FRAC_PI_2, TAU};
@@ -36,12 +43,17 @@ use std::f64::consts::{FRAC_PI_2, TAU};
 use serde_json::{Map, Value, json};
 
 use super::Input;
+use super::dates;
+use super::frame::{self, Frame};
 use super::nurbs;
-use super::stream::f64_from;
+use super::stream::{self, f64_from};
 use crate::Result;
 use crate::document::{Builder, Document};
-use crate::mesh::{FastMap, Material, Prim, srgb_to_linear, triangulate};
+use crate::mesh::{FastMap, Material, Prim, linear_u8, triangulate};
 use crate::num::{f32_of, u32_of};
+use crate::quat;
+use crate::source::{Axis, Fact, Handedness, SourceInfo};
+use crate::vec3::{self, cross};
 
 /// What a binary DXF file starts with.
 const SENTINEL: &[u8] = b"AutoCAD Binary DXF\r\n\x1a\0";
@@ -52,8 +64,8 @@ const MAX_NODES: usize = 1 << 20;
 /// The most points arcs in polylines, circles, arcs, ellipses and splines add to a drawing; past
 /// them, a bulge is its chord, a circle, arc or ellipse a segment for each quarter turn and a
 /// spline its control points. Each is a few bytes of the file but up to 32 segments (a spline
-/// up to 32 for each knot span), so this bounds what a file of curves costs.
-const MAX_ARC_POINTS: usize = 1 << 22;
+/// up to 32 for each knot span): the curve budget every reader shares.
+const MAX_ARC_POINTS: usize = super::nurbs::MAX_CURVE_POINTS;
 /// The turn each segment of an arc stands for, at most: a sixteenth of a half turn.
 const ARC_STEP: f64 = std::f64::consts::PI / 16.0;
 const WHITE: u32 = 0xFF_FFFF;
@@ -96,16 +108,7 @@ impl<'d> V<'d> {
 
 /// An integer's text: digits after an optional sign, or a real (truncated); 0 for neither.
 fn int(t: &[u8]) -> i64 {
-    let (neg, digits) = match t.first() {
-        Some(b'-') => (true, &t[1..]),
-        Some(b'+') => (false, &t[1..]),
-        _ => (false, t),
-    };
-    if !digits.is_empty() && digits.len() < 19 && digits.iter().all(u8::is_ascii_digit) {
-        let v = digits.iter().fold(0i64, |v, &d| v * 10 + i64::from(d - b'0'));
-        return if neg { -v } else { v };
-    }
-    V::Real(f64_from(t).unwrap_or(0.0)).int()
+    stream::int(t).unwrap_or_else(|| V::Real(f64_from(t).unwrap_or(0.0)).int())
 }
 
 /// A group code's text.
@@ -158,22 +161,7 @@ impl<'d> Pairs<'d> {
     /// The next line, without its end (`\n`, `\r\n` or a lone `\r`).
     #[inline]
     fn line(&mut self) -> Option<&'d [u8]> {
-        let d = self.d;
-        let rest = d.get(self.at..).filter(|r| !r.is_empty())?;
-        let n = rest
-            .iter()
-            .position(|&b| b == b'\n' || b == b'\r')
-            .unwrap_or(rest.len());
-        let mut at = self.at + n;
-        if at < d.len() {
-            at += if d[at] == b'\r' && d.get(at + 1) == Some(&b'\n') {
-                2
-            } else {
-                1
-            };
-        }
-        self.at = at;
-        Some(&rest[..n])
+        stream::next_line(self.d, &mut self.at)
     }
 
     #[inline]
@@ -382,6 +370,8 @@ struct Bucket {
     lines: Vec<[u32; 2]>,
     points: Vec<u32>,
     seen: FastMap<[u32; 3], u32>,
+    /// Faces, segments and points left out for a corner that isn't a finite point, or that names no vertex.
+    dropped: usize,
 }
 
 impl Bucket {
@@ -396,9 +386,15 @@ impl Bucket {
         })
     }
 
-    /// Adds a polygon; the triangles it made.
+    /// Adds a polygon; the triangles it made. Four corners whose last repeats the third are a triangle, which is
+    /// how DXF writes one. Otherwise the corners are taken as they are: a triangle with no area, or with a
+    /// corner twice, is kept.
     fn polygon(&mut self, pts: &[[f64; 3]], s: &mut Scratch) -> usize {
-        if pts.len() < 3 || pts.iter().flatten().any(|x| !x.is_finite()) {
+        if pts.len() < 3 {
+            return 0;
+        }
+        if pts.iter().flatten().any(|x| !x.is_finite()) {
+            self.dropped += 1;
             return 0;
         }
         s.ids.clear();
@@ -406,24 +402,18 @@ impl Bucket {
             let v = self.vertex(p);
             s.ids.push(v);
         }
-        s.ids.dedup();
-        if s.ids.len() > 1 && s.ids.first() == s.ids.last() {
+        if s.ids.len() == 4 && s.ids[3] == s.ids[2] {
             s.ids.pop();
         }
         let before = self.tris.len();
         if s.ids.len() == 3 {
             self.tris.push([s.ids[0], s.ids[1], s.ids[2]]);
-        } else if s.ids.len() > 3 {
+        } else {
             s.corners.clear();
             s.corners.extend(s.ids.iter().map(|&v| self.positions[v as usize]));
             s.tris.clear();
             triangulate(&s.corners, &mut s.tris);
-            for t in &s.tris {
-                let t = t.map(|k| s.ids[k as usize]);
-                if t[0] != t[1] && t[1] != t[2] && t[0] != t[2] {
-                    self.tris.push(t);
-                }
-            }
+            self.tris.extend(s.tris.iter().map(|t| t.map(|k| s.ids[k as usize])));
         }
         self.tris.len() - before
     }
@@ -434,6 +424,7 @@ impl Bucket {
         let mut last = None;
         for &p in pts {
             let v = p.iter().all(|x| x.is_finite()).then(|| self.vertex(p));
+            self.dropped += usize::from(v.is_none());
             if let (Some(a), Some(b)) = (last, v)
                 && a != b
             {
@@ -450,6 +441,8 @@ impl Bucket {
         if p.iter().all(|x| x.is_finite()) {
             let v = self.vertex(p);
             self.points.push(v);
+        } else {
+            self.dropped += 1;
         }
     }
 }
@@ -500,6 +493,7 @@ impl Space {
                 lines: Vec::new(),
                 points: Vec::new(),
                 seen: FastMap::default(),
+                dropped: 0,
             });
         }
         &mut self.buckets[k]
@@ -515,6 +509,14 @@ struct Model {
     block_of: HashMap<Vec<u8>, usize>,
     units: i64,
     version: String,
+    /// `$TDCREATE` and `$TDUPDATE` (local Julian dates), and `$TDUCREATE` and `$TDUUPDATE` (UTC).
+    created: Option<f64>,
+    modified: Option<f64>,
+    created_utc: Option<f64>,
+    modified_utc: Option<f64>,
+    last_saved_by: String,
+    /// `$MEASUREMENT`: 0 imperial, 1 metric.
+    measurement: Option<i64>,
     /// Triangles read, each once.
     triangles: usize,
     /// Points arcs added, up to [`MAX_ARC_POINTS`].
@@ -535,7 +537,7 @@ impl Model {
             return l;
         }
         self.layers.push(Layer {
-            name: String::from_utf8_lossy(name).into_owned(),
+            name: crate::bytes::text(name).into_owned(),
             rgb: WHITE,
             hidden: false,
         });
@@ -564,9 +566,39 @@ impl Model {
                 }
                 9 => var = v.text(),
                 70 if var == b"$INSUNITS" => self.units = v.int(),
-                1 if var == b"$ACADVER" => self.version = String::from_utf8_lossy(v.text()).into_owned(),
+                1 if var == b"$ACADVER" => self.version = crate::bytes::text(v.text()).into_owned(),
+                1 if var == b"$LASTSAVEDBY" => {
+                    crate::bytes::text(v.text()).trim().clone_into(&mut self.last_saved_by);
+                }
+                40 if var == b"$TDCREATE" => self.created = Some(v.real()),
+                40 if var == b"$TDUPDATE" => self.modified = Some(v.real()),
+                40 if var == b"$TDUCREATE" => self.created_utc = Some(v.real()),
+                40 if var == b"$TDUUPDATE" => self.modified_utc = Some(v.real()),
+                70 if var == b"$MEASUREMENT" => self.measurement = Some(v.int()),
                 _ => {}
             }
+        }
+    }
+
+    /// What the drawing says of itself: `units` from `$INSUNITS`. What the root node converts is
+    /// recorded when it is made.
+    fn info(&self, units: Option<(f64, &'static str)>) -> SourceInfo {
+        // A UTC date when the drawing has one, else a local one.
+        let date = |utc: Option<f64>, local: Option<f64>| {
+            utc.and_then(|d| dates::julian(d, true))
+                .or_else(|| local.and_then(|d| dates::julian(d, false)))
+        };
+        SourceInfo {
+            format: Some("DXF".into()),
+            version: Some(self.version.clone()).filter(|v| !v.is_empty()),
+            meters_per_unit: units.map_or(Fact::Unknown, |(m, _)| Fact::Declared(m)),
+            unit: units.map(|(_, name)| name.to_owned()),
+            up_axis: Fact::Declared(Axis::PosZ),
+            handedness: Fact::Declared(Handedness::Right),
+            author: Some(self.last_saved_by.clone()).filter(|a| !a.is_empty()),
+            created: date(self.created_utc, self.created),
+            modified: date(self.modified_utc, self.modified),
+            ..SourceInfo::default()
         }
     }
 
@@ -610,7 +642,7 @@ impl Model {
                     }
                     let key = f.name.to_ascii_uppercase();
                     self.spaces.push(Space {
-                        name: String::from_utf8_lossy(f.name).into_owned(),
+                        name: crate::bytes::text(f.name).into_owned(),
                         base: f.p[0],
                         ..Space::default()
                     });
@@ -706,6 +738,7 @@ impl Model {
             }
             ensure!(
                 self.triangles <= self.limit,
+                LimitExceeded,
                 "too many triangles to convert (more than {})",
                 self.limit
             );
@@ -847,10 +880,14 @@ impl Model {
             }
             for v in faces {
                 pts.clear();
+                // A corner left out is 0; one naming a vertex that isn't there spoils the face.
+                let mut whole = true;
                 for &k in &v.ints[1..5] {
                     let k = usize::try_from(k.unsigned_abs()).unwrap_or(0);
-                    if let Some(&q) = k.checked_sub(1).and_then(|k| positions.get(k)) {
-                        pts.push(q);
+                    match k.checked_sub(1).map(|k| positions.get(k)) {
+                        Some(Some(&q)) => pts.push(q),
+                        Some(None) => whole = false,
+                        None => {}
                     }
                 }
                 let layer = if v.layer.is_empty() { layer } else { self.layer(v.layer) };
@@ -860,7 +897,11 @@ impl Model {
                     spec
                 };
                 let bucket = self.spaces[s].bucket(layer, spec);
-                self.triangles += bucket.polygon(&pts, &mut self.scratch);
+                if whole {
+                    self.triangles += bucket.polygon(&pts, &mut self.scratch);
+                } else {
+                    bucket.dropped += 1;
+                }
             }
         } else if flags & 16 != 0 {
             // M rows of N, or the surface fitted to them (`73` by `74`).
@@ -1122,6 +1163,8 @@ impl Model {
             );
             if pts.len() == n {
                 self.triangles += bucket.polygon(&pts, &mut self.scratch);
+            } else {
+                bucket.dropped += 1;
             }
         }
         self.scratch.pts = pts;
@@ -1131,38 +1174,38 @@ impl Model {
 /// The meters in a drawing unit (`$INSUNITS`), and the unit's name.
 fn unit(units: i64) -> Option<(f64, &'static str)> {
     Some(match units {
-        1 => (0.0254, "inches"),
-        2 => (0.3048, "feet"),
-        3 => (1609.344, "miles"),
-        4 => (0.001, "millimeters"),
-        5 => (0.01, "centimeters"),
-        6 => (1.0, "meters"),
-        7 => (1000.0, "kilometers"),
-        8 => (2.54e-8, "microinches"),
-        9 => (2.54e-5, "mils"),
-        10 => (0.9144, "yards"),
-        11 => (1e-10, "angstroms"),
-        12 => (1e-9, "nanometers"),
-        13 => (1e-6, "microns"),
-        14 => (0.1, "decimeters"),
-        15 => (10.0, "decameters"),
-        16 => (100.0, "hectometers"),
-        17 => (1e9, "gigameters"),
-        18 => (1.495_978_707e11, "astronomical units"),
-        19 => (9.460_730_472_580_8e15, "light years"),
-        20 => (3.085_677_581_491_367e16, "parsecs"),
-        21 => (1200.0 / 3937.0, "US survey feet"),
-        22 => (100.0 / 3937.0, "US survey inches"),
-        23 => (3600.0 / 3937.0, "US survey yards"),
-        24 => (6_336_000.0 / 3937.0, "US survey miles"),
+        1 => (0.0254, "inch"),
+        2 => (0.3048, "foot"),
+        3 => (1609.344, "mile"),
+        4 => (0.001, "millimeter"),
+        5 => (0.01, "centimeter"),
+        6 => (1.0, "meter"),
+        7 => (1000.0, "kilometer"),
+        8 => (2.54e-8, "microinch"),
+        9 => (2.54e-5, "mil"),
+        10 => (0.9144, "yard"),
+        11 => (1e-10, "angstrom"),
+        12 => (1e-9, "nanometer"),
+        13 => (1e-6, "micron"),
+        14 => (0.1, "decimeter"),
+        15 => (10.0, "decameter"),
+        16 => (100.0, "hectometer"),
+        17 => (1e9, "gigameter"),
+        18 => (1.495_978_707e11, "astronomical unit"),
+        19 => (9.460_730_472_580_8e15, "light year"),
+        20 => (3.085_677_581_491_367e16, "parsec"),
+        21 => (1200.0 / 3937.0, "US survey foot"),
+        22 => (100.0 / 3937.0, "US survey inch"),
+        23 => (3600.0 / 3937.0, "US survey yard"),
+        24 => (6_336_000.0 / 3937.0, "US survey mile"),
         _ => return None,
     })
 }
 
-pub(crate) fn load(input: Input<'_>) -> Result<Document<'static>> {
+pub(crate) fn load(input: Input<'_>, keep: crate::Keep) -> Result<Document> {
     let data = input.read()?;
     let d = data.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&data);
-    ensure!(!d.iter().all(u8::is_ascii_whitespace), "DXF file is empty");
+    ensure!(!d.iter().all(u8::is_ascii_whitespace), Empty, "DXF file is empty");
     let binary = d.starts_with(SENTINEL);
     let mut p = Pairs {
         d,
@@ -1206,8 +1249,8 @@ pub(crate) fn load(input: Input<'_>) -> Result<Document<'static>> {
             _ => {}
         }
     }
-    ensure!(sections > 0, "not a DXF file: it has no sections");
-    Build::new(m, binary).finish()
+    ensure!(sections > 0, UnknownFormat, "not a DXF file: it has no sections");
+    Build::new(m, binary, keep.crease_angle()).finish()
 }
 
 /// The layer and color a block reference passes to what's in its block.
@@ -1250,7 +1293,7 @@ struct Build {
 }
 
 impl Build {
-    fn new(mut m: Model, binary: bool) -> Self {
+    fn new(mut m: Model, binary: bool, crease: f32) -> Self {
         let layer0 = m.layer(b"0");
         let insts = m
             .spaces
@@ -1278,12 +1321,17 @@ impl Build {
                 b.seen = FastMap::default();
             }
         }
+        let dropped = m.spaces.iter().flat_map(|s| &s.buckets).map(|b| b.dropped).sum();
         Self {
             m,
             binary,
             layer0,
             insts,
-            b: Builder::default(),
+            b: {
+                let mut b = Builder::new(crease);
+                b.dropped = dropped;
+                b
+            },
             nodes: Vec::new(),
             meshes: Vec::new(),
             mesh_tris: Vec::new(),
@@ -1307,8 +1355,7 @@ impl Build {
         if let Some(&k) = self.material_of.get(&(layer, rgb)) {
             return k;
         }
-        let channel =
-            |shift: u32| srgb_to_linear(f32::from(u8::try_from((rgb >> shift) & 0xFF).unwrap_or(255)) / 255.0);
+        let channel = |shift: u32| linear_u8(u8::try_from((rgb >> shift) & 0xFF).unwrap_or(255));
         let mut mat = Material::plain(
             &self.m.layers[layer as usize].name,
             [channel(16), channel(8), channel(0), 1.0],
@@ -1402,6 +1449,7 @@ impl Build {
             self.triangles += self.mesh_tris[m];
             ensure!(
                 self.triangles <= self.m.limit,
+                LimitExceeded,
                 "too many triangles to convert (more than {})",
                 self.m.limit
             );
@@ -1437,10 +1485,7 @@ impl Build {
             rgb: self.resolve(ins.spec, layer, ctx),
         };
         let [ax, ay, az] = axes(ins.extrusion);
-        let rotation = mul(
-            from_axes(ax, ay, az),
-            [0.0, 0.0, (ins.angle / 2.0).sin(), (ins.angle / 2.0).cos()],
-        );
+        let rotation = quat::positive_w(quat::mul(from_axes(ax, ay, az), quat::about(2, ins.angle)));
         let base = self.m.spaces[b].base;
         let s = ins.scale;
         let (sin, cos) = ins.angle.sin_cos();
@@ -1508,35 +1553,23 @@ impl Build {
         Ok(())
     }
 
-    fn finish(mut self) -> Result<Document<'static>> {
+    fn finish(mut self) -> Result<Document> {
         let top = Ctx {
             layer: self.layer0,
             rgb: WHITE,
         };
         let (mesh, children) = self.content(0, top, 0)?;
         let units = unit(self.m.units);
+        // Model space: its own entities on one node, then its inserts.
         let mut roots = Vec::new();
-        if mesh.is_some() || !children.is_empty() {
-            let h = std::f64::consts::FRAC_1_SQRT_2;
-            let mut root = json!({ "name": "RootNode", "rotation": [-h, 0.0, 0.0, h] });
-            if let Some((u, _)) = units.filter(|&(u, _)| (u - 1.0).abs() > 1e-12) {
-                root["scale"] = json!([u, u, u]);
-            }
-            if let Some(m) = mesh {
-                root["mesh"] = json!(m);
-            }
-            if !children.is_empty() {
-                root["children"] = json!(children);
-            }
-            self.nodes.push(root);
+        if let Some(m) = mesh {
+            self.nodes.push(json!({ "mesh": m }));
             roots.push(self.nodes.len() - 1);
         }
-        let mut source = json!({ "format": "DXF", "encoding": if self.binary { "binary" } else { "ASCII" } });
-        if !self.m.version.is_empty() {
-            source["version"] = json!(self.m.version);
-        }
-        if let Some((_, name)) = units {
-            source["units"] = json!(name);
+        roots.extend(children);
+        let mut source = json!({ "encoding": if self.binary { "binary" } else { "ascii" } });
+        if let Some(m) = self.m.measurement.filter(|m| matches!(m, 0 | 1)) {
+            source["measurement"] = json!(if m == 0 { "imperial" } else { "metric" });
         }
         if !self.m.ended {
             source["truncated"] = json!(true);
@@ -1546,12 +1579,15 @@ impl Build {
                 .m
                 .skipped
                 .iter()
-                .map(|(k, &n)| (String::from_utf8_lossy(k).into_owned(), json!(n)))
+                .map(|(k, &n)| (crate::bytes::text(k).into_owned(), json!(n)))
                 .collect();
             source["skipped"] = Value::Object(skipped);
         }
         if !self.m.notes.is_empty() {
             source["notes"] = json!(self.m.notes);
+        }
+        if let Value::Object(map) = &mut source {
+            self.m.info(units).write(map);
         }
         let mut json = Map::new();
         json.insert("asset".into(), json!({ "extras": { "source": source } }));
@@ -1571,7 +1607,10 @@ impl Build {
         self.b.materials(self.materials, Vec::new(), &mut json);
         let mut facts = Map::new();
         facts.insert("triangles".into(), json!(self.triangles));
-        Ok(self.b.finish(json, facts))
+        let mut doc = self.b.finish(json, facts);
+        // Z up to Y up, and the drawing's unit to meters when it has one.
+        frame::root(&mut doc, Frame::z_up().scaled(units.map_or(1.0, |(u, _)| u)));
+        Ok(doc)
     }
 }
 
@@ -1629,18 +1668,7 @@ fn segments(sweep: f64, step: f64) -> usize {
 
 /// The object coordinate system's axes for an extrusion (the arbitrary axis algorithm).
 fn axes(extrusion: [f64; 3]) -> [[f64; 3]; 3] {
-    let unit = |v: [f64; 3]| {
-        let n = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
-        (n > 1e-12 && n.is_finite()).then(|| v.map(|x| x / n))
-    };
-    let cross = |a: [f64; 3], b: [f64; 3]| {
-        [
-            a[1] * b[2] - a[2] * b[1],
-            a[2] * b[0] - a[0] * b[2],
-            a[0] * b[1] - a[1] * b[0],
-        ]
-    };
-    let Some(n) = unit(extrusion) else {
+    let Some(n) = vec3::unit(extrusion) else {
         return [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
     };
     let ax = if n[0].abs() < 1.0 / 64.0 && n[1].abs() < 1.0 / 64.0 {
@@ -1648,42 +1676,14 @@ fn axes(extrusion: [f64; 3]) -> [[f64; 3]; 3] {
     } else {
         cross([0.0, 0.0, 1.0], n)
     };
-    let ax = unit(ax).unwrap_or([1.0, 0.0, 0.0]);
-    let ay = unit(cross(n, ax)).unwrap_or([0.0, 1.0, 0.0]);
+    let ax = vec3::unit(ax).unwrap_or([1.0, 0.0, 0.0]);
+    let ay = vec3::unit(cross(n, ax)).unwrap_or([0.0, 1.0, 0.0]);
     [ax, ay, n]
 }
 
-/// The rotation whose matrix has columns `x`, `y` and `z`, as a quaternion.
+/// The rotation whose matrix has columns `x`, `y` and `z`, as a quaternion, `w` not negative.
 fn from_axes(x: [f64; 3], y: [f64; 3], z: [f64; 3]) -> [f64; 4] {
-    let (m00, m11, m22) = (x[0], y[1], z[2]);
-    let trace = m00 + m11 + m22;
-    let q = if trace > 0.0 {
-        let s = (trace + 1.0).sqrt() * 2.0;
-        [(y[2] - z[1]) / s, (z[0] - x[2]) / s, (x[1] - y[0]) / s, s / 4.0]
-    } else if m00 > m11 && m00 > m22 {
-        let s = (1.0 + m00 - m11 - m22).sqrt() * 2.0;
-        [s / 4.0, (y[0] + x[1]) / s, (z[0] + x[2]) / s, (y[2] - z[1]) / s]
-    } else if m11 > m22 {
-        let s = (1.0 + m11 - m00 - m22).sqrt() * 2.0;
-        [(y[0] + x[1]) / s, s / 4.0, (z[1] + y[2]) / s, (z[0] - x[2]) / s]
-    } else {
-        let s = (1.0 + m22 - m00 - m11).sqrt() * 2.0;
-        [(z[0] + x[2]) / s, (z[1] + y[2]) / s, s / 4.0, (x[1] - y[0]) / s]
-    };
-    let n = q.iter().map(|c| c * c).sum::<f64>().sqrt();
-    let q = q.map(|c| c / n);
-    if q[3] < 0.0 { q.map(|c| -c) } else { q }
-}
-
-/// The quaternion product `a b` (`b` turned, then `a`).
-fn mul(a: [f64; 4], b: [f64; 4]) -> [f64; 4] {
-    let q = [
-        a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1],
-        a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
-        a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3],
-        a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2],
-    ];
-    if q[3] < 0.0 { q.map(|c| -c) } else { q }
+    quat::positive_w(quat::unit_unchecked(quat::of_rotation(|r, c| [x, y, z][c][r])))
 }
 
 #[cfg(test)]

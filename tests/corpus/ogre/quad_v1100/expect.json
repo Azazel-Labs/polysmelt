@@ -95,11 +95,12 @@
     }
   },
   "document": {
-    "nodes": 1,
+    "nodes": 2,
     "skins": 0,
     "animations": 0,
     "node_names": [
-      "quad"
+      "quad",
+      "RootNode"
     ],
     "attributes": [
       "POSITION",
@@ -120,6 +121,9 @@
       "0": "face"
     },
     "/materials/0/name": "Quad/Red",
+    "/materials/0/extensions/KHR_materials_specular": {
+      "specularFactor": 0.214041
+    },
     "/materials/0/extras/ogre/properties/ambient": "1 1 1"
   },
   "materials": [
@@ -131,7 +135,7 @@
         0.033105,
         1
       ],
-      "roughness": 0.301511,
+      "roughness": 0.5491,
       "metallic": 0,
       "textured": true,
       "pixel": [

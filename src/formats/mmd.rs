@@ -10,8 +10,9 @@
 //!
 //! Materials take the diffuse color (as linear) with its alpha, the texture as the color image (cut out at alpha
 //! 0.5 when it is a PNG, TGA or DDS, formats that carry alpha on purpose), double-sided drawing from the flag (in
-//! PMD, for any material that isn't opaque), and a roughness from the specular power. The rest (specular and
-//! ambient colors, edge, sphere map, toon) is kept in `asset.extras.source.materials`. Bones' IK, inherited
+//! PMD, for any material that isn't opaque), and the specular color and power as the highlight (the classic
+//! material every reader reads one way, `legacy_material`). The cutout is decided by the texture's name, whether
+//! or not its file is found. The rest (specular and ambient colors as written, edge, sphere map, toon) is kept in `asset.extras.source.materials`. Bones' IK, inherited
 //! rotation and translation, and fixed and local axes go in their nodes' `extras`. Rigid bodies, joints, soft
 //! bodies and display frames are counted, not converted: glTF has no physics.
 //!
@@ -22,8 +23,14 @@
 //! 60 samples a span). Morph keys go in `asset.extras.source.morphKeys`; camera, light, shadow and IK keys are
 //! counted.
 //!
-//! The format is left-handed and Y up with a unit of 8 cm, so the scene is mirrored through its XY plane and
-//! scaled by 0.08 into meters. Text is UTF-16 or UTF-8 in PMX, as its header says, and Shift-JIS in PMD and VMD.
+//! The format is left-handed and Y up with a unit of 8 cm, so the scene is mirrored through its XY plane, and
+//! the document's `RootNode` scales it by 0.08 into meters: positions and translations stay in the file's units. Text is UTF-16 or UTF-8 in PMX, as its header says, and Shift-JIS in PMD and VMD.
+//!
+//! The source info has the handedness and the up axis `+Y` as declared (the program's space is every file's), the
+//! handedness converted, and `metersPerUnit` an assumed 0.08 (the unit's length is the users' convention, not the format's), converted.
+//! A model's name is its `title` and its comment its `description`; the English name and comment stay as
+//! `englishName` and `englishComment`. A motion's `frameRate` is 30, the rate its frame numbers count at, and the
+//! model it was made for is kept as `model`.
 //!
 //! A file cut short in its vertices, faces, materials, bones or morphs, a negative count, or a count past the end
 //! of the file is an error. Display frames and physics after the morphs are read as far as they go.
@@ -33,18 +40,20 @@ use std::collections::HashMap;
 use serde_json::{Map, Value, json};
 
 use super::Input;
-use super::scene::{
-    self, Animation, Bin, Channel, Interp, Node, Path as Key, Primitive, Scene, SceneMesh, Skin, Target,
-};
+use super::scene::{self, Animation, Channel, Interp, Node, Path as Key, Primitive, Scene, SceneMesh, Skin, Target};
 use crate::Result;
 use crate::assets::Assets;
+use crate::bytes::Bin;
 use crate::document::{Document, Keep};
 use crate::images::Images;
-use crate::mesh::{Material, srgb_to_linear};
+use crate::legacy_material::{Phong, Rgb, Transparency};
+use crate::material::Alpha;
 use crate::num::{f32_of, u32_of};
+use crate::quat;
+use crate::source::{Axis, Fact, Handedness, SourceInfo};
 
 /// Meters per MMD unit.
-const UNIT: f32 = 0.08;
+const UNIT: f64 = 0.08;
 /// Frames per second of a motion's keys.
 const FPS: f64 = 30.0;
 /// The most morph offsets held for targets, over all primitives.
@@ -184,6 +193,8 @@ struct Model {
     qdef: usize,
     /// Why the sections after the morphs weren't read to the end, if they weren't.
     unread: Option<String>,
+    /// Whether the file ends inside its later sections: what came before is kept.
+    cut: bool,
 }
 
 impl Model {
@@ -211,12 +222,13 @@ impl Model {
             sdef: 0,
             qdef: 0,
             unread: None,
+            cut: false,
         }
     }
 }
 
 /// Reads a `.pmx`, `.pmd` or `.vmd` file, told apart by its signature.
-pub(crate) fn load(input: Input<'_>, ext: &str, assets: &dyn Assets, keep: Keep) -> Result<Document<'static>> {
+pub(crate) fn load(input: Input<'_>, ext: &str, assets: &dyn Assets, keep: Keep) -> Result<Document> {
     let bytes = input.read()?;
     let stem = input
         .path
@@ -231,7 +243,7 @@ pub(crate) fn load(input: Input<'_>, ext: &str, assets: &dyn Assets, keep: Keep)
     } else if bytes.starts_with(b"Pmd") {
         pmd(&bytes)?
     } else {
-        bail!("isn't a {} file", ext.to_ascii_uppercase())
+        bail!(UnknownFormat, "isn't a {} file", ext.to_ascii_uppercase())
     };
     build(model, &input, &stem, assets, keep)
 }
@@ -241,9 +253,9 @@ fn sjis(b: &[u8]) -> String {
     scene::shift_jis(b).trim_end_matches('\u{FFFD}').to_owned()
 }
 
-/// A position as glTF has it: mirrored and in meters.
+/// A position as the document has it: mirrored, in the file's units as the nodes are.
 fn pt(v: [f32; 3]) -> [f32; 3] {
-    [v[0] * UNIT, v[1] * UNIT, -v[2] * UNIT]
+    [v[0], v[1], -v[2]]
 }
 
 /// A direction as glTF has it: mirrored.
@@ -275,11 +287,11 @@ impl Reader<'_> {
     /// A text field: its length in bytes, then its bytes.
     fn text(&mut self) -> Result<String> {
         let n = self.b.i32()?;
-        ensure!(n >= 0, "PMX text has a negative length");
+        ensure!(n >= 0, Corrupt, "PMX text has a negative length");
         let n = self.b.count(u64::from(n.unsigned_abs()), 1)?;
         let b = self.b.bytes(n)?;
         Ok(if self.utf8 {
-            String::from_utf8_lossy(b).into_owned()
+            crate::bytes::text(b).into_owned()
         } else {
             let units: Vec<u16> = b.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
             String::from_utf16_lossy(&units)
@@ -289,7 +301,7 @@ impl Reader<'_> {
     /// A count of items of at least `size` bytes each.
     fn count(&mut self, size: usize) -> Result<usize> {
         let n = self.b.i32()?;
-        ensure!(n >= 0, "PMX file has a negative count");
+        ensure!(n >= 0, Corrupt, "PMX file has a negative count");
         self.b.count(u64::from(n.unsigned_abs()), size)
     }
 
@@ -315,19 +327,20 @@ impl Reader<'_> {
 /// Reads a PMX file.
 fn pmx(data: &[u8]) -> Result<Model> {
     let mut b = Bin::new(data, "PMX");
-    ensure!(b.bytes(4)? == b"PMX ", "isn't a PMX file");
+    ensure!(b.bytes(4)? == b"PMX ", UnknownFormat, "isn't a PMX file");
     let version = b.f32()?;
     ensure!(
         (version - 2.0).abs() < 1e-3 || (version - 2.1).abs() < 1e-3,
+        Unsupported,
         "PMX version {version} isn't 2.0 or 2.1"
     );
     let globals = usize::from(b.u8()?);
-    ensure!(globals >= 8, "PMX header has {globals} settings, fewer than 8");
+    ensure!(globals >= 8, Corrupt, "PMX header has {globals} settings, fewer than 8");
     let g = b.bytes(globals)?;
-    ensure!(g[0] <= 1, "PMX text encoding {} isn't UTF-16 or UTF-8", g[0]);
-    ensure!(g[1] <= 4, "PMX file has {} additional UVs, more than 4", g[1]);
+    ensure!(g[0] <= 1, Corrupt, "PMX text encoding {} isn't UTF-16 or UTF-8", g[0]);
+    ensure!(g[1] <= 4, Corrupt, "PMX file has {} additional UVs, more than 4", g[1]);
     for &s in &g[2..8] {
-        ensure!(matches!(s, 1 | 2 | 4), "PMX index size {s} isn't 1, 2 or 4");
+        ensure!(matches!(s, 1 | 2 | 4), Corrupt, "PMX index size {s} isn't 1, 2 or 4");
     }
     let mut r = Reader {
         b,
@@ -395,7 +408,7 @@ fn pmx(data: &[u8]) -> Result<Model> {
                     m.qdef += 1;
                 }
             }
-            t => bail!("PMX vertex has an unknown deform type {t}"),
+            t => bail!(Corrupt, "PMX vertex has an unknown deform type {t}"),
         }
         r.b.f32()?;
         m.vertices.push(v);
@@ -439,7 +452,7 @@ fn pmx(data: &[u8]) -> Result<Model> {
         };
         let memo = r.text()?;
         let count = r.b.i32()?;
-        ensure!(count >= 0, "PMX material has a negative face count");
+        ensure!(count >= 0, Corrupt, "PMX material has a negative face count");
         m.materials.push(Mat {
             name,
             english,
@@ -540,7 +553,7 @@ fn pmx(data: &[u8]) -> Result<Model> {
             3..=7 => usize::from(r.vertex) + 16,
             8 => usize::from(r.material) + 113,
             10 => usize::from(r.rigid) + 25,
-            k => bail!("PMX morph has an unknown type {k}"),
+            k => bail!(Corrupt, "PMX morph has an unknown type {k}"),
         };
         let count = r.count(size)?;
         let data = match kind {
@@ -658,7 +671,7 @@ fn pmx_tail(r: &mut Reader<'_>, m: &mut Model) -> Result<()> {
 /// Reads a PMD file.
 fn pmd(data: &[u8]) -> Result<Model> {
     let mut b = Bin::new(data, "PMD");
-    ensure!(b.bytes(3)? == b"Pmd", "isn't a PMD file");
+    ensure!(b.bytes(3)? == b"Pmd", UnknownFormat, "isn't a PMD file");
     let version = b.f32()?;
     let mut m = Model::new("PMD", version, "Shift-JIS");
     m.name = sjis(b.fixed_str(20)?);
@@ -729,7 +742,7 @@ fn pmd(data: &[u8]) -> Result<Model> {
             flags |= 0x10;
         }
         m.materials.push(Mat {
-            name: format!("material {i}"),
+            name: format!("material{i}"),
             english: String::new(),
             diffuse: [d[0], d[1], d[2], alpha],
             specular,
@@ -840,6 +853,7 @@ fn pmd(data: &[u8]) -> Result<Model> {
     }
 
     if let Err(e) = pmd_tail(&mut b, &mut m) {
+        m.cut = e.kind() == crate::ErrorKind::Truncated;
         m.unread = Some(e.to_string());
     }
     Ok(m)
@@ -895,22 +909,15 @@ fn pmd_tail(b: &mut Bin<'_>, m: &mut Model) -> Result<()> {
 /// A name, or what stands in for an empty one.
 fn name_of(name: &str, i: usize, what: &str) -> String {
     if name.trim().is_empty() {
-        format!("{what} {i}")
+        format!("{what}{i}")
     } else {
         name.to_owned()
     }
 }
 
-/// Roughness from a Phong specular power, by the usual match of Blinn-Phong to GGX; fully rough without a
-/// highlight.
-fn roughness(power: f32, specular: [f32; 3]) -> f32 {
-    if !power.is_finite() || power <= 0.0 || !specular.iter().any(|&c| c > 0.0) {
-        return 1.0;
-    }
-    (2.0 / (power + 2.0)).powf(0.25).clamp(0.0, 1.0)
-}
-
-/// Whether a texture file is of a format whose alpha is there on purpose.
+/// Whether a texture file is of a format whose alpha is there on purpose: `MikuMikuDance` draws every texture
+/// with its alpha, in material order and without sorting, which a cutout stands in for where blending would
+/// not.
 fn cuts_out(file: &str) -> bool {
     let lower = file.to_ascii_lowercase();
     [".png", ".tga", ".dds"].iter().any(|e| lower.ends_with(e))
@@ -1023,7 +1030,7 @@ fn morph_extras(i: usize, morph: &Morph, bone: &dyn Fn(i32) -> Option<usize>) ->
             let offsets: Vec<Value> = v
                 .iter()
                 .filter_map(|(b, t, q)| {
-                    let q = scene::mirror_quat(scene::normalize(q.map(f64::from)));
+                    let q = scene::mirror_quat(quat::normalize(q.map(f64::from)));
                     Some(json!({ "bone": bone(*b)?, "translation": pt(*t), "rotation": q }))
                 })
                 .collect();
@@ -1070,7 +1077,7 @@ fn expand(morphs: &[Morph], i: usize, ratio: f32, depth: usize, acc: &mut HashMa
 }
 
 /// The model as a glTF document.
-fn build(m: Model, input: &Input<'_>, stem: &str, assets: &dyn Assets, keep: Keep) -> Result<Document<'static>> {
+fn build(m: Model, input: &Input<'_>, stem: &str, assets: &dyn Assets, keep: Keep) -> Result<Document> {
     let mut scene = Scene::default();
     let mut facts = Map::new();
     let nb = m.bones.len();
@@ -1093,24 +1100,28 @@ fn build(m: Model, input: &Input<'_>, stem: &str, assets: &dyn Assets, keep: Kee
     for (i, mat) in m.materials.iter().enumerate() {
         let unit = |c: f32| if c.is_finite() { c.clamp(0.0, 1.0) } else { 1.0 };
         let d = mat.diffuse;
-        let color = [
-            srgb_to_linear(unit(d[0])),
-            srgb_to_linear(unit(d[1])),
-            srgb_to_linear(unit(d[2])),
-            unit(d[3]),
-        ];
-        let mut out = Material::plain(&name_of(&mat.name, i, "material"), color);
+        // The diffuse color and opacity, and the highlight: its color and "specular power", the exponent.
+        let mut phong = Phong::new(Rgb::Srgb([unit(d[0]), unit(d[1]), unit(d[2])]));
+        phong.opacity = unit(d[3]);
+        phong.specular = Some(Rgb::Srgb(mat.specular));
+        phong.exponent = Some(if mat.power.is_finite() { mat.power } else { 0.0 });
+        let mut out = phong.pbr().material(&name_of(&mat.name, i, "material"));
         out.double_sided = mat.flags & 0x01 != 0;
-        out.roughness = roughness(mat.power, mat.specular);
-        if let Some(t) = &mat.texture
-            && let Some(path) = assets.find(t, dir_)
-        {
-            // Decided by the file alone, so a read without textures cuts out as a full one does.
-            if color[3] >= 1.0 && cuts_out(t) {
-                out.alpha_cutoff = Some(0.5);
+        if let Some(t) = &mat.texture {
+            // Decided by the texture's name alone, so the material is the same whether or not the file is
+            // there, and whether or not textures are kept.
+            let transparency = Transparency {
+                cutout: (out.color[3] >= 1.0 && cuts_out(t)).then_some(0.5),
+                ..Transparency::of(out.color[3])
+            };
+            if let Alpha::Mask(c) = transparency.mode() {
+                out.alpha_cutoff = Some(c);
             }
             if keep.textures {
-                out.color_image = images.file(assets, path, t);
+                match assets.find(t, dir_) {
+                    Some(path) => out.color_image = images.file(assets, path, t),
+                    None => images.miss(t),
+                }
             }
         }
         scene.materials.push(out);
@@ -1211,7 +1222,7 @@ fn build(m: Model, input: &Input<'_>, stem: &str, assets: &dyn Assets, keep: Kee
             .unwrap_or(1);
         if nb > 0 {
             p.influences = width;
-            p.rest_joint = u32_of(nb);
+            p.rest_joint = Some(u32_of(nb));
         }
         for &v in &used {
             let vx = &m.vertices[v as usize];
@@ -1253,9 +1264,7 @@ fn build(m: Model, input: &Input<'_>, stem: &str, assets: &dyn Assets, keep: Kee
         globals.push(used);
     }
     drop(remap);
-    if dropped > 0 {
-        facts.insert("dropped_triangles".into(), json!(dropped));
-    }
+    scene.dropped = dropped;
     if zw {
         facts.insert("additional_uv_zw_dropped".into(), json!(true));
     }
@@ -1400,26 +1409,34 @@ fn build(m: Model, input: &Input<'_>, stem: &str, assets: &dyn Assets, keep: Kee
         }
         scene.add(node);
     }
-    ensure!(!scene.nodes.is_empty(), "{} file has no faces or bones", m.format);
+    ensure!(
+        !scene.nodes.is_empty(),
+        Empty,
+        "{} file has no faces or bones",
+        m.format
+    );
 
     scene.mirror_z();
-    scene.scale(UNIT);
+    scene.unit(UNIT);
 
     let mut source = Map::new();
-    source.insert("format".into(), json!(m.format));
-    // The version as written (2.1, not the nearest float to it, 2.0999999).
-    source.insert(
-        "version".into(),
-        json!((f64::from(m.version) * 1000.0).round() / 1000.0),
-    );
-    source.insert("encoding".into(), json!(m.encoding));
-    source.insert("metersPerUnit".into(), json!(UNIT));
-    for (key, v) in [
-        ("name", &m.name),
-        ("englishName", &m.english_name),
-        ("comment", &m.comment),
-        ("englishComment", &m.english_comment),
-    ] {
+    convention(&mut scene.info);
+    scene.info.format = Some(m.format.into());
+    // The version as written (2.1, not the nearest float to it, 2.0999999), with its tenths (2.0).
+    let version = (f64::from(m.version) * 1000.0).round() / 1000.0;
+    scene.info.version = Some(if version.fract() == 0.0 {
+        format!("{version:.1}")
+    } else {
+        version.to_string()
+    });
+    let text = |s: &str| (!s.is_empty()).then(|| s.to_owned());
+    scene.info.title = text(&m.name);
+    scene.info.description = text(&m.comment);
+    source.insert("textEncoding".into(), json!(m.encoding));
+    if m.cut {
+        source.insert("truncated".into(), json!(true));
+    }
+    for (key, v) in [("englishName", &m.english_name), ("englishComment", &m.english_comment)] {
         if !v.is_empty() {
             source.insert(key.into(), json!(v));
         }
@@ -1497,24 +1514,6 @@ fn straight(c: [u8; 4]) -> bool {
     c[0] == c[1] && c[2] == c[3]
 }
 
-/// Spherical interpolation, the short way round.
-fn slerp(a: [f64; 4], b: [f64; 4], t: f64) -> [f64; 4] {
-    let mut d: f64 = (0..4).map(|k| a[k] * b[k]).sum();
-    let b = if d < 0.0 {
-        d = -d;
-        b.map(|c| -c)
-    } else {
-        b
-    };
-    if d > 0.9995 {
-        return std::array::from_fn(|k| a[k] + (b[k] - a[k]) * t);
-    }
-    let th = d.clamp(-1.0, 1.0).acos();
-    let s = th.sin();
-    let (wa, wb) = (((1.0 - t) * th).sin() / s, (t * th).sin() / s);
-    std::array::from_fn(|k| a[k] * wa + b[k] * wb)
-}
-
 /// The steps a span of `gap` frames is sampled at when its curves bend: one a frame, at most [`MAX_SAMPLES`].
 fn steps(gap: u32) -> u32 {
     gap.clamp(1, MAX_SAMPLES)
@@ -1524,7 +1523,7 @@ fn steps(gap: u32) -> u32 {
 fn bone_keys(keys: &[BoneKey]) -> (Keys, Keys) {
     let (mut tt, mut tv, mut rt, mut rv) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let quat = |k: &BoneKey| {
-        let q = scene::normalize(k.rotation.map(f64::from));
+        let q = quat::normalize(k.rotation.map(f64::from));
         q.map(f64::from)
     };
     for (i, k) in keys.iter().enumerate() {
@@ -1549,7 +1548,7 @@ fn bone_keys(keys: &[BoneKey]) -> (Keys, Keys) {
                 for s in 1..n {
                     let x = f64::from(s) / f64::from(n);
                     rt.push(f32_of((f64::from(p.frame) + f64::from(gap) * x) / FPS));
-                    rv.extend(scene::normalize(slerp(q0, q1, bezier(curve(k, 3), x))));
+                    rv.extend(quat::normalize(quat::slerp_stepped(q0, q1, bezier(curve(k, 3), x))));
                 }
             }
         }
@@ -1557,13 +1556,13 @@ fn bone_keys(keys: &[BoneKey]) -> (Keys, Keys) {
         tt.push(t);
         tv.extend(k.position);
         rt.push(t);
-        rv.extend(scene::normalize(quat(k)));
+        rv.extend(quat::normalize(quat(k)));
     }
     ((tt, tv), (rt, rv))
 }
 
 /// Reads a `.vmd` motion.
-fn motion(data: &[u8], stem: &str, keep: Keep) -> Result<Document<'static>> {
+fn motion(data: &[u8], stem: &str, keep: Keep) -> Result<Document> {
     let mut b = Bin::new(data, "VMD");
     let head = b.bytes(30)?;
     let name_len = if head.starts_with(b"Vocaloid Motion Data 0002") {
@@ -1571,7 +1570,7 @@ fn motion(data: &[u8], stem: &str, keep: Keep) -> Result<Document<'static>> {
     } else if head.starts_with(b"Vocaloid Motion Data file") {
         10
     } else {
-        bail!("isn't a VMD file")
+        bail!(UnknownFormat, "isn't a VMD file")
     };
     let model = sjis(b.fixed_str(name_len)?);
 
@@ -1687,21 +1686,19 @@ fn motion(data: &[u8], stem: &str, keep: Keep) -> Result<Document<'static>> {
     facts.insert("bones".into(), json!(scene.nodes.len() - 1));
     if !channels.is_empty() {
         scene.animations.push(Animation {
-            name: if stem.is_empty() {
-                "motion".into()
-            } else {
-                stem.to_owned()
-            },
+            // A motion file is one clip, named as its file is.
+            name: stem.to_owned(),
             channels,
             extras: None,
         });
     }
 
     let mut source = Map::new();
-    source.insert("format".into(), json!("VMD"));
+    convention(&mut scene.info);
+    scene.info.format = Some("VMD".into());
+    // Keys are frame numbers, which the format counts at 30 a second.
+    scene.info.frame_rate = Fact::Declared(FPS);
     source.insert("model".into(), json!(model));
-    source.insert("frameRate".into(), json!(FPS));
-    source.insert("metersPerUnit".into(), json!(UNIT));
     if !morph_keys.is_empty() {
         facts.insert("morph_keys".into(), json!(morph_keys.len()));
         let mut names: Vec<String> = Vec::new();
@@ -1730,8 +1727,15 @@ fn motion(data: &[u8], stem: &str, keep: Keep) -> Result<Document<'static>> {
     scene.source = source;
     scene.facts = facts;
     scene.mirror_z();
-    scene.scale(UNIT);
+    scene.unit(UNIT);
     scene.finish(keep)
+}
+
+/// The source info the formats share: left-handed and Y up, as the format defines, in units taken as 8 cm.
+fn convention(info: &mut SourceInfo) {
+    info.meters_per_unit = Fact::Assumed(UNIT);
+    info.up_axis = Fact::Declared(Axis::PosY);
+    info.handedness = Fact::Declared(Handedness::Left);
 }
 
 #[cfg(test)]

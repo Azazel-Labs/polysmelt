@@ -1,0 +1,20 @@
+{
+  "spec": "COLLADA 1.4.1: a real file, a sphere of polygons",
+  "source": "assimp/assimp at 711b4e9bbde2, test/models/Collada/sphere.dae (BSD-3-Clause, see ../LICENSE-assimp); expectations measured with assimp 6.0.5 (assimp-py 1.2.0)",
+  "tolerance": 1e-06,
+  "triangles": 760,
+  "bounds": {
+    "min": [
+      -0.01,
+      -0.01,
+      -0.01
+    ],
+    "max": [
+      0.01,
+      0.01,
+      0.01
+    ]
+  },
+  "area": 0.001243,
+  "position_set": "positions.f32"
+}

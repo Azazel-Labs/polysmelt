@@ -4,7 +4,12 @@
 //! asks), materials' metadata and the colors of composite materials mixed by their proportions, 2D
 //! textures (gray channels combined into one image) with each triangle's texture coordinates, and
 //! constellations, placed as nodes wherever an instance puts them. The model's Z-up unit (millimeters
-//! when unsaid) turns into glTF's Y-up meters at a root node.
+//! when unsaid) turns into glTF's Y-up meters at the document's `RootNode`, the one top-level node every reader makes. The source's units are declared when the
+//! `unit` attribute names one the format knows, and millimeters assumed otherwise (a name the format doesn't
+//! know is kept as `unitAsWritten`); its up axis is +Z, the build direction the format fixes (declared). The model's metadata of the kinds the standard names (`name`,
+//! `description`, `author`, `cad`) and the common others (`copyright`, `license`, creation and
+//! modification dates) are the source's title, description, author, tool and so on; the rest stay in
+//! its `metadata`.
 //!
 //! Dropped, and counted in the source extras: the curved edges of curved triangles (their flat
 //! triangles stay), colors and proportions given as formulas, 3D textures past their first layer,
@@ -18,11 +23,15 @@ use std::io::{BufRead, BufReader, Read};
 use quick_xml::events::{BytesStart, Event};
 use serde_json::{Map, Value, json};
 
+use super::frame::{self, Frame};
+use super::{stream, xml};
 use crate::document::{Builder, Document};
 use crate::images::Source;
 use crate::material::{Alpha, CLAMP, Full, REPEAT, Tex};
-use crate::mesh::{GRAY, Image, Material, Prim, srgb_to_linear};
-use crate::{Context as _, Result};
+use crate::mesh::{GRAY, Image, Material, Prim, linear_rgba};
+use crate::quat;
+use crate::source::{Axis, Fact, SourceInfo};
+use crate::{Context as _, ErrorKind, Result, Within as _};
 
 /// The most unzipped from a zipped AMF: more is a zip bomb, not a model.
 const MAX_PART: u64 = 2 << 30;
@@ -36,10 +45,11 @@ const MAX_TEXTURE: usize = 1 << 28;
 const NONE: f32 = f32::NAN;
 
 /// Loads an AMF: an object's triangles as a mesh, constellations as nodes, and the facts worth keeping.
-pub(crate) fn load(input: super::Input<'_>) -> Result<Document<'static>> {
+pub(crate) fn load(input: super::Input<'_>, keep: crate::Keep) -> Result<Document> {
     let zipped = input.head(4)?.starts_with(b"PK\x03\x04");
     let amf = if zipped {
-        let mut zip = zip::ZipArchive::new(input.seekable()?).context("this zipped AMF can't be opened")?;
+        let mut zip =
+            zip::ZipArchive::new(input.seekable()?).context(ErrorKind::Corrupt, "this zipped AMF can't be opened")?;
         let names: Vec<String> = zip
             .file_names()
             .filter_map(Result::ok)
@@ -49,17 +59,17 @@ pub(crate) fn load(input: super::Input<'_>) -> Result<Document<'static>> {
             .iter()
             .find(|n| n.to_ascii_lowercase().ends_with(".amf"))
             .or_else(|| names.iter().find(|n| !n.ends_with('/')))
-            .context("this zip holds no AMF")?
+            .context(ErrorKind::UnknownFormat, "this zip holds no AMF")?
             .clone();
         let entry = zip
             .by_name(&name)
-            .with_context(|| format!("reading {name}"))?
+            .with_context(ErrorKind::Corrupt, || format!("reading {name}"))?
             .take(MAX_PART);
-        parse(BufReader::with_capacity(1 << 16, entry), input.limit).with_context(|| format!("reading {name}"))?
+        parse(BufReader::with_capacity(1 << 16, entry), input.limit).with_within(|| format!("reading {name}"))?
     } else {
         parse(BufReader::with_capacity(1 << 16, input.seekable()?), input.limit)?
     };
-    build(&amf, zipped)
+    build(&amf, zipped, keep.crease_angle())
 }
 
 /// An object: its vertices and its volumes.
@@ -277,7 +287,7 @@ struct State {
 }
 
 fn parse(r: impl BufRead, limit: usize) -> Result<Amf> {
-    let mut reader = quick_xml::Reader::from_reader(r);
+    let mut reader = quick_xml::Reader::from_reader(crate::formats::xml::Utf8Read::new(r)?);
     let mut buf = Vec::new();
     let mut a = Amf::default();
     let mut s = State::default();
@@ -290,12 +300,16 @@ fn parse(r: impl BufRead, limit: usize) -> Result<Amf> {
             Err(quick_xml::Error::Syntax(e)) if root && e != quick_xml::errors::SyntaxError::InvalidBangMarkup => {
                 Event::Eof
             }
-            event => event.with_context(|| format!("bad XML near byte {at}"))?,
+            event => event.with_context(ErrorKind::Corrupt, || format!("bad XML near byte {at}"))?,
         };
         match event {
             Event::Start(e) => {
                 let t = tag(e.local_name().as_ref());
-                ensure!(root || t == Tag::Amf, "not an AMF file (it doesn't start with <amf>)");
+                ensure!(
+                    root || t == Tag::Amf,
+                    UnknownFormat,
+                    "not an AMF file (it doesn't start with <amf>)"
+                );
                 root = true;
                 s.text.clear();
                 open(&mut a, &mut s, t, &e);
@@ -303,7 +317,11 @@ fn parse(r: impl BufRead, limit: usize) -> Result<Amf> {
             }
             Event::Empty(e) => {
                 let t = tag(e.local_name().as_ref());
-                ensure!(root || t == Tag::Amf, "not an AMF file (it doesn't start with <amf>)");
+                ensure!(
+                    root || t == Tag::Amf,
+                    UnknownFormat,
+                    "not an AMF file (it doesn't start with <amf>)"
+                );
                 root = true;
                 s.text.clear();
                 open(&mut a, &mut s, t, &e);
@@ -326,7 +344,7 @@ fn parse(r: impl BufRead, limit: usize) -> Result<Amf> {
             }
             Event::GeneralRef(r) => {
                 if stack.last().is_some_and(|t| t.has_text()) {
-                    reference(&r, &mut s.text);
+                    xml::push_reference(&r, &mut s.text);
                 }
             }
             Event::Eof => {
@@ -343,55 +361,22 @@ fn parse(r: impl BufRead, limit: usize) -> Result<Amf> {
         }
         buf.clear();
     }
-    ensure!(root, "not an AMF file (it has no <amf>)");
+    ensure!(root, UnknownFormat, "not an AMF file (it has no <amf>)");
     Ok(a)
 }
 
-/// An entity or character reference's text.
-fn reference(name: &[u8], out: &mut Vec<u8>) {
-    let fixed: &[u8] = match name {
-        b"amp" => b"&",
-        b"lt" => b"<",
-        b"gt" => b">",
-        b"quot" => b"\"",
-        b"apos" => b"'",
-        _ => {
-            let code = match name {
-                [b'#', b'x' | b'X', hex @ ..] => std::str::from_utf8(hex)
-                    .ok()
-                    .and_then(|h| u32::from_str_radix(h, 16).ok()),
-                [b'#', dec @ ..] => std::str::from_utf8(dec).ok().and_then(|d| d.parse().ok()),
-                _ => None,
-            };
-            if let Some(c) = code.and_then(char::from_u32) {
-                out.extend_from_slice(c.encode_utf8(&mut [0; 4]).as_bytes());
-            }
-            return;
-        }
-    };
-    out.extend_from_slice(fixed);
-}
-
+/// An attribute's value, references decoded and trimmed.
 fn attr(e: &BytesStart<'_>, name: &[u8]) -> Option<String> {
-    e.attributes()
-        .with_checks(false)
-        .flatten()
-        .find(|a| a.key.local_name().as_ref() == name)
-        .map(|a| String::from_utf8_lossy(&a.value).trim().to_owned())
+    xml::attr(e, name).map(|v| crate::bytes::text(&v).trim().to_owned())
 }
 
 /// A finite number.
 fn number(text: &[u8]) -> Option<f32> {
-    std::str::from_utf8(text)
-        .ok()?
-        .trim()
-        .parse::<f32>()
-        .ok()
-        .filter(|v| v.is_finite())
+    stream::num(text).filter(|v| v.is_finite())
 }
 
 fn text(t: &[u8]) -> String {
-    String::from_utf8_lossy(t).trim().to_owned()
+    crate::bytes::text(t).trim().to_owned()
 }
 
 fn open(a: &mut Amf, s: &mut State, t: Tag, e: &BytesStart<'_>) {
@@ -502,17 +487,15 @@ fn close(a: &mut Amf, s: &mut State, t: Tag, parent: Option<Tag>, limit: usize) 
         Tag::Leaf(leaf, k) => {
             let v = number(&s.text);
             match (leaf, parent) {
-                (Leaf::Coord, Some(Tag::Coordinates)) => s.position[k] = v.unwrap_or(0.0),
+                // A coordinate that isn't finite stays as it is: the triangles on its vertex are dropped.
+                (Leaf::Coord, Some(Tag::Coordinates)) => s.position[k] = stream::num(&s.text).unwrap_or(0.0),
                 (Leaf::Normal, Some(Tag::Normal)) => s.normal[k] = v,
                 (Leaf::Channel, Some(Tag::Color)) => {
                     s.formula |= v.is_none() && !s.text.trim_ascii().is_empty();
                     s.channels[k] = v;
                 }
                 (Leaf::Corner, Some(Tag::Triangle)) => {
-                    s.corners[k] = std::str::from_utf8(&s.text)
-                        .ok()
-                        .and_then(|t| t.trim().parse().ok())
-                        .unwrap_or(u32::MAX);
+                    s.corners[k] = stream::whole(&s.text).unwrap_or(u32::MAX);
                 }
                 (Leaf::U, Some(Tag::Texmap)) => {
                     if let Some(m) = &mut s.map {
@@ -576,6 +559,7 @@ fn close(a: &mut Amf, s: &mut State, t: Tag, parent: Option<Tag>, limit: usize) 
                 a.vertices += 1;
                 ensure!(
                     a.vertices <= limit.saturating_mul(3),
+                    LimitExceeded,
                     "too many vertices to convert (more than three for each of {limit} triangles)"
                 );
                 let i = o.verts.len();
@@ -597,7 +581,11 @@ fn close(a: &mut Amf, s: &mut State, t: Tag, parent: Option<Tag>, limit: usize) 
         }
         Tag::Triangle => {
             if let Some(v) = &mut s.volume {
-                ensure!(a.triangles < limit, "too many triangles to convert (more than {limit})");
+                ensure!(
+                    a.triangles < limit,
+                    LimitExceeded,
+                    "too many triangles to convert (more than {limit})"
+                );
                 a.triangles += 1;
                 let k = v.tris.len();
                 v.tris.push(s.corners);
@@ -638,7 +626,7 @@ fn close(a: &mut Amf, s: &mut State, t: Tag, parent: Option<Tag>, limit: usize) 
         }
         Tag::Texture => {
             if let Some(mut t) = s.texture.take() {
-                if let Some(pixels) = base64(&s.text) {
+                if let Some(pixels) = crate::gltf::decode_base64(&s.text) {
                     t.pixels = pixels;
                     a.textures.push(t);
                 } else {
@@ -694,33 +682,29 @@ fn close(a: &mut Amf, s: &mut State, t: Tag, parent: Option<Tag>, limit: usize) 
     Ok(())
 }
 
-/// Base64 text (whitespace and padding as they come) as bytes.
-fn base64(text: &[u8]) -> Option<Vec<u8>> {
-    use base64::Engine as _;
-    use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
-    let clean: Vec<u8> = text.iter().copied().filter(|c| !c.is_ascii_whitespace()).collect();
-    let config = GeneralPurposeConfig::new().with_decode_padding_mode(DecodePaddingMode::Indifferent);
-    GeneralPurpose::new(&base64::alphabet::STANDARD, config)
-        .decode(clean)
-        .ok()
-}
-
-/// Meters per unit: the units the format names, and a few spelled other ways.
-fn meters(unit: &str) -> Option<f64> {
-    Some(match unit.to_ascii_lowercase().as_str() {
-        "millimeter" | "millimeters" | "millimetre" | "mm" => 1e-3,
-        "centimeter" | "centimeters" | "centimetre" | "cm" => 1e-2,
-        "meter" | "meters" | "metre" | "m" => 1.0,
-        "inch" | "inches" | "in" => 0.0254,
-        "feet" | "foot" | "ft" => 0.3048,
-        "micron" | "microns" | "micrometer" | "micrometre" | "um" => 1e-6,
-        _ => return None,
-    })
-}
-
-/// Linear RGBA of an sRGB color.
-fn linear(c: [f32; 4]) -> [f32; 4] {
-    [srgb_to_linear(c[0]), srgb_to_linear(c[1]), srgb_to_linear(c[2]), c[3]]
+/// Moves the model's metadata of the kinds [`SourceInfo`] has from `metadata` into `info`: the standard's
+/// `name`, `description`, `author` and `cad`, and the copyright, license and dates other writers add.
+fn take_metadata(info: &mut SourceInfo, metadata: &mut Map<String, Value>) {
+    let keys: Vec<String> = metadata.keys().cloned().collect();
+    for key in keys {
+        let slot = match key.to_ascii_lowercase().as_str() {
+            "name" | "title" => &mut info.title,
+            "description" => &mut info.description,
+            "author" | "designer" => &mut info.author,
+            "cad" | "application" => &mut info.tool,
+            "copyright" => &mut info.copyright,
+            "license" | "licenseterms" => &mut info.license,
+            "creationdate" | "created" => &mut info.created,
+            "modificationdate" | "modified" => &mut info.modified,
+            _ => continue,
+        };
+        if slot.is_some() {
+            continue;
+        }
+        if let Some(Value::String(v)) = metadata.remove(&key) {
+            *slot = Some(v.trim().to_owned());
+        }
+    }
 }
 
 fn some<const N: usize>(v: Option<&[f32; N]>) -> Option<[f32; N]> {
@@ -732,7 +716,7 @@ fn material_colors(materials: &[Mat], index: &HashMap<&str, usize>) -> Vec<Optio
     fn color(materials: &[Mat], index: &HashMap<&str, usize>, i: usize, depth: usize) -> Option<[f32; 4]> {
         let m = &materials[i];
         if let Some(c) = m.color {
-            return Some(linear(c));
+            return Some(linear_rgba(c));
         }
         if depth >= 8 {
             return None;
@@ -840,9 +824,9 @@ struct Look {
     blend: bool,
 }
 
-fn build(a: &Amf, zipped: bool) -> Result<Document<'static>> {
+fn build(a: &Amf, zipped: bool, crease: f32) -> Result<Document> {
     let unit = a.unit.clone().unwrap_or_else(|| "millimeter".to_owned());
-    let known = meters(&unit);
+    let known = crate::source::meters_in(&unit);
     let scale = known.unwrap_or(1e-3);
     let mat_index: HashMap<&str, usize> = a
         .materials
@@ -859,7 +843,7 @@ fn build(a: &Amf, zipped: bool) -> Result<Document<'static>> {
         wraps: Vec::new(),
         dropped: 0,
     };
-    let mut b = Builder::default();
+    let mut b = Builder::new(crease);
     let mut looks: HashMap<Look, usize> = HashMap::new();
     let mut materials: Vec<Full> = Vec::new();
     let mut meshes: Vec<Value> = Vec::new();
@@ -888,7 +872,7 @@ fn build(a: &Amf, zipped: bool) -> Result<Document<'static>> {
             let base = vol
                 .color
                 .or(o.color)
-                .map(linear)
+                .map(linear_rgba)
                 .or_else(|| material.and_then(|m| mat_colors[m]))
                 .unwrap_or(GRAY);
             // Each triangle's image (when textured), and the triangles in order of it.
@@ -898,7 +882,9 @@ fn build(a: &Amf, zipped: bool) -> Result<Document<'static>> {
                     tex.image(vol.maps.get(*m as usize)?.tex)
                 })
                 .collect();
-            let mut order: Vec<u32> = (0..u32::try_from(vol.tris.len())?).collect();
+            let mut order: Vec<u32> = (0..u32::try_from(vol.tris.len())
+                .context(ErrorKind::LimitExceeded, "too many triangles for 32-bit indices")?)
+                .collect();
             if image_of.iter().any(Option::is_some) {
                 order.sort_by_key(|&t| image_of[t as usize].map_or(0, |i| i + 1));
             }
@@ -954,7 +940,8 @@ fn build(a: &Amf, zipped: bool) -> Result<Document<'static>> {
                         let index = if let Some(i) = found {
                             i
                         } else {
-                            let index = u32::try_from(p.positions.len())?;
+                            let index = u32::try_from(p.positions.len())
+                                .context(ErrorKind::LimitExceeded, "too many vertices for 32-bit indices")?;
                             p.positions.push(o.verts[v as usize]);
                             match some(o.normals.get(v as usize)) {
                                 Some(n) => p.normals.push(n),
@@ -966,7 +953,7 @@ fn build(a: &Amf, zipped: bool) -> Result<Document<'static>> {
                             if colored {
                                 let c = tri_color
                                     .or_else(|| some(o.colors.get(v as usize)))
-                                    .map_or(base, linear);
+                                    .map_or(base, linear_rgba);
                                 blend |= c[3] < 1.0;
                                 p.colors.push(c);
                             }
@@ -1029,7 +1016,13 @@ fn build(a: &Amf, zipped: bool) -> Result<Document<'static>> {
             mesh_of.push(Some(meshes.len() - 1));
         }
     }
-    ensure!(triangles > 0, "this AMF has no triangles");
+    if triangles == 0 {
+        return Err(crate::Error::nothing_left(
+            a.truncated,
+            "AMF",
+            "this AMF has no triangles",
+        ));
+    }
 
     let mut place = Place {
         a,
@@ -1068,25 +1061,37 @@ fn build(a: &Amf, zipped: bool) -> Result<Document<'static>> {
             roots.extend(place.constellation(i, None));
         }
     }
-    let Place { mut nodes, dropped, .. } = place;
+    let Place { nodes, dropped, .. } = place;
 
-    let mut source = json!({ "format": "AMF", "unit": unit, "metersPerUnit": scale, "upAxis": "Z" });
-    if let Some(v) = &a.version {
-        source["version"] = json!(v);
-    }
+    let mut info = SourceInfo {
+        format: Some("AMF".into()),
+        version: a.version.clone(),
+        meters_per_unit: match known {
+            Some(m) if a.unit.is_some() => Fact::Declared(m),
+            _ => Fact::Assumed(scale),
+        },
+        unit: Some(unit),
+        up_axis: Fact::Declared(Axis::PosZ),
+        ..SourceInfo::default()
+    };
+    info.converted.units = (scale - 1.0).abs() > f64::EPSILON;
+    info.converted.up_axis = true;
+    let mut metadata = a.metadata.clone();
+    take_metadata(&mut info, &mut metadata);
+    let mut source = json!({});
     if zipped {
         source["zipped"] = json!(true);
     }
-    if known.is_none() {
-        source["unknownUnit"] = json!(true);
+    if !metadata.is_empty() {
+        source["metadata"] = Value::Object(metadata);
     }
-    if !a.metadata.is_empty() {
-        source["metadata"] = Value::Object(a.metadata.clone());
+    if let Value::Object(m) = &mut source {
+        info.write(m);
     }
     for (key, n) in [
         ("droppedCurvedEdges", a.curved),
         ("droppedFormulas", a.formulas),
-        ("droppedTriangles", bad),
+        (crate::geometry::DROPPED, bad),
         ("droppedInstances", dropped),
         ("droppedTextures", tex.dropped + a.bad_textures),
     ] {
@@ -1106,21 +1111,18 @@ fn build(a: &Amf, zipped: bool) -> Result<Document<'static>> {
         .sum();
     facts.insert("triangles".into(), json!(in_scene));
     facts.insert("objects".into(), json!(a.objects.len()));
-    facts.insert("unit".into(), json!(unit));
 
-    // Z-up to Y-up (a quarter turn about X), and the unit to meters.
-    let h = std::f32::consts::FRAC_1_SQRT_2;
-    nodes.push(
-        json!({ "name": "RootNode", "children": roots, "rotation": [-h, 0.0, 0.0, h], "scale": [scale, scale, scale] }),
-    );
     let mut json = Map::new();
     json.insert("asset".into(), json!({ "extras": { "source": source } }));
     json.insert("scene".into(), json!(0));
-    json.insert("scenes".into(), json!([{ "nodes": [nodes.len() - 1] }]));
+    json.insert("scenes".into(), json!([{ "nodes": roots }]));
     json.insert("nodes".into(), Value::Array(nodes));
     json.insert("meshes".into(), Value::Array(meshes));
     b.materials(&materials, tex.images, &mut json);
-    Ok(b.finish(json, facts))
+    let mut doc = b.finish(json, facts);
+    // Z-up to Y-up (a quarter turn about X), and the unit to meters.
+    frame::root(&mut doc, Frame::z_up().scaled(scale));
+    Ok(doc)
 }
 
 /// A look's glTF material.
@@ -1136,7 +1138,7 @@ fn full(
 ) -> Full {
     let m = material.map(|i| &a.materials[i]);
     let name = match m {
-        Some(m) => m.name.clone().unwrap_or_else(|| format!("material_{}", m.id)),
+        Some(m) => m.name.clone().unwrap_or_else(|| format!("material{}", m.id)),
         None if image.is_some() => "texture".to_owned(),
         None if own || color == [1.0; 4] => "color".to_owned(),
         None => "default".to_owned(),
@@ -1201,12 +1203,9 @@ impl Place<'_> {
     #[allow(clippy::float_cmp, reason = "only an exact identity is left out")]
     fn push(&mut self, mut node: Value, at: Option<&Instance>) -> usize {
         if let Some(i) = at {
-            let [x, y, z] = i.turn.map(|d| (d.to_radians() / 2.0).sin_cos());
+            let [x, y, z] = i.turn.map(f64::to_radians);
             // Turned about x, then y, then z: z * y * x.
-            let qx = [x.0, 0.0, 0.0, x.1];
-            let qy = [0.0, y.0, 0.0, y.1];
-            let qz = [0.0, 0.0, z.0, z.1];
-            let q = mul(mul(qz, qy), qx);
+            let q = quat::mul(quat::mul(quat::about(2, z), quat::about(1, y)), quat::about(0, x));
             if q != [0.0, 0.0, 0.0, 1.0] {
                 node["rotation"] = json!(q);
             }
@@ -1227,7 +1226,7 @@ impl Place<'_> {
             return None;
         }
         let o = &self.a.objects[i];
-        let mut node = json!({ "name": o.name.clone().unwrap_or_else(|| format!("object_{}", o.id)) });
+        let mut node = json!({ "name": o.name.clone().unwrap_or_else(|| format!("object{}", o.id)) });
         if let Some(m) = self.mesh_of[i] {
             node["mesh"] = json!(m);
         }
@@ -1260,7 +1259,7 @@ impl Place<'_> {
             children.extend(child);
         }
         self.path.pop();
-        let mut node = json!({ "name": c.name.clone().unwrap_or_else(|| format!("constellation_{}", c.id)) });
+        let mut node = json!({ "name": c.name.clone().unwrap_or_else(|| format!("constellation{}", c.id)) });
         if !children.is_empty() {
             node["children"] = json!(children);
         }
@@ -1272,16 +1271,6 @@ impl Place<'_> {
     }
 }
 
-/// The product of quaternions (x, y, z, w).
-fn mul(a: [f64; 4], b: [f64; 4]) -> [f64; 4] {
-    [
-        a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1],
-        a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
-        a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3],
-        a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2],
-    ]
-}
-
 #[cfg(test)]
 mod tests {
     use std::io::Write as _;
@@ -1289,11 +1278,34 @@ mod tests {
     use super::*;
     use crate::formats::Input;
 
-    fn load_str(xml: &str) -> Result<Document<'static>> {
-        load(Input::memory(xml.as_bytes(), "t.amf"))
+    #[test]
+    fn millimeters_are_assumed_when_unsaid_and_metadata_is_source_info() {
+        let cube = |head: &str| {
+            format!(
+                "<amf{head}><metadata type=\"cad\">a tool</metadata><metadata type=\"tolerance\">0.1</metadata>                 <object id=\"1\"><mesh><vertices>{}</vertices><volume><triangle><v1>0</v1><v2>1</v2><v3>2</v3></triangle>                 </volume></mesh></object></amf>",
+                "<vertex><coordinates><x>0</x><y>0</y><z>0</z></coordinates></vertex>                 <vertex><coordinates><x>1</x><y>0</y><z>0</z></coordinates></vertex>                 <vertex><coordinates><x>0</x><y>1</y><z>0</z></coordinates></vertex>"
+            )
+        };
+        let doc = load_str(&cube("")).unwrap();
+        let info = doc.source_info();
+        assert_eq!(info.meters_per_unit, Fact::Assumed(0.001));
+        assert_eq!(info.unit.as_deref(), Some("millimeter"));
+        assert_eq!(info.tool.as_deref(), Some("a tool"));
+        assert_eq!(source(&doc)["metadata"], json!({ "tolerance": "0.1" }));
+        assert!(doc.facts.get("unit").is_none());
+        let info = load_str(&cube(" unit=\"meter\"")).unwrap().source_info();
+        assert_eq!(info.meters_per_unit, Fact::Declared(1.0));
+        assert!(!info.converted.units, "meters need no scaling");
+        let info = load_str(&cube(" unit=\"furlong\"")).unwrap().source_info();
+        assert_eq!(info.meters_per_unit, Fact::Assumed(0.001), "read as millimeters");
+        assert_eq!(info.unit.as_deref(), Some("furlong"));
     }
 
-    fn flat(doc: &Document<'_>) -> crate::mesh::Mesh {
+    fn load_str(xml: &str) -> Result<Document> {
+        load(Input::memory(xml.as_bytes(), "t.amf"), crate::Keep::ALL)
+    }
+
+    fn flat(doc: &Document) -> crate::mesh::Mesh {
         doc.flatten(crate::document::Pose::Rest).unwrap().unwrap()
     }
 
@@ -1334,8 +1346,8 @@ mod tests {
   <material id="4"><composite materialid="5">3</composite><composite materialid="6">1</composite><composite materialid="5">x*2</composite></material>
 </amf>"#;
 
-    fn source<'a>(doc: &'a Document<'_>) -> &'a Value {
-        &doc.json["asset"]["extras"]["source"]
+    fn source(doc: &Document) -> &Value {
+        &doc.json()["asset"]["extras"]["source"]
     }
 
     #[test]
@@ -1344,18 +1356,24 @@ mod tests {
         let src = source(&doc);
         assert_eq!(src["unit"], "inch");
         assert_eq!(src["metersPerUnit"], 0.0254);
-        assert_eq!(src["metadata"]["author"], "A & B");
-        assert_eq!(src["metadata"]["name"], "Split Pyramid");
+        let info = doc.source_info();
+        assert_eq!(info.meters_per_unit, Fact::Declared(0.0254));
+        assert_eq!(info.up_axis, Fact::Declared(Axis::PosZ));
+        assert!(info.converted.units && info.converted.up_axis && !info.converted.handedness);
+        assert_eq!(info.output_meters_per_unit(), Fact::Declared(1.0));
+        assert_eq!(info.author.as_deref(), Some("A & B"));
+        assert_eq!(info.title.as_deref(), Some("Split Pyramid"));
+        assert!(src.get("metadata").is_none(), "nothing else to keep");
         assert_eq!(src["droppedCurvedEdges"], 1);
-        assert_eq!(src["droppedTriangles"], 1);
+        assert_eq!(src["droppedGeometry"], 1);
         assert_eq!(src["droppedFormulas"], 1);
         assert_eq!(doc.facts["triangles"], 5);
-        let mesh = &doc.json["meshes"][0];
+        let mesh = &doc.json()["meshes"][0];
         assert_eq!(mesh["name"], "Pyramid");
         let prims = mesh["primitives"].as_array().unwrap();
         assert_eq!(prims.len(), 3);
         assert_eq!(prims[0]["extras"]["name"], "Hard side");
-        let mats = doc.json["materials"].as_array().unwrap();
+        let mats = doc.json()["materials"].as_array().unwrap();
         let mat = |p: &Value| &mats[usize::try_from(p["material"].as_u64().unwrap()).unwrap()];
         // The first volume has a red vertex: its colors go on the vertices.
         assert!(prims[0]["attributes"].get("COLOR_0").is_some());
@@ -1369,8 +1387,8 @@ mod tests {
             .as_f64()
             .unwrap();
         assert!((c - 0.75).abs() < 1e-6, "{c}");
-        // Normals only where every vertex has one.
-        assert!(prims.iter().all(|p| p["attributes"].get("NORMAL").is_none()));
+        // No vertex has a normal: every primitive takes the default ones.
+        assert!(prims.iter().all(|p| p["attributes"].get("NORMAL").is_some()));
 
         let m = flat(&doc);
         assert_eq!(m.triangles(), 5);
@@ -1418,9 +1436,9 @@ mod tests {
     #[test]
     fn constellations_place_instances() {
         let doc = load_str(CONSTELLATIONS).unwrap();
-        let nodes = doc.json["nodes"].as_array().unwrap();
+        let nodes = doc.json()["nodes"].as_array().unwrap();
         // Four placed triangles; one mesh, shared.
-        assert_eq!(doc.json["meshes"].as_array().unwrap().len(), 1);
+        assert_eq!(doc.json()["meshes"].as_array().unwrap().len(), 1);
         assert_eq!(nodes.iter().filter(|n| n.get("mesh").is_some()).count(), 4);
         assert!(nodes.iter().any(|n| n["name"] == "Pair of pairs"));
         // The missing object and the loop between 8 and 9 are dropped.
@@ -1452,11 +1470,11 @@ mod tests {
     #[test]
     fn zipped_files_read_the_same() {
         let bytes = zipped("model.amf", PYRAMID);
-        let doc = load(Input::memory(&bytes, "t.amf")).unwrap();
+        let doc = load(Input::memory(&bytes, "t.amf"), crate::Keep::ALL).unwrap();
         assert_eq!(source(&doc)["zipped"], true);
         assert_eq!(doc.facts["triangles"], 5);
         let bytes = zipped("model.txt", "not xml at all");
-        assert!(load(Input::memory(&bytes, "t.amf")).is_err());
+        assert!(load(Input::memory(&bytes, "t.amf"), crate::Keep::ALL).is_err());
     }
 
     #[test]
@@ -1482,16 +1500,16 @@ mod tests {
             b64(&[0, 0, 0, 0])
         );
         let doc = load_str(&xml).unwrap();
-        assert_eq!(doc.json["images"].as_array().unwrap().len(), 1);
-        let prims = doc.json["meshes"][0]["primitives"].as_array().unwrap();
+        assert_eq!(doc.json()["images"].as_array().unwrap().len(), 1);
+        let prims = doc.json()["meshes"][0]["primitives"].as_array().unwrap();
         assert_eq!(prims.len(), 2);
         let textured = prims
             .iter()
             .find(|p| p["attributes"].get("TEXCOORD_0").is_some())
             .unwrap();
-        let mat = &doc.json["materials"][usize::try_from(textured["material"].as_u64().unwrap()).unwrap()];
+        let mat = &doc.json()["materials"][usize::try_from(textured["material"].as_u64().unwrap()).unwrap()];
         assert_eq!(mat["pbrMetallicRoughness"]["baseColorTexture"]["index"], 0);
-        assert_eq!(doc.json["samplers"][0]["wrapS"], REPEAT);
+        assert_eq!(doc.json()["samplers"][0]["wrapS"], REPEAT);
         let m = flat(&doc);
         let rgb = [255, 0, 0, 0, 0, 0, 0, 0, 0, 255, 0, 0];
         assert_eq!(m.images[0].bytes, crate::png::encode(2, 2, 3, &rgb).unwrap());
@@ -1505,7 +1523,7 @@ mod tests {
             limit: 3,
             ..Input::memory(PYRAMID.as_bytes(), "t.amf")
         };
-        assert!(load(input).is_err());
+        assert!(load(input, crate::Keep::ALL).is_err());
         assert!(load_str("<model/>").is_err());
         assert!(load_str("").is_err());
         assert!(load_str("PK\u{3}\u{4}junk").is_err());
@@ -1521,7 +1539,10 @@ mod tests {
         assert_eq!(doc.facts["triangles"], 2);
         // Every prefix: an error or a document, never a panic.
         for n in 0..CONSTELLATIONS.len() {
-            if let Ok(doc) = load(Input::memory(&CONSTELLATIONS.as_bytes()[..n], "t.amf")) {
+            if let Ok(doc) = load(
+                Input::memory(&CONSTELLATIONS.as_bytes()[..n], "t.amf"),
+                crate::Keep::ALL,
+            ) {
                 doc.to_glb().unwrap();
             }
         }
@@ -1537,7 +1558,7 @@ mod tests {
                 }
                 let cut = rng.below(u32::try_from(b.len()).unwrap()) as usize;
                 for bytes in [&b[..], &b[..cut]] {
-                    if let Ok(doc) = load(Input::memory(bytes, "t.amf")) {
+                    if let Ok(doc) = load(Input::memory(bytes, "t.amf"), crate::Keep::ALL) {
                         doc.to_glb().unwrap();
                     }
                 }

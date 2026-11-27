@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use crate::{Context, Result};
+use crate::{Context, ErrorKind, Result};
 
 use super::model::{self, Id, Model};
 use super::reader::{f64_at, u32_at};
@@ -51,7 +51,11 @@ fn tree(d: &[u8], depth: usize) -> Result<Vec<Node<'_>>> {
     let mut out = Vec::new();
     for (tag, payload) in flat(d) {
         let children = if !payload.is_empty() && CONTAINERS.contains(&tag) {
-            ensure!(depth < MAX_DEPTH, "records nest deeper than {MAX_DEPTH} levels");
+            ensure!(
+                depth < MAX_DEPTH,
+                LimitExceeded,
+                "records nest deeper than {MAX_DEPTH} levels"
+            );
             tree(payload, depth + 1)?
         } else {
             Vec::new()
@@ -110,7 +114,7 @@ fn entity_id(n: &Node<'_>) -> Option<Id> {
 }
 
 fn text(p: &[u8]) -> String {
-    String::from_utf8_lossy(p).into_owned()
+    crate::bytes::text(p).into_owned()
 }
 
 /// The positioned-texture matrices of a face's front and back, nested deep in the face's `DC05` payload: under
@@ -407,7 +411,7 @@ fn collect(nodes: &[Node<'_>], out: &mut Collected) {
 fn top_level(d: &[u8]) -> Result<Vec<&[u8]>> {
     let mut p = 0;
     while let Some(size) = u32_at(d, p + 2) {
-        ensure!(size as usize <= d.len() - p - 6, "model.dat is truncated");
+        ensure!(size as usize <= d.len() - p - 6, Truncated, "model.dat is cut short");
         p += 6 + size as usize;
     }
     let mut records: Vec<(u16, &[u8], &[u8])> = Vec::new();
@@ -455,12 +459,12 @@ fn top_level(d: &[u8]) -> Result<Vec<&[u8]>> {
 pub(crate) fn parse(data: &[u8]) -> Result<Model> {
     let off = (0..data.len().min(4096))
         .find(|&i| data.get(i..i + 4) == Some(b"PK\x03\x04"))
-        .context("no ZIP container found")?;
+        .context(ErrorKind::Corrupt, "no ZIP container found")?;
     let zip = Zip::open(&data[off..])?;
     let by_name = materials(&zip);
     let dat = zip
         .get("model.dat")
-        .context("model.dat not found in the ZIP container")??;
+        .context(ErrorKind::Corrupt, "model.dat not found in the ZIP container")??;
     let mut c = Collected::default();
     for record in top_level(&dat)? {
         collect(&tree(record, 0)?, &mut c);
@@ -470,7 +474,7 @@ pub(crate) fn parse(data: &[u8]) -> Result<Model> {
         definitions: c.definitions,
         ..Model::default()
     };
-    model.root = c.root.context("model.dat has no model record")?;
+    model.root = c.root.context(ErrorKind::Corrupt, "model.dat has no model record")?;
     for (id, name) in c.material_names {
         if let Some(m) = by_name.get(&name) {
             model.materials.insert(id, m.clone());
@@ -489,7 +493,7 @@ fn materials(zip: &Zip<'_>) -> HashMap<String, model::Material> {
         .filter(|n| n.starts_with("materials/") && n.ends_with("material.xml"))
     {
         let Some(Ok(bytes)) = zip.get(path) else { continue };
-        let xml = String::from_utf8_lossy(&bytes);
+        let xml = crate::bytes::text(&bytes);
         let Some(attrs) = element_attrs(&xml, "material") else {
             continue;
         };
@@ -582,48 +586,10 @@ fn attr(attrs: &str, key: &str) -> Option<String> {
         let body = &after[1..];
         let close = body.find(quote)?;
         if k.eq_ignore_ascii_case(key) {
-            return Some(decode_entities(&body[..close]));
+            return Some(crate::formats::xml::unescape(&body[..close]).into_owned());
         }
         rest = &body[close + 1..];
     }
-}
-
-fn decode_entities(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut rest = s;
-    while let Some(amp) = rest.find('&') {
-        out.push_str(&rest[..amp]);
-        rest = &rest[amp..];
-        let Some(semi) = rest.find(';').filter(|&i| i <= 10) else {
-            out.push('&');
-            rest = &rest[1..];
-            continue;
-        };
-        let name = &rest[1..semi];
-        let decoded = match name {
-            "lt" => Some('<'),
-            "gt" => Some('>'),
-            "amp" => Some('&'),
-            "apos" => Some('\''),
-            "quot" => Some('"'),
-            _ => name
-                .strip_prefix("#x")
-                .or_else(|| name.strip_prefix("#X"))
-                .map(|h| u32::from_str_radix(h, 16))
-                .or_else(|| name.strip_prefix('#').map(str::parse))
-                .and_then(Result::ok)
-                .and_then(char::from_u32),
-        };
-        if let Some(c) = decoded {
-            out.push(c);
-            rest = &rest[semi + 1..];
-        } else {
-            out.push('&');
-            rest = &rest[1..];
-        }
-    }
-    out.push_str(rest);
-    out
 }
 
 #[cfg(test)]
@@ -679,10 +645,6 @@ mod tests {
         assert_eq!(attr(a, "colorBlue"), None);
         let t = element_attrs(xml, "texture").unwrap();
         assert_eq!(attr(t, "xScale").as_deref(), Some("12"));
-        assert_eq!(
-            decode_entities("&lt;auto&gt; &#65;&#x42; &bogus; &"),
-            "<auto> AB &bogus; &"
-        );
     }
 
     #[test]

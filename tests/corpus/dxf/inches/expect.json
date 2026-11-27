@@ -16,7 +16,8 @@
   },
   "document": {
     "source": {
-      "units": "inches"
+      "unit": "inch",
+      "metersPerUnit": 0.0254
     }
   }
 }

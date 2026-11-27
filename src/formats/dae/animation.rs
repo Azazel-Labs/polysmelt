@@ -6,8 +6,10 @@ use std::rc::Rc;
 use serde_json::{Value, json};
 
 use super::{Transform, floats64, geometry, xml};
+use crate::formats::keys::{self, Path};
 use crate::formats::xform::{IDENTITY, M4, decompose, mul};
 use crate::num::f32_of;
+use crate::quat;
 
 /// How deeply animations nest.
 const MAX_NESTING: usize = 32;
@@ -184,21 +186,17 @@ fn continuous(q: [f64; 4], prev: Option<[f64; 4]>) -> [f64; 4] {
     }
 }
 
-/// The angle between two unit quaternions.
-fn turn(a: [f64; 4], b: [f64; 4]) -> f64 {
-    let d = a.iter().zip(&b).map(|(x, y)| x * y).sum::<f64>().abs().min(1.0);
-    2.0 * d.acos()
-}
-
 impl super::Reader<'_> {
-    /// The document's animations: one for each animation clip, or one of every animation when it has none.
-    pub(super) fn animations(&mut self) -> Vec<Value> {
+    /// The document's animations: one for each animation clip, named as the clip is, or one of every animation
+    /// when it has none, with no name. Each is written by the readers' one finisher ([`keys::Writer`]), so it
+    /// starts at time 0: a clip's `start`, or the earliest key, is taken off every key.
+    pub(super) fn animations(&mut self) {
         let dom = self.dom;
         let Some(root) = dom.root() else {
-            return Vec::new();
+            return;
         };
         let mut curves = HashMap::new();
-        let mut out = Vec::new();
+        let mut writer = keys::Writer::new(true);
         let clips: Vec<usize> = dom
             .kids(root, "library_animation_clips")
             .flat_map(|l| dom.kids(l, "animation_clip"))
@@ -210,9 +208,8 @@ impl super::Reader<'_> {
                     self.gather(a, 0, &mut curves, &mut tracks);
                 }
             }
-            if let Some(anim) = self.animation(&tracks, None, None) {
-                out.push(anim);
-            }
+            let out = self.animation(&tracks, None);
+            writer.animation(&mut self.b, None, None, out);
         } else {
             for clip in clips {
                 let mut tracks = Vec::new();
@@ -225,12 +222,11 @@ impl super::Reader<'_> {
                 let start = dom.attr_num::<f64>(clip, "start").filter(|t| t.is_finite());
                 let end = dom.attr_num::<f64>(clip, "end").filter(|t| t.is_finite());
                 let range = start.map(|s| (s, end.filter(|&e| e > s).unwrap_or(f64::INFINITY)));
-                if let Some(anim) = self.animation(&tracks, name, range) {
-                    out.push(anim);
-                }
+                let out = self.animation(&tracks, range);
+                writer.animation(&mut self.b, name.map(str::to_owned), None, out);
             }
         }
-        out
+        writer.finish(&mut self.b);
     }
 
     /// The channels of animation `el` and the animations in it.
@@ -432,8 +428,8 @@ impl super::Reader<'_> {
         m
     }
 
-    /// The glTF animation of `tracks`, sampled within `range`; `None` when it moves nothing.
-    fn animation(&mut self, tracks: &[Track], name: Option<&str>, range: Option<(f64, f64)>) -> Option<Value> {
+    /// The glTF tracks of `tracks`, sampled within `range`; none when it moves nothing.
+    fn animation(&mut self, tracks: &[Track], range: Option<(f64, f64)>) -> Vec<keys::Track> {
         let dom = self.dom;
         let mut by_node: Vec<(usize, Vec<&Track>)> = Vec::new();
         for t in tracks.iter().filter(|t| !t.weights) {
@@ -442,8 +438,7 @@ impl super::Reader<'_> {
                 None => by_node.push((t.node, vec![t])),
             }
         }
-        let mut samplers = Vec::new();
-        let mut channels = Vec::new();
+        let mut out = Vec::new();
         for (node, list) in by_node {
             let Some(instances) = self.instances.get(&node).cloned() else {
                 continue;
@@ -461,7 +456,7 @@ impl super::Reader<'_> {
             for k in 0..times.len() {
                 cut.push(times[k]);
                 if k + 1 < times.len() && cut.len() < MAX_SAMPLES {
-                    let angle = turn(quats[k], quats[k + 1]);
+                    let angle = quat::angle(quats[k], quats[k + 1]);
                     if angle > MAX_TURN {
                         #[allow(
                             clippy::cast_possible_truncation,
@@ -478,13 +473,13 @@ impl super::Reader<'_> {
                 cut.truncate(MAX_SAMPLES);
                 times = cut;
             }
-            // Times as glTF holds them: not negative, and increasing.
-            let mut input = Vec::with_capacity(times.len());
+            // Times single precision can tell apart.
+            let mut last = None;
             let mut kept = Vec::with_capacity(times.len());
             for &t in &times {
-                let f = f32_of(t.max(0.0));
-                if input.last().is_none_or(|&l: &f32| f > l) {
-                    input.push(f);
+                let f = f32_of(t);
+                if last.is_none_or(|l: f32| f > l) {
+                    last = Some(f);
                     kept.push(t);
                 }
             }
@@ -504,26 +499,23 @@ impl super::Reader<'_> {
                 .filter_map(|tr| Transform::of(dom.name(tr.transform)))
                 .collect();
             let has = |ks: &[Transform]| kinds.iter().any(|k| ks.contains(k));
-            let input_acc = self.b.floats(input, "SCALAR", true);
             let mut outputs = Vec::new();
             if has(&[Transform::Translate, Transform::Matrix, Transform::Lookat]) {
-                let v = trs.iter().flat_map(|d| d.t.map(f32_of)).collect();
-                outputs.push(("translation", self.b.floats(v, "VEC3", false)));
+                outputs.push((Path::Translation, trs.iter().flat_map(|d| d.t.map(f32_of)).collect()));
             }
             if has(&[Transform::Rotate, Transform::Matrix, Transform::Lookat, Transform::Skew]) {
-                let v = quats.iter().flat_map(|q| q.map(f32_of)).collect();
-                outputs.push(("rotation", self.b.floats(v, "VEC4", false)));
+                outputs.push((Path::Rotation, quats.iter().flat_map(|q| q.map(f32_of)).collect()));
             }
             if has(&[Transform::Scale, Transform::Matrix, Transform::Skew]) {
-                let v = trs.iter().flat_map(|d| d.s.map(f32_of)).collect();
-                outputs.push(("scale", self.b.floats(v, "VEC3", false)));
+                outputs.push((Path::Scale, trs.iter().flat_map(|d| d.s.map(f32_of)).collect()));
             }
             let static_trs = decompose(&self.local(node));
-            for (path, output) in outputs {
-                samplers.push(json!({ "input": input_acc, "output": output, "interpolation": "LINEAR" }));
-                let s = samplers.len() - 1;
-                for &n in &instances {
-                    channels.push(json!({ "sampler": s, "target": { "node": n, "path": path } }));
+            if let Some((&first, also)) = instances.split_first() {
+                for (path, values) in outputs {
+                    out.push(keys::Track {
+                        also: also.to_vec(),
+                        ..keys::Track::linear(first, path, kept.clone(), values)
+                    });
                 }
             }
             // glTF animates only nodes with TRS transforms.
@@ -537,27 +529,14 @@ impl super::Reader<'_> {
                 }
             }
         }
-        self.weight_channels(tracks, range, &mut samplers, &mut channels);
-        if channels.is_empty() {
-            return None;
-        }
-        let mut anim = json!({ "channels": channels, "samplers": samplers });
-        if let Some(name) = name {
-            anim["name"] = json!(name);
-        }
-        Some(anim)
+        self.weight_channels(tracks, range, &mut out);
+        out
     }
 }
 
 impl super::Reader<'_> {
     /// The channels of the morph weights `tracks` animate, on every node that draws a mesh of the morph.
-    fn weight_channels(
-        &mut self,
-        tracks: &[Track],
-        range: Option<(f64, f64)>,
-        samplers: &mut Vec<Value>,
-        channels: &mut Vec<Value>,
-    ) {
+    fn weight_channels(&mut self, tracks: &[Track], range: Option<(f64, f64)>, out: &mut Vec<keys::Track>) {
         let mut by_morph: Vec<(usize, Vec<&Track>)> = Vec::new();
         for t in tracks.iter().filter(|t| t.weights) {
             match by_morph.iter_mut().find(|(n, _)| *n == t.node) {
@@ -592,14 +571,16 @@ impl super::Reader<'_> {
             if nodes.is_empty() || times.is_empty() || count == 0 {
                 continue;
             }
-            let mut input = Vec::with_capacity(times.len());
+            let mut input: Vec<f64> = Vec::with_capacity(times.len());
             let mut output = Vec::with_capacity(times.len() * count);
+            let mut last = None;
             for &t in &times {
-                let f = f32_of(t.max(0.0));
-                if input.last().is_some_and(|&l: &f32| f <= l) {
+                let f = f32_of(t);
+                if last.is_some_and(|l: f32| f <= l) {
                     continue;
                 }
-                input.push(f);
+                last = Some(f);
+                input.push(t);
                 for (k, &default) in defaults.iter().enumerate() {
                     let value = list
                         .iter()
@@ -613,12 +594,12 @@ impl super::Reader<'_> {
                     output.push(if value.is_finite() { f32_of(value) } else { 0.0 });
                 }
             }
-            let input_acc = self.b.floats(input, "SCALAR", true);
-            let output_acc = self.b.floats(output, "SCALAR", false);
-            samplers.push(json!({ "input": input_acc, "output": output_acc, "interpolation": "LINEAR" }));
-            let s = samplers.len() - 1;
-            for n in nodes {
-                channels.push(json!({ "sampler": s, "target": { "node": n, "path": "weights" } }));
+            if let Some((&first, also)) = nodes.split_first() {
+                out.push(keys::Track {
+                    also: also.to_vec(),
+                    width: count,
+                    ..keys::Track::linear(first, Path::Weights, input, output)
+                });
             }
         }
     }
@@ -648,6 +629,14 @@ fn sample_times(list: &[&Track], range: Option<(f64, f64)>) -> Vec<f64> {
     }
     if let Some((start, end)) = range {
         times.retain(|&t| t >= start && t <= end);
+        // A clip is its span of the curves: it begins at its start and ends at its end, whether or not a key is
+        // there.
+        if !times.is_empty() {
+            times.push(start);
+            if end.is_finite() {
+                times.push(end);
+            }
+        }
     }
     times.retain(|t| t.is_finite());
     times.sort_by(f64::total_cmp);

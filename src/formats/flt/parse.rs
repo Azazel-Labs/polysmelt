@@ -8,6 +8,7 @@ use std::borrow::Cow;
 use serde_json::{Map, Value, json};
 
 use crate::Result;
+use crate::bytes::array_at as arr;
 use crate::mesh::FastMap;
 use crate::num::u32_of;
 
@@ -95,11 +96,6 @@ const G_BACKWARD: u32 = 0x8000_0000 >> 6;
 const MAX_LEVELS: usize = 4096;
 
 #[inline]
-fn arr<const N: usize>(d: &[u8], at: usize) -> Option<[u8; N]> {
-    d.get(at..at.checked_add(N)?)?.try_into().ok()
-}
-
-#[inline]
 pub(super) fn u8_at(d: &[u8], at: usize) -> u8 {
     d.get(at).copied().unwrap_or(0)
 }
@@ -140,6 +136,11 @@ pub(super) fn f64_or(d: &[u8], at: usize, default: f64) -> f64 {
         .unwrap_or(default)
 }
 
+/// A vertex's position as the file has it, finite or not: a corner at one that isn't is dropped with its face.
+fn point(d: &[u8], at: usize) -> [f64; 3] {
+    [0, 8, 16].map(|k| arr(d, at + k).map_or(0.0, f64::from_be_bytes))
+}
+
 fn vec3d(d: &[u8], at: usize) -> [f64; 3] {
     [f64_or(d, at, 0.0), f64_or(d, at + 8, 0.0), f64_or(d, at + 16, 0.0)]
 }
@@ -153,20 +154,10 @@ fn packed(d: &[u8], at: usize) -> [u8; 3] {
     [u8_at(d, at + 3), u8_at(d, at + 2), u8_at(d, at + 1)]
 }
 
-/// A fixed-size text field: up to its first NUL, Latin-1 where it isn't UTF-8.
+/// A fixed-size text field: up to its first NUL, without its padding, Windows-1252 where it isn't UTF-8.
 pub(super) fn text(d: &[u8], at: usize, len: usize) -> String {
     let end = at.saturating_add(len).min(d.len());
-    let b = d.get(at..end).unwrap_or_default();
-    let b = &b[..b.iter().position(|&c| c == 0).unwrap_or(b.len())];
-    match std::str::from_utf8(b) {
-        Ok(s) => s.trim_end().to_owned(),
-        Err(_) => b
-            .iter()
-            .map(|&c| char::from(c))
-            .collect::<String>()
-            .trim_end()
-            .to_owned(),
-    }
+    crate::bytes::name(d.get(at..end).unwrap_or_default())
 }
 
 /// A material palette entry.
@@ -450,7 +441,9 @@ impl Face {
 #[derive(Clone, Debug, Default)]
 pub(super) struct Counts {
     pub unknown_records: usize,
-    pub bad_corners: usize,
+    /// The triangles, lines and points left out for a corner that names no vertex, or one that isn't a finite
+    /// point.
+    pub dropped: usize,
     pub extensions: usize,
     pub subfaces: usize,
     pub billboards: usize,
@@ -494,6 +487,14 @@ impl Db {
             .binary_search_by_key(&offset, |&(o, _)| o)
             .ok()
             .map(|k| self.vert_at[k].1)
+            .filter(|&v| self.finite(v))
+    }
+
+    /// Whether vertex `v` is at a finite point.
+    fn finite(&self, v: u32) -> bool {
+        self.verts
+            .get(v as usize)
+            .is_some_and(|v| v.pos.iter().all(|c| c.is_finite()))
     }
 
     /// The meters in one of the file's units.
@@ -507,16 +508,16 @@ impl Db {
         }
     }
 
-    /// The units' name.
-    pub fn unit_name(&self) -> &'static str {
-        match self.units {
-            0 => "m",
-            1 => "km",
-            4 => "ft",
-            5 => "in",
-            8 => "nmi",
-            _ => "unknown",
-        }
+    /// The units' name; `None` for a code the format doesn't define.
+    pub fn unit_name(&self) -> Option<&'static str> {
+        Some(match self.units {
+            0 => "meter",
+            1 => "kilometer",
+            4 => "foot",
+            5 => "inch",
+            8 => "nautical mile",
+            _ => return None,
+        })
     }
 
     /// The version as written: 16.4 for 1640, 15.4.1 for 1541.
@@ -591,6 +592,7 @@ impl<'a> Records<'a> {
 pub(super) fn parse(data: &[u8]) -> Result<Db> {
     ensure!(
         data.len() >= 4 && u16::from_be_bytes([data[0], data[1]]) == op::HEADER,
+        UnknownFormat,
         "not an OpenFlight file"
     );
     let mut db = Db {
@@ -956,6 +958,7 @@ pub(super) fn parse(data: &[u8]) -> Result<Db> {
                 let start = u32_of(db.corners.len());
                 let morph_start = u32_of(db.morph.len());
                 let mut k = 4;
+                let mut bad = 0;
                 while k + step <= d.len() {
                     let v = db.vertex(u32_at(d, k));
                     let m = if morph { db.vertex(u32_at(d, k + 4)) } else { v };
@@ -966,9 +969,20 @@ pub(super) fn parse(data: &[u8]) -> Result<Db> {
                                 db.morph.push(m);
                             }
                         }
-                        _ => db.counts.bad_corners += 1,
+                        _ => bad += 1,
                     }
                     k += step;
+                }
+                if bad > 0 {
+                    if matches!(db.faces[f as usize].shape, Shape::Points) {
+                        // Each light point stands alone.
+                        db.counts.dropped += bad;
+                    } else {
+                        // A polygon with a corner that isn't there is dropped whole, not drawn as another shape.
+                        db.counts.dropped += 1;
+                        db.corners.truncate(start as usize);
+                        db.morph.truncate(morph_start as usize);
+                    }
                 }
                 let face = &mut db.faces[f as usize];
                 if face.len > 0 {
@@ -1230,7 +1244,7 @@ fn color_palette(db: &mut Db, d: &[u8]) {
 fn vertex(opcode: u16, d: &[u8]) -> Vert {
     let flags = u16_at(d, 6);
     let mut v = Vert {
-        pos: vec3d(d, 8),
+        pos: point(d, 8),
         ..Vert::default()
     };
     let (color_at, normal, uv) = match opcode {
@@ -1326,7 +1340,7 @@ fn local_pool(db: &mut Db, d: &[u8], count: u32, mask: u32) -> (u32, u32, Vec<[f
     for _ in 0..n {
         let mut v = Vert::default();
         if bit(0) {
-            v.pos = vec3d(d, at);
+            v.pos = point(d, at);
             at += 24;
         }
         if bit(1) {
@@ -1368,6 +1382,8 @@ fn local_pool(db: &mut Db, d: &[u8], count: u32, mask: u32) -> (u32, u32, Vec<[f
 /// A mesh primitive: a strip, fan, quad strip or polygon of the local pool's vertices, as a
 /// face with the mesh's attributes.
 fn mesh_primitive(db: &mut Db, d: &[u8], mesh: u32, pool: &(u32, u32, Vec<[f32; 2]>, u8)) {
+    /// An index that names no vertex that can be drawn.
+    const NONE: u32 = u32::MAX;
     let kind = i16_or(d, 4, 0);
     let size = usize::from(u16_at(d, 6));
     let count = u32_at(d, 8) as usize;
@@ -1385,28 +1401,35 @@ fn mesh_primitive(db: &mut Db, d: &[u8], mesh: u32, pool: &(u32, u32, Vec<[f32; 
             2 => u32::from(u16_at(d, at)),
             _ => u32_at(d, at),
         };
-        if i < *len {
-            idx.push(i);
-        } else {
-            db.counts.bad_corners += 1;
-        }
+        // An index that names no vertex of the pool, or one that isn't a finite point, stays in its place as
+        // `NONE`, and what it would have drawn is dropped.
+        idx.push(if i < *len && db.finite(first + i) { i } else { NONE });
     }
     let mut corners: Vec<u32> = Vec::new();
+    // A strip's or fan's triangle, unless it names a corner twice (how a strip is restarted) or one that isn't
+    // there.
+    let mut triangle = |corners: &mut Vec<u32>, t: [u32; 3]| {
+        if t.contains(&NONE) {
+            db.counts.dropped += 1;
+        } else if crate::geometry::distinct(t) {
+            corners.extend(t);
+        }
+    };
     let shape = match kind {
         // A triangle strip: every other triangle turned to keep the winding.
         1 => {
             for k in 2..idx.len() {
                 if k % 2 == 0 {
-                    corners.extend([idx[k - 2], idx[k - 1], idx[k]]);
+                    triangle(&mut corners, [idx[k - 2], idx[k - 1], idx[k]]);
                 } else {
-                    corners.extend([idx[k - 1], idx[k - 2], idx[k]]);
+                    triangle(&mut corners, [idx[k - 1], idx[k - 2], idx[k]]);
                 }
             }
             Shape::Triangles
         }
         2 => {
             for k in 2..idx.len() {
-                corners.extend([idx[0], idx[k - 1], idx[k]]);
+                triangle(&mut corners, [idx[0], idx[k - 1], idx[k]]);
             }
             Shape::Triangles
         }
@@ -1415,12 +1438,17 @@ fn mesh_primitive(db: &mut Db, d: &[u8], mesh: u32, pool: &(u32, u32, Vec<[f32; 
             let mut k = 2;
             while k + 1 < idx.len() {
                 let (a, b, c, e) = (idx[k - 2], idx[k - 1], idx[k + 1], idx[k]);
-                corners.extend([a, b, c, a, c, e]);
+                triangle(&mut corners, [a, b, c]);
+                triangle(&mut corners, [a, c, e]);
                 k += 2;
             }
             Shape::Triangles
         }
         4 => {
+            if idx.contains(&NONE) {
+                db.counts.dropped += 1;
+                return;
+            }
             corners = idx;
             Shape::Polygon
         }

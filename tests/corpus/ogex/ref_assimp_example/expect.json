@@ -1,0 +1,19 @@
+{
+  "spec": "OpenGEX 3.0 (the OpenGEX specification): a real file, the specification's example",
+  "source": "assimp/assimp at 711b4e9bbde2, test/models/OpenGEX/Example.ogex (BSD-3-Clause, see ../LICENSE-assimp); expectations measured with assimp 6.0.5 (assimp-py 1.2.0)",
+  "triangles": 24,
+  "bounds": {
+    "min": [
+      -52.494061,
+      0.0,
+      -60.570074
+    ],
+    "max": [
+      184.09798,
+      93.111633,
+      41.567698
+    ]
+  },
+  "area": 119294.290868,
+  "position_set": "positions.f32"
+}

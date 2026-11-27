@@ -1,10 +1,8 @@
 //! The typed rig views over real exporter output: Blender's two-bone armature as FBX and USD.
 #![cfg(feature = "fs")]
 
-#[cfg(any(feature = "fbx", feature = "usd", feature = "gltf"))]
-use polysmelt::document::Keep;
-#[cfg(any(feature = "fbx", feature = "usd", feature = "gltf"))]
-use polysmelt::formats;
+#[cfg(any(feature = "fbx", feature = "usd"))]
+use polysmelt::Loader;
 
 /// Blender's armature, the same from either exporter.
 #[cfg(any(feature = "fbx", feature = "usd"))]
@@ -12,14 +10,14 @@ mod armature {
     use std::path::PathBuf;
 
     use polysmelt::assets::Folder;
-    use polysmelt::rig::{Path, Rig, Trs};
+    use polysmelt::rig::{Property, Rig, Trs};
 
-    use super::{Keep, formats};
+    use super::Loader;
 
-    fn load(rel: &str, ext: &str) -> Rig {
+    fn load(rel: &str) -> Rig {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/corpus").join(rel);
         let assets = Folder::new(path.parent().unwrap());
-        formats::load(&path, ext, &assets, Keep::ALL).unwrap().rig().unwrap()
+        Loader::new().assets(assets).open(&path).unwrap().rig().unwrap()
     }
 
     fn mul(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
@@ -104,7 +102,9 @@ mod armature {
         let (first, last) = a.span();
         assert!(last > first, "{first}..{last}");
         assert!(
-            a.channels.iter().any(|c| c.node == upper && c.path == Path::Rotation),
+            a.channels
+                .iter()
+                .any(|c| c.node == upper && c.property == Property::Rotation),
             "Upper turns"
         );
         let posed = rig.pose(Some(0), last);
@@ -122,7 +122,7 @@ mod armature {
     #[test]
     #[cfg(feature = "fbx")]
     fn fbx_armature() {
-        check(&load("fbx/blender_armature_animated/armature_animated.fbx", "fbx"));
+        check(&load("fbx/blender_armature_animated/armature_animated.fbx"));
     }
 
     /// A pose handed in draws the mesh as the same pose played from the file does.
@@ -132,7 +132,7 @@ mod armature {
         use polysmelt::document::Pose;
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/corpus/fbx/blender_armature_animated/armature_animated.fbx");
-        let doc = formats::load(&path, "fbx", &Folder::new(path.parent().unwrap()), Keep::ALL).unwrap();
+        let doc = polysmelt::open(&path).unwrap();
         let rig = doc.rig().unwrap();
         let positions =
             |m: polysmelt::mesh::Mesh| -> Vec<[f32; 3]> { m.prims.into_iter().flat_map(|p| p.positions).collect() };
@@ -174,7 +174,7 @@ mod armature {
         use polysmelt::document::Pose;
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/corpus/fbx/blender_armature_animated/armature_animated.fbx");
-        let doc = formats::load(&path, "fbx", &Folder::new(path.parent().unwrap()), Keep::ALL).unwrap();
+        let doc = polysmelt::open(&path).unwrap();
         let rig = doc.rig().unwrap();
         let joints: Vec<usize> = rig.skins.iter().flat_map(|s| s.joints.iter().copied()).collect();
         let mesh = doc.flatten(Pose::Rest).unwrap().unwrap();
@@ -192,7 +192,7 @@ mod armature {
     #[test]
     #[cfg(feature = "usd")]
     fn usd_armature() {
-        check(&load("usd/blender_armature_animated/armature_animated.usdc", "usdc"));
+        check(&load("usd/blender_armature_animated/armature_animated.usdc"));
     }
 }
 
@@ -222,11 +222,7 @@ fn accessor_offset_to_the_buffer_end() {
     glb.extend(word(bin.len()));
     glb.extend(b"BIN\0");
     glb.extend(&bin);
-    let assets = polysmelt::assets::Memory::new();
-    let rig = formats::load_bytes(&glb, "a.glb", "glb", &assets, Keep::ALL)
-        .unwrap()
-        .rig()
-        .unwrap();
+    let rig = polysmelt::read(glb, "a.glb").unwrap().rig().unwrap();
     assert_eq!(rig.pose(Some(0), 1.0)[0].translation, [4.0, 5.0, 6.0]);
 }
 
@@ -237,7 +233,7 @@ fn accessor_offset_to_the_buffer_end() {
 #[cfg(feature = "gltf")]
 fn bind_pose_keeps_stored_vertices() {
     use polysmelt::document::Pose;
-    use polysmelt::mesh::{Bone, Material, Mesh, Prim, to_glb};
+    use polysmelt::mesh::{Bone, Material, Mesh, Prim};
     let mut p = Prim::default();
     for i in 0..6u8 {
         let x = f32::from(i) * 0.5;
@@ -273,12 +269,11 @@ fn bind_pose_keeps_stored_vertices() {
         images: Vec::new(),
         skeleton: skeleton.clone(),
     };
-    let assets = polysmelt::assets::Memory::new();
     let flat = |glb: &[u8], pose| {
-        let doc = formats::load_bytes(glb, "s.glb", "glb", &assets, Keep::ALL).unwrap();
+        let doc = polysmelt::read(glb.to_vec(), "s.glb").unwrap();
         doc.flatten(pose).unwrap().unwrap()
     };
-    let glb = to_glb(&mesh).unwrap();
+    let glb = mesh.to_glb().unwrap();
     let bind = flat(&glb, Pose::Bind);
     assert_eq!(bind.prims[0].positions, p.positions, "bind moves no vertex");
     assert_eq!(bind.prims[0].normals, p.normals);
@@ -303,7 +298,7 @@ fn bind_pose_keeps_stored_vertices() {
     }
     assert_eq!(rest.prims[0].skin_joints, bind.prims[0].skin_joints);
     assert_eq!(rest.prims[0].skin_weights, bind.prims[0].skin_weights);
-    let again = flat(&to_glb(&bind).unwrap(), Pose::Bind);
+    let again = flat(&bind.to_glb().unwrap(), Pose::Bind);
     assert_eq!(again.prims[0].positions, p.positions);
     for (got, want) in again.skeleton.iter().zip(&skeleton) {
         for (g, w) in got.matrix.iter().zip(&want.matrix) {

@@ -1,0 +1,21 @@
+{
+  "spec": "KHR_node_visibility: Khronos sample NodeVisibilityTest, hidden nodes and what's under them",
+  "source": "KhronosGroup/glTF-Sample-Assets@e124e8d, Models/NodeVisibilityTest/glTF (CC0-1.0, Marco Hutter); textures scaled down to 64 pixels",
+  "file": "NodeVisibilityTest.gltf",
+  "triangles": 6,
+  "vertices": 12,
+  "area": 48.0,
+  "bounds": {
+    "min": [
+      0.0,
+      -1.0,
+      0.0
+    ],
+    "max": [
+      16.0,
+      1.0,
+      0.01
+    ]
+  },
+  "material_count": 3
+}

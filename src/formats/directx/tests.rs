@@ -2,6 +2,7 @@ use super::*;
 use crate::assets::Memory;
 use crate::document::Pose;
 use crate::mesh::Mesh;
+use crate::vec3::{cross, dot, sub};
 
 const TEXT_CUBE: &[u8] = include_bytes!("../../../tests/corpus/x/test_cube_text/test_cube_text.x");
 const BINARY_CUBE: &[u8] = include_bytes!("../../../tests/corpus/x/test_cube_binary/test_cube_binary.x");
@@ -16,15 +17,12 @@ const GEN_SKIN: &[u8] = include_bytes!("../../../tests/corpus/x/skin/cube.x");
 const GEN_DECL: &[u8] = include_bytes!("../../../tests/corpus/x/decl_data/cube.x");
 const RED_PNG: &[u8] = include_bytes!("../../../tests/corpus/x/texture/tex/red.png");
 
-fn read_bytes(bytes: &[u8], max: usize) -> Result<Document<'static>> {
-    let keep = Keep {
-        max_triangles: max,
-        ..Keep::ALL
-    };
-    super::super::load_bytes(bytes, "a.x", "x", &Memory::new(), keep).map(Document::into_owned)
+fn read_bytes(bytes: &[u8], max: usize) -> Result<Document> {
+    let keep = Keep::ALL.with_max_triangles(max);
+    super::super::load_bytes(bytes, "a.x", "x", &Memory::new(), keep)
 }
 
-fn read(text: &str) -> Document<'static> {
+fn read(text: &str) -> Document {
     read_bytes(text.as_bytes(), usize::MAX).unwrap()
 }
 
@@ -35,7 +33,7 @@ fn error(bytes: &[u8]) -> String {
     }
 }
 
-fn mesh(doc: &Document<'_>) -> Mesh {
+fn mesh(doc: &Document) -> Mesh {
     doc.flatten(Pose::Rest).unwrap().unwrap()
 }
 
@@ -52,22 +50,6 @@ fn bounds(m: &Mesh) -> ([f32; 3], [f32; 3]) {
 
 fn close(a: &[f32], b: &[f32]) -> bool {
     a.len() == b.len() && a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-4)
-}
-
-fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
-}
-
-fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-
-fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
 /// Every triangle faces away from the mesh's center.
@@ -100,22 +82,33 @@ fn cube_file(extra: &str) -> String {
 #[test]
 fn reads_the_header() {
     let doc = read_bytes(TEXT_CUBE, usize::MAX).unwrap();
-    let source = &doc.json["asset"]["extras"]["source"];
+    let source = &doc.json()["asset"]["extras"]["source"];
     assert_eq!(source["format"], "DirectX");
     assert_eq!(source["version"], "3.3");
-    assert_eq!(source["encoding"], "text");
+    assert_eq!(source["encoding"], "ascii");
     assert_eq!(source["floatSize"], 32);
-    assert_eq!(source["ticksPerSecond"], 24);
     assert_eq!(doc.facts["triangles"], 12);
+    let info = doc.source_info();
+    assert_eq!(info.version.as_deref(), Some("3.3"));
+    assert_eq!(info.frame_rate, crate::source::Fact::Declared(24.0));
+    assert_eq!(info.up_axis, crate::source::Fact::Assumed(crate::source::Axis::PosY));
+    assert_eq!(
+        info.handedness,
+        crate::source::Fact::Declared(crate::source::Handedness::Left)
+    );
+    assert!(info.converted.handedness && !info.converted.up_axis && !info.converted.units);
+    assert_eq!(info.meters_per_unit, crate::source::Fact::Unknown);
     assert_eq!(doc.facts["meshes"], 1);
 }
 
 #[test]
 fn three_encodings_read_alike() {
     let text = mesh(&read_bytes(TEXT_CUBE, usize::MAX).unwrap());
-    for (bytes, encoding) in [(BINARY_CUBE, "binary"), (COMPRESSED_CUBE, "compressed binary")] {
+    for (bytes, compressed) in [(BINARY_CUBE, false), (COMPRESSED_CUBE, true)] {
         let doc = read_bytes(bytes, usize::MAX).unwrap();
-        assert_eq!(doc.json["asset"]["extras"]["source"]["encoding"], encoding);
+        let source = &doc.json()["asset"]["extras"]["source"];
+        assert_eq!(source["encoding"], "binary");
+        assert_eq!(source.get("compressed").is_some(), compressed);
         let m = mesh(&doc);
         assert_eq!(m.triangles(), text.triangles());
         let (a, b) = (bounds(&m), bounds(&text));
@@ -133,7 +126,7 @@ fn doubles_read_like_floats() {
 
 #[test]
 fn refuses_what_isnt_a_x_file() {
-    assert!(error(b"").contains("not a DirectX"));
+    assert!(error(b"").contains("the file is empty"));
     assert!(error(b"xof 0303").contains("not a DirectX"));
     assert!(error(b"xif 0303txt 0032 Mesh {}").contains("not a DirectX"));
     assert!(error(b"xof 0303zip 0032 Mesh {}").contains("unknown .x encoding"));
@@ -216,6 +209,46 @@ fn reads_comments_templates_and_nan() {
     assert_eq!(m.triangles(), 12);
     assert!(m.prims[0].uvs.iter().all(|uv| uv.iter().all(|c| c.is_finite())));
     assert!(m.prims[0].uvs.contains(&[0.0, 0.0]));
+}
+
+#[test]
+fn values_that_are_not_finite_keep_their_place() {
+    // Each spelling stands where a texture coordinate goes: the ones after it must not move up.
+    for bad in [
+        "nan",
+        "-nan",
+        "NaN",
+        "inf",
+        "-inf",
+        "+Infinity",
+        "-nan(ind)",
+        "1.#QNAN",
+        "-1.#IND",
+        "1.#INF00",
+    ] {
+        let doc = read(&format!(
+            "xof 0303txt 0032\nFrame Box {{ Mesh {{ {CUBE}\n MeshTextureCoords {{ 8; {bad};0.25;, \
+             0.5;0.75;, 0;1;, 1;1;, 0;0;, 1;0;, 0;1;, 1;1;; }} }} }}"
+        ));
+        let m = mesh(&doc);
+        assert_eq!(m.triangles(), 12, "{bad}");
+        // Eight vertices in the file, each a corner of three faces once the default normals keep the cube's
+        // edges hard.
+        let uvs = &m.prims[0].uvs;
+        assert_eq!(uvs.len(), 24, "{bad}");
+        assert!(uvs.contains(&[0.0, 0.25]), "{bad}: {uvs:?}");
+        assert!(uvs.contains(&[0.5, 0.75]), "{bad}: {uvs:?}");
+    }
+    // Right before an object, where a word could be taken for its template's name.
+    let doc = read(&cube_file(
+        "MeshTextureCoords { 8; 0.5;0.75;, 0;1;, 1;1;, 0;0;, 1;0;, 0;1;, 1;1;, 0.25;nan;; } MeshMaterialList { 1; 1; 0;; Material Red { 1;0;0;1;; 1; 0;0;0;; inf;0;0;; } }",
+    ));
+    assert!(mesh(&doc).prims[0].uvs.contains(&[0.25, 0.0]));
+    // Among the positions too: the count that follows them is still the face count.
+    let text = "xof 0303txt 0032\nMesh { 3; nan;0;0;, 1;0;0;, 0;1;0;; 1; 3;0,1,2;; }";
+    let m = mesh(&read(text));
+    assert_eq!(m.triangles(), 1);
+    assert!(m.prims[0].positions.contains(&[0.0, 0.0, 0.0]));
 }
 
 #[test]
@@ -351,24 +384,41 @@ fn decl_values() {
 #[test]
 fn materials_and_their_list() {
     let doc = read(&format!(
-        "xof 0303txt 0032\nMaterial Red {{ 1;0;0;1;; 250; 0;0;0;; 0.5;0;0;; }}\nFrame Box {{ Mesh {{ {CUBE}\n \
+        "xof 0303txt 0032\nMaterial Red {{ 1;0;0;1;; 250; 0.5;0.5;0.5;; 0.5;0;0;; }}\nFrame Box {{ Mesh {{ {CUBE}\n \
          MeshMaterialList {{ 2; 3; 0,1,1;; Material {{ 0.5;0.5;0.5;1;; 0; 0;0;0;; 0;0;0;; }} {{ Red }} }} }} }}"
     ));
     let m = mesh(&doc);
     assert_eq!(m.prims.len(), 2);
     assert_eq!(m.triangles(), 12);
-    let red = doc.json["materials"]
+    let red = doc.json()["materials"]
         .as_array()
         .unwrap()
         .iter()
         .find(|m| m["name"] == "Red")
         .unwrap();
+    // A power of 250 is a roughness of (2 / 252)^(1/4), and a 0.5 gray specular color its linear value of
+    // glTF's highlight.
     let rough = red["pbrMetallicRoughness"]["roughnessFactor"].as_f64().unwrap();
-    assert!((rough - 0.5).abs() < 1e-3, "{rough}");
+    assert!((rough - 0.298_475).abs() < 1e-4, "{rough}");
+    let level = red["extensions"]["KHR_materials_specular"]["specularFactor"]
+        .as_f64()
+        .unwrap();
+    assert!((level - 0.214_041).abs() < 1e-4, "{level}");
+    // The other has a black specular color: no highlight.
+    let gray = &doc.json()["materials"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["name"] != "Red")
+        .unwrap();
+    assert_eq!(gray["pbrMetallicRoughness"]["roughnessFactor"], 1.0);
+    assert_eq!(gray["extensions"]["KHR_materials_specular"]["specularFactor"], 0.0);
     assert!(red["emissiveFactor"][0].as_f64().unwrap() > 0.2);
-    // A reference to a material that isn't there leaves the faces without one, and nothing breaks.
+    // A reference to a material that isn't there leaves the faces the default one, and nothing breaks.
     let doc = read(&cube_file("MeshMaterialList { 1; 6; 0,0,0,0,0,0;; { Nowhere } }"));
     assert_eq!(mesh(&doc).triangles(), 12);
+    assert_eq!(doc.json()["materials"][0]["name"], "default");
+    assert_eq!(doc.json()["meshes"][0]["primitives"][0]["material"], 0);
 }
 
 #[test]
@@ -380,8 +430,8 @@ fn finds_a_texture() {
          0;0;0;; 0;0;0;; TextureFilename {{ \"tex\\\\red.png\"; }} }} }} }} }}"
     );
     let doc = super::super::load_bytes(text.as_bytes(), "a.x", "x", &files, Keep::ALL).unwrap();
-    assert_eq!(doc.json["images"].as_array().map_or(0, Vec::len), 1);
-    assert!(doc.json["materials"][0]["pbrMetallicRoughness"]["baseColorTexture"].is_object());
+    assert_eq!(doc.json()["images"].as_array().map_or(0, Vec::len), 1);
+    assert!(doc.json()["materials"][0]["pbrMetallicRoughness"]["baseColorTexture"].is_object());
 }
 
 // --- Frames, skins and animation -----------------------------------------------------------------------------------
@@ -440,10 +490,10 @@ fn animation_keys_and_ticks() {
          AnimationKey {{ 2; 2; 0;3;0,0,0;;, 24;3;1,0,2;;; }} \
          AnimationKey {{ 1; 2; 0;3;1,1,1;;, 48;3;2,2,2;;; }} }} }}"
     ));
-    assert_eq!(doc.json["asset"]["extras"]["source"]["ticksPerSecond"], 24);
-    assert_eq!(doc.json["animations"][0]["name"], "Go");
+    assert_eq!(doc.json()["asset"]["extras"]["source"]["frameRate"], 24.0);
+    assert_eq!(doc.json()["animations"][0]["name"], "Go");
     assert_eq!(
-        doc.json["animations"][0]["extras"]["animationOptions"][0]["closed"],
+        doc.json()["animations"][0]["extras"]["animationOptions"][0]["closed"],
         true
     );
     let rig = doc.rig().unwrap();
@@ -469,8 +519,8 @@ fn skin_weights_become_a_skin() {
          SkinWeights {{ \"Upper\"; 4; 2,3,6,7; 1;1;1;1; 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,-1,0,1;; }} }} }}\n\
          Frame Lower {{ Frame Upper {{ FrameTransformMatrix {{ 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,1,0,1;; }} }} }}"
     ));
-    assert_eq!(doc.json["skins"].as_array().unwrap().len(), 1);
-    assert_eq!(doc.json["skins"][0]["joints"].as_array().unwrap().len(), 2);
+    assert_eq!(doc.json()["skins"].as_array().unwrap().len(), 1);
+    assert_eq!(doc.json()["skins"][0]["joints"].as_array().unwrap().len(), 2);
     assert_eq!(doc.facts["skinned_meshes"], 1);
     // The bind pose puts the cube where it was.
     let (lo, hi) = bounds(&mesh(&doc));
@@ -558,4 +608,45 @@ fn corrupted_bytes_read_or_fail() {
             survives(&bad);
         }
     }
+}
+
+/// The area a mesh's triangles cover.
+fn area(m: &Mesh) -> f32 {
+    let mut sum = 0.0;
+    for p in &m.prims {
+        for t in p.indices.chunks(3) {
+            let [a, b, c] = [0, 1, 2].map(|k| p.positions[t[k] as usize]);
+            let (u, v) = ([0, 1, 2].map(|k| b[k] - a[k]), [0, 1, 2].map(|k| c[k] - a[k]));
+            let n = [
+                u[1] * v[2] - u[2] * v[1],
+                u[2] * v[0] - u[0] * v[2],
+                u[0] * v[1] - u[1] * v[0],
+            ];
+            sum += 0.5 * (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+        }
+    }
+    sum
+}
+
+#[test]
+fn a_face_that_isnt_convex_keeps_its_outline() {
+    // An arrowhead, its notch at the second corner: a fan from the first would cover three times its area.
+    let text = "xof 0303txt 0032\nMesh m {\n4;\n2;0;0;,\n0.5;0.5;0;,\n0;2;0;,\n0;0;0;;\n1;\n4;0,1,2,3;;\n}\n";
+    let m = mesh(&read(text));
+    assert_eq!(m.triangles(), 2);
+    assert!((area(&m) - 1.0).abs() < 1e-5, "{}", area(&m));
+}
+
+#[test]
+fn a_face_naming_a_missing_vertex_is_dropped_and_counted() {
+    let text = "xof 0303txt 0032\nMesh m {\n3;\n0;0;0;,\n1;0;0;,\n0;1;0;;\n2;\n3;0,1,2;,\n3;0,1,7;;\n}\n";
+    let doc = read(text);
+    assert_eq!(mesh(&doc).triangles(), 1);
+    assert_eq!(doc.json()["asset"]["extras"]["source"]["droppedGeometry"], 1);
+    // Without normals in the file, the default ones.
+    assert!(
+        doc.json()["meshes"][0]["primitives"][0]["attributes"]
+            .get("NORMAL")
+            .is_some()
+    );
 }

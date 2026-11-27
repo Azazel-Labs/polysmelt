@@ -1,0 +1,29 @@
+{
+  "spec": "VTK File Formats: a real file: legacy poly data with COLOR_SCALARS",
+  "source": "meshio's test meshes (tests/meshes), MIT license, see ../LICENSE-meshio; expectations computed with VTK 9.7.2",
+  "triangles": 1,
+  "lines": 1,
+  "bounds": {
+    "min": [
+      -1.5,
+      -1.5,
+      0.0
+    ],
+    "max": [
+      1.5,
+      1.5,
+      0.0
+    ]
+  },
+  "area": 1.125,
+  "facts": {
+    "triangles": 1
+  },
+  "document": {
+    "attributes": [
+      "COLOR_0"
+    ]
+  },
+  "colors": true,
+  "uvs": false
+}

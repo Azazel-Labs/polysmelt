@@ -177,8 +177,14 @@ pub(super) fn decode(b: &[u8]) -> Option<Raster> {
 /// Uncompressed rows of `bpp`-bit palette indices, each padded to 4 bytes, as one index a pixel.
 fn rows(data: &[u8], w: usize, h: usize, bpp: u16) -> Option<Vec<u16>> {
     let stride = (w * usize::from(bpp)).div_ceil(32) * 4;
-    let mut raw = data[..data.len().min(stride * h)].to_vec();
-    fill(&mut raw, stride * h)?;
+    let need = stride * h;
+    // Short data is judged by the pixels padding it makes, not by its packed bytes: at 1 bit a pixel those are an
+    // eighth as many, and a few bytes would make hundreds of megabytes.
+    if data.len() < need / 2 && w * h > FREE {
+        return None;
+    }
+    let mut raw = data[..data.len().min(need)].to_vec();
+    fill(&mut raw, need)?;
     let per = 8 / usize::from(bpp);
     let mask = u8::MAX >> (8 - bpp);
     let mut out = Vec::with_capacity(w * h);
@@ -385,6 +391,11 @@ mod tests {
         assert_eq!(img.bytes, png);
         let huge = bmp(40, 16000, 16000, 24, 0, &[], &[1; 100]);
         assert!(decoded(&huge, "a.bmp").is_none());
+        // At 1 bit a pixel 16000 x 2000 packs into 4 MB, which alone would pass as small.
+        let pal = [0u8, 0, 0, 0, 255, 255, 255, 0];
+        assert!(decoded(&bmp(40, 16000, 2000, 1, 0, &pal, &[0xAA; 8]), "a.bmp").is_none());
+        // A small one still pads.
+        assert!(decoded(&bmp(40, 64, 64, 1, 0, &pal, &[0xAA; 8]), "a.bmp").is_some());
         let pal = [9u8; 64];
         survives_damage(
             &bmp(

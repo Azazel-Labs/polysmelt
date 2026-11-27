@@ -5,11 +5,10 @@
   "facts": {
     "joints": 3,
     "channels": 9,
-    "frames": 2,
-    "frame_time": 0.04
+    "frames": 2
   },
   "document": {
-    "nodes": 4,
+    "nodes": 5,
     "animations": 1,
     "channels": 3,
     "node_names": [
@@ -22,15 +21,28 @@
   "json": {
     "/asset/extras/source/format": "BVH",
     "/scenes/0/nodes": [
-      0
+      4
     ],
-    "/animations/0/name": "motion",
+    "/nodes/4": {
+      "name": "RootNode",
+      "children": [
+        0
+      ]
+    },
+    "/nodes/4/rotation": null,
+    "/nodes/4/scale": null,
+    "/asset/extras/source/converted": null,
+    "/asset/extras/source/frameRate": 25.0,
+    "/asset/extras/source/assumed": [
+      "upAxis"
+    ],
+    "/animations/0/name": "names_with_spaces",
     "/animations/0/samplers/0/interpolation": "LINEAR"
   },
   "rig": [
     {
       "node": "Left Up Leg",
-      "parent": null,
+      "parent": "RootNode",
       "translation": [
         0,
         0,

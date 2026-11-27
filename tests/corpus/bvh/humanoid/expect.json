@@ -5,11 +5,10 @@
   "facts": {
     "joints": 25,
     "channels": 78,
-    "frames": 480,
-    "frame_time": 0.0083333
+    "frames": 480
   },
   "document": {
-    "nodes": 30,
+    "nodes": 31,
     "animations": 1,
     "channels": 26,
     "node_names": [
@@ -48,15 +47,28 @@
   "json": {
     "/asset/extras/source/format": "BVH",
     "/scenes/0/nodes": [
-      0
+      30
     ],
-    "/animations/0/name": "motion",
+    "/nodes/30": {
+      "name": "RootNode",
+      "children": [
+        0
+      ]
+    },
+    "/nodes/30/rotation": null,
+    "/nodes/30/scale": null,
+    "/asset/extras/source/converted": null,
+    "/asset/extras/source/frameRate": 120.00048000192001,
+    "/asset/extras/source/assumed": [
+      "upAxis"
+    ],
+    "/animations/0/name": "humanoid",
     "/animations/0/samplers/0/interpolation": "LINEAR"
   },
   "rig": [
     {
       "node": "Hips",
-      "parent": null,
+      "parent": "RootNode",
       "translation": [
         0,
         98,

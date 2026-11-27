@@ -17,7 +17,7 @@ fn sweep(bytes: &[u8], load: impl Fn(&[u8])) {
     }
 }
 
-fn load_as(bytes: &[u8], name: &str, assets: &Memory) -> Result<Document<'static>> {
+fn load_as(bytes: &[u8], name: &str, assets: &Memory) -> Result<Document> {
     load(Input::memory(bytes, name), assets, Keep::ALL)
 }
 
@@ -78,7 +78,7 @@ fn hostile_skeletons_never_panic() {
     );
     // A sound mesh linked to a broken skeleton.
     sweep(skeleton, |b| {
-        let _ = load_as(mesh, "rig.mesh", &Memory::new().with("rig.skeleton", b));
+        let _ = load_as(mesh, "rig.mesh", &Memory::new().with("rig.skeleton", b.to_vec()));
     });
 }
 
@@ -105,7 +105,7 @@ fn hostile_material_scripts_never_panic() {
     let base = include_bytes!("../../../tests/corpus/ogre/materials/lib/base.material");
     sweep(script, |b| {
         let assets = Memory::new()
-            .with("mats.material", b)
+            .with("mats.material", b.to_vec())
             .with("lib/base.material", &base[..]);
         assert!(load_as(mesh, "mats.mesh", &assets).is_ok());
     });
@@ -133,9 +133,9 @@ fn skeleton_parent_cycles_are_broken() {
                </bones><bonehierarchy><boneparent bone=\"a\" parent=\"b\"/><boneparent bone=\"b\" parent=\"c\"/>\
                <boneparent bone=\"c\" parent=\"a\"/></bonehierarchy></skeleton>";
     let doc = load_as(xml.as_bytes(), "loop.skeleton.xml", &Memory::new()).unwrap();
-    let nodes = doc.json["nodes"].as_array().unwrap();
-    assert_eq!(nodes.len(), 3);
-    let roots = doc.json["scenes"][0]["nodes"].as_array().unwrap();
+    let nodes = doc.json()["nodes"].as_array().unwrap();
+    assert_eq!(nodes.len(), 4);
+    let roots = nodes[3]["children"].as_array().unwrap();
     assert!(!roots.is_empty(), "a cycle leaves a root");
 }
 
@@ -172,7 +172,7 @@ fn operations_become_lists() {
 }
 
 #[test]
-fn influences_keep_the_four_heaviest() {
+fn influences_are_every_assignment_to_a_known_bone() {
     let bones = Bones {
         nodes: (0..6).collect(),
         by_handle: (0..6u16).map(|h| (h + 10, usize::from(h))).collect(),
@@ -198,14 +198,9 @@ fn influences_keep_the_four_heaviest() {
     let mut unknown = 0;
     let out = influences(&assigns, 2, &bones, &mut unknown);
     assert_eq!(unknown, 2);
-    let mut v0: Vec<(u32, f32)> = out[0].to_vec();
-    v0.sort_by(|a, b| b.1.total_cmp(&a.1));
-    assert_eq!(v0.iter().map(|s| s.0).collect::<Vec<_>>(), [1, 3, 4, 2]);
-    assert!((v0[0].1 - 5.0 / 14.0).abs() < 1e-6);
-    assert!((out[0].iter().map(|s| s.1).sum::<f32>() - 1.0).abs() < 1e-6);
-    let v1: Vec<(u32, f32)> = out[1].iter().copied().filter(|s| s.1 > 0.0).collect();
-    assert_eq!(v1.len(), 2);
-    assert!(v1.iter().all(|s| (s.1 - 0.5).abs() < 1e-6));
+    // Every assignment, as listed: the shared writer merges, sorts and scales them.
+    assert_eq!(out[0], [(0, 1.0), (1, 5.0), (2, 2.0), (3, 4.0), (4, 3.0)]);
+    assert_eq!(out[1], [(5, 1.0), (5, 1.0), (0, 2.0)]);
 }
 
 #[test]
@@ -229,8 +224,8 @@ fn every_byte_order_and_form_agree() {
         &Memory::new(),
     )
     .unwrap();
-    assert_eq!(le.json["meshes"], be.json["meshes"]);
-    assert_eq!(le.json["accessors"], be.json["accessors"]);
+    assert_eq!(le.json()["meshes"], be.json()["meshes"]);
+    assert_eq!(le.json()["accessors"], be.json()["accessors"]);
     let bin = load_as(
         include_bytes!("../../../tests/corpus/ogre/twin_binary/twin.mesh"),
         "twin.mesh",
@@ -243,6 +238,18 @@ fn every_byte_order_and_form_agree() {
         &Memory::new(),
     )
     .unwrap();
-    assert_eq!(bin.json["meshes"], xml.json["meshes"]);
-    assert_eq!(bin.json["accessors"], xml.json["accessors"]);
+    assert_eq!(bin.json()["meshes"], xml.json()["meshes"]);
+    assert_eq!(bin.json()["accessors"], xml.json()["accessors"]);
+}
+
+#[test]
+fn source_info_is_the_engine_convention() {
+    let doc = load_as(QUAD, "quad.mesh", &Memory::new()).unwrap();
+    let info = doc.source_info();
+    assert_eq!(info.format.as_deref(), Some("OGRE"));
+    assert_eq!(info.version.as_deref(), Some("MeshSerializer_v1.100"));
+    assert_eq!(info.up_axis, Fact::Assumed(Axis::PosY));
+    assert_eq!(info.handedness, Fact::Assumed(Handedness::Right));
+    assert_eq!(info.meters_per_unit, Fact::Unknown);
+    assert_eq!(info.converted, crate::source::Converted::default());
 }

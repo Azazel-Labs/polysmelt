@@ -12,21 +12,27 @@
 //! channel with a key at each frame where it was seen, the first frame at 0 seconds; glTF has no way to leave a gap,
 //! so a missing stretch is filled in by the keys on each side, and the missing samples are counted. A frame's time
 //! is its `Time` cell, or `(Frame# − 1) / DataRate` without one; a row with neither, or whose time doesn't follow the
-//! row before it, is left out and counted. Lengths become meters from `Units` (millimeters when it's absent).
-//! TRC files don't say which way is up; they're taken to be Y-up, as biomechanics tools write them, and that's
-//! recorded. Nothing is allocated from a count the file gives: markers come from the names and columns there are,
+//! row before it, is left out and counted. Positions stay in the file's unit: the
+//! document's `RootNode`, over `markers`, scales them to meters from `Units`.
+//! TRC files don't say which way is up; they're taken to be Y-up, as biomechanics tools write them.
+//!
+//! The source info has `Units` as the `unit` and its length as `metersPerUnit`, declared (unknown when it's
+//! absent or isn't a unit, which leaves lengths as they are), the up axis `+Y` assumed, and
+//! `DataRate` as `frameRate`, declared (an assumed default when it's missing or not above 0). Nothing is allocated from a count the file gives: markers come from the names and columns there are,
 //! and frames from the rows there are.
 
-use serde_json::{Map, Value, json};
+use serde_json::{Map, json};
 
 use super::Input;
 use super::scene::{self, Animation, Channel, Interp, Node, Path, Scene};
+use super::stream::f64_from;
 use crate::Result;
 use crate::document::{Document, Keep};
 use crate::num::f32_of;
+use crate::source::{Axis, Fact, meters_in};
 
 /// Frames per second when the header doesn't give one.
-const DEFAULT_RATE: f64 = 60.0;
+const DEFAULT_RATE: f64 = super::keys::ASSUMED_FRAME_RATE;
 
 /// Up to 40 characters of `s`, for an error message.
 fn show(s: &str) -> String {
@@ -42,26 +48,13 @@ fn cells(line: &str, tabs: bool) -> Vec<&str> {
     }
 }
 
-/// The length of a unit name in meters.
-fn unit_length(s: &str) -> Option<f64> {
-    Some(match s.trim().to_ascii_lowercase().as_str() {
-        "mm" | "millimeter" | "millimeters" | "millimetre" | "millimetres" => 0.001,
-        "cm" | "centimeter" | "centimeters" | "centimetre" | "centimetres" => 0.01,
-        "dm" => 0.1,
-        "m" | "meter" | "meters" | "metre" | "metres" => 1.0,
-        "in" | "inch" | "inches" => 0.0254,
-        "ft" | "foot" | "feet" => 0.3048,
-        _ => return None,
-    })
-}
-
 /// A cell as a finite number.
 fn number(cell: Option<&&str>) -> Option<f64> {
-    cell?.parse::<f64>().ok().filter(|v| v.is_finite())
+    f64_from(cell?.as_bytes()).filter(|v| v.is_finite())
 }
 
 /// Reads a TRC file.
-pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document<'static>> {
+pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document> {
     let bytes = input.read()?;
     let text = scene::text(&bytes);
     let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
@@ -70,11 +63,12 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document<'static>> {
     let first = lines.next().unwrap_or("");
     ensure!(
         first.split_whitespace().next() == Some("PathFileType"),
+        UnknownFormat,
         "not a TRC file: it starts with `{}`, not PathFileType",
         show(first)
     );
     let (Some(keys), Some(values)) = (lines.next(), lines.next()) else {
-        bail!("TRC file is cut short: its header is missing");
+        bail!(Truncated, "TRC file is cut short: its header is missing");
     };
     let header: Vec<(String, String)> = cells(keys, tabs)
         .into_iter()
@@ -87,13 +81,15 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document<'static>> {
         .filter(|r| r.is_finite() && *r > 0.0);
     let rate = rate_given.unwrap_or(DEFAULT_RATE);
     let units = get("units").filter(|u| !u.is_empty());
-    let meters = units.map_or(Some(0.001), unit_length);
+    // A file that doesn't say its unit has none that is known: nothing is scaled.
+    let meters = units.and_then(meters_in);
 
     // The marker names: every non-empty cell after Frame# and Time, each over three columns.
     let names_line = lines.next().unwrap_or("");
     let row = cells(names_line, tabs);
     ensure!(
         row.first().is_some_and(|c| c.eq_ignore_ascii_case("Frame#")),
+        Corrupt,
         "TRC file's fourth line starts with `{}`, not Frame#",
         show(names_line)
     );
@@ -161,7 +157,8 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document<'static>> {
             channels.push(Channel {
                 node: i,
                 path: Path::Translation,
-                times: times.iter().map(|t| f32_of(t - start)).collect(),
+                // The file's own times: the shared writer has the animation start at 0, and notes what it took off.
+                times: times.iter().map(|&t| f32_of(t)).collect(),
                 values,
                 interp: Interp::Linear,
             });
@@ -169,16 +166,20 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document<'static>> {
     }
     if keep.animations && !channels.is_empty() {
         scene.animations.push(Animation {
-            name: "motion".into(),
+            name: super::keys::clip_name(input.path).unwrap_or_default(),
             channels,
             extras: None,
         });
     }
 
+    let info = &mut scene.info;
+    info.format = Some("TRC".into());
+    info.unit = units.map(str::to_owned);
+    info.meters_per_unit = meters.map_or(Fact::Unknown, Fact::Declared);
+    // The file doesn't say; biomechanics tools write Y up.
+    info.up_axis = Fact::Assumed(Axis::PosY);
+    info.frame_rate = rate_given.map_or(Fact::Assumed(rate), Fact::Declared);
     let mut source = Map::new();
-    source.insert("format".into(), json!("TRC"));
-    source.insert("upAxis".into(), json!("Y"));
-    source.insert("units".into(), json!(units.unwrap_or("mm")));
     if let Some(kind) = first.split('\t').nth(1).or_else(|| first.split_whitespace().nth(1)) {
         source.insert("pathFileType".into(), json!(kind.trim()));
     }
@@ -192,18 +193,20 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document<'static>> {
             source.insert(key.into(), json!(v));
         }
     }
-    source.insert("frameRate".into(), json!(rate));
     if start.is_finite() {
         source.insert("startTime".into(), json!(start));
+    }
+    // Fewer rows than the header counts: the file is cut short.
+    #[allow(clippy::cast_precision_loss, reason = "frame counts are small")]
+    if get("numframes")
+        .and_then(|v| v.parse::<f64>().ok())
+        .is_some_and(|n| n.is_finite() && n > (frames + dropped) as f64)
+    {
+        source.insert("truncated".into(), json!(true));
     }
     let facts = &mut scene.facts;
     facts.insert("markers".into(), json!(markers));
     facts.insert("frames".into(), json!(frames));
-    facts.insert("frame_rate".into(), json!(rate));
-    facts.insert("frame_time".into(), json!(1.0 / rate));
-    if rate_given.is_none() {
-        facts.insert("frame_time_guessed".into(), json!(true));
-    }
     if missing > 0 {
         facts.insert("missing_samples".into(), json!(missing));
     }
@@ -213,12 +216,8 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document<'static>> {
     if dropped > 0 {
         facts.insert("dropped_rows".into(), json!(dropped));
     }
-    if meters.is_none() {
-        facts.insert("units_unknown".into(), Value::Bool(true));
-    }
-    facts.insert("up_axis_assumed".into(), json!(true));
     scene.source = source;
-    scene.scale(f32_of(meters.unwrap_or(1.0)));
+    scene.unit(meters.unwrap_or(1.0));
     scene.finish(keep)
 }
 
@@ -237,7 +236,7 @@ Frame#\tTime\tL.Knee\t\t\tR Knee\t\t\t
 3\t0.700\t120\t210\t290\t0\t510\tNaN
 ";
 
-    fn read(text: &str) -> Result<Document<'static>> {
+    fn read(text: &str) -> Result<Document> {
         load(Input::memory(text.as_bytes(), "t.trc"), Keep::ALL)
     }
 
@@ -261,13 +260,27 @@ Frame#\tTime\tL.Knee\t\t\tR Knee\t\t\t
         let rig = doc.rig().unwrap();
         assert_eq!(rig.nodes[1].name.as_deref(), Some("L.Knee"));
         assert_eq!(rig.nodes[2].name.as_deref(), Some("R Knee"));
-        assert!(near(&rig.nodes[1].rest.translation, &[0.1, 0.2, 0.3]));
-        assert!(near(&rig.nodes[2].rest.translation, &[0.0, 0.5, 0.0]));
+        // Positions stay in the file's millimeters; the root node scales them to meters.
+        assert!(near(&rig.nodes[1].rest.translation, &[100.0, 200.0, 300.0]));
+        assert!(near(&rig.nodes[2].rest.translation, &[0.0, 500.0, 0.0]));
+        assert_eq!(
+            doc.json()["nodes"][3],
+            json!({ "name": "RootNode", "children": [0], "scale": [0.001, 0.001, 0.001] })
+        );
+        let at = rig.world(&rig.pose(None, 0.0))[1];
+        assert!(near(&at[12..15], &[0.1, 0.2, 0.3]));
         assert!(near(&rig.animations[0].channels[0].times, &[0.0, 0.1, 0.2]));
         assert!(near(&rig.animations[0].channels[1].times, &[0.1]));
         let pose = rig.pose(Some(0), 0.15);
-        assert!(near(&pose[1].translation, &[0.115, 0.205, 0.295]));
-        assert_eq!(doc.json["asset"]["extras"]["source"]["startTime"], json!(0.5));
+        assert!(near(&pose[1].translation, &[115.0, 205.0, 295.0]));
+        assert_eq!(doc.json()["asset"]["extras"]["source"]["startTime"], json!(0.5));
+        let info = doc.source_info();
+        assert_eq!(info.format.as_deref(), Some("TRC"));
+        assert_eq!(info.meters_per_unit, Fact::Declared(0.001));
+        assert_eq!(info.unit.as_deref(), Some("mm"));
+        assert_eq!(info.up_axis, Fact::Assumed(Axis::PosY));
+        assert_eq!(info.frame_rate, Fact::Declared(10.0));
+        assert!(info.converted.units && !info.converted.up_axis);
     }
 
     #[test]
@@ -278,7 +291,8 @@ Frame#\tTime\tL.Knee\t\t\tR Knee\t\t\t
         assert_eq!(doc.facts["dropped_rows"], json!(1));
         assert_eq!(doc.facts["missing_samples"], json!(1));
         let rig = doc.rig().unwrap();
-        assert!(near(&rig.nodes[2].rest.translation, &[0.04, 0.05, 0.06]));
+        assert!(near(&rig.nodes[2].rest.translation, &[4.0, 5.0, 6.0]));
+        assert_eq!(doc.json()["nodes"][3]["scale"], json!([0.01, 0.01, 0.01]));
         assert!(near(&rig.animations[0].channels[0].times, &[0.0, 0.5]));
     }
 
@@ -287,8 +301,10 @@ Frame#\tTime\tL.Knee\t\t\tR Knee\t\t\t
         let text = "PathFileType\t4\nDataRate\tUnits\tNumMarkers\n0\tfurlongs\t99\nFrame#\tTime\ta\n\t\tX1\tY1\tZ1\tX2\tY2\tZ2\n1\t0\t1\t2\t3\t4\t5\t6\n";
         let doc = read(text).unwrap();
         assert_eq!(doc.facts["markers"], json!(2));
-        assert_eq!(doc.facts["units_unknown"], json!(true));
-        assert_eq!(doc.facts["frame_time_guessed"], json!(true));
+        let info = doc.source_info();
+        assert_eq!(info.meters_per_unit, Fact::Unknown);
+        assert_eq!(info.unit.as_deref(), Some("furlongs"));
+        assert!(matches!(info.frame_rate, Fact::Assumed(_)));
         let rig = doc.rig().unwrap();
         assert_eq!(rig.nodes[2].name.as_deref(), Some("marker2"));
     }
@@ -311,7 +327,7 @@ Frame#\tTime\tL.Knee\t\t\tR Knee\t\t\t
         let doc = read(&TRC[..TRC.find("\n1\t").unwrap()]).unwrap();
         assert_eq!(doc.facts["frames"], json!(0));
         assert_eq!(doc.facts["markers_never_seen"], json!(2));
-        assert!(doc.json.get("animations").is_none());
+        assert!(doc.json().get("animations").is_none());
     }
 
     #[test]

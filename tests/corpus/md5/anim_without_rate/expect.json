@@ -5,9 +5,13 @@
   "facts": {
     "joints": 2,
     "frames": 2,
-    "frame_rate": 24.0,
-    "components": 3,
-    "frame_rate_guessed": true
+    "components": 3
+  },
+  "json": {
+    "/asset/extras/source/frameRate": 24.0,
+    "/asset/extras/source/assumed": [
+      "frameRate"
+    ]
   },
   "rig": [
     {

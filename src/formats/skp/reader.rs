@@ -1,6 +1,7 @@
 //! Bounds-checked little-endian reads, so malformed files fail with an error rather than a panic.
 
-use crate::{Context, Result};
+pub(crate) use crate::bytes::{f64_at, u16_at, u32_at};
+use crate::{Context, ErrorKind, Result};
 
 /// The three bytes that open every length-prefixed UTF-16 string in a `SketchUp` file.
 pub(crate) const STRING_MARKER: [u8; 3] = [0xff, 0xfe, 0xff];
@@ -19,8 +20,14 @@ impl<'a> Reader<'a> {
 
     /// The next `n` bytes, moving past them.
     pub(crate) fn raw(&mut self, n: usize) -> Result<&'a [u8]> {
-        let end = self.p.checked_add(n).context("archive offset overflows")?;
-        let bytes = self.d.get(self.p..end).context("archive ends early")?;
+        let end = self
+            .p
+            .checked_add(n)
+            .context(ErrorKind::Corrupt, "archive offset overflows")?;
+        let bytes = self
+            .d
+            .get(self.p..end)
+            .context(ErrorKind::Truncated, "archive is cut short")?;
         self.p = end;
         Ok(bytes)
     }
@@ -61,7 +68,7 @@ impl<'a> Reader<'a> {
 
     /// The u16 at the cursor without moving it.
     pub(crate) fn peek_u16(&self) -> Result<u16> {
-        u16_at(self.d, self.p).context("archive ends early")
+        u16_at(self.d, self.p).context(ErrorKind::Truncated, "archive is cut short")
     }
 
     /// Whether a string record starts at the cursor.
@@ -72,7 +79,7 @@ impl<'a> Reader<'a> {
     /// A `SketchUp` string record: the marker, a length that widens through u8, u16 and u32, then UTF-16LE.
     pub(crate) fn utf16(&mut self) -> Result<String> {
         if !self.marker() {
-            bail!("expected a string record at offset {}", self.p);
+            bail!(Corrupt, "expected a string record at offset {}", self.p);
         }
         self.p += 3;
         let mut len = u32::from(self.u8()?);
@@ -82,7 +89,11 @@ impl<'a> Reader<'a> {
                 len = self.u32()?;
             }
         }
-        let bytes = self.raw((len as usize).checked_mul(2).context("string length overflows")?)?;
+        let bytes = self.raw(
+            (len as usize)
+                .checked_mul(2)
+                .context(ErrorKind::Corrupt, "string length overflows")?,
+        )?;
         Ok(decode_utf16le(bytes))
     }
 }
@@ -93,23 +104,6 @@ pub(crate) fn decode_utf16le(bytes: &[u8]) -> String {
     char::decode_utf16(units)
         .map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER))
         .collect()
-}
-
-pub(crate) fn u16_at(d: &[u8], at: usize) -> Option<u16> {
-    let b = d.get(at..at.checked_add(2)?)?;
-    Some(u16::from_le_bytes([b[0], b[1]]))
-}
-
-pub(crate) fn u32_at(d: &[u8], at: usize) -> Option<u32> {
-    let b = d.get(at..at.checked_add(4)?)?;
-    Some(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-}
-
-pub(crate) fn f64_at(d: &[u8], at: usize) -> Option<f64> {
-    let b = d.get(at..at.checked_add(8)?)?;
-    let mut a = [0; 8];
-    a.copy_from_slice(b);
-    Some(f64::from_le_bytes(a))
 }
 
 pub(crate) fn marker_at(d: &[u8], at: usize) -> bool {

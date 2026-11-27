@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+<irr_scene>
+<attributes>
+</attributes>
+<node type="cube">
+<attributes>
+<string name="Name" value="mover" />
+<float name="Size" value="1" />
+</attributes>
+<animators>
+<attributes>
+<string name="Type" value="flyStraight" />
+<vector3d name="Start" value="0, 0, 0" />
+<vector3d name="End" value="6, 0, 3" />
+<int name="TimeForWay" value="2000" />
+<bool name="Loop" value="false" />
+</attributes>
+</animators>
+</node>
+</irr_scene>

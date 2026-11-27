@@ -5,34 +5,36 @@
   "facts": {
     "markers": 1,
     "frames": 3,
-    "frame_rate": 10.0,
-    "frame_time": 0.1,
-    "up_axis_assumed": true,
     "dropped_rows": 3
   },
   "document": {
-    "nodes": 2,
+    "nodes": 3,
     "animations": 1,
     "channels": 1,
     "node_names": [
       "markers",
-      "a"
+      "a",
+      "RootNode"
     ]
   },
   "json": {
     "/asset/extras/source/format": "TRC",
-    "/asset/extras/source/upAxis": "Y",
+    "/asset/extras/source/upAxis": "+Y",
     "/scenes/0/nodes": [
-      0
+      2
     ],
     "/asset/extras/source/frameRate": 10.0,
-    "/animations/0/name": "motion",
+    "/asset/extras/source/metersPerUnit": 0.001,
+    "/asset/extras/source/converted": [
+      "units"
+    ],
+    "/animations/0/name": "dropped_rows",
     "/animations/0/samplers/0/interpolation": "LINEAR",
     "/asset/extras/source/startTime": 0.0
   },
   "rig": [
     {
-      "node": "markers",
+      "node": "RootNode",
       "parent": null,
       "translation": [
         0,
@@ -43,6 +45,31 @@
         0,
         0,
         0,
+        1
+      ],
+      "scale": [
+        0.001,
+        0.001,
+        0.001
+      ]
+    },
+    {
+      "node": "markers",
+      "parent": "RootNode",
+      "translation": [
+        0,
+        0,
+        0
+      ],
+      "rotation": [
+        0,
+        0,
+        0,
+        1
+      ],
+      "scale": [
+        1,
+        1,
         1
       ]
     },
@@ -56,6 +83,11 @@
         1
       ],
       "translation": [
+        1,
+        1,
+        1
+      ],
+      "world": [
         0.001,
         0.001,
         0.001
@@ -75,6 +107,11 @@
       "node": "a",
       "time": 0.0,
       "translation": [
+        1,
+        1,
+        1
+      ],
+      "world": [
         0.001,
         0.001,
         0.001
@@ -84,6 +121,11 @@
       "node": "a",
       "time": 0.1,
       "translation": [
+        2,
+        2,
+        2
+      ],
+      "world": [
         0.002,
         0.002,
         0.002
@@ -93,6 +135,11 @@
       "node": "a",
       "time": 0.2,
       "translation": [
+        3,
+        3,
+        3
+      ],
+      "world": [
         0.003,
         0.003,
         0.003

@@ -7,6 +7,8 @@ use std::rc::Rc;
 use super::xml::{self, Dom};
 use crate::mesh::{Prim, srgb_to_linear, triangulate};
 use crate::num::u32_of;
+use crate::polygon::triangulate_holes;
+use crate::vec3::{self, cross};
 
 /// The values of a `<source>`, read through its accessor: `width` numbers to an element.
 #[derive(Debug, Default)]
@@ -168,6 +170,8 @@ pub(super) struct Piece {
     /// Each vertex's index into the mesh's `<vertices>`, which skins and morph targets index.
     pub points: Vec<u32>,
     pub triangles: usize,
+    /// The triangles, polygons and segments left out for a corner that names no position.
+    pub dropped: usize,
 }
 
 /// Source values by element, read once.
@@ -176,7 +180,7 @@ pub(super) type Sources = HashMap<usize, Rc<Acc<f32>>>;
 pub(super) fn source(dom: &Dom<'_>, sources: &mut Sources, el: usize, fallback: usize) -> Rc<Acc<f32>> {
     sources
         .entry(el)
-        .or_insert_with(|| Rc::new(read(dom, el, fallback, xml::floats32)))
+        .or_insert_with(|| Rc::new(read(dom, el, fallback, xml::floats32_raw)))
         .clone()
 }
 
@@ -192,7 +196,13 @@ pub(super) fn positions(dom: &Dom<'_>, sources: &mut Sources, mesh: usize) -> Op
 
 /// The primitives of a `<mesh>` (or `<convex_mesh>`), drawing at most `budget` triangles; `Err` with the
 /// number drawn when they'd draw more.
-pub(super) fn mesh(dom: &Dom<'_>, sources: &mut Sources, mesh: usize, budget: usize) -> Result<Vec<Piece>, usize> {
+pub(super) fn mesh(
+    dom: &Dom<'_>,
+    sources: &mut Sources,
+    mesh: usize,
+    budget: usize,
+    crease: f32,
+) -> Result<Vec<Piece>, usize> {
     let mut out = Vec::new();
     let mut drawn = 0usize;
     for el in dom.children(mesh) {
@@ -206,7 +216,7 @@ pub(super) fn mesh(dom: &Dom<'_>, sources: &mut Sources, mesh: usize, budget: us
             b"linestrips" => Kind::Linestrips,
             _ => continue,
         };
-        let piece = primitive(dom, sources, el, kind, budget - drawn).map_err(|n| drawn + n)?;
+        let piece = primitive(dom, sources, el, kind, budget - drawn, crease).map_err(|n| drawn + n)?;
         if let Some(p) = piece {
             drawn += p.triangles;
             out.push(p);
@@ -297,6 +307,7 @@ fn primitive(
     el: usize,
     kind: Kind,
     budget: usize,
+    crease: f32,
 ) -> Result<Option<Piece>, usize> {
     let (streams, vertex_offset, stride) = inputs(dom, sources, el);
     let Some(pos) = streams.iter().position(|s| s.sem == Sem::Position) else {
@@ -309,7 +320,7 @@ fn primitive(
             for p in dom.kids(el, "p") {
                 let idx = xml::indices(dom.text(p));
                 for tri in idx.chunks_exact(stride * 3) {
-                    c.triangle(&tri[..stride], &tri[stride..2 * stride], &tri[2 * stride..]);
+                    c.triangle(&tri[..stride], &tri[stride..2 * stride], &tri[2 * stride..], false);
                     if c.over {
                         break;
                     }
@@ -370,7 +381,7 @@ fn primitive(
                     } else {
                         (corners[k - 1], corners[k - 2], corners[k])
                     };
-                    c.triangle(a, b, d);
+                    c.triangle(a, b, d, true);
                     if c.over {
                         break;
                     }
@@ -400,7 +411,7 @@ fn primitive(
     if c.over {
         return Err(c.triangles);
     }
-    Ok(c.finish(symbol))
+    Ok(c.finish(symbol, crease))
 }
 
 /// The empty slot of the corner table.
@@ -434,6 +445,8 @@ struct Corners {
     indices: Vec<u32>,
     /// Line segments, a pair of vertices each.
     lines: Vec<u32>,
+    /// What was left out for a corner that names no position.
+    dropped: usize,
     /// Which output each stream fills: its set's number among the inputs of its kind.
     slot: Vec<usize>,
     sets: Vec<u32>,
@@ -525,6 +538,7 @@ impl Corners {
             poly: Vec::new(),
             outline: Vec::new(),
             tris: Vec::new(),
+            dropped: 0,
         }
     }
 
@@ -592,8 +606,14 @@ impl Corners {
             let v = corner.get(s.offset).and_then(|&i| s.acc.get(i)).unwrap_or(&[]);
             let at = |k: usize| v.get(k).copied().filter(|x| x.is_finite()).unwrap_or(0.0);
             match s.sem {
-                Sem::Position => self.positions.push([at(0), at(1), at(2)]),
-                Sem::Normal => self.normals.push(unit([at(0), at(1), at(2)])),
+                // A position that isn't finite stays as it is: what's drawn on it is dropped as the primitive
+                // is written.
+                Sem::Position => {
+                    let raw = |k: usize| v.get(k).copied().unwrap_or(0.0);
+                    self.positions.push([raw(0), raw(1), raw(2)]);
+                }
+                // A normal with no length stays zero, and takes its faces' as the primitive is written.
+                Sem::Normal => self.normals.push(vec3::unit([at(0), at(1), at(2)]).unwrap_or([0.0; 3])),
                 Sem::Tangent => self.tangents.push([at(0), at(1), at(2)]),
                 Sem::Binormal => self.binormals.push([at(0), at(1), at(2)]),
                 Sem::Texcoord => self.uvs[slot].push([at(0), 1.0 - at(1)]),
@@ -605,13 +625,9 @@ impl Corners {
         }
     }
 
+    /// A triangle, as the file has it: one with no area, or with a corner twice, is kept.
     #[inline]
     fn push(&mut self, a: u32, b: u32, c: u32) {
-        // Two corners at one position (whatever their normals or texture coordinates) make no area.
-        let p = |v: u32| self.points.get(v as usize);
-        if a == b || b == c || a == c || p(a) == p(b) || p(b) == p(c) || p(a) == p(c) {
-            return;
-        }
         self.triangles += 1;
         if self.triangles > self.budget {
             self.over = true;
@@ -620,16 +636,23 @@ impl Corners {
         self.indices.extend_from_slice(&[a, b, c]);
     }
 
-    fn triangle(&mut self, a: &[u32], b: &[u32], c: &[u32]) {
+    /// A triangle of three corners. One unrolled from a strip or a fan (`strip`) that names a vertex twice
+    /// restarts the strip, and draws nothing.
+    fn triangle(&mut self, a: &[u32], b: &[u32], c: &[u32], strip: bool) {
         let (Some(a), Some(b), Some(c)) = (self.vertex(a), self.vertex(b), self.vertex(c)) else {
+            self.dropped += 1;
             return;
         };
+        if strip && !crate::geometry::distinct([a, b, c]) {
+            return;
+        }
         self.push(a, b, c);
     }
 
     /// A line segment; one that starts and ends at the same vertex draws nothing.
     fn segment(&mut self, a: &[u32], b: &[u32]) {
         let (Some(a), Some(b)) = (self.vertex(a), self.vertex(b)) else {
+            self.dropped += 1;
             return;
         };
         if a != b {
@@ -637,19 +660,19 @@ impl Corners {
         }
     }
 
-    /// The vertices of a polygon's corners; `false` when one names no position.
-    fn outline(&mut self, idx: &[u32], out: &mut Vec<u32>) -> bool {
+    /// The vertices of a polygon's corners; `false` when one names no position. `tidy` leaves out a corner
+    /// repeated in place and one that closes the outline, which an outline cut around holes can't have.
+    fn outline(&mut self, idx: &[u32], out: &mut Vec<u32>, tidy: bool) -> bool {
         out.clear();
         for corner in idx.chunks_exact(self.stride) {
             let Some(v) = self.vertex(corner) else {
                 return false;
             };
-            // A corner repeated in place adds nothing.
-            if out.last() != Some(&v) {
+            if !tidy || out.last() != Some(&v) {
                 out.push(v);
             }
         }
-        while out.len() > 1 && out.first() == out.last() {
+        while tidy && out.len() > 1 && out.first() == out.last() {
             out.pop();
         }
         true
@@ -659,14 +682,16 @@ impl Corners {
         let n = idx.len() / self.stride;
         if n == 3 {
             let s = self.stride;
-            self.triangle(&idx[..s], &idx[s..2 * s], &idx[2 * s..3 * s]);
+            self.triangle(&idx[..s], &idx[s..2 * s], &idx[2 * s..3 * s], false);
             return;
         }
         if n < 3 {
             return;
         }
         let mut poly = std::mem::take(&mut self.poly);
-        if self.outline(idx, &mut poly) && poly.len() >= 3 {
+        if !self.outline(idx, &mut poly, false) {
+            self.dropped += 1;
+        } else if poly.len() >= 3 {
             if poly.len() == 3 {
                 self.push(poly[0], poly[1], poly[2]);
             } else {
@@ -687,13 +712,17 @@ impl Corners {
     fn polygon_with_holes(&mut self, outer: &[u32], holes: &[Vec<u32>]) {
         let stride = self.stride;
         let mut ring = Vec::new();
-        if !self.outline(&outer[..outer.len() / stride * stride], &mut ring) || ring.len() < 3 {
+        if !self.outline(&outer[..outer.len() / stride * stride], &mut ring, true) {
+            self.dropped += 1;
+            return;
+        }
+        if ring.len() < 3 {
             return;
         }
         let mut hole_rings = Vec::new();
         for h in holes {
             let mut r = Vec::new();
-            if self.outline(&h[..h.len() / stride * stride], &mut r) && r.len() >= 3 {
+            if self.outline(&h[..h.len() / stride * stride], &mut r, true) && r.len() >= 3 {
                 hole_rings.push(r);
             }
         }
@@ -702,14 +731,18 @@ impl Corners {
             self.polygon(&flat);
             return;
         }
-        let mut tris = Vec::new();
-        bridge_and_clip(&ring, &hole_rings, &self.positions, &mut tris);
-        for t in tris {
-            self.push(t[0], t[1], t[2]);
+        // Triangulated in the outline's plane, wound as it is; the triangles count through the outline then the holes.
+        let ids: Vec<u32> = ring.iter().chain(hole_rings.iter().flatten()).copied().collect();
+        let loops: Vec<Vec<[f64; 3]>> = std::iter::once(&ring)
+            .chain(&hole_rings)
+            .map(|r| r.iter().map(|&v| self.positions[v as usize].map(f64::from)).collect())
+            .collect();
+        for t in triangulate_holes(&loops, None) {
+            self.push(ids[t[0]], ids[t[1]], ids[t[2]]);
         }
     }
 
-    fn finish(self, symbol: Option<String>) -> Option<Piece> {
+    fn finish(self, symbol: Option<String>, crease: f32) -> Option<Piece> {
         if self.indices.is_empty() && self.lines.is_empty() {
             return None;
         }
@@ -753,23 +786,32 @@ impl Corners {
             std::iter::once(Vec::new()).chain(rest).collect()
         };
         let triangles = self.indices.len() / 3;
+        let mut prim = Prim {
+            positions: self.positions,
+            normals: self.normals,
+            tangents,
+            uvs: first_uv,
+            uv_sets,
+            colors: first_color,
+            color_sets,
+            indices: self.indices,
+            lines: self.lines,
+            ..Prim::default()
+        };
+        // Without normals in the file, the default ones; the vertices they add keep their points, which skins
+        // and morph targets go by.
+        let mut points = self.points;
+        if prim.normals.len() != n && !prim.indices.is_empty() {
+            let added = crate::geometry::default_normals(&mut prim, crease);
+            crate::geometry::follow(&mut points, n, &added);
+        }
         Some(Piece {
-            prim: Prim {
-                positions: self.positions,
-                normals: self.normals,
-                tangents,
-                uvs: first_uv,
-                uv_sets,
-                colors: first_color,
-                color_sets,
-                indices: self.indices,
-                lines: self.lines,
-                ..Prim::default()
-            },
+            prim,
             symbol,
             sets: self.sets,
-            points: self.points,
+            points,
             triangles,
+            dropped: self.dropped,
         })
     }
 }
@@ -782,175 +824,4 @@ fn hash(key: &[u32]) -> usize {
     }
     // The high bits mix best.
     usize::try_from(h >> 32).unwrap_or(0) ^ usize::try_from(h & 0xFFFF_FFFF).unwrap_or(0).rotate_left(16)
-}
-
-fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
-}
-
-fn unit(v: [f32; 3]) -> [f32; 3] {
-    let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
-    if len > 1e-20 && len.is_finite() {
-        [v[0] / len, v[1] / len, v[2] / len]
-    } else {
-        [0.0, 0.0, 1.0]
-    }
-}
-
-/// Polygons with holes past this many corners are fanned rather than clipped.
-const MAX_CLIP: usize = 4096;
-
-/// Triangulates a polygon with holes: each hole joined to the outline by a bridge to a vertex it sees (holes with
-/// the furthest-out vertex first), then the one outline ear-clipped, the bridges' doubled points ignored as
-/// blockers. Triangles keep the outline's winding.
-pub(super) fn bridge_and_clip(outer: &[u32], holes: &[Vec<u32>], pos: &[[f32; 3]], out: &mut Vec<[u32; 3]>) {
-    // The plane of the outline (Newell's normal), and a 2D view of it with the outline counter-clockwise.
-    let mut nrm = [0f64; 3];
-    for i in 0..outer.len() {
-        let a = pos[outer[i] as usize];
-        let b = pos[outer[(i + 1) % outer.len()] as usize];
-        nrm[0] += f64::from((a[1] - b[1]) * (a[2] + b[2]));
-        nrm[1] += f64::from((a[2] - b[2]) * (a[0] + b[0]));
-        nrm[2] += f64::from((a[0] - b[0]) * (a[1] + b[1]));
-    }
-    let axis = (0..3).fold(0, |m, k| if nrm[k].abs() > nrm[m].abs() { k } else { m });
-    let (u, v) = match axis {
-        0 => (1, 2),
-        1 => (2, 0),
-        _ => (0, 1),
-    };
-    let flip = nrm[axis] < 0.0;
-    let p2 = |i: u32| -> [f64; 2] {
-        let p = pos[i as usize];
-        let x = f64::from(p[u]);
-        [if flip { -x } else { x }, f64::from(p[v])]
-    };
-    let area = |ring: &[u32]| -> f64 {
-        (0..ring.len())
-            .map(|i| {
-                let a = p2(ring[i]);
-                let b = p2(ring[(i + 1) % ring.len()]);
-                a[0] * b[1] - b[0] * a[1]
-            })
-            .sum()
-    };
-    let total = outer.len() + holes.iter().map(|h| h.len() + 2).sum::<usize>();
-    if total > MAX_CLIP {
-        for k in 1..outer.len() - 1 {
-            out.push([outer[0], outer[k], outer[k + 1]]);
-        }
-        return;
-    }
-    let mut holes: Vec<Vec<u32>> = holes
-        .iter()
-        .map(|h| {
-            let mut h = h.clone();
-            if area(&h) > 0.0 {
-                h.reverse();
-            }
-            h
-        })
-        .collect();
-    let max_x = |h: &Vec<u32>| h.iter().map(|&i| p2(i)[0]).fold(f64::MIN, f64::max);
-    holes.sort_by(|a, b| max_x(b).total_cmp(&max_x(a)));
-    let mut poly: Vec<u32> = outer.to_vec();
-    for (hi, hole) in holes.iter().enumerate() {
-        let m = (0..hole.len()).fold(0, |b, k| if p2(hole[k])[0] > p2(hole[b])[0] { k } else { b });
-        let mp = p2(hole[m]);
-        let mut candidates: Vec<usize> = (0..poly.len()).collect();
-        let dist = |i: usize| {
-            let q = p2(poly[i]);
-            (q[0] - mp[0]).powi(2) + (q[1] - mp[1]).powi(2)
-        };
-        candidates.sort_by(|&a, &b| dist(a).total_cmp(&dist(b)));
-        let blocked = |a: [f64; 2], b: [f64; 2]| -> bool {
-            let rings = std::iter::once(&poly).chain(holes[hi..].iter());
-            for ring in rings {
-                for k in 0..ring.len() {
-                    let c = p2(ring[k]);
-                    let d = p2(ring[(k + 1) % ring.len()]);
-                    if crosses(a, b, c, d) {
-                        return true;
-                    }
-                }
-            }
-            false
-        };
-        let pick = candidates
-            .iter()
-            .take(64)
-            .copied()
-            .find(|&i| !blocked(mp, p2(poly[i])))
-            .unwrap_or(candidates[0]);
-        let mut merged = Vec::with_capacity(poly.len() + hole.len() + 2);
-        merged.extend_from_slice(&poly[..=pick]);
-        merged.extend_from_slice(&hole[m..]);
-        merged.extend_from_slice(&hole[..=m]);
-        merged.extend_from_slice(&poly[pick..]);
-        poly = merged;
-    }
-    ear_clip(&poly, &p2, out);
-}
-
-/// Whether segments `ab` and `cd` cross at a point inside both (touching at an end doesn't count).
-#[allow(clippy::float_cmp, reason = "the same point, exactly")]
-fn crosses(a: [f64; 2], b: [f64; 2], c: [f64; 2], d: [f64; 2]) -> bool {
-    let orient = |p: [f64; 2], q: [f64; 2], r: [f64; 2]| (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0]);
-    if a == c || a == d || b == c || b == d {
-        return false;
-    }
-    let (d1, d2) = (orient(a, b, c), orient(a, b, d));
-    let (d3, d4) = (orient(c, d, a), orient(c, d, b));
-    d1 * d2 < 0.0 && d3 * d4 < 0.0
-}
-
-/// Ear-clips a simple outline (counter-clockwise in `p2`'s view) that may touch itself at doubled points.
-#[allow(clippy::float_cmp, reason = "the same point, exactly")]
-fn ear_clip(poly: &[u32], p2: &dyn Fn(u32) -> [f64; 2], out: &mut Vec<[u32; 3]>) {
-    let pts: Vec<[f64; 2]> = poly.iter().map(|&i| p2(i)).collect();
-    let mut idx: Vec<usize> = (0..poly.len()).collect();
-    let orient = |p: [f64; 2], q: [f64; 2], r: [f64; 2]| (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0]);
-    while idx.len() > 3 {
-        let m = idx.len();
-        let mut clipped = false;
-        for k in 0..m {
-            let (ia, ib, ic) = (idx[(k + m - 1) % m], idx[k], idx[(k + 1) % m]);
-            let (a, b, c) = (pts[ia], pts[ib], pts[ic]);
-            if orient(a, b, c) <= 0.0 {
-                continue;
-            }
-            let inside = idx.iter().any(|&j| {
-                let p = pts[j];
-                if j == ia || j == ib || j == ic || p == a || p == b || p == c {
-                    return false;
-                }
-                orient(a, b, p) >= 0.0 && orient(b, c, p) >= 0.0 && orient(c, a, p) >= 0.0
-            });
-            if inside {
-                continue;
-            }
-            out.push([poly[ia], poly[ib], poly[ic]]);
-            idx.remove(k);
-            clipped = true;
-            break;
-        }
-        if !clipped {
-            // Nothing is an ear (a degenerate or self-crossing outline): drop a corner that adds no area, or
-            // clip one anyway.
-            let k = (0..m)
-                .find(|&k| orient(pts[idx[(k + m - 1) % m]], pts[idx[k]], pts[idx[(k + 1) % m]]).abs() < 1e-30)
-                .unwrap_or(0);
-            if k != 0 || orient(pts[idx[m - 1]], pts[idx[0]], pts[idx[1]]).abs() >= 1e-30 {
-                out.push([poly[idx[(k + m - 1) % m]], poly[idx[k]], poly[idx[(k + 1) % m]]]);
-            }
-            idx.remove(k);
-        }
-    }
-    if idx.len() == 3 {
-        out.push([poly[idx[0]], poly[idx[1]], poly[idx[2]]]);
-    }
 }

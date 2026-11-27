@@ -2,8 +2,10 @@
 //!
 //! The visual scene becomes the node hierarchy, each node's transforms (`matrix`, `translate`, `rotate`, `scale`,
 //! `lookat`, `skew`) composed into its local transform; `instance_node` places a copy of a node's subtree (a node
-//! that instances itself is cut off). The document's unit and up axis become a root node that carries the scene to
-//! glTF's Y-up meters, and are recorded in `asset.extras.source`; a node's own `<asset>` changes them below it. A
+//! that instances itself is cut off). The scene stays in the document's unit and axes under the one top-level node,
+//! `RootNode`, which is always there and carries the turn to glTF's Y up and the scale to meters (no transform when
+//! the document needs none); skinned meshes are under it with everything else. The unit and up axis are recorded in `asset.extras.source` (see [`crate::source`]) with what else the
+//! `<asset>` says: its contributors, title, subject, keywords and dates; a node's own `<asset>` changes them below it. A
 //! document with no scene shows its geometries. URLs into other documents (geometry, nodes, materials, lights and
 //! cameras in other `.dae` files, beside the model or in the archive) are followed, each document read once and
 //! with its own unit, up axis and image folder.
@@ -15,7 +17,8 @@
 //! that bind it to the same materials.
 //!
 //! Materials come from `profile_COMMON` (`constant`, `lambert`, `phong`, `blinn`): the diffuse color or texture,
-//! emission, a roughness from the shininess, the specular color (`KHR_materials_specular`) and index of refraction
+//! emission, the shininess and specular color as the highlight (the classic material every reader reads one way,
+//! `legacy_material`; a `lambert` has none) and index of refraction
 //! (`KHR_materials_ior`), transparency in each of its opaque modes, the bump map the common extras name (a height
 //! map is left out), texture placement extras as `KHR_texture_transform`, and two-sidedness from the effect's or the
 //! geometry's extras. `<setparam>` in an `<instance_effect>` overrides the effect's parameters. Textures are found
@@ -48,17 +51,24 @@ use serde_json::{Map, Value, json};
 use zip::ZipArchive;
 
 use super::Input;
-use super::xform::{IDENTITY, M4, column_major, inverse, mul, scale, set_transform, translate};
+use super::frame::{self, Frame};
+use super::xform::{IDENTITY, M4, inverse, mul, scale, set_transform, to_column_major, translate};
 use crate::assets::Assets;
-use crate::document::{Builder, Document, Keep, Part};
+use crate::document::{Builder, Document, Keep};
+use crate::gltf::percent_decode;
 use crate::images::Images;
+use crate::legacy_material;
 use crate::material::Full;
-use crate::num::{f32_of, u32_of};
-use crate::{Context as _, Result};
+use crate::num::u32_of;
+use crate::source::{Axis, Fact, Handedness, SourceInfo};
+use crate::vec3::{self, cross, dot, sub};
+use crate::{Context as _, ErrorKind, Result};
 use xml::Dom;
 
 /// How deeply nodes nest, `instance_node` included.
 const MAX_DEPTH: usize = 128;
+/// The frame a camera is taken to have when the file gives only its horizontal field of view.
+const ASSUMED_ASPECT: f64 = 16.0 / 9.0;
 
 /// The most nodes a document makes: instanced subtrees can multiply.
 const MAX_NODES: usize = 1 << 20;
@@ -66,8 +76,7 @@ const MAX_NODES: usize = 1 << 20;
 /// The largest archive entry read.
 const MAX_ENTRY: u64 = 1 << 31;
 
-/// The most joints that move a vertex: four sets of glTF's four.
-const MAX_INFLUENCES: usize = 16;
+use crate::mesh::MAX_INFLUENCES;
 
 /// The most other documents a document's URLs bring in, theirs included.
 const MAX_DOCUMENTS: usize = 64;
@@ -76,7 +85,7 @@ const MAX_DOCUMENTS: usize = 64;
 const MAX_EXTRA_VALUES: usize = 4096;
 
 /// The document in a `.dae` file or an archive, as glTF.
-pub(super) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document<'static>> {
+pub(super) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document> {
     let raw = input.read()?;
     let owned: Vec<u8>;
     let mut archive = None;
@@ -85,11 +94,11 @@ pub(super) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
         .file_name()
         .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
     let text: &[u8] = if raw.starts_with(b"PK\x03\x04") {
-        let mut zip = ZipArchive::new(Cursor::new(&raw[..])).map_err(|e| invalid!("{e}"))?;
-        let entry = root_entry(&mut zip).context("the archive holds no COLLADA document")?;
+        let mut zip = ZipArchive::new(Cursor::new(&raw[..])).context(ErrorKind::Corrupt, "bad ZIP archive")?;
+        let entry = root_entry(&mut zip).context(ErrorKind::UnknownFormat, "the archive holds no COLLADA document")?;
         let mut bytes = Vec::new();
         zip.by_name(&entry)
-            .map_err(|e| invalid!("{e}"))?
+            .with_context(ErrorKind::Corrupt, || format!("reading {entry}"))?
             .take(MAX_ENTRY)
             .read_to_end(&mut bytes)?;
         let (dir, name) = entry.rsplit_once('/').map_or_else(
@@ -108,7 +117,7 @@ pub(super) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
     let root = dom
         .root()
         .filter(|&r| dom.is(r, "COLLADA"))
-        .context("not a COLLADA document")?;
+        .context(ErrorKind::UnknownFormat, "not a COLLADA document")?;
     let home = archive
         .as_ref()
         .map_or_else(|| input.dir().to_string_lossy().replace('\\', "/"), |a| a.dir.clone());
@@ -146,11 +155,11 @@ pub(super) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
         dom: &dom,
         assets,
         dir: input.dir(),
-        base: dom.attr(root, "base").map(xml::percent_decode),
+        base: dom.attr(root, "base").map(percent_decode),
         keep,
         meters,
         archive,
-        b: Builder::default(),
+        b: Builder::new(keep.crease_angle()),
         sources: HashMap::new(),
         nodes: Vec::new(),
         parents: Vec::new(),
@@ -162,6 +171,7 @@ pub(super) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
         points_of: HashMap::new(),
         normals_of: HashMap::new(),
         materials: Vec::new(),
+        default_materials: [None; 2],
         material_of: HashMap::new(),
         images: Images::new(!keep.image_bytes, input.dir()),
         image_of: HashMap::new(),
@@ -174,6 +184,7 @@ pub(super) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
         pending: Vec::new(),
         morphs: Vec::new(),
         weighted: HashMap::new(),
+        unbound: std::collections::HashSet::new(),
         skinned_roots: Vec::new(),
         drawn: 0,
         limit: input.limit,
@@ -230,53 +241,45 @@ pub(super) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
     r.skin_meshes();
     r.morph_meshes();
     if r.nodes.is_empty() {
-        return Ok(Document::empty(Map::new()));
+        return Err(crate::Error::nothing_left(
+            dom.cut,
+            "COLLADA",
+            "this COLLADA document has nothing in its scene",
+        ));
     }
-    let animations = if keep.animations { r.animations() } else { Vec::new() };
+    if keep.animations {
+        r.animations();
+    }
 
-    let basis = basis(meters, &up);
+    // The file's up axis and unit are the root node's; skinned meshes go under it with everything else.
+    let (frame, _) = Frame::of(&basis(meters, &up));
     let mut scene_nodes = roots;
-    #[allow(clippy::float_cmp, reason = "only the exact identity needs no root")]
-    if basis != IDENTITY {
-        let mut root_node = json!({ "name": "RootNode", "children": scene_nodes });
-        set_transform(&mut root_node, &basis);
-        r.nodes.push(root_node);
-        scene_nodes = vec![r.nodes.len() - 1];
-    }
     scene_nodes.append(&mut r.skinned_roots);
 
-    let mut source = json!({
-        "format": "COLLADA",
-        "upAxis": match up.as_str() { "Z_UP" => "Z", "X_UP" => "X", _ => "Y" },
-        "meters": meters,
-    });
-    if let Some(v) = dom.attr(root, "version") {
-        source["version"] = json!(v);
+    let mut source = source_info(&dom, root, asset, meters, &up);
+    if dom.cut {
+        source.insert("truncated".into(), json!(true));
     }
-    if let Some(tool) = asset
-        .and_then(|a| dom.child(a, "contributor"))
-        .and_then(|c| dom.child_string(c, "authoring_tool"))
-        .filter(|t| !t.is_empty())
-    {
-        source["authoringTool"] = json!(tool);
+    let mut asset_json = json!({});
+    if let Some(c) = source.get("copyright") {
+        asset_json["copyright"] = c.clone();
     }
+    asset_json["extras"] = json!({ "source": source });
     let mut json = Map::new();
-    json.insert("asset".into(), json!({ "extras": { "source": source } }));
+    json.insert("asset".into(), asset_json);
     json.insert("scene".into(), json!(0));
     let mut scene_json = json!({ "nodes": scene_nodes });
     if let Some(name) = scene.and_then(|s| dom.attr(s, "name").or_else(|| dom.attr(s, "id"))) {
         scene_json["name"] = json!(name);
     }
     json.insert("scenes".into(), json!([scene_json]));
+    crate::skin::set_skeletons(&r.nodes, &mut r.skins);
     json.insert("nodes".into(), Value::Array(std::mem::take(&mut r.nodes)));
     if !r.meshes.is_empty() {
         json.insert("meshes".into(), Value::Array(std::mem::take(&mut r.meshes)));
     }
     if !r.skins.is_empty() {
         json.insert("skins".into(), Value::Array(std::mem::take(&mut r.skins)));
-    }
-    if !animations.is_empty() {
-        json.insert("animations".into(), Value::Array(animations));
     }
     if !r.cameras.is_empty() {
         json.insert("cameras".into(), Value::Array(std::mem::take(&mut r.cameras)));
@@ -292,7 +295,9 @@ pub(super) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
     let images = std::mem::take(&mut r.images);
     let mut b = r.b;
     b.materials(materials, images.list, &mut json);
-    Ok(b.finish(json, Map::new()))
+    let mut doc = b.finish(json, Map::new());
+    frame::root(&mut doc, frame);
+    Ok(doc)
 }
 
 /// The entry of an archive that holds its document: the one `manifest.xml` names (a `.zae`), or the first model a
@@ -308,7 +313,7 @@ fn root_entry(zip: &mut ZipArchive<Cursor<&[u8]>>) -> Option<String> {
     };
     // The entry a path names, from the folder `dir` (empty or with a trailing `/`), any case.
     let entry = |dir: &str, path: &str| {
-        let path = xml::percent_decode(path.trim());
+        let path = percent_decode(path.trim());
         let path = path.split(['#', '?']).next().unwrap_or("");
         let full = effect::normalize(&format!("{dir}{path}"));
         names
@@ -377,6 +382,138 @@ fn read_document(path: &str, archive: Option<&mut Archive<'_>>, assets: &dyn Ass
     assets.read(&found).map(Cow::into_owned)
 }
 
+/// What the document's `<asset>` says of it, as `asset.extras.source`: its unit and up axis (COLLADA's meter and
+/// Y up when it doesn't say), every contributor's author, tool, copyright and comments, its title, subject,
+/// keywords, and when it was made and changed. `revision`, a 1.5 document's `geographic_location` (as
+/// `georeference`), and each contributor in full when there are several (`contributors`) are kept too.
+fn source_info(dom: &Dom<'_>, root: usize, asset: Option<usize>, meters: f64, up: &str) -> Map<String, Value> {
+    let text = |e: usize, name: &str| {
+        dom.child(e, name)
+            .map(|c| crate::bytes::text(dom.text(c)).trim().to_owned())
+            .filter(|s| !s.is_empty())
+    };
+    let declared_unit = asset.and_then(|a| unit(dom, a)).is_some();
+    let up_given = asset.and_then(|a| dom.child_string(a, "up_axis")).is_some();
+    let axis = match up {
+        "Z_UP" => Axis::PosZ,
+        "X_UP" => Axis::PosX,
+        _ => Axis::PosY,
+    };
+    let mut info = SourceInfo {
+        format: Some("COLLADA".into()),
+        version: dom.attr(root, "version").map(str::to_owned),
+        meters_per_unit: if declared_unit {
+            Fact::Declared(meters)
+        } else {
+            Fact::Assumed(meters)
+        },
+        unit: asset
+            .and_then(|a| dom.child(a, "unit"))
+            .filter(|_| declared_unit)
+            .and_then(|u| dom.attr(u, "name"))
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .map(str::to_owned)
+            .or_else(|| ((meters - 1.0).abs() < 1e-12).then(|| "meter".to_owned())),
+        up_axis: if up_given {
+            Fact::Declared(axis)
+        } else {
+            Fact::Assumed(axis)
+        },
+        // The specification fixes it.
+        handedness: Fact::Declared(Handedness::Right),
+        ..SourceInfo::default()
+    };
+    info.converted.units = (meters - 1.0).abs() > 1e-12;
+    info.converted.up_axis = axis != Axis::PosY;
+    let mut details = Map::new();
+    if let Some(a) = asset {
+        let (mut tools, mut authors, mut copyrights, mut contributors) =
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        for c in dom.kids(a, "contributor") {
+            let mut one = Map::new();
+            for field in [
+                "author",
+                "author_email",
+                "author_website",
+                "authoring_tool",
+                "comments",
+                "copyright",
+                "source_data",
+            ] {
+                if let Some(v) = text(c, field) {
+                    match field {
+                        "author" => authors.push(v.clone()),
+                        "authoring_tool" => tools.push(v.clone()),
+                        "copyright" => copyrights.push(v.clone()),
+                        "comments" => info.comments.push(v.clone()),
+                        _ => {}
+                    }
+                    one.insert(field.into(), json!(v));
+                }
+            }
+            if !one.is_empty() {
+                contributors.push(Value::Object(one));
+            }
+        }
+        let joined = |mut v: Vec<String>| {
+            let mut seen = std::collections::HashSet::new();
+            v.retain(|s| seen.insert(s.clone()));
+            (!v.is_empty()).then(|| v.join("; "))
+        };
+        info.tool = joined(tools);
+        info.author = joined(authors);
+        info.copyright = joined(copyrights);
+        if contributors.len() > 1 {
+            details.insert("contributors".into(), Value::Array(contributors));
+        }
+        info.title = text(a, "title");
+        info.description = text(a, "subject");
+        info.created = text(a, "created");
+        info.modified = text(a, "modified");
+        info.keywords = text(a, "keywords")
+            .map(|k| {
+                let list: Vec<String> = if k.contains([',', ';']) {
+                    k.split([',', ';'])
+                        .map(str::trim)
+                        .filter(|k| !k.is_empty())
+                        .map(str::to_owned)
+                        .collect()
+                } else {
+                    k.split_whitespace().map(str::to_owned).collect()
+                };
+                list
+            })
+            .unwrap_or_default();
+        if let Some(r) = text(a, "revision") {
+            details.insert("revision".into(), json!(r));
+        }
+        if let Some(g) = dom.path(a, &["coverage", "geographic_location"]) {
+            let mut geo = Map::new();
+            for k in ["longitude", "latitude"] {
+                if let Some(v) = text(g, k).and_then(|v| v.parse::<f64>().ok()).filter(|v| v.is_finite()) {
+                    geo.insert(k.into(), json!(v));
+                }
+            }
+            if let Some(alt) = dom.child(g, "altitude") {
+                if let Ok(v) = dom.string(alt).parse::<f64>()
+                    && v.is_finite()
+                {
+                    geo.insert("altitude".into(), json!(v));
+                }
+                if let Some(mode) = dom.attr(alt, "mode") {
+                    geo.insert("altitudeMode".into(), json!(mode));
+                }
+            }
+            if !geo.is_empty() {
+                info.georeference = Some(Value::Object(geo));
+            }
+        }
+    }
+    info.write(&mut details);
+    details
+}
+
 /// The meters in the unit an `<asset>` gives.
 fn unit(dom: &Dom<'_>, asset: usize) -> Option<f64> {
     dom.child(asset, "unit")
@@ -396,29 +533,7 @@ fn basis(meters: f64, up: &str) -> M4 {
 
 /// The document's text as UTF-8: a byte order mark dropped, UTF-16 converted.
 fn decode(bytes: &[u8]) -> Cow<'_, [u8]> {
-    if let Some(rest) = bytes.strip_prefix(b"\xEF\xBB\xBF") {
-        return Cow::Borrowed(rest);
-    }
-    let utf16 = |rest: &[u8], le: bool| -> Cow<'_, [u8]> {
-        let units: Vec<u16> = rest
-            .chunks_exact(2)
-            .map(|c| {
-                if le {
-                    u16::from_le_bytes([c[0], c[1]])
-                } else {
-                    u16::from_be_bytes([c[0], c[1]])
-                }
-            })
-            .collect();
-        Cow::Owned(String::from_utf16_lossy(&units).into_bytes())
-    };
-    match bytes {
-        [0xFF, 0xFE, rest @ ..] => utf16(rest, true),
-        [0xFE, 0xFF, rest @ ..] => utf16(rest, false),
-        [b'<', 0, ..] => utf16(bytes, true),
-        [0, b'<', ..] => utf16(bytes, false),
-        _ => Cow::Borrowed(bytes),
-    }
+    crate::formats::xml::utf8(bytes)
 }
 
 /// The archive a document came in, for the textures beside it.
@@ -483,6 +598,8 @@ pub(super) struct Reader<'a> {
     /// Each morphed mesh's primitives' normals (empty for one without), which its targets' normals are taken from.
     normals_of: HashMap<usize, Vec<Vec<[f32; 3]>>>,
     materials: Vec<Full>,
+    /// The material of faces bound to none, and the one for those with vertex colors.
+    default_materials: [Option<usize>; 2],
     material_of: HashMap<MaterialKey, usize>,
     images: Images,
     image_of: HashMap<usize, Option<usize>>,
@@ -498,6 +615,8 @@ pub(super) struct Reader<'a> {
     morphs: Vec<(usize, usize)>,
     /// The skinned meshes that have their joints and weights, by the `<skin>` they're from.
     weighted: HashMap<usize, usize>,
+    /// The skinned meshes with a point no joint moves: their skins take the instancing node as a joint.
+    unbound: std::collections::HashSet<usize>,
     skinned_roots: Vec<usize>,
     drawn: usize,
     limit: usize,
@@ -737,7 +856,12 @@ impl Reader<'_> {
             return Ok(());
         };
         self.drawn += self.mesh_triangles[mesh];
-        ensure!(self.drawn <= self.limit, "too many triangles (over {})", self.limit);
+        ensure!(
+            self.drawn <= self.limit,
+            LimitExceeded,
+            "too many triangles (over {})",
+            self.limit
+        );
         if self.keep.skins
             && let Some(skin) = skin
         {
@@ -788,8 +912,8 @@ impl Reader<'_> {
             return Ok(None);
         };
         let budget = self.limit.saturating_sub(self.drawn);
-        let Ok(pieces) = geometry::mesh(dom, &mut self.sources, mesh_el, budget) else {
-            bail!("too many triangles (over {})", self.limit);
+        let Ok(pieces) = geometry::mesh(dom, &mut self.sources, mesh_el, budget, self.b.crease) else {
+            bail!(LimitExceeded, "too many triangles (over {})", self.limit);
         };
         let mut prims = Vec::new();
         let mut points = Vec::new();
@@ -798,12 +922,19 @@ impl Reader<'_> {
         let mut triangles = 0;
         let morphed = morph.is_some() && self.keep.morph_targets;
         for p in pieces {
+            self.b.dropped += p.dropped;
             let material = if self.keep.materials {
                 p.symbol
                     .as_deref()
                     .and_then(|s| self.material_for(geometry, s, binds, &p.sets))
             } else {
                 None
+            };
+            // Faces bound to no material take the default one.
+            let material = if self.keep.materials && material.is_none() && !p.prim.indices.is_empty() {
+                Some(self.default_material(!p.prim.colors.is_empty()))
+            } else {
+                material
             };
             // A piece draws triangles or lines, never both, so it is one glTF primitive.
             let base = if morphed && p.prim.normals.len() == p.prim.positions.len() {
@@ -860,6 +991,13 @@ impl Reader<'_> {
                     .as_deref()
                     .filter(|_| self.keep.materials)
                     .and_then(|s| self.material_for(geometry, s, binds, sets));
+                let faces = prim.get("mode").is_none();
+                let colored = prim.pointer("/attributes/COLOR_0").is_some();
+                let material = if self.keep.materials && material.is_none() && faces {
+                    Some(self.default_material(colored))
+                } else {
+                    material
+                };
                 match (material, prim.as_object_mut()) {
                     (Some(m), Some(o)) => drop(o.insert("material".into(), json!(m))),
                     (None, Some(o)) => drop(o.remove("material")),
@@ -870,6 +1008,17 @@ impl Reader<'_> {
         self.meshes.push(mesh);
         self.mesh_triangles.push(self.mesh_triangles[first]);
         self.meshes.len() - 1
+    }
+
+    /// The material of faces bound to none: [`legacy_material::default_material`], made once.
+    fn default_material(&mut self, colored: bool) -> usize {
+        if let Some(m) = self.default_materials[usize::from(colored)] {
+            return m;
+        }
+        self.materials.push(legacy_material::default_material(colored).into());
+        let m = self.materials.len() - 1;
+        self.default_materials[usize::from(colored)] = Some(m);
+        m
     }
 
     /// The material bound to `symbol`, its textures reading the primitive's coordinate sets (`sets`, in the
@@ -913,7 +1062,7 @@ impl Reader<'_> {
     /// Skins for the skinned meshes, now that every node is made.
     fn skin_meshes(&mut self) {
         for p in std::mem::take(&mut self.pending) {
-            let Some((joints, count)) = self.joints(p.skin, &p.roots) else {
+            let Some((mut joints, count)) = self.joints(p.skin, &p.roots) else {
                 // The joints aren't in the scene: the mesh goes unskinned where it is.
                 let mut children = Vec::new();
                 let holder = self.holder(p.node, "mesh", &mut children);
@@ -925,13 +1074,24 @@ impl Reader<'_> {
                 self.weigh(p.mesh, p.skin, count);
                 self.weighted.insert(p.mesh, p.skin);
             }
-            let ibms = self.inverse_binds(p.skin, count);
-            let acc = self.b.floats(ibms, "MAT4", false);
-            let mut skin = json!({ "joints": joints, "inverseBindMatrices": acc });
-            if let Some(s) = self.common_ancestor(&joints) {
-                skin["skeleton"] = json!(s);
+            let mut ibms = self.inverse_binds(p.skin, count);
+            // A vertex no joint moves stays with the node the controller is instanced on: that node is a joint
+            // too, after the file's (a node under it when it is one of them already), and the vertex keeps its
+            // place in the node's own space.
+            if self.unbound.contains(&p.mesh) {
+                let rest = if joints.contains(&p.node) {
+                    let n = self.push_node(json!({}), Some(p.node));
+                    self.adopt(p.node, &[n]);
+                    n
+                } else {
+                    p.node
+                };
+                joints.push(rest);
+                ibms.extend(crate::skin::inverse_bind(to_column_major(&IDENTITY)));
             }
-            self.skins.push(skin);
+            let acc = self.b.floats(ibms, "MAT4", false);
+            // `skeleton` is set once every node has its place ([`crate::skin::set_skeletons`]).
+            self.skins.push(json!({ "joints": joints, "inverseBindMatrices": acc }));
             let mut node = json!({ "mesh": p.mesh, "skin": self.skins.len() - 1 });
             if let Some(name) = p.name {
                 node["name"] = json!(name);
@@ -1011,32 +1171,6 @@ impl Reader<'_> {
         Some((joints, count))
     }
 
-    /// The deepest node every one of `nodes` is under (or is).
-    fn common_ancestor(&self, nodes: &[usize]) -> Option<usize> {
-        let chain = |mut n: usize| {
-            let mut c = vec![n];
-            while let Some(p) = self.parents[n] {
-                c.push(p);
-                n = p;
-                if c.len() > MAX_NODES {
-                    break;
-                }
-            }
-            c.reverse();
-            c
-        };
-        let mut common = chain(*nodes.first()?);
-        for &n in &nodes[1..] {
-            let other = chain(n);
-            let same = common.iter().zip(&other).take_while(|(a, b)| a == b).count();
-            common.truncate(same);
-            if common.is_empty() {
-                return None;
-            }
-        }
-        common.last().copied()
-    }
-
     /// Writes the joints and weights of a skinned mesh's primitives.
     fn weigh(&mut self, mesh: usize, skin: usize, count: usize) {
         let dom = self.dom;
@@ -1044,60 +1178,36 @@ impl Reader<'_> {
         let Some(points) = self.points_of.get(&mesh) else {
             return;
         };
-        let last = u32_of(count.saturating_sub(1));
-        // Four influences to a set of joints and weights, as many sets as the most-influenced point needs.
-        let width = influences.most.div_ceil(4).max(1) * 4;
+        // Through the readers' one writer of joints and weights ([`crate::skin::sets`]): a point no joint moves
+        // goes to the rest joint, which comes after the file's.
         let mut written = Vec::new();
+        let mut unbound = false;
         for pts in points {
-            let n = pts.len();
-            let mut js = Vec::with_capacity(n * width);
-            let mut ws = Vec::with_capacity(n * width);
-            let (mut j, mut w) = (vec![0u32; width], vec![0f32; width]);
-            for &p in pts {
-                j.fill(0);
-                w.fill(0.0);
-                for (k, &(jj, ww)) in influences.of(p as usize).iter().enumerate() {
-                    j[k] = jj;
-                    w[k] = ww;
-                }
-                settle(&mut j, &mut w, last);
-                js.extend_from_slice(&j);
-                ws.extend_from_slice(&w);
-            }
-            let mut sets = Vec::new();
-            for set in 0..width / 4 {
-                let set_js = quad(&js, width, set);
-                let set_ws = quad(&ws, width, set);
-                let j = if count <= 256 {
-                    let b: Vec<u8> = set_js.iter().map(|&j| u8::try_from(j).unwrap_or(0)).collect();
-                    self.b.accessor(Part::bytes(b), 5121, n, "VEC4", Some(34962))
-                } else {
-                    let b = set_js.iter().map(|&j| u16::try_from(j).unwrap_or(0)).collect();
-                    self.b.accessor(Part::u16(b), 5123, n, "VEC4", Some(34962))
-                };
-                let w = self.b.accessor(Part::f32(set_ws), 5126, n, "VEC4", Some(34962));
-                sets.push((j, w));
-            }
-            written.push(sets);
+            let sets = crate::skin::sets(pts.len(), count, u32_of(count), |i, list| {
+                list.extend_from_slice(influences.of(pts[i] as usize));
+            });
+            unbound |= sets.unbound;
+            written.push(sets.write(&mut self.b, count + 1));
+        }
+        if unbound {
+            self.unbound.insert(mesh);
         }
         let _ = dom;
         if let Some(prims) = self.meshes[mesh]["primitives"].as_array_mut() {
             for (prim, sets) in prims.iter_mut().zip(written) {
-                for (k, (j, w)) in sets.into_iter().enumerate() {
-                    prim["attributes"][format!("JOINTS_{k}")] = json!(j);
-                    prim["attributes"][format!("WEIGHTS_{k}")] = json!(w);
+                for (key, a) in sets {
+                    prim["attributes"][key] = json!(a);
                 }
             }
         }
     }
 
-    /// Each point's strongest joints (up to sixteen) and their weights, from a skin's `<vertex_weights>`.
+    /// Each point's joints and their weights, from a skin's `<vertex_weights>`.
     fn influences(&self, skin: usize) -> Influences {
         let dom = self.dom;
         let mut out = Influences {
             starts: vec![0],
             pairs: Vec::new(),
-            most: 0,
         };
         let Some(vw) = dom.child(skin, "vertex_weights") else {
             return out;
@@ -1148,9 +1258,10 @@ impl Reader<'_> {
             if at > v.len() {
                 at = v.len();
             }
-            all.sort_by(|a, b| b.1.total_cmp(&a.1));
-            all.truncate(MAX_INFLUENCES);
-            out.most = out.most.max(all.len());
+            // A file may list a point's influences without end: no more are kept than can matter.
+            if all.len() > MAX_INFLUENCES {
+                crate::skin::strongest(&mut all);
+            }
             out.pairs.extend_from_slice(&all);
             out.starts.push(u32_of(out.pairs.len()));
         }
@@ -1171,9 +1282,7 @@ impl Reader<'_> {
         let mut out = Vec::with_capacity(count * 16);
         for k in 0..count {
             let m = ibm.as_ref().and_then(|a| a.get(u32_of(k))).map_or(IDENTITY, matrix_of);
-            let mut m = mul(&m, &bind_shape);
-            m[3] = [0.0, 0.0, 0.0, 1.0];
-            out.extend(column_major(&m).map(f32_of));
+            out.extend(crate::skin::inverse_bind(to_column_major(&mul(&m, &bind_shape))));
         }
         out
     }
@@ -1221,8 +1330,10 @@ impl Reader<'_> {
                 target_normals.push(normals);
             }
             let at = |acc: Option<&geometry::Acc<f32>>, p: u32| -> [f32; 3] {
+                // A coordinate that isn't finite moves nothing.
+                let finite = |x: f32| if x.is_finite() { x } else { 0.0 };
                 acc.and_then(|a| a.get(p)).map_or([0.0; 3], |v| {
-                    [v[0], v.get(1).copied().unwrap_or(0.0), v.get(2).copied().unwrap_or(0.0)]
+                    [v[0], v.get(1).copied().unwrap_or(0.0), v.get(2).copied().unwrap_or(0.0)].map(finite)
                 })
             };
             let mut per_prim = Vec::new();
@@ -1288,7 +1399,7 @@ impl Reader<'_> {
         base: &[Vec<[f32; 3]>],
     ) -> Option<Vec<Vec<[f32; 3]>>> {
         let budget = self.mesh_triangles.get(mesh).copied().unwrap_or(0);
-        let pieces = geometry::mesh(self.dom, &mut self.sources, target, budget).ok()?;
+        let pieces = geometry::mesh(self.dom, &mut self.sources, target, budget, self.b.crease).ok()?;
         if pieces.len() != points.len() || pieces.iter().zip(points).any(|(p, pts)| p.points != *pts) {
             return None;
         }
@@ -1342,7 +1453,10 @@ impl Reader<'_> {
                 (_, Some(y), Some(a)) => (y.to_radians(), Some(a)),
                 (Some(x), Some(y), None) => (y.to_radians(), Some(half(x) / half(y))),
                 (Some(x), None, Some(a)) => (2.0 * (half(x) / a).atan(), Some(a)),
-                (Some(x), None, None) => (x.to_radians(), None),
+                // The horizontal angle alone: glTF wants the vertical, which needs the aspect ratio the file
+                // leaves to the viewer. A 16:9 frame is assumed and written with it, so the two together
+                // are the file's angle across.
+                (Some(x), None, None) => (2.0 * (half(x) / ASSUMED_ASPECT).atan(), Some(ASSUMED_ASPECT)),
                 (None, Some(y), None) => (y.to_radians(), None),
                 (None, None, a) => (std::f64::consts::FRAC_PI_4, a),
             };
@@ -1436,6 +1550,8 @@ impl Reader<'_> {
         } else {
             (color, 1.0)
         };
+        // A display color, like the materials': glTF's is linear.
+        let color = color.map(crate::mesh::srgb_to_linear);
         let mut light = json!({ "type": ty, "color": color, "intensity": intensity });
         if ty == "spot" {
             let falloff = dom
@@ -1495,7 +1611,7 @@ impl Reader<'_> {
                 for t in dom.children(extra) {
                     let key = dom
                         .attr(t, "profile")
-                        .map_or_else(|| String::from_utf8_lossy(dom.name(t)).into_owned(), str::to_owned);
+                        .map_or_else(|| crate::bytes::text(dom.name(t)).into_owned(), str::to_owned);
                     let v = extra_json(dom, t, 0, &mut budget);
                     out.insert(key, v);
                 }
@@ -1517,7 +1633,7 @@ fn extra_json(dom: &Dom<'_>, e: usize, depth: usize, budget: &mut usize) -> Valu
         }
         *budget -= 1;
         let v = extra_json(dom, c, depth + 1, budget);
-        let key = String::from_utf8_lossy(dom.name(c)).into_owned();
+        let key = crate::bytes::text(dom.name(c)).into_owned();
         match out.get_mut(&key) {
             Some(Value::Array(list)) => list.push(v),
             Some(old) => *old = json!([old.take(), v]),
@@ -1529,50 +1645,11 @@ fn extra_json(dom: &Dom<'_>, e: usize, depth: usize, budget: &mut usize) -> Valu
     Value::Object(out)
 }
 
-/// A vertex's joints and weights as glTF wants them: joints in range, weights summing to 1, a vertex no joint moves
-/// bound to joint 0, and a slot with no weight naming joint 0.
-fn settle(j: &mut [u32], w: &mut [f32], last: u32) {
-    for x in w.iter_mut() {
-        if !(*x > 0.0 && x.is_finite()) {
-            *x = 0.0;
-        }
-    }
-    for x in j.iter_mut() {
-        *x = (*x).min(last);
-    }
-    let sum: f32 = w.iter().sum();
-    if sum > 0.0 {
-        for x in w.iter_mut() {
-            *x /= sum;
-        }
-        let top = (0..w.len()).fold(0, |a, k| if w[k] > w[a] { k } else { a });
-        w[top] += 1.0 - w.iter().sum::<f32>();
-    } else {
-        j.fill(0);
-        w.fill(0.0);
-        w[0] = 1.0;
-    }
-    for (x, &v) in j.iter_mut().zip(w.iter()) {
-        if v == 0.0 {
-            *x = 0;
-        }
-    }
-}
-
-/// The `set`th four of each `width` numbers.
-fn quad<T: Copy>(v: &[T], width: usize, set: usize) -> Vec<T> {
-    v.chunks_exact(width)
-        .flat_map(|c| c[set * 4..set * 4 + 4].iter().copied())
-        .collect()
-}
-
-/// Each point's influences, strongest first.
+/// Each point's influences, as the file lists them.
 struct Influences {
     /// Where each point's influences start in `pairs`, and where the last one's end.
     starts: Vec<u32>,
     pairs: Vec<(u32, f32)>,
-    /// The most influences a point has.
-    most: usize,
 }
 
 impl Influences {
@@ -1649,9 +1726,9 @@ impl Transform {
                 let eye = [at(0, 0.0), at(1, 0.0), at(2, 0.0)];
                 let target = [at(3, 0.0), at(4, 0.0), at(5, -1.0)];
                 let up = [at(6, 0.0), at(7, 1.0), at(8, 0.0)];
-                let z = norm(sub(eye, target)).unwrap_or([0.0, 0.0, 1.0]);
-                let x = norm(cross(up, z))
-                    .or_else(|| norm(cross([0.0, 0.0, 1.0], z)))
+                let z = vec3::unit(sub(eye, target)).unwrap_or([0.0, 0.0, 1.0]);
+                let x = vec3::unit(cross(up, z))
+                    .or_else(|| vec3::unit(cross([0.0, 0.0, 1.0], z)))
                     .unwrap_or([1.0, 0.0, 0.0]);
                 let y = cross(z, x);
                 [
@@ -1665,11 +1742,11 @@ impl Transform {
                 // Shears along the rotation axis's part across the translation axis, by the angle's tangent.
                 let angle = at(0, 0.0).to_radians().clamp(-1.5, 1.5);
                 let a = [at(1, 0.0), at(2, 0.0), at(3, 0.0)];
-                let Some(b) = norm([at(4, 0.0), at(5, 0.0), at(6, 0.0)]) else {
+                let Some(b) = vec3::unit([at(4, 0.0), at(5, 0.0), at(6, 0.0)]) else {
                     return IDENTITY;
                 };
                 let d = dot(a, b);
-                let Some(a) = norm([a[0] - d * b[0], a[1] - d * b[1], a[2] - d * b[2]]) else {
+                let Some(a) = vec3::unit([a[0] - d * b[0], a[1] - d * b[1], a[2] - d * b[2]]) else {
                     return IDENTITY;
                 };
                 let t = angle.tan();
@@ -1687,7 +1764,7 @@ impl Transform {
 
 /// A rotation of `angle` radians about `axis`.
 fn rotation(axis: [f64; 3], angle: f64) -> M4 {
-    let Some([x, y, z]) = norm(axis) else {
+    let Some([x, y, z]) = vec3::unit(axis) else {
         return IDENTITY;
     };
     let (s, c) = angle.sin_cos();
@@ -1698,25 +1775,4 @@ fn rotation(axis: [f64; 3], angle: f64) -> M4 {
         [t * x * z - s * y, t * y * z + s * x, t * z * z + c, 0.0],
         [0.0, 0.0, 0.0, 1.0],
     ]
-}
-
-fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-
-fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-
-fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
-}
-
-fn norm(v: [f64; 3]) -> Option<[f64; 3]> {
-    let len = dot(v, v).sqrt();
-    (len > 1e-12 && len.is_finite()).then(|| [v[0] / len, v[1] / len, v[2] / len])
 }

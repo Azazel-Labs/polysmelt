@@ -11,7 +11,7 @@ use std::fmt;
 
 use flate2::{Decompress, FlushDecompress, Status};
 
-use crate::{Context as _, Result};
+use crate::{Context as _, ErrorKind, Result, Within as _};
 
 /// The start of every binary FBX file, before its version.
 pub(super) const BINARY_MAGIC: &[u8] = b"Kaydara FBX Binary  \0";
@@ -229,18 +229,19 @@ impl<'a> Tree<'a> {
     /// When the file isn't FBX, is older than FBX 7, or isn't laid out as FBX is.
     pub(super) fn parse(data: &'a [u8]) -> Result<Self> {
         if super::fbx_ascii::is_ascii(data) {
-            return super::fbx_ascii::parse(data).context("couldn't read this ASCII FBX file");
+            return super::fbx_ascii::parse(data).within("couldn't read this ASCII FBX file");
         }
         if let Some(v) = data.strip_prefix(BINARY_MAGIC).and_then(|r| r.get(2..6)) {
             let v = u32::from_le_bytes(v.try_into().unwrap_or_default());
             ensure!(
                 v >= 7000,
+                Unsupported,
                 "this is FBX {}.{}, older than FBX 7, which this reader and Blender cannot read",
                 v / 1000,
                 v % 1000 / 100
             );
         }
-        binary(data).map_err(|e| invalid!("not a readable FBX file: {e}"))
+        binary(data).within("not a readable FBX file")
     }
 
     pub(super) fn version(&self) -> Version {
@@ -403,15 +404,15 @@ impl<'a> Builder<'a> {
 }
 
 /// Binary FBX 7.x: the header, then nodes, each closed by its end's offset, and lists of children by a null node.
-fn binary(data: &[u8]) -> std::result::Result<Tree<'_>, String> {
+fn binary(data: &[u8]) -> Result<Tree<'_>> {
     let rest = data
         .strip_prefix(BINARY_MAGIC)
-        .ok_or("it starts like neither binary nor ASCII FBX")?;
+        .context(ErrorKind::UnknownFormat, "it starts like neither binary nor ASCII FBX")?;
     let version = rest
         .get(2..6)
         .and_then(|v| v.try_into().ok())
         .map(u32::from_le_bytes)
-        .ok_or("the file ends in its header")?;
+        .context(ErrorKind::Truncated, "the file is cut short in its header")?;
     // From FBX 7.5, a node's end, attribute count and attribute bytes are 64-bit.
     let wide = version >= 7500;
     let w = if wide { 8 } else { 4 };
@@ -442,12 +443,13 @@ fn binary(data: &[u8]) -> std::result::Result<Tree<'_>, String> {
             continue;
         }
         if at + header > end {
-            return Err(format!(
-                "the file is cut short, or a node overruns its parent, at byte {at}"
-            ));
+            bail!(
+                Truncated,
+                "the file is cut short at byte {at}, or a node there runs past the end of its parent"
+            );
         }
         let (Some(node_end), Some(count), Some(list)) = (word(at), word(at + w), word(at + 2 * w)) else {
-            return Err(format!("a node at byte {at} has sizes too large"));
+            bail!(Corrupt, "a node at byte {at} has sizes too large");
         };
         if node_end == 0 {
             // The null node ending a list of children; the rest of the parent (or the file, past the root's: its
@@ -462,14 +464,15 @@ fn binary(data: &[u8]) -> std::result::Result<Tree<'_>, String> {
         let props = name_at + usize::from(data[at + 3 * w]);
         let props_end = props.checked_add(list).filter(|&e| e <= node_end);
         let Some(props_end) = props_end.filter(|_| node_end <= end) else {
-            return Err(format!(
-                "the node at byte {at} ends past its parent or the file (cut short?)"
-            ));
+            bail!(
+                Truncated,
+                "the node at byte {at} runs past the end of its parent or the file"
+            );
         };
-        let name = String::from_utf8_lossy(&data[name_at..props]);
+        let name = crate::bytes::text(&data[name_at..props]);
         let from = b.attrs().len();
         attributes(&data[props..props_end], count, b.attrs())
-            .map_err(|e| format!("in node {name:?} at byte {at}: {e}"))?;
+            .with_within(|| format!("in node {name:?} at byte {at}"))?;
         let node = b.add(name, from);
         if props_end < node_end {
             b.open(node);
@@ -483,19 +486,19 @@ fn binary(data: &[u8]) -> std::result::Result<Tree<'_>, String> {
 }
 
 /// Reads `count` attributes from `data` into `out`; bytes left over are padding.
-fn attributes<'a>(mut data: &'a [u8], count: usize, out: &mut Vec<Attr<'a>>) -> std::result::Result<(), String> {
-    fn take<'a>(data: &mut &'a [u8], n: usize) -> std::result::Result<&'a [u8], String> {
+fn attributes<'a>(mut data: &'a [u8], count: usize, out: &mut Vec<Attr<'a>>) -> Result<()> {
+    fn take<'a>(data: &mut &'a [u8], n: usize) -> Result<&'a [u8]> {
         if n > data.len() {
-            return Err("an attribute runs past the node's attribute bytes".into());
+            bail!(Corrupt, "an attribute runs past the end of the node's attribute bytes");
         }
         let (head, tail) = data.split_at(n);
         *data = tail;
         Ok(head)
     }
-    fn u32_at(data: &mut &[u8]) -> std::result::Result<u32, String> {
+    fn u32_at(data: &mut &[u8]) -> Result<u32> {
         Ok(u32::from_le_bytes(take(data, 4)?.try_into().unwrap_or_default()))
     }
-    fn fixed<const N: usize>(data: &mut &[u8]) -> std::result::Result<[u8; N], String> {
+    fn fixed<const N: usize>(data: &mut &[u8]) -> Result<[u8; N]> {
         Ok(take(data, N)?.try_into().unwrap_or([0; N]))
     }
     // Each attribute takes at least two bytes, so `count` can't run long past what `data` holds.
@@ -512,7 +515,7 @@ fn attributes<'a>(mut data: &'a [u8], count: usize, out: &mut Vec<Attr<'a>>) -> 
                 let n = u32_at(&mut data)? as usize;
                 let bytes = take(&mut data, n)?;
                 if kind == b'S' {
-                    Attr::String(String::from_utf8_lossy(bytes))
+                    Attr::String(crate::bytes::text(bytes))
                 } else {
                     Attr::Binary(Cow::Borrowed(bytes))
                 }
@@ -531,7 +534,7 @@ fn attributes<'a>(mut data: &'a [u8], count: usize, out: &mut Vec<Attr<'a>>) -> 
                     _ => Attr::ArrF64(Array::raw(len, encoding, bytes)),
                 }
             }
-            _ => return Err(format!("an attribute of unknown type {kind:#04x}")),
+            _ => bail!(Corrupt, "an attribute of unknown type {kind:#04x}"),
         });
     }
     Ok(())

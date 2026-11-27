@@ -1,0 +1,24 @@
+{
+  "spec": "3D Tiles 1.0 (OGC 18-053r2): cmpt of a b3dm and an i3dm",
+  "source": "CesiumGS/cesium Specs/Data/Cesium3DTiles/Composite/Composite at 49f9cfe7c2c0 (Apache-2.0, LICENSE-cesium); expectations decoded by tools/corpus/tiles.py",
+  "triangles": 420,
+  "facts": {
+    "tiles": 2,
+    "triangles": 420,
+    "instances": 25,
+    "features": 10
+  },
+  "vertices": 840,
+  "bounds": {
+    "min": [
+      1214910.3129,
+      4081525.4478,
+      4736230.8677
+    ],
+    "max": [
+      1215121.5903,
+      4081683.8392,
+      4736402.6321
+    ]
+  }
+}

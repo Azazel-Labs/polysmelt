@@ -127,11 +127,11 @@ fn unescape(s: &[u8]) -> String {
         out.push(s[i]);
         i += 1;
     }
-    String::from_utf8_lossy(&out).into_owned()
+    crate::bytes::text(&out).into_owned()
 }
 
 fn text(w: &[u8]) -> String {
-    String::from_utf8_lossy(w).into_owned()
+    crate::bytes::text(w).into_owned()
 }
 
 struct Parser<'d> {
@@ -242,19 +242,25 @@ impl<'d> Parser<'d> {
                 }
             }
             b"META" => {
+                let mut pair = Vec::new();
                 for _ in 0..2 {
-                    if matches!(self.lx.peek(), Tok::Str(_)) {
+                    if let Tok::Str(s) = self.lx.peek() {
                         self.lx.next();
+                        pair.push(unescape(s));
                     }
+                }
+                if let Ok([name, content]) = <[String; 2]>::try_from(pair) {
+                    self.g.meta.push((name, content));
                 }
             }
             b"UNIT" => {
                 let category = self.word();
-                self.lx.next();
+                let name = self.word();
                 if let Some(f) = self.word()
                     && category == Some(b"length")
                 {
                     self.g.unit = Some(number(f));
+                    self.g.unit_name = name.map(text);
                 }
                 return true;
             }
@@ -380,7 +386,12 @@ impl<'d> Parser<'d> {
         self.depth += 1;
         loop {
             match self.lx.next() {
-                Tok::Close | Tok::End => break,
+                Tok::Close => break,
+                Tok::End => {
+                    // The file ends inside the node.
+                    self.g.cut = true;
+                    break;
+                }
                 Tok::Word(w) => {
                     if self.statement(w) {
                         continue;
@@ -456,7 +467,11 @@ impl<'d> Parser<'d> {
         loop {
             let at = self.lx.at;
             match self.lx.next() {
-                Tok::RBracket | Tok::End => break,
+                Tok::RBracket => break,
+                Tok::End => {
+                    self.g.cut = true;
+                    break;
+                }
                 Tok::Word(w) if numeric(w) => nums.push(number(w)),
                 Tok::Str(s) => strs.push(unescape(s)),
                 Tok::Word(b"TRUE") => bools.push(true),

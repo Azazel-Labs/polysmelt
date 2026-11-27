@@ -1,0 +1,28 @@
+{
+  "spec": "VTK File Formats: a real file: legacy STRUCTURED_POINTS",
+  "source": "meshio's test meshes (tests/meshes), MIT license, see ../LICENSE-meshio; expectations computed with VTK 9.7.2",
+  "triangles": 162,
+  "bounds": {
+    "min": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "max": [
+      4.5,
+      4.5,
+      0.0
+    ]
+  },
+  "area": 20.25,
+  "facts": {
+    "triangles": 162
+  },
+  "document": {
+    "attributes": [
+      "_TRANSMISSIVITY"
+    ]
+  },
+  "colors": false,
+  "uvs": false
+}

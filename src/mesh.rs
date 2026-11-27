@@ -1,9 +1,31 @@
 //! A model as plain triangle lists (and line and point lists): what the format readers
 //! produce, written out as a GLB.
+//!
+//! Building one by hand and writing it:
+//!
+//! ```
+//! use polysmelt::mesh::{Material, Mesh, Prim};
+//!
+//! let mesh = Mesh {
+//!     prims: vec![Prim {
+//!         positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+//!         indices: vec![0, 1, 2],
+//!         material: 0,
+//!         ..Prim::default()
+//!     }],
+//!     materials: vec![Material::plain("red", [1.0, 0.0, 0.0, 1.0])],
+//!     ..Mesh::default()
+//! };
+//! assert_eq!(mesh.triangles(), 1);
+//! let glb = mesh.to_glb()?;
+//! assert_eq!(&glb[..4], b"glTF");
+//! # Ok::<(), polysmelt::Error>(())
+//! ```
 
 use crate::Result;
 use crate::document::Document;
 use crate::num::u32_of;
+use crate::vec3;
 
 /// The most triangles a load accepts by default, against hostile or runaway files:
 /// [`Keep::max_triangles`](crate::document::Keep::max_triangles) raises or lowers it.
@@ -18,11 +40,24 @@ pub const TRIANGLE_CEILING: usize = 1 << 30;
 /// clouds: [`Keep::max_points`](crate::document::Keep::max_points) raises or lowers it.
 pub const MAX_POINTS: usize = 16_000_000;
 
+/// The most joints that move one vertex, whichever reader merges a vertex's influences: four sets of glTF's four
+/// `JOINTS_n` and `WEIGHTS_n`, past what models are rigged with. The strongest are kept.
+#[cfg_attr(
+    not(feature = "dae"),
+    allow(dead_code, reason = "COLLADA and the scene readers use it")
+)]
+pub(crate) const MAX_INFLUENCES: usize = 16;
+
 /// One material's worth of triangles, and of the lines and points drawn on the same vertices.
-#[derive(Debug, Default, Clone)]
+///
+/// Every per-vertex list is either empty or as long as `positions`. Build one with a struct
+/// literal ending in `..Prim::default()`.
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct Prim {
+    /// Vertex positions.
     pub positions: Vec<[f32; 3]>,
-    /// Unit vertex normals; empty for a faceted model (STL), which glTF clients shade flat.
+    /// Unit vertex normals. Every mesh read from a file has them, but a glTF's that has none, which glTF clients
+    /// shade flat; empty there, and in a mesh built without.
     pub normals: Vec<[f32; 3]>,
     /// Unit tangents for normal mapping, as glTF stores them: `xyz` the direction, `w` ±1 the
     /// bitangent's handedness (`bitangent = cross(normal, xyz) * w`). Empty when the model has
@@ -49,6 +84,7 @@ pub struct Prim {
     /// Points, a vertex index each (glTF's `POINTS`): a point cloud is a primitive of these
     /// alone.
     pub points: Vec<u32>,
+    /// Its material, an index into [`Mesh::materials`].
     pub material: usize,
     /// Each vertex's most-weighted joint, as a node index (the order of `Rig::nodes`), when the primitive is skinned;
     /// empty otherwise. Tells which bone each part of the surface moves with, for fitting a body to its skeleton.
@@ -71,7 +107,7 @@ impl Prim {
 
     /// Whether every vertex has joints and weights, so the primitive can be bound to [`Mesh::skeleton`].
     #[must_use]
-    pub fn skinned(&self) -> bool {
+    pub fn is_skinned(&self) -> bool {
         !self.positions.is_empty()
             && self.skin_joints.len() == self.positions.len()
             && self.skin_weights.len() == self.positions.len()
@@ -81,6 +117,7 @@ impl Prim {
 /// A joint skinned primitives are bound to.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Bone {
+    /// Its name, if it has one.
     pub name: Option<String>,
     /// The bone it hangs from, an index into [`Mesh::skeleton`], always before this one.
     pub parent: Option<usize>,
@@ -125,34 +162,51 @@ impl Default for Sampling {
 /// How each of a material's core textures is sampled.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Samplings {
+    /// [`Material::color_image`]'s.
     pub color: Sampling,
+    /// [`Material::normal_image`]'s.
     pub normal: Sampling,
+    /// [`Material::metallic_roughness_image`]'s.
     pub metallic_roughness: Sampling,
+    /// [`Material::occlusion_image`]'s.
     pub occlusion: Sampling,
+    /// [`Material::emissive_image`]'s.
     pub emissive: Sampling,
 }
 
 /// A texture an extension uses: an image in [`Mesh::images`], and how it's sampled.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Texture {
+    /// The image, an index into [`Mesh::images`].
     pub image: usize,
+    /// How it's sampled.
     pub sampling: Sampling,
 }
 
 /// The `KHR_materials_*` extensions to glTF's metallic-roughness model: index of refraction,
 /// specular, transmission, clearcoat, sheen, volume, anisotropy, iridescence and dispersion.
 /// A `None` is the extension left out.
+///
+/// Non-exhaustive, so that more extensions can be added: start from [`Extensions::default`]
+/// (none) and set the ones you need.
 #[derive(Debug, Clone, PartialEq, Default)]
+#[non_exhaustive]
 pub struct Extensions {
     /// `KHR_materials_ior`.
     pub ior: Option<f32>,
+    /// `KHR_materials_specular`.
     pub specular: Option<Specular<Texture>>,
     /// `KHR_materials_transmission`: how much light passes through, its texture's red scaling it.
     pub transmission: Option<Factor<Texture>>,
+    /// `KHR_materials_clearcoat`.
     pub clearcoat: Option<Clearcoat<Texture>>,
+    /// `KHR_materials_sheen`.
     pub sheen: Option<Sheen<Texture>>,
+    /// `KHR_materials_volume`.
     pub volume: Option<Volume<Texture>>,
+    /// `KHR_materials_anisotropy`.
     pub anisotropy: Option<Anisotropy<Texture>>,
+    /// `KHR_materials_iridescence`.
     pub iridescence: Option<Iridescence<Texture>>,
     /// `KHR_materials_dispersion`: how much the index of refraction varies with wavelength.
     pub dispersion: Option<f32>,
@@ -161,12 +215,27 @@ pub struct Extensions {
 /// A material, glTF's metallic-roughness model: a base color, the metallic and roughness
 /// scalars, and the textures that vary them. The textures read [`Prim::uvs`] unless their
 /// [`Sampling`] says otherwise; the images are indices into [`Mesh::images`].
-#[derive(Debug, Clone)]
+///
+/// Non-exhaustive, so that more of glTF's material can be carried: start from
+/// [`Material::plain`] (or [`Material::default`]) and set what you need.
+///
+/// ```
+/// use polysmelt::mesh::Material;
+///
+/// let mut glass = Material::plain("glass", [0.9, 0.95, 1.0, 0.25]);
+/// glass.roughness = 0.05;
+/// glass.double_sided = true;
+/// assert_eq!(glass.metallic, 0.0);
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct Material {
+    /// Its name; may be empty.
     pub name: String,
     /// Linear RGBA. Its alpha is opacity: below 1 the material is blended, unless
     /// `alpha_cutoff` makes it cut out instead.
     pub color: [f32; 4],
+    /// Linear RGBA (the image itself sRGB-encoded), scaling `color`.
     pub color_image: Option<usize>,
     /// A tangent-space normal map.
     pub normal_image: Option<usize>,
@@ -179,7 +248,9 @@ pub struct Material {
     pub emissive: [f32; 3],
     /// Light given off, scaling `emissive`.
     pub emissive_image: Option<usize>,
+    /// How metallic, 0 (a dielectric) to 1 (a metal).
     pub metallic: f32,
+    /// How rough, 0 (a mirror) to 1 (fully diffuse).
     pub roughness: f32,
     /// Seen from both sides rather than culled from behind.
     pub double_sided: bool,
@@ -239,18 +310,22 @@ pub struct Image {
     /// clones point at the same bytes.
     pub bytes: crate::Bytes,
     /// `image/png` or `image/jpeg`; or `image/webp` for a WebP image [`Document::flatten`]
-    /// took from a glTF document as it is, which [`to_glb`] writes as PNG and
+    /// took from a glTF document as it is, which [`Mesh::to_glb`] writes as PNG and
     /// [`Image::into_png_or_jpeg`] turns into PNG.
     ///
     /// [`Document::flatten`]: crate::document::Document::flatten
     pub mime: &'static str,
 }
 
-/// A model as triangles (and lines and points) grouped by material, ready to write as glTF.
-#[derive(Debug, Default, Clone)]
+/// A model as triangles (and lines and points) grouped by material, ready to write as glTF
+/// with [`Mesh::to_glb`] (see the [module](self) docs, which build one).
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct Mesh {
+    /// Its primitives, one a material.
     pub prims: Vec<Prim>,
+    /// Its materials, which [`Prim::material`] indexes.
     pub materials: Vec<Material>,
+    /// Its images, which the materials index.
     pub images: Vec<Image>,
     /// The joints skinned primitives are bound to, parents first; empty when nothing is skinned. Written out, a
     /// skin binds the vertices where they are, so the GLB loads in the pose the mesh was drawn in, ready to move.
@@ -274,6 +349,17 @@ impl Mesh {
     #[must_use]
     pub fn points(&self) -> usize {
         self.prims.iter().map(|p| p.points.len()).sum()
+    }
+
+    /// A GLB with one mesh: a primitive per `Prim` (and one more for its lines, and one for its
+    /// points, on the same vertices), its materials, and the images embedded.
+    ///
+    /// # Errors
+    ///
+    /// When the mesh has nothing to draw.
+    pub fn to_glb(&self) -> Result<Vec<u8>> {
+        ensure!(self.prims.iter().any(|p| !p.is_empty()), Empty, "nothing to draw");
+        Document::from_mesh(self.clone(), serde_json::Map::new()).to_glb()
     }
 }
 
@@ -401,31 +487,51 @@ pub fn srgb_to_linear(c: f32) -> f32 {
     }
 }
 
-/// Smooth normals from the triangles, for models that don't carry any.
+/// [`srgb_to_linear`] in double precision.
+#[cfg_attr(not(feature = "skp"), allow(dead_code, reason = "not every reader uses it"))]
+pub(crate) fn srgb_to_linear_f64(c: f64) -> f64 {
+    if c <= 0.040_45 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// An 8-bit sRGB color channel in linear light.
+#[cfg_attr(
+    not(any(feature = "flt", feature = "dxf", feature = "3mf")),
+    allow(dead_code, reason = "not every reader uses it")
+)]
+pub(crate) fn linear_u8(c: u8) -> f32 {
+    srgb_to_linear(f32::from(c) / 255.0)
+}
+
+/// An sRGB color with its RGB made linear; alpha is linear already.
+#[cfg_attr(
+    not(any(feature = "amf", feature = "dae", feature = "3mf")),
+    allow(dead_code, reason = "not every reader uses it")
+)]
+pub(crate) fn linear_rgba(c: [f32; 4]) -> [f32; 4] {
+    [srgb_to_linear(c[0]), srgb_to_linear(c[1]), srgb_to_linear(c[2]), c[3]]
+}
+
+/// A linear color channel, from 0 to 1, sRGB-encoded.
+#[cfg_attr(not(feature = "3mf"), allow(dead_code, reason = "not every reader uses it"))]
+pub(crate) fn linear_to_srgb(c: f32) -> f32 {
+    if c <= 0.003_130_8 {
+        c * 12.92
+    } else {
+        1.055 * c.powf(1.0 / 2.4) - 0.055
+    }
+}
+
+/// Smooth normals from the triangles: each vertex takes the normals of the triangles that share it, weighted
+/// by their areas, so vertices that aren't shared come out flat. A vertex with no triangle of any area around
+/// it points up, `[0, 1, 0]`. (A file read without normals gets these only across edges that turn less than 30
+/// degrees: its vertices are split where an edge is harder.)
 #[must_use]
 pub fn smooth_normals(positions: &[[f32; 3]], indices: &[u32]) -> Vec<[f32; 3]> {
-    let mut nrm = vec![[0.0f32; 3]; positions.len()];
-    for t in indices.as_chunks::<3>().0 {
-        let n = face_normal(
-            positions[t[0] as usize],
-            positions[t[1] as usize],
-            positions[t[2] as usize],
-        );
-        for &i in t {
-            for (a, b) in nrm[i as usize].iter_mut().zip(n) {
-                *a += b;
-            }
-        }
-    }
-    for n in &mut nrm {
-        let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
-        *n = if len > 0.0 {
-            [n[0] / len, n[1] / len, n[2] / len]
-        } else {
-            [0.0, 1.0, 0.0]
-        };
-    }
-    nrm
+    crate::geometry::smooth(positions, indices)
 }
 
 /// One gray primitive.
@@ -434,32 +540,22 @@ pub fn smooth_normals(positions: &[[f32; 3]], indices: &[u32]) -> Vec<[f32; 3]> 
 pub(crate) fn single(p: Prim) -> Mesh {
     Mesh {
         prims: vec![p],
-        materials: vec![Material::plain("default", GRAY)],
+        materials: vec![crate::legacy_material::default_material(false)],
         images: Vec::new(),
         skeleton: Vec::new(),
     }
 }
 
+// Shared by the format readers; which ones use it depends on the enabled features.
+#[allow(dead_code)]
 pub(crate) fn face_normal(a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> [f32; 3] {
-    let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
-    let v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
-    let n = [
-        u[1] * v[2] - u[2] * v[1],
-        u[2] * v[0] - u[0] * v[2],
-        u[0] * v[1] - u[1] * v[0],
-    ];
-    let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
-    if len > 0.0 {
-        [n[0] / len, n[1] / len, n[2] / len]
-    } else {
-        [0.0, 1.0, 0.0]
-    }
+    vec3::unit_or(vec3::cross(vec3::sub(b, a), vec3::sub(c, a)), [0.0, 1.0, 0.0])
 }
 
 /// Builds a primitive from triangles given as corner positions, storing each distinct point
-/// once (by bit pattern; `-0.0` counts as `0.0`) and the triangles as indices into them. No
-/// normals: glTF clients shade a primitive without normals flat, which is what a triangle soup
-/// (STL) means.
+/// once (by bit pattern; `-0.0` counts as `0.0`) and the triangles as indices into them: what a
+/// triangle soup (STL) needs before it can be given normals. It has none of its own to keep, so
+/// the primitive takes the default ones as it is written (see [`crate::geometry`]).
 // Shared by the format readers; which ones use it depends on the enabled features.
 #[allow(dead_code)]
 pub(crate) struct Welder {
@@ -578,17 +674,6 @@ impl Welder {
     }
 }
 
-/// A GLB with one mesh: a primitive per `Prim` (and one more for its lines, and one for its
-/// points, on the same vertices), its materials, and the images embedded.
-///
-/// # Errors
-///
-/// When the mesh has nothing to draw.
-pub fn to_glb(mesh: &Mesh) -> Result<Vec<u8>> {
-    ensure!(mesh.prims.iter().any(|p| !p.is_empty()), "nothing to draw");
-    Document::from_mesh(mesh.clone(), serde_json::Map::new()).to_glb()
-}
-
 /// Triangulates one polygon face, its corners in order, appending triangles as indices into
 /// `corners` that keep the polygon's winding. Convex polygons (nearly every face) are fanned;
 /// concave ones are ear-clipped in the polygon's plane, so no triangle falls outside the
@@ -614,11 +699,7 @@ pub(crate) fn triangulate(corners: &[[f32; 3]], out: &mut Vec<[u32; 3]>) {
         return;
     }
     // The plane's normal (Newell), then 2D coordinates along its two other axes.
-    let mut nrm = [0f64; 3];
-    for (i, a) in corners.iter().enumerate() {
-        let b = corners[if i + 1 == n { 0 } else { i + 1 }];
-        newell(&mut nrm, a.map(f64::from), b.map(f64::from));
-    }
+    let nrm = vec3::newell(corners.iter().map(|c| c.map(f64::from)));
     let axis = plane_axis(nrm);
     if nrm[axis] == 0.0 || n > 4096 {
         out.extend((1..u32_of(n) - 1).map(|k| [0, k, k + 1]));
@@ -664,14 +745,6 @@ pub(crate) fn triangulate(corners: &[[f32; 3]], out: &mut Vec<[u32; 3]>) {
     fan(out, &idx);
 }
 
-/// A step of Newell's normal: the edge from `a` to `b`.
-#[inline]
-fn newell(nrm: &mut [f64; 3], a: [f64; 3], b: [f64; 3]) {
-    nrm[0] += (a[1] - b[1]) * (a[2] + b[2]);
-    nrm[1] += (a[2] - b[2]) * (a[0] + b[0]);
-    nrm[2] += (a[0] - b[0]) * (a[1] + b[1]);
-}
-
 /// The axis a polygon with normal `nrm` faces most: the last of the largest.
 #[inline]
 fn plane_axis(nrm: [f64; 3]) -> usize {
@@ -714,10 +787,10 @@ pub(crate) fn quad(c: &[[f32; 3]; 4]) -> Option<[[u32; 3]; 2]> {
         c[3].map(f64::from),
     ];
     let mut nrm = [0f64; 3];
-    newell(&mut nrm, p[0], p[1]);
-    newell(&mut nrm, p[1], p[2]);
-    newell(&mut nrm, p[2], p[3]);
-    newell(&mut nrm, p[3], p[0]);
+    vec3::newell_edge(&mut nrm, p[0], p[1]);
+    vec3::newell_edge(&mut nrm, p[1], p[2]);
+    vec3::newell_edge(&mut nrm, p[2], p[3]);
+    vec3::newell_edge(&mut nrm, p[3], p[0]);
     let axis = plane_axis(nrm);
     if nrm[axis] == 0.0 {
         return Some(FAN);
@@ -877,8 +950,12 @@ mod triangulate_tests {
     feature = "x3d",
     feature = "dxf",
     feature = "md2",
+    feature = "smd",
     feature = "flt",
-    feature = "ogex"
+    feature = "ogex",
+    feature = "vtk",
+    feature = "msh",
+    feature = "medit"
 ))]
 #[derive(Default, Clone, Copy)]
 pub(crate) struct FxHasher(u64);
@@ -895,8 +972,12 @@ pub(crate) struct FxHasher(u64);
     feature = "x3d",
     feature = "dxf",
     feature = "md2",
+    feature = "smd",
     feature = "flt",
-    feature = "ogex"
+    feature = "ogex",
+    feature = "vtk",
+    feature = "msh",
+    feature = "medit"
 ))]
 impl std::hash::Hasher for FxHasher {
     #[inline]
@@ -936,8 +1017,12 @@ impl std::hash::Hasher for FxHasher {
     feature = "x3d",
     feature = "dxf",
     feature = "md2",
+    feature = "smd",
     feature = "flt",
-    feature = "ogex"
+    feature = "ogex",
+    feature = "vtk",
+    feature = "msh",
+    feature = "medit"
 ))]
 pub(crate) type FastMap<K, V> = std::collections::HashMap<K, V, std::hash::BuildHasherDefault<FxHasher>>;
 

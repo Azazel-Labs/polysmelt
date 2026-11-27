@@ -1,0 +1,18 @@
+{
+  "spec": "XGL 1.0 (the XGL file format specification): a real file, five cubes of materials with alpha, zipped",
+  "source": "assimp test models (test/models/XGL), BSD license, see ../LICENSE-assimp",
+  "triangles": 60,
+  "bounds": {
+    "min": [
+      -856.310974,
+      -55.100883,
+      -268.159119
+    ],
+    "max": [
+      98.810425,
+      1227.140869,
+      248.437958
+    ]
+  },
+  "tolerance": 0.0001
+}

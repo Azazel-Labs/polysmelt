@@ -32,37 +32,43 @@
 //! nodes' rest pose is the first frame's, so the base frame gives only what no frame animates: the engine never
 //! reads the rest, and some exporters write the base frame's quaternions with the other sign of `w` from their
 //! frames'. Frame k is at k over `frameRate` seconds (24 when the rate isn't a positive number, as the engine
-//! plays them, noted in the facts). The frames become one linear animation, named after the file: a translation
+//! plays them, an assumed `frameRate` in the source info). The frames become one linear animation, named after the file: a translation
 //! channel for each joint with a position bit, a rotation channel for each with a quaternion bit. Per-frame
 //! `bounds` are dropped. A mesh and its animations are separate files, each read on its own; both share the joint
 //! names that tie them together.
 //!
-//! The format is Z up, so the scene's roots are turned for glTF's Y up; game units are kept unscaled.
+//! The format is Z up and right-handed, as the engine it belongs to is, so the scene stays as the file has it under the document's `RootNode`, which turns it for glTF's Y
+//! up (the source info's `upAxis` is a declared `+Z`, converted, and its `handedness` a declared `right`); game units are kept unscaled, and their length unknown. The exporter's
+//! `commandline` is kept as written.
 //!
 //! A file cut short, a number that isn't one, or an index past what its block holds (a vertex's weights, a weight's
-//! joint, a triangle's vertex, a joint's parent, a frame's components) is an error. Counts are checked against the
+//! joint, a joint's parent, a frame's components) is an error. A triangle naming a vertex past its block's is
+//! dropped and counted (`droppedGeometry` in the source extras), as in every format. Counts are checked against the
 //! file's size before anything is allocated for them.
 
 use std::collections::HashMap;
 
-use serde_json::{Map, Value, json};
+use serde_json::{Map, json};
 
 use super::Input;
-use super::scene::{
-    self, Animation, Channel, Interp, M4, MAX_INFLUENCES, Node, Path, Primitive, Scene, SceneMesh, Skin, Z_UP_TO_Y_UP,
-};
+use super::scene::{self, Animation, Channel, Interp, M4, Node, Path, Primitive, Scene, SceneMesh, Skin, Z_UP_TO_Y_UP};
+use super::stream::{self, f64_from};
 use crate::Result;
 use crate::assets::Assets;
 use crate::document::{Document, Keep};
 use crate::images::Images;
 use crate::mesh::Material;
 use crate::num::{f32_of, u32_of};
+use crate::quat;
+use crate::source::{Axis, Fact, Handedness};
 
-/// The frame rate taken when a file gives none that's usable: the engine's.
+/// The frame rate taken when a file gives none that's usable: the engine's, whose `idMD5Anim` starts at a
+/// `frameRate` of 24 before it reads the file's (id Software's released Doom 3 source). So that, not the readers'
+/// shared assumption.
 const DEFAULT_RATE: f32 = 24.0;
 
 /// Reads an `.md5mesh` or `.md5anim` model.
-pub(crate) fn load(input: Input<'_>, ext: &str, assets: &dyn Assets, keep: Keep) -> Result<Document<'static>> {
+pub(crate) fn load(input: Input<'_>, ext: &str, assets: &dyn Assets, keep: Keep) -> Result<Document> {
     let data = input.read()?;
     let file = parse(&data)?;
     let stem = input
@@ -74,20 +80,25 @@ pub(crate) fn load(input: Input<'_>, ext: &str, assets: &dyn Assets, keep: Keep)
         (false, true) => true,
         // Both kinds of section, or neither: the extension decides.
         (true, true) => ext.eq_ignore_ascii_case("md5anim"),
-        (false, false) => bail!("MD5 file has no joints, meshes or hierarchy"),
+        (false, false) => bail!(Empty, "MD5 file has no joints, meshes or hierarchy"),
     };
     let mut scene = if anim {
-        build_anim(&file.anim.unwrap_or_default(), &stem)?
+        // An animation file is one clip, named as its file is.
+        build_anim(
+            &file.anim.unwrap_or_default(),
+            &super::keys::clip_name(input.path).unwrap_or_default(),
+        )?
     } else {
         build_mesh(&file.mesh.unwrap_or_default(), &stem, &input, assets, keep)?
     };
-    scene.source.insert("format".into(), json!("MD5"));
-    scene.source.insert("version".into(), json!(file.version));
-    scene.source.insert("upAxis".into(), json!("Z"));
+    scene.info.format = Some("MD5".into());
+    scene.info.version = Some(file.version.to_string());
+    scene.info.up_axis = Fact::Declared(Axis::PosZ);
+    scene.info.handedness = Fact::Declared(Handedness::Right);
     if !file.commandline.is_empty() {
         scene.source.insert("commandline".into(), json!(file.commandline));
     }
-    scene.rotate_roots(Z_UP_TO_Y_UP);
+    scene.turn(Z_UP_TO_Y_UP);
     scene.finish(keep)
 }
 
@@ -113,7 +124,7 @@ impl<'a> Lex<'a> {
     }
 
     fn err(&self, what: &str) -> crate::Error {
-        invalid!("MD5 file, line {}: {what}", self.line)
+        err!(Corrupt, "MD5 file, line {}: {what}", self.line)
     }
 
     /// Moves past `n` bytes, counting the line breaks among them.
@@ -160,7 +171,7 @@ impl<'a> Lex<'a> {
             }
             b'"' => {
                 let Some(end) = rest[1..].iter().position(|&c| c == b'"' || c == b'\n') else {
-                    return Err(self.err("a string runs to the end of the file"));
+                    bail!(Truncated, "MD5 file is cut short in a string on line {}", self.line);
                 };
                 if rest[1 + end] != b'"' {
                     return Err(self.err("a string runs past the end of its line"));
@@ -191,7 +202,7 @@ impl<'a> Lex<'a> {
     }
 
     fn need(&mut self) -> Result<Tok<'a>> {
-        self.next()?.ok_or_else(|| invalid!("MD5 file is cut short"))
+        self.next()?.ok_or_else(|| err!(Truncated, "MD5 file is cut short"))
     }
 
     fn sym(&mut self, s: u8) -> Result<()> {
@@ -210,19 +221,14 @@ impl<'a> Lex<'a> {
 
     fn num(&mut self) -> Result<f64> {
         let w = self.word()?;
-        std::str::from_utf8(w)
-            .ok()
-            .and_then(|s| s.parse::<f64>().ok())
+        f64_from(w)
             .filter(|v| v.is_finite())
-            .ok_or_else(|| self.err(&format!("{:?} isn't a number", String::from_utf8_lossy(w))))
+            .ok_or_else(|| self.err(&format!("{:?} isn't a number", crate::bytes::text(w))))
     }
 
     fn int(&mut self) -> Result<i64> {
         let w = self.word()?;
-        std::str::from_utf8(w)
-            .ok()
-            .and_then(|s| s.parse::<i64>().ok())
-            .ok_or_else(|| self.err(&format!("{:?} isn't a whole number", String::from_utf8_lossy(w))))
+        stream::int(w).ok_or_else(|| self.err(&format!("{:?} isn't a whole number", crate::bytes::text(w))))
     }
 
     /// A count or index: a whole number that isn't negative.
@@ -250,7 +256,11 @@ impl<'a> Lex<'a> {
     /// least `size` bytes each.
     fn room(&self, n: usize, size: usize) -> Result<usize> {
         if n.saturating_mul(size) > self.b.len() - self.at {
-            return Err(self.err(&format!("a count of {n} is more than the file holds")));
+            bail!(
+                Truncated,
+                "MD5 file is cut short: line {} counts {n}, more than the file holds",
+                self.line
+            );
         }
         Ok(n)
     }
@@ -274,10 +284,6 @@ fn quat(xyz: [f64; 3]) -> [f64; 4] {
     let t = 1.0 - xyz[0] * xyz[0] - xyz[1] * xyz[1] - xyz[2] * xyz[2];
     let w = if t > 0.0 { -t.sqrt() } else { 0.0 };
     [xyz[0], xyz[1], xyz[2], w]
-}
-
-fn conj(q: [f64; 4]) -> [f64; 4] {
-    [-q[0], -q[1], -q[2], q[3]]
 }
 
 /// What a file holds.
@@ -340,12 +346,18 @@ fn parse(data: &[u8]) -> Result<File> {
     let mut lex = Lex::new(data);
     match lex.next()? {
         Some(Tok::Word(b"MD5Version")) => {}
-        _ => bail!("not an MD5 file: it doesn't start with MD5Version"),
+        _ => bail!(UnknownFormat, "not an MD5 file: it doesn't start with MD5Version"),
     }
     let mut file = File {
         version: lex.int()?,
         ..File::default()
     };
+    ensure!(
+        file.version == 10,
+        Unsupported,
+        "MD5Version {} isn't read, only version 10",
+        file.version
+    );
     while let Some(tok) = lex.next()? {
         let Tok::Word(key) = tok else {
             if tok == Tok::Sym(b'{') {
@@ -430,7 +442,7 @@ fn parse(data: &[u8]) -> Result<File> {
                         }
                         Some(Tok::Word(_)) => values.push(f32_of(lex.num()?)),
                         Some(_) => return Err(lex.err("expected a number or '}'")),
-                        None => bail!("MD5 file is cut short"),
+                        None => bail!(Truncated, "MD5 file is cut short"),
                     }
                 }
                 file.anim.get_or_insert_default().frames.push(values);
@@ -527,21 +539,7 @@ fn mesh_block(lex: &mut Lex<'_>) -> Result<MeshBlock> {
 
 /// The texture a shader names, found by the engine's conventions.
 fn texture(shader: &str, input: &Input<'_>, assets: &dyn Assets, images: &mut Images) -> Option<usize> {
-    if shader.is_empty() {
-        return None;
-    }
-    let dir = input.dir();
-    let has_ext = std::path::Path::new(shader).extension().is_some_and(|e| e.len() <= 4);
-    let mut tries = Vec::new();
-    if has_ext {
-        tries.push(shader.to_owned());
-    }
-    tries.push(format!("{shader}.tga"));
-    tries.push(format!("{shader}_d.tga"));
-    tries
-        .iter()
-        .find_map(|t| assets.find(t, dir).map(|p| (p, t)))
-        .and_then(|(p, t)| images.file(assets, p, t))
+    images.find_bare(assets, shader, &[".tga", "_d.tga"], input.dir())
 }
 
 fn build_mesh(m: &MeshFile, stem: &str, input: &Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Scene> {
@@ -550,6 +548,7 @@ fn build_mesh(m: &MeshFile, stem: &str, input: &Input<'_>, assets: &dyn Assets, 
     for j in &m.joints {
         ensure!(
             j.parent >= -1 && j.parent < i64::try_from(n).unwrap_or(i64::MAX),
+            Corrupt,
             "MD5 joint {:?} has parent {}, but there are {n} joints",
             j.name,
             j.parent
@@ -559,19 +558,19 @@ fn build_mesh(m: &MeshFile, stem: &str, input: &Input<'_>, assets: &dyn Assets, 
     let mut worlds: Vec<M4> = Vec::with_capacity(n);
     for (i, j) in m.joints.iter().enumerate() {
         let parent = usize::try_from(j.parent).ok().filter(|&p| p != i);
-        let rot = scene::normalize(j.rot).map(f64::from);
+        let rot = quat::normalize(j.rot).map(f64::from);
         let mut node = Node::named(j.name.clone(), parent);
         let (t, r) = match parent {
             Some(p) => {
                 let pj = &m.joints[p];
-                let pr = conj(scene::normalize(pj.rot).map(f64::from));
+                let pr = quat::conjugate(quat::normalize(pj.rot).map(f64::from));
                 let d = [j.pos[0] - pj.pos[0], j.pos[1] - pj.pos[1], j.pos[2] - pj.pos[2]];
-                (scene::rotate(pr, d), scene::quat_mul(pr, rot))
+                (quat::rotate(pr, d), quat::mul(pr, rot))
             }
             None => (j.pos, rot),
         };
         node.translation = t.map(f32_of);
-        node.rotation = scene::normalize(r);
+        node.rotation = quat::normalize(r);
         scene.add(node);
         worlds.push(scene::trs(j.pos.map(f32_of), rot.map(f32_of), [1.0; 3]));
     }
@@ -583,6 +582,7 @@ fn build_mesh(m: &MeshFile, stem: &str, input: &Input<'_>, assets: &dyn Assets, 
         for (vi, v) in block.verts.iter().enumerate() {
             ensure!(
                 v.start.checked_add(v.count).is_some_and(|e| e <= block.weights.len()),
+                Corrupt,
                 "MD5 mesh {mi}: vertex {vi}'s weights run past numweights {}",
                 block.weights.len()
             );
@@ -590,17 +590,14 @@ fn build_mesh(m: &MeshFile, stem: &str, input: &Input<'_>, assets: &dyn Assets, 
         for (wi, w) in block.weights.iter().enumerate() {
             ensure!(
                 w.joint < n,
+                Corrupt,
                 "MD5 mesh {mi}: weight {wi} names joint {}, but there are {n}",
                 w.joint
             );
         }
-        for (ti, t) in block.tris.iter().enumerate() {
-            ensure!(
-                t.iter().all(|&i| i < block.verts.len()),
-                "MD5 mesh {mi}: triangle {ti} names a vertex past numverts {}",
-                block.verts.len()
-            );
-        }
+        // A triangle naming a vertex that isn't there is dropped, as in every format.
+        let whole = |t: &&[usize; 3]| t.iter().all(|&i| i < block.verts.len());
+        scene.dropped += block.tris.iter().filter(|t| !whole(t)).count();
         if block.tris.is_empty() || block.verts.is_empty() {
             continue;
         }
@@ -611,7 +608,7 @@ fn build_mesh(m: &MeshFile, stem: &str, input: &Input<'_>, assets: &dyn Assets, 
             let mut set: Vec<(u32, f32)> = Vec::new();
             for w in &block.weights[v.start..v.start + v.count] {
                 let j = &m.joints[w.joint];
-                let o = scene::rotate(scene::normalize(j.rot).map(f64::from), w.pos);
+                let o = quat::rotate(quat::normalize(j.rot).map(f64::from), w.pos);
                 for k in 0..3 {
                     p[k] += w.bias * (j.pos[k] + o[k]);
                 }
@@ -622,8 +619,7 @@ fn build_mesh(m: &MeshFile, stem: &str, input: &Input<'_>, assets: &dyn Assets, 
                 }
             }
             set.retain(|s| s.1 > 0.0 && s.1.is_finite());
-            set.sort_by(|a, b| b.1.total_cmp(&a.1));
-            set.truncate(MAX_INFLUENCES);
+            scene::strongest(&mut set);
             positions.push(p.map(f32_of));
             sets.push(set);
         }
@@ -638,7 +634,8 @@ fn build_mesh(m: &MeshFile, stem: &str, input: &Input<'_>, assets: &dyn Assets, 
             }
         }
         // Clockwise front faces in the file; glTF's are counterclockwise.
-        let indices: Vec<u32> = block.tris.iter().flat_map(|t| [t[0], t[2], t[1]].map(u32_of)).collect();
+        let tris = block.tris.iter().filter(whole);
+        let indices: Vec<u32> = tris.flat_map(|t| [t[0], t[2], t[1]].map(u32_of)).collect();
         let normals = smooth_normals(&positions, &indices);
         let material = if let Some(&i) = materials.get(&block.shader) {
             i
@@ -735,9 +732,10 @@ fn smooth_normals(positions: &[[f32; 3]], indices: &[u32]) -> Vec<[f32; 3]> {
 fn build_anim(a: &AnimFile, stem: &str) -> Result<Scene> {
     let mut scene = Scene::default();
     let n = a.hierarchy.len();
-    ensure!(n > 0, "MD5 animation has no joints");
+    ensure!(n > 0, Empty, "MD5 animation has no joints");
     ensure!(
         a.base.len() == n,
+        Corrupt,
         "MD5 animation's baseframe has {} joints, its hierarchy {n}",
         a.base.len()
     );
@@ -745,18 +743,21 @@ fn build_anim(a: &AnimFile, stem: &str) -> Result<Scene> {
     for (name, parent, flags, start) in &a.hierarchy {
         ensure!(
             *parent >= -1 && *parent < i64::try_from(n).unwrap_or(i64::MAX),
+            Corrupt,
             "MD5 joint {name:?} has parent {parent}, but there are {n} joints"
         );
         ensure!(
             start
                 .checked_add(flags.count_ones() as usize)
                 .is_some_and(|e| e <= components),
+            Corrupt,
             "MD5 joint {name:?}'s components run past numAnimatedComponents {components}"
         );
     }
     for (k, f) in a.frames.iter().enumerate() {
         ensure!(
             f.len() >= components,
+            Corrupt,
             "MD5 frame {k} has {} values, expected numAnimatedComponents {components}",
             f.len()
         );
@@ -785,7 +786,7 @@ fn build_anim(a: &AnimFile, stem: &str) -> Result<Scene> {
             None => *base,
         };
         node.translation = [v[0], v[1], v[2]].map(f32_of);
-        node.rotation = scene::normalize(quat([v[3], v[4], v[5]]));
+        node.rotation = quat::normalize(quat([v[3], v[4], v[5]]));
         scene.add(node);
     }
     let times: Vec<f32> = (0..a.frames.len())
@@ -801,7 +802,7 @@ fn build_anim(a: &AnimFile, stem: &str) -> Result<Scene> {
         for f in &a.frames {
             let v = pose(base, *flags, *start, f);
             ts.extend([v[0], v[1], v[2]].map(f32_of));
-            rs.extend(scene::normalize(quat([v[3], v[4], v[5]])));
+            rs.extend(quat::normalize(quat([v[3], v[4], v[5]])));
         }
         if flags & 0b111 != 0 {
             channels.push(Channel {
@@ -832,14 +833,13 @@ fn build_anim(a: &AnimFile, stem: &str) -> Result<Scene> {
     let mut facts = Map::new();
     facts.insert("joints".into(), json!(n));
     facts.insert("frames".into(), json!(a.frames.len()));
-    facts.insert("frame_rate".into(), json!(rate));
     facts.insert("components".into(), json!(components));
-    if guessed {
-        facts.insert("frame_rate_guessed".into(), Value::Bool(true));
-    }
     scene.facts = facts;
     scene.source.insert("frames".into(), json!(a.frames.len()));
-    scene.source.insert("frameRate".into(), json!(rate));
+    scene.info.frame_rate = match a.frame_rate {
+        Some(r) if !guessed => Fact::Declared(r),
+        _ => Fact::Assumed(f64::from(rate)),
+    };
     Ok(scene)
 }
 
@@ -899,7 +899,7 @@ frame 1 {
 }
 "#;
 
-    fn read(text: &[u8], name: &str) -> Result<Document<'static>> {
+    fn read(text: &[u8], name: &str) -> Result<Document> {
         let ext = name.rsplit('.').next().unwrap_or("");
         load(Input::memory(text, name), ext, &Memory::new(), Keep::ALL)
     }
@@ -907,7 +907,7 @@ frame 1 {
     #[test]
     fn mesh_vertices_come_from_weights() {
         let doc = read(MESH.as_bytes(), "t.md5mesh").unwrap();
-        assert_eq!(doc.json["skins"][0]["joints"], json!([0, 1]));
+        assert_eq!(doc.json()["skins"][0]["joints"], json!([0, 1]));
         let mesh = doc.flatten(Pose::Rest).unwrap().unwrap();
         // Z up turned to Y up: (x, y, z) becomes (x, z, -y).
         let mut got: Vec<[f32; 3]> = mesh.prims[0].positions.clone();
@@ -917,17 +917,27 @@ frame 1 {
             assert!(g.iter().zip(w).all(|(a, b)| (a - b).abs() < 1e-5), "{got:?}");
         }
         assert_eq!(doc.facts["joints"], 2);
-        assert_eq!(doc.json["asset"]["extras"]["source"]["commandline"], "test");
+        assert_eq!(doc.json()["asset"]["extras"]["source"]["commandline"], "test");
     }
 
     #[test]
     fn anim_keys_follow_flags() {
         let doc = read(ANIM.as_bytes(), "walk.md5anim").unwrap();
-        let a = &doc.json["animations"][0];
+        let a = &doc.json()["animations"][0];
         assert_eq!(a["name"], "walk");
         assert_eq!(a["channels"].as_array().unwrap().len(), 2);
         assert_eq!(doc.facts["frames"], 2);
         assert!(doc.flatten(Pose::Rest).unwrap().is_none());
+        let info = doc.source_info();
+        assert_eq!(info.format.as_deref(), Some("MD5"));
+        assert_eq!(info.version.as_deref(), Some("10"));
+        assert_eq!(info.frame_rate, Fact::Declared(10.0));
+        assert_eq!(info.meters_per_unit, Fact::Unknown);
+        assert_eq!(info.up_axis, Fact::Declared(Axis::PosZ));
+        assert!(info.converted.up_axis);
+        let guessed = ANIM.replace("frameRate 10", "frameRate 0");
+        let doc = read(guessed.as_bytes(), "walk.md5anim").unwrap();
+        assert_eq!(doc.source_info().frame_rate, Fact::Assumed(24.0));
     }
 
     #[test]
@@ -952,8 +962,10 @@ frame 1 {
                 .to_string()
                 .contains("joint 7")
         );
+        // A triangle naming a vertex that isn't there is dropped and counted, as in every format.
         let bad = MESH.replace("tri 0 0 2 1", "tri 0 0 2 9");
-        assert!(read(bad.as_bytes(), "t.md5mesh").is_err());
+        let doc = read(bad.as_bytes(), "t.md5mesh").unwrap();
+        assert_eq!(doc.json()["asset"]["extras"]["source"]["droppedGeometry"], 1);
         let bad = MESH.replace("vert 2 ( 0 1 ) 2 2", "vert 2 ( 0 1 ) 3 2");
         assert!(read(bad.as_bytes(), "t.md5mesh").is_err());
         let bad = MESH.replace("numverts 3", "numverts 99999999999");

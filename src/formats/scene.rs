@@ -2,28 +2,38 @@
 //! transforms, meshes with any number of texture coordinate, color and joint sets, morph targets, skins and
 //! animations.
 //!
-//! A reader builds the scene in its format's own coordinates, then converts it whole: [`Scene::mirror_z`] for a
-//! left-handed source (positions, normals, transforms, inverse bind matrices and keys mirrored, and triangles wound
-//! the other way), [`Scene::rotate_roots`] for a source that isn't Y up (only the root nodes and their keys turn,
-//! so skins and morph targets stay as they are), and [`Scene::scale`] for a source in other units.
+//! A reader builds the scene in its format's own coordinates and units and leaves it so. [`Scene::mirror_z`]
+//! mirrors a left-handed source (positions, normals, transforms, inverse bind matrices and keys, with triangles
+//! wound the other way). [`Scene::turn`] and [`Scene::unit`] say what brings the scene to glTF's Y up and meters,
+//! and change nothing in it: [`Scene::finish`] puts every root under the one root node that carries them (see
+//! [`frame`]), as every reader does.
 //!
 //! [`Scene::finish`] writes what glTF requires and the validator checks: unit normals and rotations, positions'
 //! bounds, joints and weights merged, sorted, cut to sixteen and summing to 1, key times strictly increasing,
-//! quaternion keys on one side, and every skin's joints under one root. A node can't be its own ancestor: a parent
+//! quaternion keys on one side, and every skin's joints under one root (the root node). A node can't be its own ancestor: a parent
 //! link that would close a loop is cut.
-
-use std::collections::HashMap;
 
 use serde_json::{Map, Value, json};
 
+use super::frame::{self, Frame};
 use crate::Result;
-use crate::document::{Builder, Document, Keep, Part};
-use crate::images::Source;
+use crate::document::{Accessor, Builder, Document, Keep, Limits, Part, Sparse};
+use crate::legacy_material::{self, Transparency};
+use crate::material::{Alpha, Full};
 use crate::mesh::Material;
 use crate::num::{f32_of, u32_of};
+use crate::quat::{self, normalize};
+use crate::source::SourceInfo;
 
-/// The most influences a vertex keeps: four sets of joints and weights.
-pub(crate) const MAX_INFLUENCES: usize = 16;
+use super::keys;
+pub(crate) use super::keys::{Interp, Path};
+use crate::skin::{self, Sets};
+#[allow(unused_imports, reason = "each reader uses the parts its format needs")]
+pub(crate) use crate::skin::{MAX_INFLUENCES, strongest};
+
+/// The most texture coordinate sets a mesh keeps, as `TEXCOORD_0` to `TEXCOORD_7`: past what any real model has,
+/// and a bound on what a file that declares hundreds costs.
+pub(crate) const MAX_UV_SETS: usize = 8;
 
 /// A node: a name, a parent, a transform, and what it carries.
 #[derive(Debug, Clone)]
@@ -95,8 +105,9 @@ pub(crate) struct Primitive {
     pub joints: Vec<u32>,
     pub weights: Vec<f32>,
     pub influences: usize,
-    /// The joint a vertex no joint moves is bound to.
-    pub rest_joint: u32,
+    /// The joint a vertex no joint moves is bound to, when the reader has one for it; with `None`, the node that
+    /// draws the mesh becomes that joint if any vertex needs it ([`crate::skin`]).
+    pub rest_joint: Option<u32>,
     /// Triangles, three indices each (or points, one each, when `points` is set, or line segments, two each,
     /// when `lines` is set).
     pub indices: Vec<u32>,
@@ -127,21 +138,6 @@ pub(crate) struct Skin {
     pub inverse_binds: Vec<M4>,
 }
 
-/// What an animation channel sets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Path {
-    Translation,
-    Rotation,
-    Scale,
-    Weights,
-}
-
-/// How values between keys are found.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Interp {
-    Linear,
-}
-
 /// One animated property of one node.
 #[derive(Debug, Clone)]
 pub(crate) struct Channel {
@@ -168,20 +164,27 @@ pub(crate) struct Scene {
     pub nodes: Vec<Node>,
     pub meshes: Vec<SceneMesh>,
     pub materials: Vec<Material>,
-    pub images: Vec<Source>,
+    /// Materials (indices) blended by their color texture's alpha, their own color being opaque.
+    pub blend: Vec<usize>,
+    pub images: crate::images::List,
     pub skins: Vec<Skin>,
     pub animations: Vec<Animation>,
-    /// Written as `asset.extras.source`.
+    /// The format's own details, written as `asset.extras.source` with [`Scene::info`].
     pub source: Map<String, Value>,
+    /// What the file says about itself (its units, up axis, author...), written into `asset.extras.source`. What
+    /// [`Scene::mirror_z`] converts is marked converted there, and what the root node converts when it is made.
+    pub info: SourceInfo,
     pub facts: Map<String, Value>,
+    /// The triangles the reader left out for naming a vertex that isn't there, counted with those dropped as
+    /// the scene is written (see [`crate::geometry`]).
+    pub dropped: usize,
+    /// The turn and scale that bring the scene to glTF's axes and meters ([`Scene::turn`],
+    /// [`Scene::unit`]): the root node [`Scene::finish`] puts every root under carries them.
+    pub frame: Frame,
 }
 
-/// A 4×4 matrix, column-major.
-pub(crate) type M4 = [f64; 16];
-
-pub(crate) const IDENTITY: M4 = [
-    1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
-];
+/// 4×4 matrices, column-major.
+pub(crate) use super::xform::col::{IDENTITY, M4, mul};
 
 impl Scene {
     /// Adds a node; returns its index.
@@ -252,6 +255,7 @@ impl Scene {
     /// Mirrors the scene through the XY plane (Z negated), as a left-handed source needs: vertex data, node
     /// transforms, inverse bind matrices and keys, with every triangle wound the other way so faces keep facing out.
     pub fn mirror_z(&mut self) {
+        self.info.converted.handedness = true;
         let v = |p: &mut [f32; 3]| p[2] = -p[2];
         for m in &mut self.meshes {
             for p in &mut m.prims {
@@ -295,69 +299,15 @@ impl Scene {
         }
     }
 
-    /// Scales lengths by `s`: positions, morph offsets, translations, keys and inverse bind matrices.
-    pub fn scale(&mut self, s: f32) {
-        let v = |p: &mut [f32; 3]| *p = p.map(|c| c * s);
-        for m in &mut self.meshes {
-            for p in &mut m.prims {
-                p.positions.iter_mut().for_each(v);
-                for t in &mut p.targets {
-                    t.positions.iter_mut().for_each(v);
-                }
-            }
-        }
-        for n in &mut self.nodes {
-            v(&mut n.translation);
-        }
-        let sd = f64::from(s);
-        for sk in &mut self.skins {
-            for m in &mut sk.inverse_binds {
-                m[12] *= sd;
-                m[13] *= sd;
-                m[14] *= sd;
-            }
-        }
-        for a in &mut self.animations {
-            for c in &mut a.channels {
-                if c.path == Path::Translation {
-                    c.values.iter_mut().for_each(|x| *x *= s);
-                }
-            }
-        }
+    /// Says the scene's unit is `meters` long: the root node scales it to meters, and nothing in the scene changes.
+    pub fn unit(&mut self, meters: f64) {
+        self.frame = self.frame.scaled(meters);
     }
 
-    /// Turns the whole scene by unit quaternion `q`: each root node's transform and keys are turned, and what hangs
-    /// from them follows. Skinned vertices follow their joints, so nothing else changes.
-    pub fn rotate_roots(&mut self, q: [f32; 4]) {
-        let parents = self.parents();
-        let qd = q.map(f64::from);
-        let roots: Vec<bool> = parents.iter().map(Option::is_none).collect();
-        for (n, &root) in self.nodes.iter_mut().zip(&roots) {
-            // A skinned mesh's node doesn't place it, so it stays as it is.
-            if !root || n.skin.is_some() {
-                continue;
-            }
-            n.translation = rotate(qd, n.translation.map(f64::from)).map(f32_of);
-            n.rotation = normalize(quat_mul(qd, n.rotation.map(f64::from)));
-        }
-        for a in &mut self.animations {
-            for c in &mut a.channels {
-                if c.node >= roots.len() || !roots[c.node] || self.nodes[c.node].skin.is_some() {
-                    continue;
-                }
-                match c.path {
-                    Path::Translation => c.values.chunks_exact_mut(3).for_each(|k| {
-                        let r = rotate(qd, [k[0], k[1], k[2]].map(f64::from)).map(f32_of);
-                        k.copy_from_slice(&r);
-                    }),
-                    Path::Rotation => c.values.chunks_exact_mut(4).for_each(|k| {
-                        let r = normalize(quat_mul(qd, [k[0], k[1], k[2], k[3]].map(f64::from)));
-                        k.copy_from_slice(&r);
-                    }),
-                    Path::Scale | Path::Weights => {}
-                }
-            }
-        }
+    /// Says unit quaternion `q` turns the scene to glTF's axes: the root node turns, and nothing in the scene
+    /// changes.
+    pub fn turn(&mut self, q: [f32; 4]) {
+        self.frame = self.frame.turned(q.map(f64::from));
     }
 
     /// The triangles the scene draws.
@@ -370,63 +320,98 @@ impl Scene {
             .sum()
     }
 
-    /// Writes the scene as a glTF document, keeping what `keep` says; more triangles than it allows is an error.
-    pub fn finish(mut self, keep: Keep) -> Result<Document<'static>> {
-        let limit = keep.triangles();
-        let tris = self.triangles();
-        ensure!(tris <= limit, "too many triangles to convert (more than {limit})");
-        let parents = self.parents();
-        let mut b = Builder::default();
-        let mut json = Map::new();
-
-        // Every skin's joints under one root: the tops of their trees gathered under a new node when there are
-        // several.
-        let mut extra_root = None;
-        if keep.skins {
-            let mut tops = Vec::new();
-            for s in &self.skins {
-                let mut mine: Vec<usize> = Vec::new();
-                for &j in &s.joints {
-                    let mut at = j;
-                    let mut steps = 0;
-                    while let Some(p) = parents.get(at).copied().flatten() {
-                        at = p;
-                        steps += 1;
-                        if steps > parents.len() {
-                            break;
-                        }
-                    }
-                    if !mine.contains(&at) {
-                        mine.push(at);
-                    }
-                }
-                if mine.len() > 1 {
-                    for t in mine {
-                        if !tops.contains(&t) {
-                            tops.push(t);
-                        }
-                    }
+    /// Gives every skinned primitive with a vertex no joint moves, and no rest joint of its reader's choosing, the
+    /// node drawing its mesh as one: added to the skin after its other joints, with the inverse bind matrix that
+    /// keeps the vertex where it is (a skinned node's own transform isn't written, so the node stands where its
+    /// parent does).
+    fn rest_joints(&mut self, parents: &[Option<usize>]) {
+        let mut world = None;
+        for ni in 0..self.nodes.len() {
+            let (Some(m), Some(si)) = (self.nodes[ni].mesh, self.nodes[ni].skin) else {
+                continue;
+            };
+            let (Some(mesh), Some(skin)) = (self.meshes.get(m), self.skins.get(si)) else {
+                continue;
+            };
+            let count = skin.joints.len();
+            if count == 0
+                || !mesh
+                    .prims
+                    .iter()
+                    .any(|p| p.rest_joint.is_none() && has_unbound(p, count))
+            {
+                continue;
+            }
+            let at = match parents[ni] {
+                Some(p) => world.get_or_insert_with(|| self.world())[p],
+                None => IDENTITY,
+            };
+            let skin = &mut self.skins[si];
+            skin.inverse_binds.resize(count, IDENTITY);
+            skin.joints.push(ni);
+            skin.inverse_binds.push(invert(&at));
+            for p in &mut self.meshes[m].prims {
+                if p.rest_joint.is_none() {
+                    p.rest_joint = Some(u32_of(count));
                 }
             }
-            if !tops.is_empty() {
-                extra_root = Some((self.nodes.len(), tops));
+        }
+    }
+
+    /// Writes the scene as a glTF document, keeping what `keep` says; more triangles than it allows is an error.
+    pub fn finish(mut self, keep: Keep) -> Result<Document> {
+        let limit = keep.triangles();
+        let tris = self.triangles();
+        ensure!(
+            tris <= limit,
+            LimitExceeded,
+            "too many triangles to convert (more than {limit})"
+        );
+        let parents = self.parents();
+        let mut b = Builder::new(keep.crease_angle());
+        b.dropped = self.dropped;
+        let mut json = Map::new();
+
+        // Faces with no material take the default one (white under vertex colors), and a material drawn with
+        // vertex colors that aren't opaque blends.
+        let mut blend = std::mem::take(&mut self.blend);
+        let mut defaults = [None; 2];
+        for p in self.meshes.iter_mut().flat_map(|m| &mut m.prims) {
+            let colors = p
+                .colors
+                .first()
+                .filter(|c| !c.is_empty() && c.len() == p.positions.len());
+            let faces = !p.points && !p.lines && !p.indices.is_empty();
+            if p.material.is_none() && faces && !p.positions.is_empty() {
+                let k = usize::from(colors.is_some());
+                let materials = &mut self.materials;
+                p.material = Some(*defaults[k].get_or_insert_with(|| {
+                    materials.push(legacy_material::default_material(k == 1));
+                    materials.len() - 1
+                }));
+            }
+            if let Some(m) = p.material
+                && colors.is_some_and(|c| c.iter().any(|c| c[3] < 1.0))
+            {
+                blend.push(m);
             }
         }
 
+        // A vertex no joint moves stays with the node that draws its mesh: where a reader appointed no rest joint,
+        // that node joins the skin as one, after the file's joints, bound where it stands.
+        if keep.skins {
+            self.rest_joints(&parents);
+        }
+
+        // Every root goes under the root node, so every skin's joints have one root whatever trees they are in.
         let n = self.nodes.len();
-        let mut children: Vec<Vec<usize>> = vec![Vec::new(); n + 1];
+        let mut children: Vec<Vec<usize>> = vec![Vec::new(); n];
         let mut roots = Vec::new();
         for (i, p) in parents.iter().enumerate() {
             match p {
                 Some(p) => children[*p].push(i),
-                None => match &extra_root {
-                    Some((r, tops)) if tops.contains(&i) => children[*r].push(i),
-                    _ => roots.push(i),
-                },
+                None => roots.push(i),
             }
-        }
-        if let Some((r, _)) = &extra_root {
-            roots.push(*r);
         }
 
         // Meshes.
@@ -441,7 +426,7 @@ impl Scene {
         let mut mesh_index = vec![None; self.meshes.len()];
         // Joints and weights are written after every mesh's other data, so a read without skins numbers the
         // rest as a full read does.
-        let mut skinning: Vec<(usize, usize, Skinning)> = Vec::new();
+        let mut skinning: Vec<(usize, usize, Sets, usize)> = Vec::new();
         // Morph targets too, before the joints and weights, so a read without them numbers every mesh's own data
         // as a full read does.
         let mut morphing: Vec<(usize, usize, usize, Vec<Target>)> = Vec::new();
@@ -451,6 +436,7 @@ impl Scene {
             let morphs = keep.morph_targets && targets > 0 && m.prims.iter().all(|p| p.targets.len() == targets);
             let mut prims = Vec::new();
             for mut p in m.prims {
+                make_sound(&mut b, &mut p);
                 let targets = if morphs {
                     std::mem::take(&mut p.targets)
                 } else {
@@ -458,8 +444,8 @@ impl Scene {
                 };
                 let n = p.positions.len();
                 if let Some((v, skin)) = write_prim(&mut b, p, joints, material_count) {
-                    if let Some(skin) = skin {
-                        skinning.push((meshes_json.len(), prims.len(), skin));
+                    if let (Some(skin), Some(count)) = (skin, joints) {
+                        skinning.push((meshes_json.len(), prims.len(), skin, count));
                     }
                     if !targets.is_empty() {
                         morphing.push((meshes_json.len(), prims.len(), n, targets));
@@ -511,9 +497,9 @@ impl Scene {
                 .collect();
             meshes_json[mi]["primitives"][pi]["targets"] = json!(targets);
         }
-        for (mi, pi, skin) in skinning {
+        for (mi, pi, skin, count) in skinning {
             let attributes = &mut meshes_json[mi]["primitives"][pi]["attributes"];
-            for (key, a) in skin.write(&mut b) {
+            for (key, a) in skin.write(&mut b, count) {
                 attributes[key] = json!(a);
             }
         }
@@ -549,6 +535,9 @@ impl Scene {
                 }
                 let a = b.accessor(Part::f32(ibm), 5126, s.joints.len(), "MAT4", None);
                 let mut sj = json!({ "joints": s.joints, "inverseBindMatrices": a });
+                if let Some(root) = skin::common_root(&parents, &s.joints) {
+                    sj["skeleton"] = json!(root);
+                }
                 if !s.name.is_empty() {
                     sj["name"] = json!(s.name);
                 }
@@ -558,7 +547,7 @@ impl Scene {
         }
 
         // Nodes.
-        let mut nodes_json = Vec::with_capacity(n + 1);
+        let mut nodes_json = Vec::with_capacity(n);
         for (i, node) in self.nodes.iter().enumerate() {
             let mut nj = json!({});
             if !node.name.is_empty() {
@@ -599,13 +588,14 @@ impl Scene {
             }
             nodes_json.push(nj);
         }
-        if let Some((r, _)) = &extra_root {
-            nodes_json.push(json!({ "name": "Skeleton", "children": children[*r] }));
-        }
 
         // Materials and images, before the animations, so a read without animations numbers the images' views as
         // a full read does.
-        let images = if keep.textures { self.images } else { Vec::new() };
+        let images = if keep.textures {
+            self.images
+        } else {
+            crate::images::List::default()
+        };
         let mut materials = self.materials;
         if !keep.textures {
             for m in &mut materials {
@@ -616,28 +606,24 @@ impl Scene {
                 m.emissive_image = None;
             }
         }
+        let materials = materials.into_iter().enumerate().map(|(i, m)| {
+            let mut full = Full::from(m);
+            if full.alpha == Alpha::Opaque && blend.contains(&i) {
+                let transparency = Transparency {
+                    texture_alpha: true,
+                    ..Transparency::of(full.base_color[3])
+                };
+                full.alpha = transparency.mode();
+            }
+            full
+        });
         b.materials(materials, images, &mut json);
 
         // Animations.
-        let mut animations_json = Vec::new();
         if keep.animations {
-            // Each distinct set of times is written once, by a hash of their bits: channels usually share theirs.
-            let mut inputs: HashMap<u64, Vec<(Vec<f32>, usize)>> = HashMap::new();
-            // Every key is written to one buffer view, each accessor at its offset into it: one part and one view,
-            // where a view per accessor would cost far more than the keys of a short channel.
-            let mut data: Vec<f32> = Vec::new();
-            let mut placed: Vec<usize> = Vec::new();
-            let mut place = |b: &mut Builder, v: &[f32], count: usize, kind: &str| {
-                b.accessors.push(json!({
-                    "byteOffset": data.len() * 4, "componentType": 5126, "count": count, "type": kind
-                }));
-                data.extend_from_slice(v);
-                placed.push(b.accessors.len() - 1);
-                b.accessors.len() - 1
-            };
+            let mut writer = keys::Writer::new(keep.extras);
             for a in std::mem::take(&mut self.animations) {
-                let mut channels = Vec::new();
-                let mut samplers = Vec::new();
+                let mut tracks = Vec::with_capacity(a.channels.len());
                 for c in a.channels {
                     let width = match c.path {
                         Path::Translation | Path::Scale => 3,
@@ -655,71 +641,27 @@ impl Scene {
                     if c.node >= n {
                         continue;
                     }
-                    let (node, cpath, cinterp) = (c.node, c.path, c.interp);
-                    let Some((times, values)) = clean_keys(c, width) else {
-                        continue;
-                    };
-                    let count = times.len();
-                    let hash = times.iter().fold(times.len() as u64, |h, t| {
-                        (h.rotate_left(5) ^ u64::from(t.to_bits())).wrapping_mul(0x9e37_79b9_7f4a_7c15)
+                    tracks.push(keys::Track {
+                        node: c.node,
+                        also: Vec::new(),
+                        path: c.path,
+                        interp: c.interp,
+                        times: c.times.into(),
+                        values: c.values,
+                        width,
                     });
-                    let list = inputs.entry(hash).or_default();
-                    let found = list
-                        .iter()
-                        .find(|(t, _)| t.iter().map(|x| x.to_bits()).eq(times.iter().map(|x| x.to_bits())));
-                    let input = if let Some(&(_, i)) = found {
-                        i
-                    } else {
-                        let i = place(&mut b, &times, count, "SCALAR");
-                        // Strictly increasing, so the first and last are the bounds.
-                        b.accessors[i]["min"] = json!([times[0]]);
-                        b.accessors[i]["max"] = json!([times[count - 1]]);
-                        list.push((times, i));
-                        i
-                    };
-                    let (path, kind) = match cpath {
-                        Path::Translation => ("translation", "VEC3"),
-                        Path::Rotation => ("rotation", "VEC4"),
-                        Path::Scale => ("scale", "VEC3"),
-                        Path::Weights => ("weights", "SCALAR"),
-                    };
-                    let output = if cpath == Path::Weights {
-                        place(&mut b, &values, count * width, "SCALAR")
-                    } else {
-                        place(&mut b, &values, count, kind)
-                    };
-                    let interp = match cinterp {
-                        Interp::Linear => "LINEAR",
-                    };
-                    channels.push(json!({ "sampler": samplers.len(), "target": { "node": node, "path": path } }));
-                    samplers.push(json!({ "input": input, "output": output, "interpolation": interp }));
                 }
-                if channels.is_empty() {
-                    continue;
-                }
-                let mut aj = json!({ "channels": channels, "samplers": samplers });
-                if !a.name.is_empty() {
-                    aj["name"] = json!(a.name);
-                }
-                if keep.extras
-                    && let Some(e) = a.extras
-                {
-                    aj["extras"] = e;
-                }
-                animations_json.push(aj);
+                writer.animation(&mut b, Some(a.name), a.extras, tracks);
             }
-            if !data.is_empty() {
-                let view = b.view(Part::f32(data), None);
-                for a in placed {
-                    b.accessors[a]["bufferView"] = json!(view);
-                }
-            }
+            writer.finish(&mut b);
         }
 
-        json.insert(
-            "asset".into(),
-            json!({ "extras": { "source": Value::Object(self.source) } }),
-        );
+        self.info.write(&mut self.source);
+        let mut asset = json!({ "extras": { "source": Value::Object(self.source) } });
+        if let Some(c) = self.info.copyright {
+            asset["copyright"] = json!(c);
+        }
+        json.insert("asset".into(), asset);
         json.insert("scene".into(), json!(0));
         json.insert("scenes".into(), json!([{ "nodes": roots }]));
         if !nodes_json.is_empty() {
@@ -731,107 +673,60 @@ impl Scene {
         if !skins_json.is_empty() {
             json.insert("skins".into(), Value::Array(skins_json));
         }
-        if !animations_json.is_empty() {
-            json.insert("animations".into(), Value::Array(animations_json));
-        }
         let mut facts = self.facts;
         facts.entry("triangles").or_insert(json!(tris));
-        Ok(b.finish(json, facts))
+        let mut doc = b.finish(json, facts);
+        frame::root(&mut doc, self.frame);
+        Ok(doc)
     }
 }
 
-/// A channel's keys as glTF wants them: finite, times strictly increasing (a key at or before the last moves just
-/// after it), rotations unit length and each on the same side as the last. `None` when no key is left. Keys that
-/// are already in order are cleaned where they are.
-fn clean_keys(c: Channel, width: usize) -> Option<(Vec<f32>, Vec<f32>)> {
-    let Channel {
-        mut times,
-        mut values,
-        path,
-        ..
-    } = c;
-    let width = width.max(1);
-    let keys = times.len().min(values.len() / width);
-    times.truncate(keys);
-    values.truncate(keys * width);
-    let tidy = times.iter().all(|t| t.is_finite())
-        && times.windows(2).all(|w| w[0] < w[1])
-        && values.iter().all(|x| x.is_finite());
-    if !tidy {
-        let mut kept: Vec<f32> = Vec::with_capacity(keys);
-        let mut out = Vec::with_capacity(keys * width);
-        for (&t, v) in times.iter().zip(values.chunks_exact(width)) {
-            if !t.is_finite() || v.iter().any(|x| !x.is_finite()) {
-                continue;
-            }
-            kept.push(match kept.last() {
-                Some(&p) if t <= p => p.next_up(),
-                _ => t,
-            });
-            out.extend_from_slice(v);
-        }
-        times = kept;
-        values = out;
+/// Holds a primitive to what every reader's geometry is (see [`crate::geometry`]): what can't be drawn is
+/// dropped and counted, and triangles have unit normals, the file's own or the default ones, whose added
+/// vertices every list of the primitive's follows.
+fn make_sound(b: &mut Builder, p: &mut Primitive) {
+    use crate::geometry::{crease, follow, normals};
+    let (mut none, mut none_too) = (Vec::new(), Vec::new());
+    let lists = if p.points {
+        [&mut none, &mut none_too, &mut p.indices]
+    } else if p.lines {
+        [&mut none, &mut p.indices, &mut none_too]
+    } else {
+        [&mut p.indices, &mut none, &mut none_too]
+    };
+    b.sound(&mut p.positions, lists);
+    let n = p.positions.len();
+    if p.points || p.lines || p.indices.is_empty() || n == 0 {
+        return;
     }
-    if path == Path::Rotation {
-        let mut last = [0.0f64, 0.0, 0.0, 1.0];
-        for v in values.chunks_exact_mut(4) {
-            let mut q: [f64; 4] = std::array::from_fn(|i| f64::from(v[i]));
-            // Already unit length to within half a float's step: normalizing wouldn't change it.
-            let unit = (q.iter().map(|c| c * c).sum::<f64>() - 1.0).abs() <= 1e-7;
-            if !unit {
-                q = normalize(q).map(f64::from);
-            }
-            let dot: f64 = (0..4).map(|i| q[i] * last[i]).sum();
-            if dot < 0.0 {
-                q = q.map(|x| -x);
-            }
-            last = q;
-            if !unit || dot < 0.0 {
-                for (o, x) in v.iter_mut().zip(q) {
-                    *o = f32_of(x);
-                }
-            }
+    if p.normals.len() == n {
+        normals(&p.positions, &p.indices, &mut p.normals, 0.0);
+        return;
+    }
+    let (made, added) = crease(&p.positions, &mut p.indices, b.crease);
+    p.normals = made;
+    // Tangents mean nothing without the normals they were made beside.
+    p.tangents = Vec::new();
+    follow(&mut p.positions, n, &added);
+    for set in &mut p.uvs {
+        follow(set, n, &added);
+    }
+    for set in &mut p.colors {
+        follow(set, n, &added);
+    }
+    let k = p.influences;
+    if k > 0 && p.joints.len() == n * k && p.weights.len() == n * k {
+        for &s in &added {
+            let at = s as usize * k;
+            p.joints.extend_from_within(at..at + k);
+            p.weights.extend_from_within(at..at + k);
         }
     }
-    (!times.is_empty()).then_some((times, values))
-}
-
-/// A primitive's joints and weights, to be written after the meshes.
-struct Skinning {
-    joints: Vec<u32>,
-    weights: Vec<f32>,
-    sets: usize,
-    vertices: usize,
-    count: usize,
-}
-
-impl Skinning {
-    /// Writes the accessors, returning the attributes they make.
-    fn write(self, b: &mut Builder) -> Vec<(String, usize)> {
-        let (n, count) = (self.vertices, self.count);
-        let per = n * 4;
-        let mut out = Vec::new();
-        for s in 0..self.sets {
-            let jpart = &self.joints[s * per..(s + 1) * per];
-            let j = if count <= 256 {
-                let v: Vec<u8> = jpart.iter().map(|&j| u8::try_from(j).unwrap_or(0)).collect();
-                b.accessor(Part::bytes(v), 5121, n, "VEC4", Some(34962))
-            } else {
-                let v = jpart.iter().map(|&j| u16::try_from(j).unwrap_or(0)).collect();
-                b.accessor(Part::u16(v), 5123, n, "VEC4", Some(34962))
-            };
-            let w = b.accessor(
-                Part::f32(self.weights[s * per..(s + 1) * per].to_vec()),
-                5126,
-                n,
-                "VEC4",
-                Some(34962),
-            );
-            out.push((format!("JOINTS_{s}"), j));
-            out.push((format!("WEIGHTS_{s}"), w));
-        }
-        out
+    for t in &mut p.targets {
+        // A target shorter than the vertices leaves the rest where they are.
+        t.positions.resize(n, [0.0; 3]);
+        follow(&mut t.positions, n, &added);
+        follow(&mut t.normals, n, &added);
     }
 }
 
@@ -842,39 +737,13 @@ fn write_prim(
     mut p: Primitive,
     joints: Option<usize>,
     materials: usize,
-) -> Option<(Value, Option<Skinning>)> {
+) -> Option<(Value, Option<Sets>)> {
     let n = p.positions.len();
     if n == 0 || p.indices.is_empty() {
         return None;
     }
-    if p.indices.iter().any(|&i| i as usize >= n) {
-        let width = if p.points {
-            1
-        } else if p.lines {
-            2
-        } else {
-            3
-        };
-        let idx: Vec<u32> = p
-            .indices
-            .chunks_exact(width)
-            .filter(|t| t.iter().all(|&i| (i as usize) < n))
-            .flatten()
-            .copied()
-            .collect();
-        p.indices = idx;
-        if p.indices.is_empty() {
-            return None;
-        }
-    }
-    for v in &mut p.positions {
-        if v.iter().any(|c| !c.is_finite()) {
-            *v = [0.0; 3];
-        }
-    }
     let mut attributes = Map::new();
-    if p.normals.len() == n && !p.points && !p.lines {
-        fix_normals(&mut p.normals, &p.positions, &p.indices);
+    if !p.points && !p.lines {
         let a = b.accessor(
             Part::f32(std::mem::take(&mut p.normals).into_flattened()),
             5126,
@@ -958,14 +827,7 @@ fn write_prim(
         && p.joints.len() == n * p.influences
         && p.weights.len() == n * p.influences
     {
-        let (joints, weights, sets) = skin_sets(&p, count);
-        skinning = Some(Skinning {
-            joints,
-            weights,
-            sets,
-            vertices: n,
-            count,
-        });
+        skinning = Some(skin_sets(&p, count));
     }
     let count = p.indices.len();
     let narrow = (n < usize::from(u16::MAX))
@@ -1007,23 +869,18 @@ fn write_prim(
     reason = "branchless, so the loop over every vertex vectorizes"
 )]
 fn sparse_vec3(b: &mut Builder, mut v: Vec<[f32; 3]>, n: usize, bounds: bool) -> usize {
-    // Every value as it's written, in one pass: one past the list, or not finite, is zero.
+    // Every value as it's written: one past the list, or not finite, is zero. A value that isn't finite is rare,
+    // so one pass over the bits looks for any first (its exponent bits all set).
     v.resize(n, [0.0; 3]);
-    let (mut min, mut max) = ([f32::MAX; 3], [f32::MIN; 3]);
-    let mut moved = 0;
-    // Without branching per component (`&` and `|`, not `&&` and `||`), so the loop vectorizes.
-    for x in &mut v {
-        if !(x[0].is_finite() & x[1].is_finite() & x[2].is_finite()) {
-            *x = [0.0; 3];
-        }
-        moved += usize::from((x[0] != 0.0) | (x[1] != 0.0) | (x[2] != 0.0));
-        // Finite by now, so a plain comparison does; zero vectors count, as the bounds take in zero
-        // whenever there's one.
-        for k in 0..3 {
-            min[k] = if x[k] < min[k] { x[k] } else { min[k] };
-            max[k] = if x[k] > max[k] { x[k] } else { max[k] };
+    let worst = v.as_flattened().iter().fold(0, |m, x| m.max(x.to_bits() & 0x7fff_ffff));
+    if worst >= 0x7f80_0000 {
+        for x in &mut v {
+            if !(x[0].is_finite() & x[1].is_finite() & x[2].is_finite()) {
+                *x = [0.0; 3];
+            }
         }
     }
+    let (moved, min, max) = survey(&v);
     let a = if moved * 4 < n {
         let mut nonzero: Vec<u32> = Vec::with_capacity(moved.max(1));
         let mut values: Vec<[f32; 3]> = Vec::with_capacity(moved.max(1));
@@ -1042,166 +899,108 @@ fn sparse_vec3(b: &mut Builder, mut v: Vec<[f32; 3]>, n: usize, bounds: bool) ->
         let count = nonzero.len();
         let iv = b.view(Part::u32(nonzero), None);
         let vv = b.view(Part::vec3(values), None);
-        let a = json!({
-            "componentType": 5126,
-            "count": n,
-            "type": "VEC3",
-            "sparse": {
-                "count": count,
-                "indices": { "bufferView": iv, "componentType": 5125 },
-                "values": { "bufferView": vv },
-            },
+        b.accessors.push(Accessor {
+            component_type: 5126,
+            count: n,
+            kind: "VEC3",
+            sparse: Some(Sparse {
+                count,
+                indices: iv,
+                index_type: 5125,
+                values: vv,
+            }),
+            ..Accessor::default()
         });
-        b.accessors.push(a);
         b.accessors.len() - 1
     } else {
         b.accessor(Part::vec3(v), 5126, n, "VEC3", Some(34962))
     };
     if bounds {
-        b.accessors[a]["min"] = json!(min);
-        b.accessors[a]["max"] = json!(max);
+        b.accessors[a].min = Some(Limits::floats(&min));
+        b.accessors[a].max = Some(Limits::floats(&max));
     }
     a
 }
 
-/// Each vertex's joints and weights in sets of four, as glTF wants them: joints in range and merged where
-/// repeated, the strongest first, at most [`MAX_INFLUENCES`], summing to 1, and a vertex with none bound wholly to
-/// the primitive's rest joint. Returns the joints and weights set after set, and the number of sets.
-fn skin_sets(p: &Primitive, count: usize) -> (Vec<u32>, Vec<f32>, usize) {
-    let n = p.positions.len().max(p.joints.len() / p.influences.max(1));
-    let w = p.influences;
-    // Every vertex's list, end to end, and where each ends: no list of its own for each vertex.
-    let mut flat: Vec<(u32, f32)> = Vec::with_capacity(n * w.clamp(1, 4));
-    let mut ends: Vec<usize> = Vec::with_capacity(n);
-    let mut list: Vec<(u32, f32)> = Vec::with_capacity(w);
-    let mut most = 1;
-    let rest = if (p.rest_joint as usize) < count {
-        p.rest_joint
-    } else {
-        0
-    };
-    for v in 0..n {
-        list.clear();
-        for k in 0..w {
-            let (j, wt) = (p.joints[v * w + k], p.weights[v * w + k]);
-            if !(wt > 0.0 && wt.is_finite()) || j as usize >= count {
-                continue;
-            }
-            match list.iter_mut().find(|e| e.0 == j) {
-                Some(e) => e.1 += wt,
-                None => list.push((j, wt)),
-            }
+/// How many of `v` (all finite) aren't zero, and the least and greatest of each component; zero vectors count, as
+/// the bounds take in zero whenever there's one. A tie between zeros of either sign goes to the first in the list,
+/// as a plain pass over it would have it.
+#[allow(clippy::needless_bitwise_bool, reason = "branchless, so the loop vectorizes")]
+fn survey(v: &[[f32; 3]]) -> (usize, [f32; 3], [f32; 3]) {
+    // Four vectors at a time, each component in a lane of its own, so the loop vectorizes.
+    let flat = v.as_flattened();
+    let (mut lo, mut hi) = ([f32::MAX; 12], [f32::MIN; 12]);
+    let mut moved = 0;
+    let mut chunks = flat.chunks_exact(12);
+    for c in &mut chunks {
+        let mut bits = [0u32; 12];
+        for k in 0..12 {
+            lo[k] = if c[k] < lo[k] { c[k] } else { lo[k] };
+            hi[k] = if c[k] > hi[k] { c[k] } else { hi[k] };
+            // Without the sign bit: zero of either sign is zero.
+            bits[k] = c[k].to_bits() << 1;
         }
-        list.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
-        list.truncate(MAX_INFLUENCES);
-        let sum: f32 = list.iter().map(|e| e.1).sum();
-        if list.is_empty() || sum <= 0.0 || !sum.is_finite() {
-            flat.push((rest, 1.0));
-        } else {
-            flat.extend(list.iter().map(|&(j, wt)| (j, wt / sum)));
-        }
-        most = most.max(flat.len() - ends.last().copied().unwrap_or(0));
-        ends.push(flat.len());
-    }
-    let sets = most.div_ceil(4);
-    let mut js = vec![0u32; sets * n * 4];
-    let mut ws = vec![0f32; sets * n * 4];
-    let starts = std::iter::once(0).chain(ends.iter().copied());
-    for (v, (start, end)) in starts.zip(ends.iter().copied()).enumerate() {
-        for (k, &(j, wt)) in flat[start..end].iter().enumerate() {
-            let at = (k / 4) * n * 4 + v * 4 + k % 4;
-            js[at] = j;
-            ws[at] = wt;
+        for j in 0..4 {
+            moved += usize::from((bits[3 * j] | bits[3 * j + 1] | bits[3 * j + 2]) != 0);
         }
     }
-    (js, ws, sets)
+    let (mut min, mut max) = ([f32::MAX; 3], [f32::MIN; 3]);
+    for k in 0..12 {
+        let j = k % 3;
+        min[j] = if lo[k] < min[j] { lo[k] } else { min[j] };
+        max[j] = if hi[k] > max[j] { hi[k] } else { max[j] };
+    }
+    for x in chunks.remainder().chunks_exact(3) {
+        moved += usize::from((x[0] != 0.0) | (x[1] != 0.0) | (x[2] != 0.0));
+        for k in 0..3 {
+            min[k] = if x[k] < min[k] { x[k] } else { min[k] };
+            max[k] = if x[k] > max[k] { x[k] } else { max[k] };
+        }
+    }
+    // Lanes keep their own first zero, not the list's: a zero bound takes the sign of the list's first zero.
+    for k in 0..3 {
+        if min[k] == 0.0 || max[k] == 0.0 {
+            let first = v.iter().map(|x| x[k]).find(|&c| c == 0.0).unwrap_or(0.0);
+            if min[k] == 0.0 {
+                min[k] = first;
+            }
+            if max[k] == 0.0 {
+                max[k] = first;
+            }
+        }
+    }
+    (moved, min, max)
 }
 
-/// Normalizes `normals`, replacing any that is zero or not finite by the normal of the faces around it (or +Y).
-fn fix_normals(normals: &mut [[f32; 3]], positions: &[[f32; 3]], indices: &[u32]) {
-    let mut bad = Vec::new();
-    for (i, v) in normals.iter_mut().enumerate() {
-        let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
-        if l > 0.0 && l.is_finite() {
-            *v = v.map(|c| c / l);
-        } else {
-            bad.push(i);
-        }
+/// Each vertex's joints and weights in sets of four, as glTF wants them ([`skin::sets`]): a vertex with none is
+/// bound wholly to the primitive's rest joint.
+fn skin_sets(p: &Primitive, count: usize) -> Sets {
+    let w = p.influences;
+    let n = p.positions.len().max(p.joints.len() / w.max(1));
+    let rest = p.rest_joint.filter(|&r| (r as usize) < count).unwrap_or(0);
+    skin::sets(n, count, rest, |v, list| {
+        list.extend((0..w).map(|k| (p.joints[v * w + k], p.weights[v * w + k])));
+    })
+}
+
+/// Whether some vertex of `p` has no joint among `count` to move it.
+fn has_unbound(p: &Primitive, count: usize) -> bool {
+    let w = p.influences;
+    if w == 0 || p.joints.len() != p.positions.len() * w || p.weights.len() != p.joints.len() {
+        return false;
     }
-    if bad.is_empty() {
-        return;
-    }
-    let mut sum = vec![[0.0f32; 3]; normals.len()];
-    for t in indices.chunks_exact(3) {
-        let [a, b, c] = [t[0], t[1], t[2]].map(|i| positions[i as usize]);
-        let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
-        let w = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
-        let f = [
-            u[1] * w[2] - u[2] * w[1],
-            u[2] * w[0] - u[0] * w[2],
-            u[0] * w[1] - u[1] * w[0],
-        ];
-        for &i in t {
-            let s = &mut sum[i as usize];
-            for k in 0..3 {
-                s[k] += f[k];
-            }
-        }
-    }
-    for i in bad {
-        let s = sum[i];
-        let l = (s[0] * s[0] + s[1] * s[1] + s[2] * s[2]).sqrt();
-        normals[i] = if l > 0.0 && l.is_finite() {
-            s.map(|c| c / l)
-        } else {
-            [0.0, 1.0, 0.0]
-        };
-    }
+    p.joints.chunks_exact(w).zip(p.weights.chunks_exact(w)).any(|(j, wt)| {
+        let sum: f32 = j
+            .iter()
+            .zip(wt)
+            .filter(|&(&j, &wt)| wt > 0.0 && wt.is_finite() && (j as usize) < count)
+            .map(|(_, &wt)| wt)
+            .sum();
+        sum.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater)
+    })
 }
 
 // Math, in double precision.
-
-/// The Hamilton product `a·b` of quaternions `[x, y, z, w]`: rotating by `b`, then by `a`.
-pub(crate) fn quat_mul(a: [f64; 4], b: [f64; 4]) -> [f64; 4] {
-    let [ax, ay, az, aw] = a;
-    let [bx, by, bz, bw] = b;
-    [
-        aw * bx + ax * bw + ay * bz - az * by,
-        aw * by - ax * bz + ay * bw + az * bx,
-        aw * bz + ax * by - ay * bx + az * bw,
-        aw * bw - ax * bx - ay * by - az * bz,
-    ]
-}
-
-/// `q` at unit length, in single precision; the identity for a zero or broken one.
-pub(crate) fn normalize(q: [f64; 4]) -> [f32; 4] {
-    let l = q.iter().map(|c| c * c).sum::<f64>().sqrt();
-    if l > 0.0 && l.is_finite() {
-        q.map(|c| f32_of(c / l))
-    } else {
-        [0.0, 0.0, 0.0, 1.0]
-    }
-}
-
-/// The rotation by `radians` about axis `axis` (0, 1 or 2 for X, Y or Z).
-pub(crate) fn about(axis: usize, radians: f64) -> [f64; 4] {
-    let (s, c) = (radians * 0.5).sin_cos();
-    let mut q = [0.0, 0.0, 0.0, c];
-    q[axis] = s;
-    q
-}
-
-/// `v` rotated by unit quaternion `q`.
-pub(crate) fn rotate(q: [f64; 4], v: [f64; 3]) -> [f64; 3] {
-    let [x, y, z, w] = q;
-    let [a, b, c] = v;
-    let t = [2.0 * (y * c - z * b), 2.0 * (z * a - x * c), 2.0 * (x * b - y * a)];
-    [
-        a + w * t[0] + (y * t[2] - z * t[1]),
-        b + w * t[1] + (z * t[0] - x * t[2]),
-        c + w * t[2] + (x * t[1] - y * t[0]),
-    ]
-}
 
 /// The quaternion mirrored through the XY plane: the same turn seen in a Z-negated world.
 pub(crate) fn mirror_quat(q: [f32; 4]) -> [f32; 4] {
@@ -1222,20 +1021,9 @@ pub(crate) fn mirror_matrix(m: &M4) -> M4 {
     out
 }
 
-/// `a·b`.
-pub(crate) fn mul(a: &M4, b: &M4) -> M4 {
-    let mut out = [0.0; 16];
-    for c in 0..4 {
-        for r in 0..4 {
-            out[c * 4 + r] = (0..4).map(|k| a[k * 4 + r] * b[c * 4 + k]).sum();
-        }
-    }
-    out
-}
-
 /// The transform of translation `t`, rotation `q` and scale `s`.
 pub(crate) fn trs(t: [f32; 3], q: [f32; 4], s: [f32; 3]) -> M4 {
-    let r = quat_matrix(q.map(f64::from));
+    let r = quat::matrix(q.map(f64::from));
     let s = s.map(f64::from);
     let mut m = IDENTITY;
     for c in 0..3 {
@@ -1247,67 +1035,6 @@ pub(crate) fn trs(t: [f32; 3], q: [f32; 4], s: [f32; 3]) -> M4 {
     m[13] = f64::from(t[1]);
     m[14] = f64::from(t[2]);
     m
-}
-
-/// The 3×3 rotation of unit quaternion `q`, column-major.
-pub(crate) fn quat_matrix(q: [f64; 4]) -> [f64; 9] {
-    let [x, y, z, w] = q;
-    [
-        1.0 - 2.0 * (y * y + z * z),
-        2.0 * (x * y + z * w),
-        2.0 * (x * z - y * w),
-        2.0 * (x * y - z * w),
-        1.0 - 2.0 * (x * x + z * z),
-        2.0 * (y * z + x * w),
-        2.0 * (x * z + y * w),
-        2.0 * (y * z - x * w),
-        1.0 - 2.0 * (x * x + y * y),
-    ]
-}
-
-/// The quaternion of a 3×3 rotation, column-major.
-pub(crate) fn matrix_quat(m: &[f64; 9]) -> [f64; 4] {
-    let at = |r: usize, c: usize| m[c * 3 + r];
-    let trace = at(0, 0) + at(1, 1) + at(2, 2);
-    let q = if trace > 0.0 {
-        let s = (trace + 1.0).sqrt() * 2.0;
-        [
-            (at(2, 1) - at(1, 2)) / s,
-            (at(0, 2) - at(2, 0)) / s,
-            (at(1, 0) - at(0, 1)) / s,
-            0.25 * s,
-        ]
-    } else if at(0, 0) > at(1, 1) && at(0, 0) > at(2, 2) {
-        let s = (1.0 + at(0, 0) - at(1, 1) - at(2, 2)).sqrt() * 2.0;
-        [
-            0.25 * s,
-            (at(0, 1) + at(1, 0)) / s,
-            (at(0, 2) + at(2, 0)) / s,
-            (at(2, 1) - at(1, 2)) / s,
-        ]
-    } else if at(1, 1) > at(2, 2) {
-        let s = (1.0 + at(1, 1) - at(0, 0) - at(2, 2)).sqrt() * 2.0;
-        [
-            (at(0, 1) + at(1, 0)) / s,
-            0.25 * s,
-            (at(1, 2) + at(2, 1)) / s,
-            (at(0, 2) - at(2, 0)) / s,
-        ]
-    } else {
-        let s = (1.0 + at(2, 2) - at(0, 0) - at(1, 1)).sqrt() * 2.0;
-        [
-            (at(0, 2) + at(2, 0)) / s,
-            (at(1, 2) + at(2, 1)) / s,
-            0.25 * s,
-            (at(1, 0) - at(0, 1)) / s,
-        ]
-    };
-    let l = q.iter().map(|c| c * c).sum::<f64>().sqrt();
-    if l > 0.0 && l.is_finite() {
-        q.map(|c| c / l)
-    } else {
-        [0.0, 0.0, 0.0, 1.0]
-    }
 }
 
 /// A transform split into translation, rotation and scale. A mirroring transform takes a negative X scale; shear is
@@ -1330,7 +1057,7 @@ pub(crate) fn decompose(m: &M4) -> ([f32; 3], [f32; 4], [f32; 3]) {
             r[c * 3 + row] = v[row] / k;
         }
     }
-    let q = matrix_quat(&r);
+    let q = quat::from_matrix(&r);
     (t, normalize(q), s.map(f32_of))
 }
 
@@ -1397,121 +1124,9 @@ pub(crate) const Z_UP_TO_Y_UP: [f32; 4] = [
     std::f32::consts::FRAC_1_SQRT_2,
 ];
 
-/// A little-endian reader over a file's bytes that checks every read against the end.
-#[derive(Clone, Copy)]
-pub(crate) struct Bin<'a> {
-    pub data: &'a [u8],
-    pub at: usize,
-    /// The format's name, for errors.
-    pub what: &'static str,
-}
-
-#[allow(dead_code, reason = "each binary reader uses the parts its format needs")]
-impl<'a> Bin<'a> {
-    pub fn new(data: &'a [u8], what: &'static str) -> Self {
-        Self { data, at: 0, what }
-    }
-
-    /// Bytes left.
-    pub fn left(&self) -> usize {
-        self.data.len().saturating_sub(self.at)
-    }
-
-    pub fn bytes(&mut self, n: usize) -> Result<&'a [u8]> {
-        match self.at.checked_add(n).filter(|&e| e <= self.data.len()) {
-            Some(end) => {
-                let s = &self.data[self.at..end];
-                self.at = end;
-                Ok(s)
-            }
-            None => bail!("{} file is cut short", self.what),
-        }
-    }
-
-    pub fn skip(&mut self, n: usize) -> Result<()> {
-        self.bytes(n).map(|_| ())
-    }
-
-    /// Moves to `off` from the start.
-    pub fn seek(&mut self, off: usize) -> Result<()> {
-        ensure!(off <= self.data.len(), "{} file points past its end", self.what);
-        self.at = off;
-        Ok(())
-    }
-
-    pub fn array<const N: usize>(&mut self) -> Result<[u8; N]> {
-        let mut out = [0; N];
-        out.copy_from_slice(self.bytes(N)?);
-        Ok(out)
-    }
-
-    pub fn u8(&mut self) -> Result<u8> {
-        Ok(self.array::<1>()?[0])
-    }
-
-    pub fn i8(&mut self) -> Result<i8> {
-        Ok(i8::from_le_bytes(self.array()?))
-    }
-
-    pub fn u16(&mut self) -> Result<u16> {
-        Ok(u16::from_le_bytes(self.array()?))
-    }
-
-    pub fn i16(&mut self) -> Result<i16> {
-        Ok(i16::from_le_bytes(self.array()?))
-    }
-
-    pub fn u32(&mut self) -> Result<u32> {
-        Ok(u32::from_le_bytes(self.array()?))
-    }
-
-    pub fn i32(&mut self) -> Result<i32> {
-        Ok(i32::from_le_bytes(self.array()?))
-    }
-
-    pub fn f32(&mut self) -> Result<f32> {
-        Ok(f32::from_le_bytes(self.array()?))
-    }
-
-    pub fn f64(&mut self) -> Result<f64> {
-        Ok(f64::from_le_bytes(self.array()?))
-    }
-
-    pub fn vec2(&mut self) -> Result<[f32; 2]> {
-        Ok([self.f32()?, self.f32()?])
-    }
-
-    pub fn vec3(&mut self) -> Result<[f32; 3]> {
-        Ok([self.f32()?, self.f32()?, self.f32()?])
-    }
-
-    pub fn vec4(&mut self) -> Result<[f32; 4]> {
-        Ok([self.f32()?, self.f32()?, self.f32()?, self.f32()?])
-    }
-
-    /// A count of items of `size` bytes each that must fit in what's left: refused otherwise, so nothing is
-    /// allocated for a count the file can't hold.
-    pub fn count(&self, n: u64, size: usize) -> Result<usize> {
-        let n = usize::try_from(n).unwrap_or(usize::MAX);
-        match n.checked_mul(size.max(1)) {
-            Some(b) if b <= self.left() => Ok(n),
-            _ => bail!("{} file claims {n} items, more than it holds", self.what),
-        }
-    }
-
-    /// A fixed-size string field: up to its first NUL.
-    pub fn fixed_str(&mut self, n: usize) -> Result<&'a [u8]> {
-        let b = self.bytes(n)?;
-        Ok(&b[..b.iter().position(|&c| c == 0).unwrap_or(b.len())])
-    }
-}
-
-/// Text as Rust wants it: UTF-8 as it is, anything else read as Windows-1252/Latin-1 byte by byte.
+/// Text as every reader decodes it ([`crate::bytes::text`]): UTF-8 as it is, anything else as Windows-1252.
 pub(crate) fn text(b: &[u8]) -> String {
-    match std::str::from_utf8(b) {
-        Ok(s) => s.to_owned(),
-        Err(_) => b.iter().map(|&c| char::from(c)).collect(),
-    }
+    crate::bytes::text(b).into_owned()
 }
 
 /// Text in Shift-JIS (code page 932), as Japanese tools write it. A byte sequence that isn't Shift-JIS becomes
@@ -1591,6 +1206,68 @@ mod tests {
         }
     }
 
+    /// A triangle on `material`, with vertex colors of `alpha` when it's given.
+    fn triangle(material: Option<usize>, alpha: Option<f32>) -> Primitive {
+        Primitive {
+            positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            colors: alpha.map(|a| vec![[1.0, 1.0, 1.0, a]; 3]).into_iter().collect(),
+            indices: vec![0, 1, 2],
+            material,
+            ..Primitive::default()
+        }
+    }
+
+    #[test]
+    fn faces_with_no_material_take_the_default_and_vertex_alpha_blends() {
+        let mut s = Scene::default();
+        s.materials.push(Material::plain("paint", [1.0, 0.0, 0.0, 1.0]));
+        s.materials.push(Material::plain("leaf", [1.0; 4]));
+        s.materials.push(Material::plain("cut", [1.0; 4]));
+        s.materials[2].alpha_cutoff = Some(0.5);
+        // A material blended by its texture's alpha, as its reader says.
+        s.blend.push(1);
+        s.meshes.push(SceneMesh {
+            prims: vec![
+                triangle(Some(0), Some(0.5)),
+                triangle(Some(1), None),
+                triangle(Some(2), Some(0.5)),
+                triangle(None, None),
+                triangle(None, Some(1.0)),
+            ],
+            ..SceneMesh::default()
+        });
+        let mut node = Node::named("n", None);
+        node.mesh = Some(0);
+        s.add(node);
+        let doc = s.finish(Keep::ALL).unwrap();
+        let json = doc.json();
+        let m = json["materials"].as_array().unwrap();
+        let prims = json["meshes"][0]["primitives"].as_array().unwrap();
+        // Vertex alpha blends an opaque material, a texture's alpha does where the reader says so, and a cutout
+        // stays one.
+        assert_eq!(m[0]["alphaMode"], "BLEND");
+        assert_eq!(m[1]["alphaMode"], "BLEND");
+        assert_eq!(m[2]["alphaMode"], "MASK");
+        // The default material: gray, and white under vertex colors.
+        assert_eq!(m.len(), 5);
+        let (gray, white) = (&m[3], &m[4]);
+        assert_eq!(
+            (prims[3]["material"].as_u64(), prims[4]["material"].as_u64()),
+            (Some(3), Some(4))
+        );
+        assert_eq!((&gray["name"], &white["name"]), (&json!("default"), &json!("default")));
+        assert_eq!(
+            gray["pbrMetallicRoughness"]["baseColorFactor"],
+            json!([0.72f32, 0.72f32, 0.74f32, 1.0f32])
+        );
+        assert_eq!(gray["pbrMetallicRoughness"]["roughnessFactor"], json!(0.85f32));
+        assert_eq!(
+            white["pbrMetallicRoughness"]["baseColorFactor"],
+            json!([1.0, 1.0, 1.0, 1.0])
+        );
+        assert!(gray.get("alphaMode").is_none() && white.get("alphaMode").is_none());
+    }
+
     #[test]
     fn loops_in_parents_are_cut() {
         let mut s = Scene::default();
@@ -1610,10 +1287,15 @@ mod tests {
             joints: vec![1, 1, 2, 7, 0, 0, 0, 0],
             weights: vec![0.25, 0.25, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0],
             influences: 4,
-            rest_joint: 2,
+            rest_joint: Some(2),
             ..Primitive::default()
         };
-        let (j, w, sets) = skin_sets(&p, 3);
+        let Sets {
+            joints: j,
+            weights: w,
+            groups: sets,
+            ..
+        } = skin_sets(&p, 3);
         assert_eq!(sets, 1);
         assert_eq!(&j[..4], &[2, 1, 0, 0]);
         assert!((w[0] - 2.0 / 3.0).abs() < 1e-6 && (w[1] - 1.0 / 3.0).abs() < 1e-6);
@@ -1715,18 +1397,18 @@ mod tests {
     fn an_awkward_scene_writes_and_flattens() {
         let mut s = awkward();
         s.mirror_z();
-        s.rotate_roots(Z_UP_TO_Y_UP);
-        s.scale(0.5);
+        s.turn(Z_UP_TO_Y_UP);
+        s.unit(0.5);
         let doc = s.finish(Keep::ALL).unwrap();
-        let skins = doc.json["skins"].as_array().unwrap();
+        let skins = doc.json()["skins"].as_array().unwrap();
         assert_eq!(skins.len(), 1);
-        // The two skeleton roots are gathered under one.
-        assert_eq!(doc.json["nodes"].as_array().unwrap().len(), 4);
-        let prim = &doc.json["meshes"][0]["primitives"][0];
+        // The three nodes, and the root node the two skeleton roots are under.
+        assert_eq!(doc.json()["nodes"].as_array().unwrap().len(), 4);
+        let prim = &doc.json()["meshes"][0]["primitives"][0];
         assert!(prim["attributes"].get("TEXCOORD_1").is_none());
         assert_eq!(prim["material"], 0);
         assert!(
-            doc.json["accessors"][usize::try_from(prim["targets"][0]["POSITION"].as_u64().unwrap()).unwrap()]
+            doc.json()["accessors"][usize::try_from(prim["targets"][0]["POSITION"].as_u64().unwrap()).unwrap()]
                 .get("sparse")
                 .is_some()
         );

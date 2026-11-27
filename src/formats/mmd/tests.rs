@@ -154,7 +154,7 @@ fn pmx_sample(utf8: bool, size: u8) -> Vec<u8> {
     w.out
 }
 
-fn read(bytes: &[u8], name: &str) -> Result<Document<'static>> {
+fn read(bytes: &[u8], name: &str) -> Result<Document> {
     let assets = Memory::new().with("tex/skin.png", PNG.to_vec());
     let ext = name.rsplit('.').next().unwrap();
     load(super::super::Input::memory(bytes, name), ext, &assets, Keep::ALL)
@@ -173,11 +173,11 @@ fn a_pmx_model_in_every_encoding_and_index_size() {
     for utf8 in [false, true] {
         for size in [1, 2, 4] {
             let doc = read(&pmx_sample(utf8, size), "m.pmx").unwrap();
-            let j = &doc.json;
+            let j = &doc.json();
             assert_eq!(doc.facts["triangles"], json!(2), "{utf8} {size}");
             assert_eq!(doc.facts["bones"], json!(2));
             assert_eq!(doc.facts["sdef_vertices"], json!(1));
-            assert_eq!(j["asset"]["extras"]["source"]["name"], "モデル");
+            assert_eq!(doc.source_info().title.as_deref(), Some("モデル"));
             assert_eq!(j["meshes"][0]["primitives"].as_array().unwrap().len(), 2);
             let names = &j["meshes"][0]["extras"]["targetNames"];
             assert_eq!(names, &json!(["smile", "half"]));
@@ -193,9 +193,15 @@ fn pmx_is_mirrored_and_scaled() {
     let doc = read(&pmx_sample(true, 2), "m.pmx").unwrap();
     let rig = doc.rig().unwrap();
     let arm = rig.find("腕").unwrap();
-    // (0, 5, 5) from its parent, mirrored and in meters.
+    // (0, 5, 5) from its parent, mirrored, in the file's units: the root node scales them to meters.
     let t = rig.nodes[arm].rest.translation;
-    assert!((t[1] - 0.4).abs() < 1e-6 && (t[2] + 0.4).abs() < 1e-6, "{t:?}");
+    assert!((t[1] - 5.0).abs() < 1e-6 && (t[2] + 5.0).abs() < 1e-6, "{t:?}");
+    let top = usize::try_from(doc.json()["scenes"][0]["nodes"][0].as_u64().unwrap()).unwrap();
+    assert_eq!(doc.json()["nodes"][top]["name"], "RootNode");
+    assert_eq!(doc.json()["nodes"][top]["scale"], serde_json::json!([0.08, 0.08, 0.08]));
+    let at = rig.world(&rig.pose(None, 0.0))[arm];
+    let parent = rig.world(&rig.pose(None, 0.0))[rig.nodes[arm].parent.unwrap()];
+    assert!((at[13] - parent[13] - 0.4).abs() < 1e-6 && (at[14] - parent[14] + 0.4).abs() < 1e-6);
     let mesh = doc.flatten(crate::document::Pose::Rest).unwrap().unwrap();
     let p = &mesh.prims[0];
     // Faces wind counter-clockwise about their normals once mirrored: the normal now faces +Z.
@@ -210,7 +216,7 @@ fn pmx_is_mirrored_and_scaled() {
 #[test]
 fn pmx_materials_and_extras() {
     let doc = read(&pmx_sample(false, 4), "m.pmx").unwrap();
-    let j = &doc.json;
+    let j = &doc.json();
     let face = &j["materials"][0];
     assert_eq!(face["name"], "face");
     assert_eq!(face["doubleSided"], true);
@@ -219,7 +225,14 @@ fn pmx_materials_and_extras() {
     assert_eq!(j["materials"][1]["alphaMode"], "BLEND");
     let src = &j["asset"]["extras"]["source"];
     assert_eq!(src["materials"][0]["toon"], "toon03.bmp");
-    assert_eq!(src["metersPerUnit"], json!(UNIT));
+    assert_eq!(src["metersPerUnit"], json!(0.08));
+    let info = doc.source_info();
+    assert_eq!(info.format.as_deref(), Some("PMX"));
+    assert_eq!(info.version.as_deref(), Some("2.0"));
+    assert_eq!(info.meters_per_unit, Fact::Assumed(0.08));
+    assert_eq!(info.up_axis, Fact::Declared(Axis::PosY));
+    assert_eq!(info.handedness, Fact::Declared(Handedness::Left));
+    assert!(info.converted.units && info.converted.handedness && !info.converted.up_axis);
     let morphs = j["meshes"][0]["extras"]["morphs"].as_array().unwrap();
     assert_eq!(morphs.len(), 2);
     assert_eq!(morphs[1]["type"], "bone");
@@ -243,11 +256,7 @@ fn pmx_morph_targets_and_skin() {
 #[test]
 fn reading_less_drops_morphs_and_skins() {
     let bytes = pmx_sample(true, 2);
-    let keep = Keep {
-        morph_targets: false,
-        skins: false,
-        ..Keep::ALL
-    };
+    let keep = Keep::ALL.with_morph_targets(false).with_skins(false);
     let doc = load(
         super::super::Input::memory(&bytes, "m.pmx"),
         "pmx",
@@ -255,8 +264,8 @@ fn reading_less_drops_morphs_and_skins() {
         keep,
     )
     .unwrap();
-    assert!(doc.json["meshes"][0]["primitives"][0].get("targets").is_none());
-    assert!(doc.json.get("skins").is_none());
+    assert!(doc.json()["meshes"][0]["primitives"][0].get("targets").is_none());
+    assert!(doc.json().get("skins").is_none());
 }
 
 /// A PMD model: a triangle, a material with a texture and a sphere map, two bones, IK, a base and an eye morph,
@@ -310,9 +319,10 @@ fn pmd_sample() -> Vec<u8> {
 #[test]
 fn a_pmd_model() {
     let doc = read(&pmd_sample(), "m.pmd").unwrap();
-    let j = &doc.json;
+    let j = &doc.json();
     let src = &j["asset"]["extras"]["source"];
-    assert_eq!(src["name"], "モデル");
+    assert_eq!(doc.source_info().title.as_deref(), Some("モデル"));
+    assert_eq!(doc.source_info().version.as_deref(), Some("1.0"));
     assert_eq!(src["englishName"], "Model");
     assert_eq!(src["materials"][0]["sphereMode"], "multiply");
     assert_eq!(j["materials"][0]["doubleSided"], true);
@@ -350,11 +360,15 @@ fn vmd_sample() -> Vec<u8> {
 #[test]
 fn a_vmd_motion() {
     let doc = read(&vmd_sample(), "m.vmd").unwrap();
-    let j = &doc.json;
+    let j = &doc.json();
     assert_eq!(doc.facts["bone_keys"], json!(3));
     assert_eq!(doc.facts["camera_keys"], json!(1));
     let src = &j["asset"]["extras"]["source"];
     assert_eq!(src["morphKeys"]["smile"]["times"], json!([1.0]));
+    let info = doc.source_info();
+    assert_eq!(info.format.as_deref(), Some("VMD"));
+    assert_eq!(info.frame_rate, Fact::Declared(30.0));
+    assert_eq!(info.handedness, Fact::Declared(Handedness::Left));
     let rig = doc.rig().unwrap();
     let a = &rig.animations[0];
     // The translation's span from 10 to 20 is straight; the rotation's is bent and sampled every frame.
@@ -362,13 +376,13 @@ fn a_vmd_motion() {
     let rot = a
         .channels
         .iter()
-        .find(|c| c.node == bone && c.path == crate::rig::Path::Rotation)
+        .find(|c| c.node == bone && c.property == crate::rig::Property::Rotation)
         .unwrap();
     assert_eq!(rot.times.len(), 2 + 10);
     let tr = a
         .channels
         .iter()
-        .find(|c| c.node == bone && c.path == crate::rig::Path::Translation)
+        .find(|c| c.node == bone && c.property == crate::rig::Property::Translation)
         .unwrap();
     assert_eq!(tr.times.len(), 3);
 }

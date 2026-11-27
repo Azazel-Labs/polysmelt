@@ -1,0 +1,94 @@
+{
+ "asset": {
+  "version": "1.1"
+ },
+ "geometricError": 10,
+ "root": {
+  "boundingVolume": {
+   "box": [
+    0,
+    0,
+    0,
+    4,
+    0,
+    0,
+    0,
+    4,
+    0,
+    0,
+    0,
+    4
+   ]
+  },
+  "geometricError": 0,
+  "refine": "ADD",
+  "transform": [
+   2,
+   0,
+   0,
+   0,
+   0,
+   2,
+   0,
+   0,
+   0,
+   0,
+   2,
+   0,
+   100,
+   0,
+   0,
+   1
+  ],
+  "contents": [
+   {
+    "uri": "models/wedge.glb"
+   },
+   {
+    "uri": "models/wedge.gltf"
+   }
+  ],
+  "children": [
+   {
+    "boundingVolume": {
+     "box": [
+      0,
+      0,
+      0,
+      4,
+      0,
+      0,
+      0,
+      4,
+      0,
+      0,
+      0,
+      4
+     ]
+    },
+    "geometricError": 0,
+    "transform": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     10,
+     1
+    ],
+    "content": {
+     "uri": "models/wedge.glb"
+    }
+   }
+  ]
+ }
+}

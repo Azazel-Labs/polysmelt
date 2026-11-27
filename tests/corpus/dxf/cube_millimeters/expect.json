@@ -38,9 +38,11 @@
     ],
     "source": {
       "format": "DXF",
-      "encoding": "ASCII",
+      "encoding": "ascii",
       "version": "AC1027",
-      "units": "millimeters"
+      "unit": "millimeter",
+      "metersPerUnit": 0.001,
+      "upAxis": "+Z"
     }
   }
 }

@@ -1,0 +1,20 @@
+{
+  "spec": "3MF (3D Manufacturing Format core specification): a real file, a sphere",
+  "source": "3MFConsortium/3mf-samples at 665e20dc4d77, examples/core/sphere.3mf (BSD-2-Clause, see ../LICENSE-3mf-samples); expectations measured with lib3mf 2.5.0",
+  "tolerance": 1e-06,
+  "triangles": 2880,
+  "bounds": {
+    "min": [
+      0.0,
+      0.0,
+      -0.02
+    ],
+    "max": [
+      0.02,
+      0.02,
+      0.0
+    ]
+  },
+  "area": 0.001254,
+  "position_set": "positions.f32"
+}

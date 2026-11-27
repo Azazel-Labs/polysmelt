@@ -1,6 +1,8 @@
 //! What a load keeps: [`Keep`], applied by [`Document::prune`].
 
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, PoisonError};
 
 use serde_json::{Map, Value};
 
@@ -21,18 +23,25 @@ use crate::mesh::{MAX_POINTS, MAX_TRIANGLES, TRIANGLE_CEILING};
 /// Without textures, a material's factors are its own: a reader that would have found a color
 /// texture doesn't turn the base color white for it.
 ///
+/// A `Keep` is built from [`Keep::ALL`] (or [`Keep::MESHES`], [`Keep::LIGHT`]) with a `with_`
+/// setter for each switch, which chain and work in `const`s:
+///
 /// ```
-/// use polysmelt::document::Keep;
+/// use polysmelt::Keep;
 /// // Static meshes for an engine that animates nothing, but still skins them.
-/// let keep = Keep { animations: false, ..Keep::ALL };
+/// let keep = Keep::ALL.with_animations(false);
 /// # assert!(keep.skins);
 /// // A 100-million-triangle scan, past the default limit.
-/// let keep = Keep { max_triangles: 120_000_000, ..Keep::ALL };
-/// // A 40-million-point lidar scan, drawn as points.
-/// let keep = Keep { max_points: 40_000_000, ..Keep::ALL };
+/// let keep = Keep::ALL.with_max_triangles(120_000_000);
+/// // A 40-million-point lidar scan, drawn as points, read on every core.
+/// const SCAN: Keep = Keep::ALL.with_max_points(40_000_000).with_threads(0);
 /// // Only the surfaces: no points or lines in the flattened mesh.
-/// let keep = Keep { lines_and_points: false, ..Keep::ALL };
+/// let keep = Keep::ALL.with_lines_and_points(false);
 /// ```
+///
+/// New switches may come in later versions, each keeping by default what it switches, so a
+/// `Keep` can't be written out field by field.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[allow(clippy::struct_excessive_bools, reason = "independent switches")]
 pub struct Keep {
@@ -59,8 +68,9 @@ pub struct Keep {
     pub cameras: bool,
     /// Lights (`KHR_lights_punctual`).
     pub lights: bool,
-    /// `extras` everywhere: custom properties and source metadata. The document's facts
-    /// stay either way.
+    /// `extras` everywhere: custom properties and each format's own details. What the file says
+    /// about itself in the keys [`SourceInfo`](crate::source::SourceInfo) reads (units, up axis,
+    /// author...) stays in `asset.extras.source`, and the document's facts stay, either way.
     pub extras: bool,
     /// The most triangles a load accepts, against hostile or runaway files: a model that draws
     /// more is refused (and [`Document::flatten`] refuses to draw more). Defaults to
@@ -82,6 +92,8 @@ pub struct Keep {
     /// either way. Where threads can't be had (WebAssembly without shared memory, or a
     /// platform that refuses to start one), it reads on the calling thread.
     pub threads: usize,
+    /// [`Keep::crease_angle`], in hundredths of a degree.
+    crease: u16,
 }
 
 impl Default for Keep {
@@ -106,6 +118,7 @@ impl Keep {
         lines_and_points: true,
         max_points: MAX_POINTS,
         threads: 1,
+        crease: 3000,
     };
 
     /// The meshes and what shapes or shades them (skins, morph targets, materials, textures,
@@ -123,6 +136,142 @@ impl Keep {
         image_bytes: false,
         ..Keep::MESHES
     };
+
+    /// With [`Keep::animations`] set to `animations`.
+    #[must_use]
+    pub const fn with_animations(mut self, animations: bool) -> Self {
+        self.animations = animations;
+        self
+    }
+
+    /// With [`Keep::skins`] set to `skins`.
+    #[must_use]
+    pub const fn with_skins(mut self, skins: bool) -> Self {
+        self.skins = skins;
+        self
+    }
+
+    /// With [`Keep::morph_targets`] set to `morph_targets`.
+    #[must_use]
+    pub const fn with_morph_targets(mut self, morph_targets: bool) -> Self {
+        self.morph_targets = morph_targets;
+        self
+    }
+
+    /// With [`Keep::materials`] set to `materials`.
+    #[must_use]
+    pub const fn with_materials(mut self, materials: bool) -> Self {
+        self.materials = materials;
+        self
+    }
+
+    /// With [`Keep::textures`] set to `textures`.
+    #[must_use]
+    pub const fn with_textures(mut self, textures: bool) -> Self {
+        self.textures = textures;
+        self
+    }
+
+    /// With [`Keep::image_bytes`] set to `image_bytes`.
+    #[must_use]
+    pub const fn with_image_bytes(mut self, image_bytes: bool) -> Self {
+        self.image_bytes = image_bytes;
+        self
+    }
+
+    /// With [`Keep::cameras`] set to `cameras`.
+    #[must_use]
+    pub const fn with_cameras(mut self, cameras: bool) -> Self {
+        self.cameras = cameras;
+        self
+    }
+
+    /// With [`Keep::lights`] set to `lights`.
+    #[must_use]
+    pub const fn with_lights(mut self, lights: bool) -> Self {
+        self.lights = lights;
+        self
+    }
+
+    /// With [`Keep::extras`] set to `extras`.
+    #[must_use]
+    pub const fn with_extras(mut self, extras: bool) -> Self {
+        self.extras = extras;
+        self
+    }
+
+    /// With [`Keep::max_triangles`] set to `max_triangles`.
+    #[must_use]
+    pub const fn with_max_triangles(mut self, max_triangles: usize) -> Self {
+        self.max_triangles = max_triangles;
+        self
+    }
+
+    /// With [`Keep::lines_and_points`] set to `lines_and_points`.
+    #[must_use]
+    pub const fn with_lines_and_points(mut self, lines_and_points: bool) -> Self {
+        self.lines_and_points = lines_and_points;
+        self
+    }
+
+    /// With [`Keep::max_points`] set to `max_points`.
+    #[must_use]
+    pub const fn with_max_points(mut self, max_points: usize) -> Self {
+        self.max_points = max_points;
+        self
+    }
+
+    /// With [`Keep::threads`] set to `threads`.
+    #[must_use]
+    pub const fn with_threads(mut self, threads: usize) -> Self {
+        self.threads = threads;
+        self
+    }
+
+    /// With [`Keep::crease_angle`] set to `degrees`: from 0 to 180, and anything past either end is that end.
+    /// A value that isn't a number leaves the default, 30.
+    ///
+    /// ```
+    /// use polysmelt::Keep;
+    /// // Every face flat, as a file without normals is drawn where nothing smooths it.
+    /// const FACETED: Keep = Keep::ALL.with_crease_angle(0.0);
+    /// // Smooth across every shared vertex, whatever the edge.
+    /// let smooth = Keep::ALL.with_crease_angle(180.0);
+    /// assert_eq!((FACETED.crease_angle(), smooth.crease_angle()), (0.0, 180.0));
+    /// assert_eq!(Keep::ALL.crease_angle(), 30.0);
+    /// ```
+    #[must_use]
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "between 0 and 18000 once clamped"
+    )]
+    pub const fn with_crease_angle(mut self, degrees: f32) -> Self {
+        self.crease = if degrees.is_nan() {
+            3000
+        } else if degrees <= 0.0 {
+            0
+        } else if degrees >= 180.0 {
+            18000
+        } else {
+            (degrees * 100.0 + 0.5) as u16
+        };
+        self
+    }
+
+    /// The crease angle, in degrees, of the normals a reader makes for a file that has none and says nothing of
+    /// its own about smoothing: two faces that meet at a vertex share a normal there when they turn less than
+    /// this from each other, and the vertex is split where they turn more. 30 by default, so a box keeps its
+    /// hard edges and a finely cut curved surface is smooth; 0 makes every face flat, with normals of its own,
+    /// and 180 smooths across every vertex the file's faces share.
+    ///
+    /// A file's own normals and smoothing data always win: this is only for what has neither (an STL, a 3MF, an
+    /// OBJ with no `vn` and no `s`). A glTF file is read as it is, without normals if it has none. Set with
+    /// [`Keep::with_crease_angle`].
+    #[must_use]
+    pub const fn crease_angle(&self) -> f32 {
+        self.crease as f32 / 100.0
+    }
 
     /// [`Keep::max_triangles`], clamped to [`TRIANGLE_CEILING`].
     pub(crate) fn triangles(self) -> usize {
@@ -148,14 +297,20 @@ impl Keep {
         )),
         allow(dead_code, reason = "only the OBJ and SPZ readers take threads")
     )]
-    pub(crate) fn threads(self) -> usize {
-        if cfg!(all(target_family = "wasm", not(target_feature = "atomics"))) {
-            1
-        } else if self.threads == 0 {
-            std::thread::available_parallelism().map_or(1, std::num::NonZero::get)
-        } else {
-            self.threads
-        }
+    pub(crate) fn thread_count(self) -> usize {
+        thread_count(self.threads)
+    }
+}
+
+/// Threads to use for a `threads` setting, at least 1: 0 takes one per core, and WebAssembly without shared memory
+/// has none to spare.
+pub(crate) fn thread_count(threads: usize) -> usize {
+    if cfg!(all(target_family = "wasm", not(target_feature = "atomics"))) {
+        1
+    } else if threads == 0 {
+        std::thread::available_parallelism().map_or(1, std::num::NonZero::get)
+    } else {
+        threads
     }
 }
 
@@ -174,9 +329,10 @@ thread_local! {
         feature = "pcd",
         feature = "xyz",
         feature = "e57",
-        feature = "ac3d"
+        feature = "ac3d",
+        feature = "fbx"
     )),
-    allow(dead_code, reason = "only the OBJ and SPZ readers take threads")
+    allow(dead_code, reason = "only some readers, and the FBX writer, take threads")
 )]
 pub(crate) fn spawn<'s>(s: &'s std::thread::Scope<'s, '_>, f: impl FnOnce() + Send + 's) -> bool {
     #[cfg(test)]
@@ -184,6 +340,49 @@ pub(crate) fn spawn<'s>(s: &'s std::thread::Scope<'s, '_>, f: impl FnOnce() + Se
         return false;
     }
     std::thread::Builder::new().spawn_scoped(s, f).is_ok()
+}
+
+/// `f` of each item, in order, spread over up to `threads` threads that each take the next item as they finish one.
+/// Each thread makes a state with `init` that `f` keeps using for the items it takes. Where no thread can be started,
+/// the calling thread does them all.
+#[cfg_attr(
+    not(any(feature = "ac3d", feature = "fbx")),
+    allow(dead_code, reason = "only the AC3D reader and the FBX writer share work this way")
+)]
+pub(crate) fn par_map_with<T: Sync, S, R: Send>(
+    items: &[T],
+    threads: usize,
+    init: impl Fn() -> S + Sync,
+    f: impl Fn(&mut S, &T) -> R + Sync,
+) -> Vec<R> {
+    if threads <= 1 || items.len() <= 1 {
+        let mut state = init();
+        return items.iter().map(|t| f(&mut state, t)).collect();
+    }
+    let next = AtomicUsize::new(0);
+    let done: Mutex<Vec<Option<R>>> = Mutex::new((0..items.len()).map(|_| None).collect());
+    let run = || {
+        let mut state = init();
+        loop {
+            let k = next.fetch_add(1, Ordering::Relaxed);
+            let Some(item) = items.get(k) else { break };
+            let r = f(&mut state, item);
+            done.lock().unwrap_or_else(PoisonError::into_inner)[k] = Some(r);
+        }
+    };
+    std::thread::scope(|s| {
+        for _ in 1..threads.min(items.len()) {
+            if !spawn(s, run) {
+                break;
+            }
+        }
+        run();
+    });
+    done.into_inner()
+        .unwrap_or_else(PoisonError::into_inner)
+        .into_iter()
+        .flatten()
+        .collect()
 }
 
 /// Calls `f` on each item of `obj[key]` that's an object.
@@ -258,7 +457,7 @@ fn extensions_present(v: &Value, out: &mut BTreeSet<String>) {
     }
 }
 
-impl Document<'_> {
+impl Document {
     /// Drops what `keep` doesn't keep. The JSON stays valid glTF: references to what went are
     /// removed with it, and extensions no longer used are unlisted. Extensions Polysmelt doesn't
     /// know that refer to dropped materials, textures or cameras may be left pointing at them.
@@ -280,8 +479,29 @@ impl Document<'_> {
         {
             return;
         }
+        let missed = if keep.textures && keep.materials {
+            None
+        } else {
+            self.missed.take()
+        };
         let mut before = BTreeSet::new();
-        let mut root = Value::Object(std::mem::take(&mut self.json));
+        let mut root = Value::Object(std::mem::take(self.json_mut()));
+        // Without its textures a document misses none: what the reader looked for and didn't find goes, as a read
+        // without textures wouldn't have looked.
+        if let Some(missed) = missed
+            && let Some(source) = root.pointer_mut("/asset/extras/source").and_then(Value::as_object_mut)
+        {
+            let (missed, counted) = *missed;
+            if counted {
+                source.remove("droppedTextures");
+            }
+            if let Some(Value::Array(files)) = source.get_mut("missingFiles") {
+                files.retain(|f| !f.as_str().is_some_and(|f| missed.files.iter().any(|m| m == f)));
+                if files.is_empty() {
+                    source.remove("missingFiles");
+                }
+            }
+        }
         extensions_present(&root, &mut before);
         let Value::Object(json) = &mut root else { unreachable!() };
         // Animation pointers (`KHR_animation_pointer`) into what goes, go with it.
@@ -362,7 +582,21 @@ impl Document<'_> {
             self.refs.clear();
         }
         if !keep.extras {
+            // What the file says about itself isn't a custom property: its normalized keys stay.
+            let info: Option<Map<String, Value>> = root
+                .pointer("/asset/extras/source")
+                .and_then(Value::as_object)
+                .map(|s| {
+                    s.iter()
+                        .filter(|(k, _)| crate::source::KEYS.contains(&k.as_str()))
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect()
+                })
+                .filter(|m: &Map<String, Value>| !m.is_empty());
             remove_key_everywhere(&mut root, "extras");
+            if let (Some(info), Some(asset)) = (info, root.get_mut("asset").and_then(Value::as_object_mut)) {
+                asset.insert("extras".into(), serde_json::json!({ "source": info }));
+            }
         }
         let Value::Object(json) = &mut root else { unreachable!() };
         if !dead.is_empty() {
@@ -388,6 +622,13 @@ impl Document<'_> {
                 json.remove("animations");
             }
         }
+        // An assumed frame rate is a guess about the animations: it goes with the last of them, as a read
+        // that keeps no animations leaves it out.
+        if !keep.animations
+            && let Some(Value::Object(source)) = json.get_mut("asset").and_then(|a| a.pointer_mut("/extras/source"))
+        {
+            crate::source::drop_assumed_frame_rate(source);
+        }
         let mut after = BTreeSet::new();
         extensions_present(&root, &mut after);
         let Value::Object(json) = &mut root else { unreachable!() };
@@ -400,7 +641,7 @@ impl Document<'_> {
             }
         }
         let Value::Object(json) = root else { unreachable!() };
-        self.json = json;
+        *self.json_mut() = json;
     }
 }
 
@@ -419,10 +660,10 @@ mod tests {
 
     use super::*;
 
-    fn doc(v: Value) -> Document<'static> {
+    fn doc(v: Value) -> Document {
         let Value::Object(json) = v else { unreachable!() };
         let mut d = Document::empty(Map::new());
-        d.json = json;
+        *d.json_mut() = json;
         d
     }
 
@@ -431,7 +672,7 @@ mod tests {
         let v = json!({ "asset": { "version": "2.0" }, "animations": [{ "channels": [{}] }], "extras": { "a": 1 } });
         let mut d = doc(v.clone());
         d.prune(Keep::default());
-        assert_eq!(Value::Object(d.json), v);
+        assert_eq!(Value::Object(d.json().clone()), v);
     }
 
     #[test]
@@ -444,13 +685,13 @@ mod tests {
             image_bytes: false,
             ..Keep::ALL
         });
-        assert_eq!(Value::Object(d.json), v);
+        assert_eq!(Value::Object(d.json().clone()), v);
         let mut d = doc(v);
         d.prune(Keep {
             extras: false,
             ..Keep::ALL
         });
-        assert!(!d.json.contains_key("animations"));
+        assert!(!d.json().contains_key("animations"));
     }
 
     #[test]
@@ -462,7 +703,7 @@ mod tests {
             max_points: usize::MAX,
             ..Keep::ALL
         });
-        assert_eq!(Value::Object(d.json.clone()), v);
+        assert_eq!(Value::Object(d.json().clone()), v);
         assert!(!d.lines_and_points());
         assert_eq!(d.max_points(), TRIANGLE_CEILING);
         d.prune(Keep::LIGHT);
@@ -496,7 +737,7 @@ mod tests {
         }));
         d.prune(Keep::MESHES);
         assert_eq!(
-            Value::Object(d.json),
+            Value::Object(d.json().clone()),
             json!({
                 "asset": { "version": "2.0" },
                 "nodes": [{ "mesh": 0, "skin": 0 }, {}],
@@ -537,7 +778,7 @@ mod tests {
             ..Keep::ALL
         });
         assert_eq!(
-            Value::Object(d.json),
+            Value::Object(d.json().clone()),
             json!({
                 "asset": { "version": "2.0" },
                 "nodes": [{ "mesh": 0 }],
@@ -568,7 +809,7 @@ mod tests {
             ..Keep::ALL
         });
         assert_eq!(
-            Value::Object(d.json),
+            Value::Object(d.json().clone()),
             json!({
                 "asset": { "version": "2.0" },
                 "animations": [{ "channels": [

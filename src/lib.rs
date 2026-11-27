@@ -1,97 +1,155 @@
-//! Pure-Rust 3D asset interchange, with glTF as the hub.
+//! Pure-Rust 3D asset interchange, with glTF as the hub: 60-some formats read into a glTF 2.0
+//! [`Document`], and written back out as GLB.
 //!
-//! - [`formats`]: readers for STL, PLY, `MagicaVoxel`, OBJ, FBX, 3DS, 3MF, USD, glTF,
-//!   `SketchUp`, BVH, COLLADA, VRM, OFF, X3D/VRML, DXF, LAS/LAZ, PCD, E57, text point clouds,
-//!   AMF, `LightWave`, AC3D, `OpenFlight` and `OpenGEX`, and for game and animation assets
+//! # Quick start
+//!
+//! ```no_run
+//! use polysmelt::document::Pose;
+//!
+//! // Any format Polysmelt reads: told by the extension, or else by the file's first bytes. The
+//! // textures and libraries the model names are found beside it.
+//! let doc = polysmelt::open("models/robot.fbx")?;
+//!
+//! // What the file says about itself (format, units, axes, the tool that wrote it), and what
+//! // the reader converted to glTF's conventions.
+//! let info = doc.source_info();
+//! println!("{:?} {:?}, up {:?}", info.format, info.version, info.up_axis);
+//!
+//! // What it draws, counted from the JSON alone, or flattened into posed triangles.
+//! println!("{} triangles", doc.triangles());
+//! if let Some(mesh) = doc.flatten(Pose::Rest)? {
+//!     println!("{} vertices", mesh.prims.iter().map(|p| p.positions.len()).sum::<usize>());
+//! }
+//!
+//! // And out as a GLB, everything it holds kept.
+//! doc.write_glb(std::io::BufWriter::new(std::fs::File::create("robot.glb")?))?;
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+//!
+//! A model in memory is [`read`], and a [`Loader`] chooses what [`open`] and [`read`] don't:
+//! what to [`Keep`], where the files a model names are found, and its [`Format`].
+//!
+//! ```
+//! use polysmelt::{Keep, Loader, assets::Memory};
+//!
+//! let obj = "mtllib box.mtl\nusemtl red\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
+//! let mtl = "newmtl red\nKd 1 0 0\n";
+//! let doc = Loader::new()
+//!     .assets(Memory::new().with("box.mtl", mtl.as_bytes()))
+//!     .keep(Keep::ALL.with_animations(false))
+//!     .read(obj.as_bytes(), "box.obj")?;
+//! assert_eq!(doc.triangles(), 1);
+//! assert_eq!(doc.json()["materials"][0]["name"], "red");
+//! let glb: Vec<u8> = doc.to_glb()?;
+//! # Ok::<(), polysmelt::Error>(())
+//! ```
+//!
+//! # What's here
+//!
+//! - [`open`], [`read`] and [`Loader`]: the ways in. [`Format`] names what they read: STL, PLY,
+//!   `MagicaVoxel`, OBJ, FBX, 3DS, 3MF, USD, glTF, `SketchUp`, BVH, COLLADA, VRM, OFF,
+//!   X3D/VRML, DXF, LAS/LAZ, PCD, E57, text point clouds, AMF, `LightWave`, AC3D,
+//!   `OpenFlight`, `OpenGEX`, Irrlicht, XGL, VTK, 3D Tiles, Gmsh and Medit, and for game and
+//!   animation assets
 //!   `MikuMikuDance` (PMX, PMD, VMD), `DirectX` `.x`, MD2, MD3, MD5, IQM, SMD, `MilkShape` 3D,
-//!   `Blitz3D`, ASF/AMC, C3D, TRC, HTR and OGRE, each behind a cargo feature, producing a
-//!   [`Document`](document::Document).
-//! - [`document`]: that common form, a glTF 2.0 document (JSON and buffers) written out as a GLB
-//!   as it is, flattened into a posed [`Mesh`](mesh::Mesh) on demand, and pruned to what a
-//!   [`Keep`](document::Keep) asks for.
+//!   `Blitz3D`, ASF/AMC, C3D, TRC, HTR and OGRE, each behind a cargo feature.
+//! - [`document`]: the [`Document`] they produce, a glTF 2.0 document (JSON and buffers)
+//!   written out as a GLB as it is, flattened into a posed [`Mesh`](mesh::Mesh) on demand, and
+//!   pruned to what a [`Keep`] asks for.
 //! - [`mesh`]: the flat triangle-list model, written out as a GLB.
 //! - [`rig`]: typed views of a document's node tree, skins and animations, for playing and
 //!   retargeting motion.
+//! - [`source`]: what a file said about itself: units, axes, the tool that wrote it.
 //! - [`assets`]: how readers find the textures and material libraries a model refers to.
 //! - [`images`]: handles on a document's images, for those a load found but didn't read.
 //! - [`gltf`]: GLB packing, and meshopt compression added to or decoded away from a GLB.
 //! - [`meshopt`]: the `EXT_meshopt_compression` and `KHR_meshopt_compression` bitstreams.
 
-use std::fmt::Display;
-
 /// The shared byte buffer [`mesh::Image`] holds, from the `bytes` crate: cloning or slicing one
 /// doesn't copy its bytes.
-pub use bytes::Bytes;
+pub use ::bytes::Bytes;
+/// The JSON a [`Document`] is, from the `serde_json` crate, as [`Document::json`] hands it out.
+pub use serde_json;
 
-/// Returns an [`Error::InvalidInput`] built from a format string.
+#[cfg(feature = "fbx")]
+pub use document::FbxOptions;
+pub use document::{Document, Keep};
+#[cfg(feature = "fs")]
+pub use formats::open;
+pub use formats::{Format, Loader, read};
+
+/// The README's examples, compiled as doc tests.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;
+
+/// Returns an [`Error`] of an [`ErrorKind`] (named bare: `Corrupt`) with a message built from a
+/// format string.
 macro_rules! bail {
-    ($($t:tt)*) => {
-        return Err($crate::Error::InvalidInput($crate::printable(format!($($t)*))))
+    ($kind:ident, $($t:tt)*) => {
+        return Err(err!($kind, $($t)*))
     };
 }
 
-/// Bails unless the condition holds.
+/// Bails with an error of the kind unless the condition holds.
 macro_rules! ensure {
-    ($cond:expr, $($t:tt)*) => {
+    ($cond:expr, $kind:ident, $($t:tt)*) => {
         if !$cond {
-            bail!($($t)*)
+            bail!($kind, $($t)*)
         }
     };
 }
 
-/// An [`Error::InvalidInput`] built from a format string.
+/// An [`Error`] of an [`ErrorKind`] (named bare: `Corrupt`) with a message built from a format
+/// string. A constant message isn't allocated.
 #[allow(unused_macros)]
-macro_rules! invalid {
-    ($($t:tt)*) => {
-        $crate::Error::InvalidInput($crate::printable(format!($($t)*)))
+macro_rules! err {
+    ($kind:ident, $($t:tt)*) => {
+        $crate::Error::from_args($crate::ErrorKind::$kind, format_args!($($t)*))
     };
 }
 
-/// Text from a file as an error message shows it: quoted, escaped as Rust writes a string
-/// literal (so control characters and NULs come out printable), and cut to 32 characters.
-#[allow(dead_code, reason = "which readers use it depends on the enabled features")]
-pub(crate) fn shown(text: &[u8]) -> String {
-    const MOST: usize = 32;
-    let text = String::from_utf8_lossy(text);
-    let mut cut: String = text.chars().take(MOST).collect();
-    if text.chars().nth(MOST).is_some() {
-        cut.push('…');
-    }
-    format!("{cut:?}")
-}
-
-/// An error message with any control characters escaped, so file content that slipped into
-/// it can't garble a terminal or a report.
-pub(crate) fn printable(message: String) -> String {
-    if !message.chars().any(char::is_control) {
-        return message;
-    }
-    message
-        .chars()
-        .map(|c| {
-            if c.is_control() {
-                c.escape_debug().to_string()
-            } else {
-                c.to_string()
-            }
-        })
-        .collect()
-}
-
 pub mod assets;
+#[allow(dead_code, reason = "which readers use it depends on the enabled features")]
+mod bytes;
 pub mod document;
+mod error;
 mod flatten;
-pub mod formats;
+mod formats;
 mod gaussian;
+mod geometry;
 pub mod gltf;
 pub mod images;
 mod json;
 mod keep;
+mod legacy_material;
 mod material;
 pub mod mesh;
 pub mod meshopt;
 mod num;
+#[cfg_attr(
+    not(all(
+        feature = "minimal",
+        feature = "fbx",
+        feature = "usd",
+        feature = "dae",
+        feature = "x3d",
+        feature = "e57",
+        feature = "amf"
+    )),
+    allow(dead_code, reason = "each reader uses the parts it needs")
+)]
+mod quat;
 pub mod rig;
+#[cfg_attr(
+    not(feature = "default"),
+    allow(dead_code, reason = "each reader uses the parts it needs")
+)]
+mod skin;
+pub mod source;
+
+#[cfg(any(feature = "dae", feature = "skp"))]
+mod polygon;
 
 #[cfg(any(
     feature = "webp",
@@ -116,69 +174,14 @@ mod png;
 mod raster;
 #[cfg(test)]
 mod test_rng;
+#[cfg_attr(
+    not(all(feature = "3mf", feature = "x3d")),
+    allow(dead_code, reason = "each reader uses the parts it needs")
+)]
+mod vec3;
 #[cfg(feature = "webp")]
 mod webp;
 
-/// What can go wrong reading or writing an asset.
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    /// The input is malformed or uses something unsupported.
-    #[error("{0}")]
-    InvalidInput(String),
-    /// Reading a file failed.
-    #[error(transparent)]
-    Io(#[from] std::io::Error),
-}
-
-/// A result with [`Error`].
-pub type Result<T, E = Error> = std::result::Result<T, E>;
-
-/// Turns a missing value or a foreign error into an [`Error::InvalidInput`] that says what was
-/// being done.
-#[allow(dead_code)]
-pub(crate) trait Context<T> {
-    fn context(self, what: impl Display) -> Result<T>;
-    fn with_context<D: Display>(self, what: impl FnOnce() -> D) -> Result<T>;
-}
-
-impl<T> Context<T> for Option<T> {
-    fn context(self, what: impl Display) -> Result<T> {
-        self.ok_or_else(|| Error::InvalidInput(printable(what.to_string())))
-    }
-    fn with_context<D: Display>(self, what: impl FnOnce() -> D) -> Result<T> {
-        self.ok_or_else(|| Error::InvalidInput(printable(what().to_string())))
-    }
-}
-
-impl<T, E: Display> Context<T> for std::result::Result<T, E> {
-    fn context(self, what: impl Display) -> Result<T> {
-        self.map_err(|e| Error::InvalidInput(printable(format!("{what}: {e}"))))
-    }
-    fn with_context<D: Display>(self, what: impl FnOnce() -> D) -> Result<T> {
-        self.map_err(|e| Error::InvalidInput(printable(format!("{}: {e}", what()))))
-    }
-}
-
-/// Foreign errors met while parsing, as invalid input.
-macro_rules! invalid_from {
-    ($($t:ty),* $(,)?) => {
-        $(impl From<$t> for Error {
-            fn from(e: $t) -> Self {
-                Error::InvalidInput(e.to_string())
-            }
-        })*
-    };
-}
-
-invalid_from!(
-    std::num::ParseIntError,
-    std::num::ParseFloatError,
-    std::num::TryFromIntError,
-    std::array::TryFromSliceError,
-    std::str::Utf8Error,
-    serde_json::Error,
-);
-#[cfg(any(feature = "3mf", feature = "usd"))]
-invalid_from!(zip::result::ZipError);
-#[cfg(feature = "3mf")]
-invalid_from!(quick_xml::Error);
+#[allow(unused_imports, reason = "which readers use them depends on the enabled features")]
+pub(crate) use error::{Context, Within, printable, shown};
+pub use error::{Error, ErrorKind, Result};

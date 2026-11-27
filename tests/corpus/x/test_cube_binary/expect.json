@@ -28,6 +28,7 @@
   },
   "json": {
     "/asset/extras/source/encoding": "binary",
-    "/asset/extras/source/ticksPerSecond": 24
+    "/asset/extras/source/compressed": null,
+    "/asset/extras/source/frameRate": 24
   }
 }

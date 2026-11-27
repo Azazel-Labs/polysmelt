@@ -1,0 +1,31 @@
+{
+  "spec": "VTK File Formats: a real file: legacy ASCII 1.0, an unstructured grid of twelve cell types",
+  "source": "VTK's test data (Testing/Data), BSD license, see ../LICENSE-VTK; expectations computed with VTK 9.7.2",
+  "triangles": 40,
+  "lines": 2,
+  "points": 1,
+  "bounds": {
+    "min": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "max": [
+      2.0,
+      1.0,
+      6.0
+    ]
+  },
+  "area": 20.780239,
+  "facts": {
+    "triangles": 40
+  },
+  "document": {
+    "attributes": [
+      "_SCALARS",
+      "_VECTORS"
+    ]
+  },
+  "colors": false,
+  "uvs": false
+}

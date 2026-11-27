@@ -14,11 +14,11 @@
 //! the top left, as glTF's do, and are kept as written. Triangles are wound clockwise seen from the front, so each
 //! is turned around for glTF. A surface with no triangles is left out.
 //!
-//! Each tag is a root node named after it, at its place in the first frame (its axes are the columns of its
-//! rotation). With more than one frame, the frames become one linear animation, named after the file: a weights
+//! Each tag is a node named after it, a root of the file, at its place in the first frame (its axes are the columns of its
+//! rotation). With more than one frame, the frames become one linear animation, with no name as the file gives it none: a weights
 //! channel per surface with a key per frame that turns that frame's target fully on (the first frame's key turns
 //! them all off), and translation and rotation channels per tag. The format has no frame rate; frames are taken at
-//! 10 a second (a model's frame rates are in the game's animation scripts).
+//! 30 a second, the readers' shared assumption (a model's frame rates are in the game's animation scripts).
 //!
 //! A surface's first shader name is its material's texture, looked for as written and, when it has no extension,
 //! as a `.tga` (the assets find the same name in other image formats, and by file name in other folders); its
@@ -26,10 +26,14 @@
 //! the model when there is one (`surface,texture` lines, as player models name theirs). Shader scripts, which can
 //! name a different texture for a shader, aren't read; frame bounds are dropped.
 //!
-//! The format is Z up, so the scene's roots are turned for glTF's Y up; game units are kept unscaled.
+//! The format is Z up and right-handed, as the engine it belongs to is, so the scene stays as the file has it under the document's `RootNode`, which turns it for glTF's Y
+//! up (the source info's `upAxis` is a declared `+Z`, converted, and its `handedness` a declared `right`); game units are kept unscaled, and their length unknown. With more than
+//! one frame the assumed frame rate is recorded. The header's name (the model's path in the game's folders) is kept
+//! as `name`.
 //!
-//! A file cut short, an offset past its end, a negative count, a surface that doesn't start with `IDP3` or has no
-//! frames, or a triangle naming a vertex past its surface's is an error. Counts are checked against the file's size
+//! A file cut short, an offset past its end, a negative count, or a surface that doesn't start with `IDP3` or has
+//! no frames is an error. A triangle naming a vertex past its surface's is dropped and counted
+//! (`droppedGeometry` in the source extras), as in every format. Counts are checked against the file's size
 //! before anything is allocated for them, and a file whose frames would make more morph data than a model of the
 //! engine can hold is refused.
 
@@ -39,18 +43,21 @@ use std::f64::consts::TAU;
 use serde_json::json;
 
 use super::Input;
-use super::scene::{
-    self, Animation, Bin, Channel, Interp, Node, Path, Primitive, Scene, SceneMesh, Target, Z_UP_TO_Y_UP,
-};
+use super::scene::{self, Animation, Channel, Interp, Node, Path, Primitive, Scene, SceneMesh, Target, Z_UP_TO_Y_UP};
 use crate::Result;
 use crate::assets::Assets;
+use crate::bytes::Bin;
 use crate::document::{Document, Keep};
 use crate::images::Images;
 use crate::mesh::Material;
 use crate::num::{f32_of, u32_of};
+use crate::quat;
+use crate::source::{Axis, Fact, Handedness};
 
-/// Frames a second, as the format stores none.
-const RATE: f32 = 10.0;
+/// Frames a second, as the format stores none (the game gives each animation its rate in an `animation.cfg`
+/// beside the model): the readers' shared assumption.
+#[allow(clippy::cast_possible_truncation, reason = "a small whole number")]
+const RATE: f32 = super::keys::ASSUMED_FRAME_RATE as f32;
 
 /// The most frames read; the engine holds 1024.
 const MAX_FRAMES: usize = 1024;
@@ -63,7 +70,7 @@ const MAX_MORPH_DATA: usize = 1 << 24;
 const SURFACE_HEADER: usize = 108;
 
 /// Reads an `.md3` model.
-pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document<'static>> {
+pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document> {
     let data = input.read()?;
     let file = parse(&data, keep.morph_targets)?;
     let stem = input
@@ -83,6 +90,7 @@ pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
     let n_frames = file.frame_names.len();
     let target_names = target_names(&file.frame_names);
     for s in file.surfaces {
+        scene.dropped += s.dropped;
         let texture = if s.shader.is_empty() {
             skin.get(&s.name.to_ascii_lowercase()).cloned().unwrap_or_default()
         } else {
@@ -174,7 +182,7 @@ pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
     }
     if !channels.is_empty() {
         scene.animations.push(Animation {
-            name: stem,
+            name: String::new(),
             channels,
             extras: None,
         });
@@ -183,16 +191,18 @@ pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
     scene.facts.insert("frames".into(), json!(n_frames));
     scene.facts.insert("surfaces".into(), json!(file.surface_count));
     scene.facts.insert("tags".into(), json!(n_tags));
-    scene.source.insert("format".into(), json!("MD3"));
-    scene.source.insert("version".into(), json!(file.version));
+    scene.info.format = Some("MD3".into());
+    scene.info.version = Some(file.version.to_string());
     if !file.name.is_empty() {
+        // The model's path in the game's folders, not a title.
         scene.source.insert("name".into(), json!(file.name));
     }
-    scene.source.insert("upAxis".into(), json!("Z"));
+    scene.info.up_axis = Fact::Declared(Axis::PosZ);
+    scene.info.handedness = Fact::Declared(Handedness::Right);
     if n_frames > 1 {
-        scene.source.insert("frameRate".into(), json!(RATE));
+        scene.info.frame_rate = Fact::Assumed(f64::from(RATE));
     }
-    scene.rotate_roots(Z_UP_TO_Y_UP);
+    scene.turn(Z_UP_TO_Y_UP);
     scene.finish(keep)
 }
 
@@ -216,17 +226,7 @@ fn target_names(frames: &[String]) -> Vec<String> {
 /// The texture a shader or skin names, by the engine's conventions: as written, then as a `.tga` when it has no
 /// extension.
 fn find_texture(name: &str, input: &Input<'_>, assets: &dyn Assets, images: &mut Images) -> Option<usize> {
-    if name.is_empty() {
-        return None;
-    }
-    let mut tries = vec![name.to_owned()];
-    if std::path::Path::new(name).extension().is_none() {
-        tries.push(format!("{name}.tga"));
-    }
-    tries
-        .iter()
-        .find_map(|t| assets.find(t, input.dir()).map(|p| (p, t)))
-        .and_then(|(p, t)| images.file(assets, p, t))
+    images.find_bare(assets, name, &[".tga"], input.dir())
 }
 
 /// The textures `<stem>_default.skin` beside the model gives its surfaces, by lowercase surface name; empty when
@@ -276,20 +276,31 @@ struct Surface {
     prim: Primitive,
     /// Each kept frame's target; `None` for the first frame and any frame that doesn't move from it.
     frames: Vec<Option<usize>>,
+    /// The triangles left out for naming a vertex that isn't there.
+    dropped: usize,
 }
 
 /// A header count or offset, which can't be negative.
 fn size(v: i32, what: &str) -> Result<usize> {
-    usize::try_from(v).map_err(|_| invalid!("MD3 {what} is negative ({v})"))
+    usize::try_from(v).map_err(|_| err!(Corrupt, "MD3 {what} is negative ({v})"))
 }
 
 /// Reads the file; `morphs` says whether frames after the first are kept as targets.
 fn parse(data: &[u8], morphs: bool) -> Result<File> {
-    ensure!(data.starts_with(b"IDP3"), "not an MD3 file: no IDP3 signature");
+    ensure!(
+        data.starts_with(b"IDP3"),
+        UnknownFormat,
+        "not an MD3 file: no IDP3 signature"
+    );
     let mut b = Bin::new(data, "MD3");
     b.skip(4)?;
     let version = b.i32()?;
-    let name = scene::text(b.fixed_str(64)?);
+    ensure!(
+        version == 15,
+        Unsupported,
+        "MD3 version {version} isn't read, only version 15"
+    );
+    let name = crate::bytes::name(b.fixed_str(64)?);
     let _flags = b.i32()?;
     let n_frames = size(b.i32()?, "frame count")?;
     let n_tags = size(b.i32()?, "tag count")?;
@@ -298,9 +309,10 @@ fn parse(data: &[u8], morphs: bool) -> Result<File> {
     let ofs_frames = size(b.i32()?, "frame offset")?;
     let ofs_tags = size(b.i32()?, "tag offset")?;
     let ofs_surfaces = size(b.i32()?, "surface offset")?;
-    ensure!(n_frames > 0, "MD3 file has no frames");
+    ensure!(n_frames > 0, Empty, "MD3 file has no frames");
     ensure!(
         n_frames <= MAX_FRAMES,
+        LimitExceeded,
         "MD3 file has {n_frames} frames, more than {MAX_FRAMES}"
     );
 
@@ -308,7 +320,7 @@ fn parse(data: &[u8], morphs: bool) -> Result<File> {
     let mut frame_names = Vec::with_capacity(b.count(n_frames as u64, 56)?);
     for _ in 0..n_frames {
         b.skip(40)?;
-        frame_names.push(scene::text(b.fixed_str(16)?));
+        frame_names.push(crate::bytes::name(b.fixed_str(16)?));
     }
 
     let mut tags: Vec<Tag> = Vec::new();
@@ -316,16 +328,16 @@ fn parse(data: &[u8], morphs: bool) -> Result<File> {
         b.seek(ofs_tags)?;
         let total = n_frames
             .checked_mul(n_tags)
-            .ok_or_else(|| invalid!("MD3 file claims too many tags"))?;
+            .ok_or_else(|| err!(LimitExceeded, "MD3 file claims too many tags"))?;
         b.count(total as u64, 112)?;
         for f in 0..n_frames {
             for t in 0..n_tags {
-                let name = scene::text(b.fixed_str(64)?);
+                let name = crate::bytes::name(b.fixed_str(64)?);
                 let origin = b.vec3()?;
                 let axes = [b.vec3()?, b.vec3()?, b.vec3()?];
                 // The axes are the rotation's columns, which is how the matrix is laid out.
                 let m: [f64; 9] = std::array::from_fn(|i| f64::from(axes[i / 3][i % 3]));
-                let q = scene::normalize(scene::matrix_quat(&m));
+                let q = quat::normalize(quat::from_matrix(&m));
                 if f == 0 {
                     tags.push(Tag {
                         name,
@@ -350,7 +362,7 @@ fn parse(data: &[u8], morphs: bool) -> Result<File> {
         surfaces.extend(surface);
         at = at
             .checked_add(end)
-            .ok_or_else(|| invalid!("MD3 surface {s} points past the file's end"))?;
+            .ok_or_else(|| err!(Truncated, "MD3 surface {s} runs past the end of the file"))?;
     }
     Ok(File {
         version,
@@ -367,8 +379,12 @@ fn parse(data: &[u8], morphs: bool) -> Result<File> {
 fn surface(data: &[u8], start: usize, s: usize, keep: usize, budget: &mut usize) -> Result<(Option<Surface>, usize)> {
     let mut b = Bin::new(data, "MD3");
     b.seek(start)?;
-    ensure!(b.bytes(4)? == b"IDP3", "MD3 surface {s} doesn't start with IDP3");
-    let name = scene::text(b.fixed_str(64)?);
+    ensure!(
+        b.bytes(4)? == b"IDP3",
+        Corrupt,
+        "MD3 surface {s} doesn't start with IDP3"
+    );
+    let name = crate::bytes::name(b.fixed_str(64)?);
     let _flags = b.i32()?;
     let n_frames = size(b.i32()?, "surface frame count")?;
     let n_shaders = size(b.i32()?, "shader count")?;
@@ -377,7 +393,7 @@ fn surface(data: &[u8], start: usize, s: usize, keep: usize, budget: &mut usize)
     let ofs = |b: &mut Bin<'_>, what: &str| -> Result<usize> {
         start
             .checked_add(size(b.i32()?, what)?)
-            .ok_or_else(|| invalid!("MD3 surface {s}'s {what} points past the file's end"))
+            .ok_or_else(|| err!(Truncated, "MD3 surface {s}'s {what} runs past the end of the file"))
     };
     let ofs_tris = ofs(&mut b, "triangle offset")?;
     let ofs_shaders = ofs(&mut b, "shader offset")?;
@@ -387,11 +403,13 @@ fn surface(data: &[u8], start: usize, s: usize, keep: usize, budget: &mut usize)
     // Each surface follows the last, so the next can't start inside this one's header.
     ensure!(
         end >= SURFACE_HEADER,
+        Corrupt,
         "MD3 surface {s} is {end} bytes, less than its header"
     );
-    ensure!(n_frames > 0, "MD3 surface {s} has no frames");
+    ensure!(n_frames > 0, Corrupt, "MD3 surface {s} has no frames");
     ensure!(
         n_frames <= MAX_FRAMES,
+        LimitExceeded,
         "MD3 surface {s} has {n_frames} frames, more than {MAX_FRAMES}"
     );
 
@@ -399,18 +417,21 @@ fn surface(data: &[u8], start: usize, s: usize, keep: usize, budget: &mut usize)
     if n_shaders > 0 {
         b.seek(ofs_shaders)?;
         b.count(n_shaders as u64, 68)?;
-        shader = scene::text(b.fixed_str(64)?);
+        shader = crate::bytes::name(b.fixed_str(64)?);
     }
     if n_tris == 0 || n_verts == 0 {
         return Ok((None, end));
     }
     b.seek(ofs_tris)?;
     let mut indices = Vec::with_capacity(b.count(n_tris as u64, 12)?.saturating_mul(3));
-    for t in 0..n_tris {
+    let mut dropped = 0;
+    for _ in 0..n_tris {
         let v = [b.i32()?, b.i32()?, b.i32()?];
         let v = v.map(|i| usize::try_from(i).ok().filter(|&i| i < n_verts));
+        // A triangle naming a vertex that isn't there is dropped, as in every format.
         let [Some(a), Some(c1), Some(c2)] = v else {
-            bail!("MD3 surface {s}'s triangle {t} names a vertex past its {n_verts}");
+            dropped += 1;
+            continue;
         };
         // Clockwise front faces in the file; glTF's are counterclockwise.
         indices.extend([a, c2, c1].map(u32_of));
@@ -426,7 +447,7 @@ fn surface(data: &[u8], start: usize, s: usize, keep: usize, budget: &mut usize)
         .checked_mul(n_verts)
         .and_then(|n| n.checked_add(kept * kept))
         .filter(|&n| n <= *budget)
-        .ok_or_else(|| invalid!("MD3 file's frames hold more vertices than a model can"))?;
+        .ok_or_else(|| err!(LimitExceeded, "MD3 file's frames hold more vertices than a model can"))?;
     *budget -= cost;
     b.seek(ofs_xyz)?;
     b.count((n_frames as u64).saturating_mul(n_verts as u64), 8)?;
@@ -458,6 +479,7 @@ fn surface(data: &[u8], start: usize, s: usize, keep: usize, budget: &mut usize)
             shader,
             prim,
             frames,
+            dropped,
         }),
         end,
     ))
@@ -564,5 +586,27 @@ mod tests {
         sweep(bytes, |b| {
             let _ = load(Input::memory(b, "thing.md3"), &crate::assets::Memory::new(), Keep::ALL);
         });
+    }
+
+    #[test]
+    fn source_info_is_game_units_z_up_at_the_assumed_frame_rate() {
+        let bytes = include_bytes!("../../tests/corpus/md3/surfaces_tag_and_skin/thing.md3");
+        let doc = load(
+            Input::memory(bytes, "thing.md3"),
+            &crate::assets::Memory::new(),
+            Keep::ALL,
+        )
+        .unwrap();
+        let info = doc.source_info();
+        assert_eq!(info.format.as_deref(), Some("MD3"));
+        assert_eq!(info.version.as_deref(), Some("15"));
+        assert_eq!(info.meters_per_unit, Fact::Unknown);
+        assert_eq!(info.up_axis, Fact::Declared(Axis::PosZ));
+        assert_eq!(info.frame_rate, Fact::Assumed(30.0));
+        assert!(info.converted.up_axis && !info.converted.units);
+        assert_eq!(
+            doc.json()["asset"]["extras"]["source"]["name"],
+            "models/thing/thing.md3"
+        );
     }
 }

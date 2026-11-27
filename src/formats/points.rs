@@ -13,8 +13,9 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 
 use serde_json::{Map, Value, json};
 
-use crate::Result;
 use crate::document::{Builder, Document, Part};
+use crate::source::SourceInfo;
+use crate::{Context as _, ErrorKind, Result};
 
 /// A point cloud on its way to a document. Every array that isn't empty has one entry per
 /// point.
@@ -181,16 +182,25 @@ impl Cloud {
         debug_assert!(self.positions.len() < n);
     }
 
-    /// The document: `source` (the format and what the file says about itself) in the asset's
+    /// The document: `info` written over `source` (the format's own details) in the asset's
     /// extras, `facts` as given with the point count added.
-    pub fn document(mut self, source: Value, mut facts: Map<String, Value>) -> Document<'static> {
+    pub fn document(
+        mut self,
+        info: &SourceInfo,
+        mut source: Map<String, Value>,
+        mut facts: Map<String, Value>,
+    ) -> Document {
+        info.write(&mut source);
+        let source = Value::Object(source);
         self.drop_broken();
         let n = self.positions.len();
         facts.insert("points".into(), json!(n));
         if n == 0 {
-            return Document::empty(facts);
+            let mut doc = Document::empty(facts);
+            doc.base_mut()["asset"]["extras"] = json!({ "source": source });
+            return doc;
         }
-        let mut b = Builder::default();
+        let mut b = Builder::plain();
         let mut constant = std::mem::take(&mut self.constant);
         let mut attributes = json!({ "POSITION": b.positions(std::mem::take(&mut self.positions)) });
         if self.normals.len() == n {
@@ -211,21 +221,17 @@ impl Cloud {
             );
             attributes["NORMAL"] = json!(a);
         }
+        // A color stays an attribute even when every point has the same one: it is what draws them.
         if self.colors.len() == n {
-            let first = self.colors[0];
-            if self.colors.iter().all(|&c| c == first) {
-                constant.insert("COLOR_0".into(), json!(first.map(|c| f32::from(c) / 65535.0)));
-            } else {
-                let a = b.accessor(
-                    Part::u16(std::mem::take(&mut self.colors).into_flattened()),
-                    5123,
-                    n,
-                    "VEC4",
-                    Some(34962),
-                );
-                b.accessors[a]["normalized"] = json!(true);
-                attributes["COLOR_0"] = json!(a);
-            }
+            let a = b.accessor(
+                Part::u16(std::mem::take(&mut self.colors).into_flattened()),
+                5123,
+                n,
+                "VEC4",
+                Some(34962),
+            );
+            b.accessors[a].normalized = true;
+            attributes["COLOR_0"] = json!(a);
         }
         for c in std::mem::take(&mut self.columns) {
             let key = format!("_{}", c.name);
@@ -260,16 +266,21 @@ impl Cloud {
 }
 
 /// Room for `n` more items, or an error where there isn't memory for them.
+#[cfg_attr(
+    not(any(feature = "las", feature = "pcd", feature = "xyz", feature = "e57")),
+    allow(dead_code, reason = "not every reader uses it")
+)]
 pub(crate) fn reserve<T>(v: &mut Vec<T>, n: usize, what: &str) -> Result<()> {
-    v.try_reserve(n)
-        .ok()
-        .ok_or_else(|| crate::Error::InvalidInput(format!("not enough memory for the {what} points")))
+    v.try_reserve(n).with_context(ErrorKind::LimitExceeded, || {
+        format!("not enough memory for the {what} points")
+    })
 }
 
 /// Refuses `n` points when it's more than `max` ([`Keep::max_points`](crate::document::Keep)).
 pub(crate) fn check_count(n: u64, max: usize, what: &str) -> Result<()> {
     ensure!(
         usize::try_from(n).is_ok_and(|n| n <= max),
+        LimitExceeded,
         "{n} points in the {what} file, more than the {max} allowed (Keep::max_points)"
     );
     Ok(())
@@ -355,16 +366,28 @@ mod tests {
             origin: [10.0, 0.0, 0.0],
             constant: Map::new(),
         };
-        let doc = cloud.document(json!({ "format": "test" }), Map::new());
+        let info = SourceInfo {
+            format: Some("test".into()),
+            ..SourceInfo::default()
+        };
+        let doc = cloud.document(&info, Map::new(), Map::new());
+        assert_eq!(doc.source_info().format.as_deref(), Some("test"));
         assert_eq!(doc.facts["points"], 2);
-        let mesh = &doc.json["meshes"][0];
+        let mesh = &doc.json()["meshes"][0];
         let attrs = &mesh["primitives"][0]["attributes"];
         assert!(attrs.get("_INTENSITY").is_some());
         assert!(attrs.get("_CLASS").is_none());
-        assert!(attrs.get("COLOR_0").is_none());
+        // One color for every point is still the points' color.
+        assert!(attrs.get("COLOR_0").is_some());
+        assert!(mesh["extras"]["constant"].get("COLOR_0").is_none());
         assert_eq!(mesh["extras"]["constant"]["_CLASS"], 2.0);
-        assert_eq!(doc.json["nodes"][0]["translation"], json!([10.0, 0.0, 0.0]));
+        assert_eq!(doc.json()["nodes"][0]["translation"], json!([10.0, 0.0, 0.0]));
         let m = doc.flatten(crate::document::Pose::Rest).unwrap().unwrap();
         assert_eq!(m.prims.iter().map(|p| p.points.len()).sum::<usize>(), 2);
+        let c = m.prims[0].colors[0];
+        assert!(
+            (c[0] - 1.0 / 65535.0).abs() < 1e-7 && (c[3] - 4.0 / 65535.0).abs() < 1e-7,
+            "{c:?}"
+        );
     }
 }

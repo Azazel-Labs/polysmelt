@@ -7,8 +7,14 @@
 //! (the mesh matrix only records how they got there), so an object the keyframer doesn't place keeps them as they
 //! are. The keyframer's object nodes become the hierarchy: their first keys are the rest pose and their tracks the
 //! animation, its TCB splines as glTF cubic splines (rotations as linear, between the turns the keys add up to). A
+//! node's parent can also be a camera, a light or the target one aims at, which have nodes of their own in the
+//! keyframer; those join the hierarchy when something hangs under them. A camera or spotlight node stands where its
+//! position track has it and turns to face its target (itself a node with a position track), rolled as its roll
+//! track says: its children are in that frame, which looks down -Z with Y up, as glTF's cameras do. Its turning
+//! under animation is sampled each frame from the three tracks. A
 //! placed mesh is moved into its node's space as lib3ds does (back through the mesh matrix and the pivot), unless that
-//! wouldn't put it back where the editor has it at rest; then the rest pose decides. Materials have a diffuse color, a
+//! wouldn't put it back where the editor has it at rest or at any later key (a file saved on a later frame holds that
+//! frame's vertices and mesh matrix); then the rest pose decides. Materials have a diffuse color, a
 //! transparency and maybe a texture named by file; every value they hold, maps included, is kept in `extras`. Of the
 //! other maps, the specular map tints the highlight, the self-illumination map glows, and the bump map is the normal
 //! map when its image is one (scaled by its amount); a bump map that is a height map, the shininess map (glossiness,
@@ -16,7 +22,18 @@
 //! Smoothing groups are bit masks: faces sharing a bit share normals at their common corners (by position, so a
 //! texture seam doesn't crease them), and a material shaded flat ignores them. A mesh matrix that mirrors leaves its
 //! faces wound inside out in world space; they are turned back. An opacity map that is the color map uses its alpha.
-//! 3DS is Z up; the data stays so under a root node that turns it to glTF's Y up.
+//! 3DS is Z up; the data stays so, as the file has it, under the root node (`RootNode`) that turns it to glTF's Y
+//! up and scales it by the file's master scale.
+//!
+//! The source info has Z up and right-handed, declared (3D Studio's space is every file's), 30 frames a second
+//! assumed when there is a keyframer (the file doesn't say), and no unit: 3DS names none, so its length is unknown. The `MASTER_SCALE` chunk is, in Autodesk's
+//! words, "a master scale factor for all geometry coordinates", which 3ds Max's importer multiplies them by: the
+//! root node scales by it (by 1 when the chunk is missing or isn't a positive number), and camera clip planes and
+//! light ranges with it. Autodesk's toolkit adds that "a master scale of 1.0 translates into one unit per inch", but
+//! the file has no field for a unit and other programs write their own units with a master scale of 1, so no unit
+//! is assumed and `converted` doesn't list `units`: a file with a master scale of 1 is the size its numbers say.
+//! The master scale is kept as `masterScale`, beside
+//! the `meshVersion`, the `ambient` light and the `keyframer`'s name, revision, length and segment.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -24,14 +41,20 @@ use std::path::Path;
 
 use serde_json::{Map, Value, json};
 
+use super::frame::{self, Frame};
+use super::keys::{self, Interp, Track};
 use super::xform::{self, IDENTITY, M4};
 use crate::Result;
 use crate::assets::Assets;
+use crate::bytes::{Le, array_at, f32_at, floats, records, u16_at, u32_at, until_nul};
 use crate::document::{Builder, Document, Keep};
 use crate::images::Images;
-use crate::material::{self, Alpha, Factor, Full, Specular, Tex, UvTransform};
+use crate::legacy_material::{self, Highlight, Phong, Rgb, Transparency};
+use crate::material::{self, Factor, Full, Specular, Tex, UvTransform};
 use crate::mesh::{FastMap, GRAY, Material, Prim, face_normal, srgb_to_linear};
-use crate::num::u32_of;
+use crate::num::{u32_of, usize_of};
+use crate::quat;
+use crate::source::{Axis, Fact, Handedness, SourceInfo};
 
 const MAIN: u16 = 0x4D4D;
 /// A 3D Studio project file, which holds the same editor chunk.
@@ -99,6 +122,11 @@ const PERCENT_U16: u16 = 0x0030;
 const PERCENT_F32: u16 = 0x0031;
 const KEYFRAMER: u16 = 0xB000;
 const OBJECT_NODE_TAG: u16 = 0xB002;
+const CAMERA_NODE_TAG: u16 = 0xB003;
+const TARGET_NODE_TAG: u16 = 0xB004;
+const LIGHT_NODE_TAG: u16 = 0xB005;
+const L_TARGET_NODE_TAG: u16 = 0xB006;
+const SPOTLIGHT_NODE_TAG: u16 = 0xB007;
 const KF_SEGMENT: u16 = 0xB008;
 const KF_HEADER: u16 = 0xB00A;
 const NODE_HDR: u16 = 0xB010;
@@ -107,6 +135,7 @@ const PIVOT: u16 = 0xB013;
 const POS_TRACK: u16 = 0xB020;
 const ROT_TRACK: u16 = 0xB021;
 const SCL_TRACK: u16 = 0xB022;
+const ROLL_TRACK: u16 = 0xB024;
 const NODE_ID: u16 = 0xB030;
 
 /// The keyframer counts frames; 3D Studio and 3ds Max play them at 30 a second unless told otherwise, which the file
@@ -117,40 +146,27 @@ const FRAMES_PER_SECOND: f32 = 30.0;
 /// what is left; the readers below take only whole records from it.
 fn chunks(mut data: &[u8]) -> impl Iterator<Item = (u16, &[u8])> {
     std::iter::from_fn(move || {
-        let id = u16::from_le_bytes(data.get(..2)?.try_into().ok()?);
-        let len = u32::from_le_bytes(data.get(2..6)?.try_into().ok()?) as usize;
+        let id = u16_at(data, 0)?;
+        let len = usize_of(u64::from(u32_at(data, 2)?));
         if len < 6 {
             return None;
         }
-        let len = len.min(data.len());
-        let body = &data[6..len];
-        data = &data[len..];
-        Some((id, body))
+        let (chunk, rest) = data.split_at(len.min(data.len()));
+        data = rest;
+        Some((id, chunk.get(6..)?))
     })
 }
 
-fn u16_at(d: &[u8], i: usize) -> Option<u16> {
-    Some(u16::from_le_bytes(d.get(i..i + 2)?.try_into().ok()?))
-}
-
-fn u32_at(d: &[u8], i: usize) -> Option<u32> {
-    Some(u32::from_le_bytes(d.get(i..i + 4)?.try_into().ok()?))
-}
-
-fn f32_at(d: &[u8], i: usize) -> Option<f32> {
-    Some(f32::from_le_bytes(d.get(i..i + 4)?.try_into().ok()?))
-}
-
 fn vec3_at(d: &[u8], i: usize) -> Option<[f32; 3]> {
-    Some([f32_at(d, i)?, f32_at(d, i + 4)?, f32_at(d, i + 8)?])
+    array_at::<12>(d, i).map(|b| floats(Le, b))
 }
 
 /// A zero-terminated name and what follows it.
 fn cstr(d: &[u8]) -> (String, &[u8]) {
-    let end = d.iter().position(|&c| c == 0).unwrap_or(d.len());
+    let name = until_nul(d);
     (
-        String::from_utf8_lossy(&d[..end]).into_owned(),
-        d.get(end + 1..).unwrap_or_default(),
+        crate::bytes::text(name).trim_end().to_owned(),
+        d.get(name.len() + 1..).unwrap_or_default(),
     )
 }
 
@@ -229,7 +245,7 @@ struct Mat {
     alpha: f32,
     texture: Option<String>,
     glossiness: Option<f32>,
-    /// The highlight's color, and how strong it is (0 to 1).
+    /// The highlight's color (sRGB, as written), and how strong it is (0 to 1).
     specular: Option<[f32; 3]>,
     shine_strength: Option<f32>,
     self_illum: f32,
@@ -262,7 +278,7 @@ fn material(d: &[u8]) -> Mat {
                 if id == MAT_DIFFUSE {
                     m.color = color(b).unwrap_or(m.color);
                 } else if id == MAT_SPECULAR {
-                    m.specular = color(b);
+                    m.specular = color_chunk(b).map(|(id, b)| rgb(id, b));
                 }
                 let key = match id {
                     MAT_AMBIENT => "ambient",
@@ -422,21 +438,17 @@ fn jpeg_components(b: &[u8]) -> Option<u8> {
         if *b.get(at)? != 0xFF {
             return None;
         }
-        let marker = *b.get(at + 1)?;
+        let marker = *b.get(at.checked_add(1)?)?;
         match marker {
             // Fill bytes.
             0xFF => at += 1,
             // Start of frame, any kind (not DHT, JPG or DAC).
-            0xC0..=0xCF if !matches!(marker, 0xC4 | 0xC8 | 0xCC) => return b.get(at + 9).copied(),
+            0xC0..=0xCF if !matches!(marker, 0xC4 | 0xC8 | 0xCC) => return b.get(at.checked_add(9)?).copied(),
             // Markers without a length, or the scan: no frame header.
             0xD0..=0xDA | 0x01 => return None,
-            _ => at += 2 + usize::from(u16_at_be(b, at + 2)?),
+            _ => at = at.checked_add(2 + usize::from(u16::from_be_bytes(array_at(b, at.checked_add(2)?)?)))?,
         }
     }
-}
-
-fn u16_at_be(b: &[u8], at: usize) -> Option<u16> {
-    Some(u16::from_be_bytes([*b.get(at)?, *b.get(at + 1)?]))
 }
 
 /// Whether a texture's file name marks it as a normal map: `normal`, `norm`, `nrm`, `nmap` or `ddn` in it, or `_n`,
@@ -491,7 +503,11 @@ impl Look {
                 ..c.clone()
             };
             if self.alpha_source {
-                f.alpha = Alpha::Blend;
+                let transparency = Transparency {
+                    texture_alpha: true,
+                    ..Transparency::of(f.base_color[3])
+                };
+                f.alpha = transparency.mode();
             }
         }
         f.specular.clone_from(&self.specular);
@@ -547,33 +563,29 @@ fn trimesh(d: &[u8]) -> Trimesh {
     for (id, b) in chunks(d) {
         match id {
             VERTICES => {
-                let n = u16_at(b, 0).unwrap_or(0) as usize;
-                t.vertices = (0..n).map_while(|i| vec3_at(b, 2 + i * 12)).collect();
+                let n = usize::from(u16_at(b, 0).unwrap_or(0));
+                t.vertices = records::<12>(b, 2, n).iter().map(|&v| floats(Le, v)).collect();
             }
             UVS => {
-                let n = u16_at(b, 0).unwrap_or(0) as usize;
-                t.uvs = (0..n)
-                    .map_while(|i| Some([f32_at(b, 2 + i * 8)?, f32_at(b, 6 + i * 8)?]))
-                    .collect();
+                let n = usize::from(u16_at(b, 0).unwrap_or(0));
+                t.uvs = records::<8>(b, 2, n).iter().map(|&v| floats(Le, v)).collect();
             }
             MESH_MATRIX => {
                 let m: Option<Vec<f32>> = (0..12).map(|i| f32_at(b, i * 4)).collect();
                 t.matrix = m.and_then(|m| m.try_into().ok());
             }
             FACES => {
-                let n = u16_at(b, 0).unwrap_or(0) as usize;
-                t.faces = (0..n)
-                    .map_while(|i| {
-                        let o = 2 + i * 8;
-                        Some([u16_at(b, o)?, u16_at(b, o + 2)?, u16_at(b, o + 4)?])
-                    })
+                let n = usize::from(u16_at(b, 0).unwrap_or(0));
+                t.faces = records::<8>(b, 2, n)
+                    .iter()
+                    .map(|f| [0, 2, 4].map(|o| u16::from_le_bytes([f[o], f[o + 1]])))
                     .collect();
                 for (id, s) in chunks(b.get(2 + n * 8..).unwrap_or_default()) {
                     match id {
                         FACE_MATERIAL => {
                             let (name, rest) = cstr(s);
-                            let k = u16_at(rest, 0).unwrap_or(0) as usize;
-                            let faces = (0..k).map_while(|i| u16_at(rest, 2 + i * 2)).collect();
+                            let k = usize::from(u16_at(rest, 0).unwrap_or(0));
+                            let faces = records(rest, 2, k).iter().map(|&f| u16::from_le_bytes(f)).collect();
                             t.materials.push((name, faces));
                         }
                         SMOOTHING => {
@@ -734,7 +746,7 @@ fn track<const N: usize>(b: &[u8]) -> Vec<Key<N>> {
     let mut keys = Vec::new();
     let mut o = 14;
     for _ in 0..n {
-        let (Some(frame), Some(flags)) = (u32_at(b, o), u16_at(b, o + 4)) else {
+        let (Some(frame), Some(flags)) = (u32_at(b, o), u16_at(b, o.saturating_add(4))) else {
             break;
         };
         o += 6;
@@ -754,13 +766,68 @@ fn track<const N: usize>(b: &[u8]) -> Vec<Key<N>> {
         }
         #[allow(clippy::cast_possible_wrap, reason = "frames are signed in the file")]
         let frame = frame as i32;
+        // A key whose value isn't a number places nothing: it is left out, and the track runs through the
+        // keys beside it. Spline parameters that aren't numbers are the default, 0.
+        if value.iter().any(|v| !v.is_finite()) {
+            continue;
+        }
+        let tcb = tcb.map(|t| if t.is_finite() { t } else { 0.0 });
         keys.push(Key { frame, tcb, value });
     }
     keys
 }
 
-/// An object node of the keyframer: the hierarchy's piece of an object, or of a dummy (`$$$DUMMY`).
+/// What a keyframer node moves.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum Kind {
+    /// An object (a mesh), or a dummy (`$$$DUMMY`).
+    Object,
+    Camera,
+    /// The point a camera looks at: a node of its own, named as its camera.
+    CameraTarget,
+    /// A light shining every way.
+    Light,
+    Spot,
+    /// The point a spotlight shines at, named as its light.
+    SpotTarget,
+}
+
+impl Kind {
+    fn of(tag: u16) -> Option<Self> {
+        Some(match tag {
+            OBJECT_NODE_TAG => Self::Object,
+            CAMERA_NODE_TAG => Self::Camera,
+            TARGET_NODE_TAG => Self::CameraTarget,
+            LIGHT_NODE_TAG => Self::Light,
+            SPOTLIGHT_NODE_TAG => Self::Spot,
+            L_TARGET_NODE_TAG => Self::SpotTarget,
+            _ => return None,
+        })
+    }
+
+    /// The kind of node a node of this kind aims at.
+    fn target(self) -> Option<Self> {
+        match self {
+            Self::Camera => Some(Self::CameraTarget),
+            Self::Spot => Some(Self::SpotTarget),
+            _ => None,
+        }
+    }
+
+    /// The kind of node that goes with a node of this kind, under one name: what it aims at, or what aims at it.
+    fn pair(self) -> Option<Self> {
+        match self {
+            Self::CameraTarget => Some(Self::Camera),
+            Self::SpotTarget => Some(Self::Spot),
+            _ => self.target(),
+        }
+    }
+}
+
+/// A node of the keyframer: the hierarchy's piece of an object, or of a dummy (`$$$DUMMY`), or a camera, a light or
+/// the target of one.
 struct KfNode {
+    kind: Kind,
     id: u16,
     name: String,
     instance: String,
@@ -770,6 +837,8 @@ struct KfNode {
     /// Angle (radians) and axis.
     rot: Vec<Key<4>>,
     scl: Vec<Key<3>>,
+    /// Degrees about the line of sight, for a camera or a spotlight.
+    roll: Vec<Key<1>>,
 }
 
 #[derive(Default)]
@@ -783,6 +852,8 @@ struct Keyframer {
 
 fn keyframer(d: &[u8]) -> Keyframer {
     let mut k = Keyframer::default();
+    // Nodes of every kind count toward the ids of a file that has none.
+    let mut count = 0usize;
     for (id, b) in chunks(d) {
         match id {
             KF_HEADER => {
@@ -792,19 +863,62 @@ fn keyframer(d: &[u8]) -> Keyframer {
                 k.length = u32_at(rest, 0);
             }
             KF_SEGMENT => k.segment = u32_at(b, 0).zip(u32_at(b, 4)).map(|(s, e)| [s, e]),
-            OBJECT_NODE_TAG => {
-                let index = u16::try_from(k.nodes.len()).unwrap_or(u16::MAX);
-                k.nodes.push(kf_node(b, index));
+            _ => {
+                if let Some(kind) = Kind::of(id) {
+                    let index = u16::try_from(count).unwrap_or(u16::MAX);
+                    count += 1;
+                    k.nodes.push(kf_node(b, index, kind));
+                }
             }
-            _ => {}
         }
     }
     k
 }
 
+/// Drops the camera, light and target nodes nothing hangs under: those cameras and lights stay where the editor has
+/// them. One with a node under it is part of the hierarchy, and so are the nodes above it and the one it goes with:
+/// the target it aims at, or the camera or spotlight aiming at it.
+fn prune(kf: &mut Keyframer) {
+    let mut used: Vec<bool> = kf.nodes.iter().map(|n| n.kind == Kind::Object).collect();
+    if used.iter().all(|&u| u) {
+        return;
+    }
+    {
+        let nodes = &kf.nodes;
+        let index_of: HashMap<u16, usize> = nodes.iter().enumerate().rev().map(|(i, n)| (n.id, i)).collect();
+        let named: HashMap<(Kind, &str), usize> = nodes
+            .iter()
+            .enumerate()
+            .rev()
+            .map(|(i, n)| ((n.kind, n.name.as_str()), i))
+            .collect();
+        let mut todo: Vec<usize> = (0..nodes.len()).filter(|&i| used[i]).collect();
+        while let Some(i) = todo.pop() {
+            let n = &nodes[i];
+            let parent = n.parent.and_then(|p| index_of.get(&p).copied());
+            let pair = n.kind.pair().and_then(|k| named.get(&(k, n.name.as_str())).copied());
+            for j in [parent, pair].into_iter().flatten() {
+                if !used[j] {
+                    used[j] = true;
+                    todo.push(j);
+                }
+            }
+        }
+    }
+    let mut used = used.into_iter();
+    kf.nodes.retain(|_| used.next().unwrap_or(true));
+}
+
+/// The track of something that doesn't move: one key.
+fn still<const N: usize>(value: [f32; N]) -> Vec<Key<N>> {
+    let (frame, tcb) = (0, [0.0; 5]);
+    vec![Key { frame, tcb, value }]
+}
+
 /// A node, its id the order it came in when it has no id chunk (as early files have).
-fn kf_node(d: &[u8], index: u16) -> KfNode {
+fn kf_node(d: &[u8], index: u16, kind: Kind) -> KfNode {
     let mut n = KfNode {
+        kind,
         id: index,
         name: String::new(),
         instance: String::new(),
@@ -813,7 +927,9 @@ fn kf_node(d: &[u8], index: u16) -> KfNode {
         pos: Vec::new(),
         rot: Vec::new(),
         scl: Vec::new(),
+        roll: Vec::new(),
     };
+    let object = kind == Kind::Object;
     for (id, b) in chunks(d) {
         match id {
             NODE_ID => n.id = u16_at(b, 0).unwrap_or(index),
@@ -823,23 +939,15 @@ fn kf_node(d: &[u8], index: u16) -> KfNode {
                 n.parent = u16_at(rest, 4).filter(|&p| p != u16::MAX);
             }
             INSTANCE_NAME => n.instance = cstr(b).0,
-            PIVOT => n.pivot = vec3_at(b, 0).unwrap_or_default(),
+            PIVOT if object => n.pivot = vec3_at(b, 0).unwrap_or_default(),
             POS_TRACK => n.pos = track(b),
-            ROT_TRACK => n.rot = track(b),
-            SCL_TRACK => n.scl = track(b),
+            ROT_TRACK if object => n.rot = track(b),
+            SCL_TRACK if object => n.scl = track(b),
+            ROLL_TRACK if !object => n.roll = track(b),
             _ => {}
         }
     }
     n
-}
-
-fn qmul(a: [f64; 4], b: [f64; 4]) -> [f64; 4] {
-    [
-        a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1],
-        a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
-        a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3],
-        a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2],
-    ]
 }
 
 /// A rotation key's turn. 3DS turns clockwise about the axis, as lib3ds reads it.
@@ -859,37 +967,18 @@ fn rotations(keys: &[Key<4>]) -> Vec<[f64; 4]> {
     let mut q = [0.0, 0.0, 0.0, 1.0];
     keys.iter()
         .map(|k| {
-            q = qmul(axis_angle(k), q);
-            let n = q.iter().map(|c| c * c).sum::<f64>().sqrt();
-            q = q.map(|c| c / n);
+            q = quat::unit_unchecked(quat::mul(axis_angle(k), q));
             q
         })
         .collect()
 }
 
 fn trs(t: [f64; 3], q: [f64; 4], s: [f64; 3]) -> M4 {
-    let [x, y, z, w] = q;
-    let r = [
-        [
-            1.0 - 2.0 * (y * y + z * z),
-            2.0 * (x * y - w * z),
-            2.0 * (x * z + w * y),
-        ],
-        [
-            2.0 * (x * y + w * z),
-            1.0 - 2.0 * (x * x + z * z),
-            2.0 * (y * z - w * x),
-        ],
-        [
-            2.0 * (x * z - w * y),
-            2.0 * (y * z + w * x),
-            1.0 - 2.0 * (x * x + y * y),
-        ],
-    ];
+    let r = quat::matrix(q);
     let mut m = IDENTITY;
     for i in 0..3 {
         for j in 0..3 {
-            m[i][j] = r[i][j] * s[j];
+            m[i][j] = r[j * 3 + i] * s[j];
         }
         m[i][3] = t[i];
     }
@@ -905,6 +994,42 @@ fn rest(n: &KfNode) -> ([f64; 3], [f64; 4], [f64; 3]) {
         .unwrap_or([0.0, 0.0, 0.0, 1.0]);
     let s = n.scl.first().map_or([1.0; 3], |k| k.value.map(f64::from));
     (t, q, s)
+}
+
+/// Whether `back` (a mesh's way into its node's space, through its mesh matrix and pivot) undoes where the node
+/// stands at one of its keys after the first, under `above`. A file saved on a later frame records where the object
+/// stood then: its mesh matrix and vertices are that frame's, and the tracks still place it at every other.
+fn stands_at_a_key(n: &KfNode, above: Option<&M4>, back: &M4, scale: f64) -> bool {
+    // A track's value on a frame: its key there, or its only key (none: the default).
+    fn on<const N: usize>(keys: &[Key<N>], frame: i32, default: [f32; N]) -> Option<[f64; N]> {
+        let key = match keys {
+            [] => return Some(default.map(f64::from)),
+            [only] => only,
+            _ => keys.iter().find(|k| k.frame == frame)?,
+        };
+        Some(key.value.map(f64::from))
+    }
+    let turns = rotations(&n.rot);
+    let frames = n.pos.iter().map(|k| k.frame);
+    let frames = frames.chain(n.rot.iter().map(|k| k.frame));
+    let frames = frames.chain(n.scl.iter().map(|k| k.frame));
+    frames.into_iter().any(|frame| {
+        let q = match n.rot.len() {
+            0 => Some([0.0, 0.0, 0.0, 1.0]),
+            1 => turns.first().copied(),
+            _ => n
+                .rot
+                .iter()
+                .position(|k| k.frame == frame)
+                .and_then(|at| turns.get(at).copied()),
+        };
+        let (Some(t), Some(q), Some(s)) = (on(&n.pos, frame, [0.0; 3]), q, on(&n.scl, frame, [1.0; 3])) else {
+            return false;
+        };
+        let local = trs(t, q, s);
+        let world = above.map_or(local, |a| xform::mul(a, &local));
+        near_identity(&xform::mul(&world, back), scale)
+    })
 }
 
 fn near_identity(m: &M4, scale: f64) -> bool {
@@ -953,7 +1078,7 @@ fn placed(mut prims: Vec<Prim>, m: &M4) -> Vec<Prim> {
 
 /// The rotation that points a camera or spotlight (which look down their -Z, Y up) from `from` at `to`, Z up,
 /// turned `roll` degrees about that line.
-fn look_at(from: [f32; 3], to: [f32; 3], roll: f32) -> Option<[f64; 4]> {
+fn look_at(from: [f64; 3], to: [f64; 3], roll: f64) -> Option<[f64; 4]> {
     let norm = |v: [f64; 3]| {
         let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
         (l > 1e-12).then(|| v.map(|c| c / l))
@@ -965,7 +1090,7 @@ fn look_at(from: [f32; 3], to: [f32; 3], roll: f32) -> Option<[f64; 4]> {
             a[0] * b[1] - a[1] * b[0],
         ]
     };
-    let f = norm(std::array::from_fn(|i| f64::from(to[i]) - f64::from(from[i])))?;
+    let f = norm(std::array::from_fn(|i| to[i] - from[i]))?;
     let up = if f[2].abs() > 0.999 {
         [0.0, 1.0, 0.0]
     } else {
@@ -973,12 +1098,77 @@ fn look_at(from: [f32; 3], to: [f32; 3], roll: f32) -> Option<[f64; 4]> {
     };
     let r = norm(cross(f, up))?;
     let u = cross(r, f);
-    let (s, c) = f64::from(roll).to_radians().sin_cos();
+    let (s, c) = roll.to_radians().sin_cos();
     let (r, u): ([f64; 3], [f64; 3]) = (
         std::array::from_fn(|i| r[i] * c + u[i] * s),
         std::array::from_fn(|i| u[i] * c - r[i] * s),
     );
     Some(xform::quaternion(&std::array::from_fn(|i| [r[i], u[i], -f[i]])))
+}
+
+/// What a camera or spotlight node aims at: its target's node, or the point the editor has when the keyframer has
+/// no such node.
+#[derive(Clone, Copy)]
+enum Aim {
+    Node(usize),
+    Point([f64; 3]),
+}
+
+fn point(m: &M4, p: [f64; 3]) -> [f64; 3] {
+    std::array::from_fn(|i| m[i][0] * p[0] + m[i][1] * p[1] + m[i][2] * p[2] + m[i][3])
+}
+
+/// The rotation of a camera or spotlight node at `from`, under `above`, that faces it at `to` (a point of the
+/// scene), rolled `roll` degrees.
+fn aimed(above: Option<&M4>, from: [f64; 3], to: [f64; 3], roll: f64) -> Option<[f64; 4]> {
+    let Some(a) = above else {
+        return look_at(from, to, roll);
+    };
+    let q = look_at(point(a, from), to, roll)?;
+    Some(quat::unit_unchecked(quat::mul(
+        quat::conjugate(xform::decompose(a).r),
+        q,
+    )))
+}
+
+/// A track as the curve its keys draw, the one its spline channel draws.
+struct Curve<'a, const N: usize> {
+    keys: Vec<&'a Key<N>>,
+    tangents: Vec<([f32; N], [f32; N])>,
+}
+
+impl<'a, const N: usize> Curve<'a, N> {
+    fn new(keys: &'a [Key<N>]) -> Self {
+        let keys: Vec<&Key<N>> = rising(keys.iter().map(|k| (k.frame, k)));
+        let tangents = tcb_tangents(&keys);
+        Self { keys, tangents }
+    }
+
+    /// Its first and last frames, when it has more than one key.
+    fn span(&self) -> Option<(i32, i32)> {
+        let (first, last) = (self.keys.first()?, self.keys.last()?);
+        (self.keys.len() > 1).then_some((first.frame, last.frame))
+    }
+
+    /// Its value on a frame: held before the first key and after the last.
+    fn at(&self, frame: f64) -> Option<[f64; N]> {
+        let next = self.keys.partition_point(|k| f64::from(k.frame) <= frame);
+        let Some(before) = next.checked_sub(1) else {
+            return self.keys.first().map(|k| k.value.map(f64::from));
+        };
+        let (a, leave) = (self.keys[before], self.tangents[before].1);
+        let (Some(b), Some((arrive, _))) = (self.keys.get(next), self.tangents.get(next)) else {
+            return Some(a.value.map(f64::from));
+        };
+        let u = (frame - f64::from(a.frame)) / (f64::from(b.frame) - f64::from(a.frame));
+        let (u2, u3) = (u * u, u * u * u);
+        Some(std::array::from_fn(|k| {
+            (2.0 * u3 - 3.0 * u2 + 1.0) * f64::from(a.value[k])
+                + (u3 - 2.0 * u2 + u) * f64::from(leave[k])
+                + (3.0 * u2 - 2.0 * u3) * f64::from(b.value[k])
+                + (u3 - u2) * f64::from(arrive[k])
+        }))
+    }
 }
 
 fn camera_json(c: &Camera, name: &str, extras: bool) -> Value {
@@ -1015,8 +1205,14 @@ fn light_json(l: &Light, name: &str, extras: bool) -> Value {
     }
     if let Some(s) = &l.spot {
         let half = std::f64::consts::FRAC_PI_2;
-        let outer = (f64::from(s.falloff).to_radians() / 2.0).clamp(1e-4, half);
-        let inner = (f64::from(s.hotspot).to_radians() / 2.0).clamp(0.0, outer * 0.999);
+        // A NaN angle takes the widest cone, so the clamps below always have ordered bounds.
+        let cone = |deg: f32, wide: f64| {
+            Some(f64::from(deg).to_radians() / 2.0)
+                .filter(|a| !a.is_nan())
+                .unwrap_or(wide)
+        };
+        let outer = cone(s.falloff, half).clamp(1e-4, half);
+        let inner = cone(s.hotspot, outer).clamp(0.0, outer * 0.999);
         out["type"] = json!("spot");
         out["spot"] = json!({ "innerConeAngle": inner, "outerConeAngle": outer });
     }
@@ -1115,7 +1311,7 @@ fn seconds(frame: i32) -> f32 {
 }
 
 /// A vector track as a cubic spline channel: each key's arriving tangent, value and leaving tangent, per second.
-fn spline(b: &mut Builder, keys: &[Key<3>]) -> (usize, usize) {
+fn spline(keys: &[Key<3>]) -> (Vec<f32>, Vec<f32>) {
     let keys: Vec<&Key<3>> = rising(keys.iter().map(|k| (k.frame, k)));
     let tangents = tcb_tangents(&keys);
     let times: Vec<f32> = keys.iter().map(|k| seconds(k.frame)).collect();
@@ -1127,7 +1323,7 @@ fn spline(b: &mut Builder, keys: &[Key<3>]) -> (usize, usize) {
         out.extend(k.value);
         out.extend(leave.map(|v| if after > 0.0 { v / after } else { 0.0 }));
     }
-    (b.floats(times, "SCALAR", true), b.floats(out, "VEC3", false))
+    (times, out)
 }
 
 /// Each object's mesh, by the placement its vertices are moved by.
@@ -1161,20 +1357,27 @@ impl Meshes {
 }
 
 #[allow(clippy::too_many_lines, reason = "one pass over the file's parts, in order")]
-pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document<'static>> {
+pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document> {
     let data = input.read()?;
     let main = chunks(&data)
         .next()
         .filter(|&(id, _)| id == MAIN || id == PROJECT)
         .map(|(_, b)| b);
-    let Some(main) = main else { bail!("not a 3DS file") };
-    let mut source = json!({ "format": "3DS", "upAxis": "Z" });
+    let Some(main) = main else {
+        bail!(UnknownFormat, "not a 3DS file")
+    };
+    // The main chunk's length is the file's: a file shorter than it is cut short, and what's whole is kept.
+    let cut = u32_at(&data, 2).is_some_and(|n| usize_of(u64::from(n)) > data.len());
+    let mut source = Map::new();
+    if cut {
+        source.insert("truncated".into(), json!(true));
+    }
     let (mut editor, mut kf) = (&[][..], Keyframer::default());
     for (id, b) in chunks(main) {
         match id {
             VERSION => {
                 if let Some(v) = u32_at(b, 0) {
-                    source["version"] = json!(v);
+                    source.insert("version".into(), json!(v));
                 }
             }
             EDITOR if editor.is_empty() => editor = b,
@@ -1182,6 +1385,7 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
             _ => {}
         }
     }
+    prune(&mut kf);
 
     let mut materials: Vec<Material> = Vec::new();
     let mut raws: Vec<Map<String, Value>> = Vec::new();
@@ -1191,6 +1395,8 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
     let mut by_name: HashMap<String, usize> = HashMap::new();
     let dir = input.dir();
     let mut images = Images::new(!keep.image_bytes, dir);
+    // Texture names whatever their case, as 3DS's DOS-era names are: `WOOD.JPG` and `wood.jpg` are one image even
+    // where the two find different paths.
     let mut image_of: HashMap<String, Option<usize>> = HashMap::new();
     // Whether each bump map file is a normal map.
     let mut normal_of: HashMap<String, bool> = HashMap::new();
@@ -1199,17 +1405,17 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         match id {
             MESH_VERSION => {
                 if let Some(v) = u32_at(b, 0) {
-                    source["meshVersion"] = json!(v);
+                    source.insert("meshVersion".into(), json!(v));
                 }
             }
             MASTER_SCALE => {
                 if let Some(s) = f32_at(b, 0) {
-                    source["masterScale"] = clean(s);
+                    source.insert("masterScale".into(), clean(s));
                 }
             }
             AMBIENT_LIGHT => {
                 if let Some(c) = color_raw(b) {
-                    source["ambient"] = c;
+                    source.insert("ambient".into(), c);
                 }
             }
             MATERIAL => {
@@ -1220,7 +1426,7 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
                     }
                     *image_of
                         .entry(f.to_lowercase())
-                        .or_insert_with(|| images.file(assets, assets.find(f, dir)?, f))
+                        .or_insert_with(|| images.find(assets, &[f], &[dir]))
                 };
                 let image = m.texture.as_deref().and_then(&mut image_for);
                 let maps = m.raw.get("maps").and_then(Value::as_object);
@@ -1257,29 +1463,43 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
                     .zip(m.texture.as_deref())
                     .is_some_and(|(o, t)| o.eq_ignore_ascii_case(t));
                 flat.push(m.raw.get("shading").and_then(Value::as_u64) == Some(1));
+                // A texture shows as painted, not tinted by the color under it.
+                let rgb = if image.is_some() { [1.0; 3] } else { m.color };
+                // The classic material. Its "shininess" percentage is the glossiness of 3ds Max's standard
+                // material, whose Phong shader takes an exponent of 2^(10 g) for a glossiness g of 0 to 1 (the
+                // SDK's standard shaders); its "shininess strength" scales the specular color, the highlight's.
+                let mut phong = Phong::new(Rgb::Linear(rgb));
+                phong.opacity = m.alpha;
+                phong.exponent = m.glossiness.map(|g| (10.0 * g).exp2());
+                if m.specular.is_some() || m.shine_strength.is_some() {
+                    phong.specular = Some(Rgb::Srgb(m.specular.unwrap_or([1.0; 3])));
+                    phong.strength = m.shine_strength.unwrap_or(1.0);
+                }
+                let look = phong.pbr();
+                // No highlight has no use for a texture coloring it.
+                let spec_tex = spec_tex.filter(|_| look.specular != Some(Highlight::NONE));
+                let highlight = look.specular.or(spec_tex.as_ref().map(|_| Highlight {
+                    factor: 1.0,
+                    color: [1.0; 3],
+                }));
                 looks.push(Look {
                     color: image.and(map("texture")).map(|t| map_tex(t, 0)),
-                    // Phong's highlight: its color, scaled by its strength.
-                    specular: (m.specular.is_some() || m.shine_strength.is_some() || spec_tex.is_some()).then(|| {
-                        Specular {
-                            factor: Factor::of(m.shine_strength.unwrap_or(1.0)),
-                            color: m.specular.unwrap_or([1.0; 3]),
-                            color_tex: spec_tex,
-                        }
+                    specular: highlight.map(|h| Specular {
+                        factor: Factor::of(h.factor),
+                        color: h.color,
+                        color_tex: spec_tex,
                     }),
                     emissive,
                     normal: normal.clone(),
                     alpha_source: cut || tiling.is_some_and(|t| t & TILE_ALPHA != 0),
                 });
-                // A texture shows as painted, not tinted by the color under it.
-                let rgb = if image.is_some() { [1.0; 3] } else { m.color };
-                let plain = Material::plain(&m.name, [rgb[0], rgb[1], rgb[2], m.alpha]);
+                let plain = Material::plain(&m.name, look.base_color);
                 by_name.insert(m.name.clone(), materials.len());
                 materials.push(Material {
                     color_image: image,
                     normal_image: normal.map(|t| t.image),
                     emissive: m.color.map(|c| c * m.self_illum),
-                    roughness: m.glossiness.map_or(plain.roughness, |g| 1.0 - g),
+                    roughness: look.roughness,
                     double_sided: m.two_sided,
                     ..plain
                 });
@@ -1293,6 +1513,8 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
     // Each mesh object's primitives, one per material.
     let mut triangles = 0usize;
     let mut prims_of = Vec::with_capacity(objects.len());
+    // Faces naming a vertex that isn't there, which are left out.
+    let mut dropped = 0;
     for o in &objects {
         let Body::Mesh(ts) = &o.body else {
             prims_of.push(None);
@@ -1301,7 +1523,12 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         let mut prims: HashMap<usize, Prim> = HashMap::new();
         for t in ts {
             triangles += t.faces.len();
-            ensure!(triangles <= input.limit, "more than {} triangles", input.limit);
+            ensure!(
+                triangles <= input.limit,
+                LimitExceeded,
+                "more than {} triangles",
+                input.limit
+            );
             let mut face_mat = vec![None; t.faces.len()];
             for (name, faces) in &t.materials {
                 let m = by_name.get(name).copied();
@@ -1311,13 +1538,27 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
                     }
                 }
             }
+            let past = |f: &&[u16; 3]| f.iter().any(|&i| usize::from(i) >= t.vertices.len());
+            dropped += t.faces.iter().filter(past).count();
             add_faces(t, &face_mat, &flat, &mut prims, &mut materials);
         }
         let mut prims: Vec<Prim> = prims.into_values().filter(|p| !p.indices.is_empty()).collect();
         prims.sort_by_key(|p| p.material);
         prims_of.push(Some(prims).filter(|p| !p.is_empty()));
     }
-    ensure!(triangles > 0, "this 3DS file has no meshes");
+    // A scene of cameras or lights alone is one still.
+    if triangles == 0
+        && !objects
+            .iter()
+            .any(|o| matches!(o.body, Body::Camera(_) | Body::Light(_)))
+    {
+        if cut {
+            return Err(crate::Error::cut_short(
+                "3DS file is cut short before its first whole mesh",
+            ));
+        }
+        bail!(Empty, "this 3DS file has no meshes, cameras or lights");
+    }
     let mut textured = vec![false; materials.len()];
     for p in prims_of.iter().flatten().flatten().filter(|p| !p.uvs.is_empty()) {
         textured[p.material] = true;
@@ -1326,7 +1567,8 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         super::guess_texture(&mut materials, &mut images, &textured, input.path, assets);
     }
 
-    let mut b = Builder::default();
+    let mut b = Builder::new(keep.crease_angle());
+    b.dropped = dropped;
     let mut nodes: Vec<Value> = Vec::new();
     let (mut cameras, mut lights) = (Vec::new(), Vec::new());
     let mut roots = Vec::new();
@@ -1342,10 +1584,38 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         .rev()
         .map(|(i, o)| (o.name.as_str(), i))
         .collect();
+    // A camera, light or target node without a track is where the editor has it.
+    for n in &mut kf.nodes {
+        let at = match (n.kind, object_of.get(n.name.as_str()).map(|&o| &objects[o].body)) {
+            (Kind::Camera, Some(Body::Camera(c))) => {
+                if n.roll.is_empty() {
+                    n.roll = still([c.roll]);
+                }
+                Some(c.position)
+            }
+            (Kind::CameraTarget, Some(Body::Camera(c))) => Some(c.target),
+            (Kind::Light | Kind::Spot, Some(Body::Light(l))) => Some(l.position),
+            (Kind::SpotTarget, Some(Body::Light(l))) => l.spot.as_ref().map(|s| s.target),
+            _ => None,
+        };
+        if let Some(at) = at.filter(|_| n.pos.is_empty()) {
+            n.pos = still(at);
+        }
+    }
+    // The object each node places: a camera's node its camera, a light's its light, a target's none.
     let placed_by_kf: Vec<Option<usize>> = kf
         .nodes
         .iter()
-        .map(|n| object_of.get(n.name.as_str()).copied())
+        .map(|n| {
+            let o = object_of.get(n.name.as_str()).copied()?;
+            let fits = match n.kind {
+                Kind::Object => true,
+                Kind::Camera => matches!(objects[o].body, Body::Camera(_)),
+                Kind::Light | Kind::Spot => matches!(objects[o].body, Body::Light(_)),
+                Kind::CameraTarget | Kind::SpotTarget => false,
+            };
+            fits.then_some(o)
+        })
         .collect();
     for &o in placed_by_kf.iter().flatten() {
         meshes.left[o] += 1;
@@ -1366,7 +1636,12 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         if placed_by_kf.contains(&Some(i)) {
             continue;
         }
-        let mut node = json!({ "name": o.name });
+        // An object with no name has no name key.
+        let mut node = if o.name.is_empty() {
+            json!({})
+        } else {
+            json!({ "name": o.name })
+        };
         match &o.body {
             Body::Mesh(_) => {
                 meshes.left[i] += 1;
@@ -1374,23 +1649,29 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
                     node["mesh"] = json!(m);
                 }
             }
-            Body::Camera(c) if keep.cameras => {
+            // A camera or light that isn't kept leaves its node where it stood, as pruning one does: the scene
+            // is the file's, whatever is kept of it.
+            Body::Camera(c) => {
                 node["translation"] = cleans(&c.position);
-                if let Some(q) = look_at(c.position, c.target, c.roll) {
+                if let Some(q) = look_at(c.position.map(f64::from), c.target.map(f64::from), f64::from(c.roll)) {
                     node["rotation"] = json!(q);
                 }
-                cameras.push(camera_json(c, &o.name, keep.extras));
-                node["camera"] = json!(cameras.len() - 1);
+                if keep.cameras {
+                    cameras.push(camera_json(c, &o.name, keep.extras));
+                    node["camera"] = json!(cameras.len() - 1);
+                }
             }
-            Body::Light(l) if keep.lights => {
+            Body::Light(l) => {
                 node["translation"] = cleans(&l.position);
-                if let Some(q) = l.spot.as_ref().and_then(|s| look_at(l.position, s.target, 0.0)) {
+                let aim = |s: &Spot| look_at(l.position.map(f64::from), s.target.map(f64::from), 0.0);
+                if let Some(q) = l.spot.as_ref().and_then(aim) {
                     node["rotation"] = json!(q);
                 }
-                lights.push(light_json(l, &o.name, keep.extras));
-                node["extensions"] = json!({ "KHR_lights_punctual": { "light": lights.len() - 1 } });
+                if keep.lights {
+                    lights.push(light_json(l, &o.name, keep.extras));
+                    node["extensions"] = json!({ "KHR_lights_punctual": { "light": lights.len() - 1 } });
+                }
             }
-            Body::Camera(_) | Body::Light(_) => continue,
             Body::Empty => {}
         }
         if keep.extras {
@@ -1413,8 +1694,8 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         .enumerate()
         .map(|(i, n)| n.parent.and_then(|p| index_of.get(&p).copied()).filter(|&p| p != i))
         .collect();
-    let rests: Vec<_> = kf.nodes.iter().map(rest).collect();
-    let local: Vec<M4> = rests.iter().map(|&(t, q, s)| trs(t, q, s)).collect();
+    let mut rests: Vec<_> = kf.nodes.iter().map(rest).collect();
+    let mut local: Vec<M4> = rests.iter().map(|&(t, q, s)| trs(t, q, s)).collect();
     let mut world: Vec<Option<M4>> = vec![None; kf.nodes.len()];
     let mut parent_ok = vec![true; kf.nodes.len()];
     for i in 0..kf.nodes.len() {
@@ -1435,11 +1716,70 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
             world[n] = Some(above.map_or(local[n], |w| xform::mul(&w, &local[n])));
         }
     }
+    let up = |i: usize| parent_of[i].filter(|_| parent_ok[i]);
+    // What each camera and spotlight node aims at.
+    let targets: HashMap<(Kind, &str), usize> = kf
+        .nodes
+        .iter()
+        .enumerate()
+        .rev()
+        .filter(|(_, n)| matches!(n.kind, Kind::CameraTarget | Kind::SpotTarget))
+        .map(|(i, n)| ((n.kind, n.name.as_str()), i))
+        .collect();
+    let aims: Vec<Option<Aim>> = kf
+        .nodes
+        .iter()
+        .map(|n| {
+            if let Some(&t) = targets.get(&(n.kind.target()?, n.name.as_str())) {
+                return Some(Aim::Node(t));
+            }
+            match &objects[*object_of.get(n.name.as_str())?].body {
+                Body::Camera(c) if n.kind == Kind::Camera => Some(Aim::Point(c.target.map(f64::from))),
+                Body::Light(l) if n.kind == Kind::Spot => l.spot.as_ref().map(|s| Aim::Point(s.target.map(f64::from))),
+                _ => None,
+            }
+        })
+        .collect();
+    let roll_of = |n: &KfNode| n.roll.first().map_or(0.0, |k| f64::from(k.value[0]));
+    if aims.iter().any(Option::is_some) {
+        // Each aiming node turned to face its target, from the roots down: what is under it moves with it.
+        let mut below = vec![Vec::new(); kf.nodes.len()];
+        let mut todo = Vec::new();
+        for i in 0..kf.nodes.len() {
+            match up(i) {
+                Some(p) => below[p].push(i),
+                None => todo.push(i),
+            }
+        }
+        while let Some(i) = todo.pop() {
+            let above = up(i).and_then(|p| world[p]);
+            let to = aims[i].and_then(|aim| match aim {
+                Aim::Node(t) => world[t].map(|w| [w[0][3], w[1][3], w[2][3]]),
+                Aim::Point(p) => Some(p),
+            });
+            if let Some(q) = to.and_then(|to| aimed(above.as_ref(), rests[i].0, to, roll_of(&kf.nodes[i]))) {
+                rests[i].1 = q;
+                local[i] = trs(rests[i].0, q, rests[i].2);
+            }
+            world[i] = Some(above.map_or(local[i], |w| xform::mul(&w, &local[i])));
+            todo.extend(&below[i]);
+        }
+    }
     let mut placed_once = vec![false; objects.len()];
     for (i, n) in kf.nodes.iter().enumerate() {
         let obj = placed_by_kf[i];
-        let name = if n.instance.is_empty() { &n.name } else { &n.instance };
-        let mut node = json!({ "name": name });
+        let name = match n.kind {
+            // As 3ds Max names a target.
+            Kind::CameraTarget | Kind::SpotTarget => Cow::Owned(format!("{}.Target", n.name)),
+            _ if n.instance.is_empty() => Cow::Borrowed(&n.name),
+            _ => Cow::Borrowed(&n.instance),
+        };
+        // A node with no name has no name key.
+        let mut node = if name.is_empty() {
+            json!({})
+        } else {
+            json!({ "name": name.as_str() })
+        };
         let (t, q, s) = rests[i];
         if t.iter().any(|&c| c != 0.0) {
             node["translation"] = cleans(&n.pos[0].value);
@@ -1456,7 +1796,7 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
             && matches!(objects[o].body, Body::Mesh(_))
         {
             // Back through the mesh matrix and the pivot, as lib3ds does, unless the object's first node isn't then
-            // where the editor has it: then its rest pose decides.
+            // where the editor has it, at rest or at any of its keys: then its rest pose decides.
             let m = match &objects[o].body {
                 Body::Mesh(ts) => ts.iter().find_map(|t| t.matrix).map_or(IDENTITY, |m| mesh_matrix(&m)),
                 _ => IDENTITY,
@@ -1465,13 +1805,28 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
             let lib = (xform::det3(&m).abs() > 1e-12).then(|| xform::mul(&pivot, &xform::inverse(&m)));
             let by_rest = xform::inverse(&w);
             let size = m[0][3].abs().max(m[1][3].abs()).max(m[2][3].abs());
+            let above = up(i).and_then(|p| world[p]);
             let into = match lib {
                 Some(l) if placed_once[o] || near_identity(&xform::mul(&w, &l), size) => l,
+                Some(l) if stands_at_a_key(n, above.as_ref(), &l, size) => l,
                 _ => by_rest,
             };
             placed_once[o] = true;
             if let Some(mesh) = meshes.get(&mut b, o, &into) {
                 node["mesh"] = json!(mesh);
+            }
+        }
+        if let Some(o) = obj.map(|o| &objects[o]) {
+            match (n.kind, &o.body) {
+                (Kind::Camera, Body::Camera(c)) if keep.cameras => {
+                    cameras.push(camera_json(c, &o.name, keep.extras));
+                    node["camera"] = json!(cameras.len() - 1);
+                }
+                (Kind::Light | Kind::Spot, Body::Light(l)) if keep.lights => {
+                    lights.push(light_json(l, &o.name, keep.extras));
+                    node["extensions"] = json!({ "KHR_lights_punctual": { "light": lights.len() - 1 } });
+                }
+                _ => {}
             }
         }
         if keep.extras {
@@ -1491,7 +1846,7 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         nodes.push(node);
     }
     for i in 0..kf.nodes.len() {
-        match parent_of[i].filter(|_| parent_ok[i]) {
+        match up(i) {
             Some(p) => {
                 let children = nodes[first + p]
                     .as_object_mut()
@@ -1504,17 +1859,20 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         }
     }
 
-    let mut animations = Vec::new();
     if keep.animations {
-        let (mut channels, mut samplers) = (Vec::new(), Vec::new());
+        // The keyframer's tracks as one animation, with no name (the file gives it none), starting at time 0 even
+        // when its first key is at a negative frame or a late one.
+        let mut tracks: Vec<Track> = Vec::new();
         for (i, n) in kf.nodes.iter().enumerate() {
             let node = first + i;
-            let mut add = |path: &str, (input, output): (usize, usize), interpolation: &str| {
-                channels.push(json!({ "sampler": samplers.len(), "target": { "node": node, "path": path } }));
-                samplers.push(json!({ "input": input, "output": output, "interpolation": interpolation }));
+            let mut add = |path: keys::Path, (times, values): (Vec<f32>, Vec<f32>), interp: Interp| {
+                tracks.push(Track {
+                    interp,
+                    ..Track::linear(node, path, times, values)
+                });
             };
             if n.pos.len() > 1 {
-                add("translation", spline(&mut b, &n.pos), "CUBICSPLINE");
+                add(keys::Path::Translation, spline(&n.pos), Interp::Cubic);
             }
             if n.rot.len() > 1 {
                 let turns = rotations(&n.rot);
@@ -1532,18 +1890,59 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
                     values.extend(q.map(|c| c as f32));
                 }
                 let times = keys.iter().map(|&(t, _)| t).collect();
-                let io = (b.floats(times, "SCALAR", true), b.floats(values, "VEC4", false));
-                add("rotation", io, "LINEAR");
+                add(keys::Path::Rotation, (times, values), Interp::Linear);
+            }
+            if let Some(aim) = aims[i] {
+                // A camera or spotlight turns as it, its target or its roll moves: its rotation on each frame of
+                // those tracks, the nodes above the two standing as they do at rest.
+                let (own, roll) = (Curve::new(&n.pos), Curve::new(&n.roll));
+                let to = match aim {
+                    Aim::Node(t) => Some((Curve::new(&kf.nodes[t].pos), up(t).and_then(|p| world[p]))),
+                    Aim::Point(_) => None,
+                };
+                let spans = [own.span(), roll.span(), to.as_ref().and_then(|(c, _)| c.span())];
+                let span = spans.into_iter().flatten().reduce(|a, b| (a.0.min(b.0), a.1.max(b.1)));
+                if let Some((lo, hi)) = span {
+                    let above = up(i).and_then(|p| world[p]);
+                    // Every frame, or of a very long span every few.
+                    let step = usize_of(u64::from(hi.abs_diff(lo)).div_ceil(4096).max(1));
+                    let mut frames: Vec<i32> = (lo..hi).step_by(step).collect();
+                    frames.push(hi);
+                    let mut last = rests[i].1;
+                    let mut values = Vec::with_capacity(frames.len() * 4);
+                    for &frame in &frames {
+                        let f = f64::from(frame);
+                        let target = match (&to, aim) {
+                            (Some((curve, over)), _) => curve.at(f).map(|p| over.map_or(p, |m| point(&m, p))),
+                            (None, Aim::Point(p)) => Some(p),
+                            (None, Aim::Node(_)) => None,
+                        };
+                        let turn = own
+                            .at(f)
+                            .zip(target)
+                            .and_then(|(from, to)| aimed(above.as_ref(), from, to, roll.at(f).map_or(0.0, |r| r[0])));
+                        let mut q = turn.unwrap_or(last);
+                        if (0..4).map(|k| q[k] * last[k]).sum::<f64>() < 0.0 {
+                            q = q.map(|c| -c);
+                        }
+                        last = q;
+                        #[allow(clippy::cast_possible_truncation, reason = "accessor floats")]
+                        values.extend(q.map(|c| c as f32));
+                    }
+                    let times = frames.iter().map(|&f| seconds(f)).collect();
+                    add(keys::Path::Rotation, (times, values), Interp::Linear);
+                }
             }
             if n.scl.len() > 1 {
-                add("scale", spline(&mut b, &n.scl), "CUBICSPLINE");
+                add(keys::Path::Scale, spline(&n.scl), Interp::Cubic);
             }
         }
-        if !channels.is_empty() {
-            animations.push(json!({ "name": "keyframer", "channels": channels, "samplers": samplers }));
-        }
+        let mut writer = keys::Writer::new(keep.extras);
+        writer.animation(&mut b, None, None, tracks);
+        writer.finish(&mut b);
     }
-    if !kf.nodes.is_empty() || kf.revision.is_some() {
+    let animated = !kf.nodes.is_empty() || kf.revision.is_some();
+    if animated {
         let mut k = Map::new();
         if !kf.name.is_empty() {
             k.insert("name".into(), json!(kf.name));
@@ -1557,21 +1956,51 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         if let Some(s) = kf.segment {
             k.insert("segment".into(), json!(s));
         }
-        source["keyframer"] = Value::Object(k);
+        source.insert("keyframer".into(), Value::Object(k));
+    }
+    // The master scale multiplies every coordinate (see the module's notes); it names no unit.
+    let master = source
+        .get("masterScale")
+        .and_then(Value::as_f64)
+        .filter(|s| s.is_finite() && *s > 0.0)
+        .unwrap_or(1.0);
+    let info = SourceInfo {
+        format: Some("3DS".into()),
+        version: source.get("version").map(ToString::to_string),
+        up_axis: Fact::Declared(Axis::PosZ),
+        handedness: Fact::Declared(Handedness::Right),
+        frame_rate: if animated {
+            Fact::Assumed(f64::from(FRAMES_PER_SECOND))
+        } else {
+            Fact::Unknown
+        },
+        ..SourceInfo::default()
+    };
+    info.write(&mut source);
+    // What a camera sees and a light reaches are lengths of the scene, scaled as it is drawn.
+    for c in &mut cameras {
+        for key in ["znear", "zfar"] {
+            if let Some(v) = c.pointer_mut(&format!("/perspective/{key}"))
+                && let Some(x) = v.as_f64()
+            {
+                *v = json!(x * master);
+            }
+        }
+    }
+    for l in &mut lights {
+        if let Some(v) = l.get_mut("range")
+            && let Some(x) = v.as_f64()
+        {
+            *v = json!(x * master);
+        }
     }
 
-    // Z-up to Y-up: a quarter turn about X.
-    let h = std::f32::consts::FRAC_1_SQRT_2;
-    nodes.push(json!({ "name": "RootNode", "children": roots, "rotation": [-h, 0.0, 0.0, h] }));
     let mut json = Map::new();
     json.insert("asset".into(), json!({ "extras": { "source": source } }));
     json.insert("scene".into(), json!(0));
-    json.insert("scenes".into(), json!([{ "nodes": [nodes.len() - 1] }]));
+    json.insert("scenes".into(), json!([{ "nodes": roots }]));
     json.insert("nodes".into(), Value::Array(nodes));
     json.insert("meshes".into(), Value::Array(meshes.list));
-    if !animations.is_empty() {
-        json.insert("animations".into(), Value::Array(animations));
-    }
     if !cameras.is_empty() {
         json.insert("cameras".into(), Value::Array(cameras));
     }
@@ -1597,7 +2026,10 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         }
     }
     // `read` counts the triangles drawn, from the document.
-    Ok(b.finish(json, Map::new()))
+    let mut doc = b.finish(json, Map::new());
+    // Z-up to Y-up (a quarter turn about X), and the file's master scale.
+    frame::root_by_factor(&mut doc, Frame::z_up().scaled(master));
+    Ok(doc)
 }
 
 /// A trimesh's faces, into the prims of their materials. A corner's normal averages the faces around its vertex that
@@ -1707,7 +2139,7 @@ fn add_faces(
         }
         let mat = face_mat[f].unwrap_or_else(|| {
             if materials.last().is_none_or(|m| m.name != "default") {
-                materials.push(Material::plain("default", GRAY));
+                materials.push(legacy_material::default_material(false));
             }
             materials.len() - 1
         });
@@ -1742,10 +2174,8 @@ fn add_faces(
                     nrm = sum.map(|c| c / len);
                 }
             }
-            #[allow(clippy::float_cmp, reason = "exactly zero: no face in the group gave a normal")]
-            if nrm == [0.0; 3] {
-                nrm = [0.0, 0.0, 1.0];
-            }
+            // Still zero when no face in the group gave a normal: the vertex then takes the one every format's
+            // does, as the primitive is written.
             // -0.0 + 0.0 is 0.0: one key for both zeros.
             let nrm = nrm.map(|c| c + 0.0);
             let idx = *seen.entry((mat, vi, nrm.map(f32::to_bits))).or_insert_with(|| {
@@ -1853,7 +2283,7 @@ mod tests {
         chunk(MAIN, &chunk(EDITOR, &editor))
     }
 
-    fn read(name: &str, data: &[u8]) -> Result<Document<'static>> {
+    fn read(name: &str, data: &[u8]) -> Result<Document> {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join(name);
         std::fs::write(&p, data).unwrap();
@@ -1864,6 +2294,9 @@ mod tests {
         )
     }
 
+    /// What the root node scales these files by: their master scale, 1 (or none).
+    const UNIT: f32 = 1.0;
+
     fn close(a: [f32; 3], b: [f32; 3]) -> bool {
         (0..3).all(|k| (a[k] - b[k]).abs() < 1e-4)
     }
@@ -1871,10 +2304,7 @@ mod tests {
     #[test]
     fn the_triangle_limit_refuses_bigger_models() {
         let read = |max_triangles| {
-            let keep = Keep {
-                max_triangles,
-                ..Keep::ALL
-            };
+            let keep = Keep::ALL.with_max_triangles(max_triangles);
             crate::formats::load_bytes(&square(), "s.3ds", "3ds", &crate::assets::Memory::new(), keep)
                 .map(|d| d.flatten(crate::document::Pose::Rest).unwrap().unwrap().triangles())
         };
@@ -1886,15 +2316,23 @@ mod tests {
     #[test]
     fn meshes_materials_and_smoothing() {
         let doc = read("floor.3ds", &square()).unwrap();
-        let names: Vec<&str> = doc.json["nodes"]
+        let names: Vec<&str> = doc.json()["nodes"]
             .as_array()
             .unwrap()
             .iter()
             .map(|n| n["name"].as_str().unwrap())
             .collect();
         assert_eq!(names, ["Floor", "Wall", "RootNode"]);
-        assert_eq!(doc.json["asset"]["extras"]["source"]["upAxis"], "Z");
-        let red = &doc.json["materials"][0]["extras"]["3ds"];
+        let info = doc.source_info();
+        assert_eq!(info.format.as_deref(), Some("3DS"));
+        assert_eq!(info.up_axis, Fact::Declared(Axis::PosZ));
+        assert_eq!(info.handedness, Fact::Declared(Handedness::Right));
+        // 3DS names no unit, and with no master scale nothing is scaled.
+        assert_eq!(info.meters_per_unit, Fact::Unknown);
+        assert_eq!(info.frame_rate, Fact::Unknown, "no keyframer");
+        assert!(info.converted.up_axis && !info.converted.units);
+        assert!(doc.json()["nodes"][2].get("scale").is_none());
+        let red = &doc.json()["materials"][0]["extras"]["3ds"];
         assert_eq!(red["diffuse"], json!([255, 0, 0]));
         assert_eq!(red["transparency"], json!(25.0));
         assert_eq!(red["maps"]["bump"], json!({ "file": "red.png", "uScale": 2.0 }));
@@ -1913,14 +2351,19 @@ mod tests {
             "Z up became Y up: {:?}",
             floor.positions
         );
-        assert!(floor.positions.iter().any(|&p| close(p, [2.0, 0.0, -2.0])));
+        assert!(
+            floor
+                .positions
+                .iter()
+                .any(|&p| close(p.map(|c| c / UNIT), [2.0, 0.0, -2.0]))
+        );
         assert!(floor.normals.iter().all(|n| n[1] > 0.99), "{:?}", floor.normals);
         assert!(floor.uvs.contains(&[0.0, 1.0]), "V flipped to glTF's origin");
         let wall = &mesh.prims[1];
         assert_eq!(mesh.materials[wall.material].name, "default");
         assert_eq!(wall.positions.len(), 3);
         assert!(wall.normals.iter().all(|n| n[2].abs() > 0.99), "{:?}", wall.normals);
-        assert!(crate::mesh::to_glb(&mesh).unwrap().starts_with(b"glTF"));
+        assert!(mesh.to_glb().unwrap().starts_with(b"glTF"));
     }
 
     fn track(id: u16, keys: &[(u32, &[f32])]) -> Vec<u8> {
@@ -1982,9 +2425,10 @@ mod tests {
         let mut main = chunk(EDITOR, &editor);
         main.extend(chunk(KEYFRAMER, &kf));
         let doc = read("arm.3ds", &chunk(MAIN, &main)).unwrap();
-        assert_eq!(doc.json["nodes"][1]["name"], "Arm");
-        assert_eq!(doc.json["nodes"][0]["children"], json!([1]));
-        assert_eq!(doc.json["animations"][0]["channels"].as_array().unwrap().len(), 2);
+        assert_eq!(doc.json()["nodes"][1]["name"], "Arm");
+        assert_eq!(doc.json()["nodes"][0]["children"], json!([1]));
+        assert_eq!(doc.json()["animations"][0]["channels"].as_array().unwrap().len(), 2);
+        assert_eq!(doc.source_info().frame_rate, Fact::Assumed(30.0));
 
         // At rest, everything is where the editor has it (turned Y up).
         let mesh = doc.flatten(Pose::Rest).unwrap().unwrap();
@@ -1992,13 +2436,93 @@ mod tests {
         let mut want: Vec<[f32; 3]> = at([5., 0., 0.])
             .into_iter()
             .chain(at([5., 3., 0.]))
-            .map(|[x, y, z]| [x, z, -y])
+            .map(|[x, y, z]| [x, z, -y].map(|c| c * UNIT))
             .collect();
         #[allow(clippy::cast_possible_truncation, reason = "small test values")]
-        let key = |p: &[f32; 3]| p.map(|c| (c * 1000.0).round() as i64);
+        let key = |p: &[f32; 3]| p.map(|c| (c * 100_000.0).round() as i64);
         got.sort_by_key(key);
         want.sort_by_key(key);
         assert!(got.iter().zip(&want).all(|(a, b)| close(*a, *b)), "{got:?} != {want:?}");
+    }
+
+    #[test]
+    fn keys_that_are_not_numbers_are_left_out() {
+        let tri = trimesh(&at([0., 0., 0.]), &[[0, 1, 2]], None);
+        let editor = object("Tri", &chunk(TRIMESH, &tri));
+        let kf = node(
+            0,
+            "Tri",
+            u16::MAX,
+            [0.; 3],
+            &[
+                track(
+                    POS_TRACK,
+                    &[
+                        (0, &[f32::NAN, 0., 0.]),
+                        (10, &[1., 2., 3.]),
+                        (20, &[4., f32::INFINITY, 6.]),
+                    ],
+                ),
+                track(ROT_TRACK, &[(0, &[f32::NAN, 0., 0., 1.])]),
+                track(SCL_TRACK, &[(0, &[f32::NAN, f32::NAN, f32::NAN]), (10, &[2., 2., 2.])]),
+            ],
+        );
+        let mut main = chunk(EDITOR, &editor);
+        main.extend(chunk(KEYFRAMER, &kf));
+        let doc = read("nan.3ds", &chunk(MAIN, &main)).unwrap();
+        // The first key that is a number is the rest pose (Z up turned Y up at the root above).
+        let node = doc.json()["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["name"] == "Tri")
+            .unwrap();
+        assert_eq!(node["translation"], json!([1.0, 2.0, 3.0]));
+        assert_eq!(node["scale"], json!([2.0, 2.0, 2.0]));
+        assert!(node.get("rotation").is_none());
+        let text = serde_json::to_string(doc.json()).unwrap();
+        assert!(!text.contains("null"), "{text}");
+        assert!(doc.flatten(Pose::Rest).unwrap().is_some());
+    }
+
+    #[test]
+    fn a_mesh_saved_on_a_later_frame_follows_its_mesh_matrix() {
+        // A triangle that turns a quarter (clockwise, as 3DS turns) about Z by frame 30, saved on frame 30: its
+        // vertices and mesh matrix are that frame's.
+        let quarter = std::f32::consts::FRAC_PI_2;
+        let saved = [[5., 0., 0.], [5., -1., 0.], [6., 0., 0.]];
+        let mut mesh = trimesh(&saved, &[[0, 1, 2]], None);
+        mesh.extend(chunk(
+            MESH_MATRIX,
+            &f32s(&[0., -1., 0., 1., 0., 0., 0., 0., 1., 5., 0., 0.]),
+        ));
+        let editor = object("Spinner", &chunk(TRIMESH, &mesh));
+        let kf = node(
+            0,
+            "Spinner",
+            u16::MAX,
+            [0.; 3],
+            &[
+                track(POS_TRACK, &[(0, &[5., 0., 0.])]),
+                track(ROT_TRACK, &[(0, &[0., 0., 0., 1.]), (30, &[quarter, 0., 0., 1.])]),
+            ],
+        );
+        let mut main = chunk(EDITOR, &editor);
+        main.extend(chunk(KEYFRAMER, &kf));
+        let doc = read("spinner.3ds", &chunk(MAIN, &main)).unwrap();
+        let drawn = |pose| -> Vec<[f32; 3]> {
+            let mesh = doc.flatten(pose).unwrap().unwrap();
+            mesh.prims.iter().flat_map(|p| p.positions.clone()).collect()
+        };
+        let y_up =
+            |v: &[[f32; 3]]| -> Vec<[f32; 3]> { v.iter().map(|&[x, y, z]| [x, z, -y].map(|c| c * UNIT)).collect() };
+        let same = |got: &[[f32; 3]], want: &[[f32; 3]]| want.iter().all(|w| got.iter().any(|g| close(*g, *w)));
+        // On frame 30 it is where the file has it.
+        let then = drawn(Pose::Animation { index: 0, time: 1.0 });
+        assert!(same(&then, &y_up(&saved)), "{then:?}");
+        // At rest, the first key, it hasn't turned yet.
+        let rest = drawn(Pose::Rest);
+        assert!(same(&rest, &y_up(&at([5., 0., 0.]))), "{rest:?}");
     }
 
     #[test]
@@ -2012,15 +2536,15 @@ mod tests {
         editor.extend(object("Cam", &chunk(CAMERA, &cam)));
         editor.extend(object("Spot", &chunk(LIGHT, &spot)));
         let doc = read("lit.3ds", &chunk(MAIN, &chunk(EDITOR, &editor))).unwrap();
-        let p = &doc.json["cameras"][0]["perspective"];
+        let p = &doc.json()["cameras"][0]["perspective"];
         assert_eq!(p["znear"], json!(1.0));
         assert_eq!(p["zfar"], json!(100.0));
-        let light = &doc.json["extensions"]["KHR_lights_punctual"]["lights"][0];
+        let light = &doc.json()["extensions"]["KHR_lights_punctual"]["lights"][0];
         assert_eq!(light["type"], "spot");
         let outer = light["spot"]["outerConeAngle"].as_f64().unwrap();
         assert!((outer - 30f64.to_radians()).abs() < 1e-9);
         // The camera looks along +Y: its -Z turned onto +Y is a quarter turn about +X.
-        let q: Vec<f64> = doc.json["nodes"][1]["rotation"]
+        let q: Vec<f64> = doc.json()["nodes"][1]["rotation"]
             .as_array()
             .unwrap()
             .iter()
@@ -2029,8 +2553,244 @@ mod tests {
         let h = std::f64::consts::FRAC_1_SQRT_2;
         assert!((q[0] - h).abs() < 1e-6 && (q[3] - h).abs() < 1e-6, "{q:?}");
         // The spot looks straight down: -Z already.
-        let q = doc.json["nodes"][2]["rotation"].as_array().unwrap();
+        let q = doc.json()["nodes"][2]["rotation"].as_array().unwrap();
         assert!((q[3].as_f64().unwrap().abs() - 1.0).abs() < 1e-6, "{q:?}");
+    }
+
+    /// A keyframer node that isn't an object's (`tag` says whose: a camera's, a light's, a target's), named as the
+    /// camera or light is.
+    fn other(tag: u16, id: u16, name: &str, parent: u16, tracks: &[Vec<u8>]) -> Vec<u8> {
+        let mut hdr = name.as_bytes().to_vec();
+        hdr.push(0);
+        hdr.extend(u16s(&[0, 0, parent]));
+        let mut n = chunk(NODE_ID, &id.to_le_bytes());
+        n.extend(chunk(NODE_HDR, &hdr));
+        for t in tracks {
+            n.extend(t);
+        }
+        chunk(tag, &n)
+    }
+
+    /// What is drawn in `pose`, Z up as the file has it.
+    fn drawn(doc: &Document, pose: Pose) -> Vec<[f32; 3]> {
+        let mesh = doc.flatten(pose).unwrap().unwrap();
+        let points = mesh.prims.iter().flat_map(|p| p.positions.clone());
+        // Back in the file's Z up and units: the root node's turn and scale taken off.
+        points.map(|[x, y, z]| [x, -z, y].map(|c| c / UNIT)).collect()
+    }
+
+    fn same(got: &[[f32; 3]], want: &[[f32; 3]]) -> bool {
+        got.len() == want.len() && want.iter().all(|w| got.iter().any(|g| close(*g, *w)))
+    }
+
+    /// A camera at (0, -10, 0) looking along +Y at its target, and a triangle whose node is at (1, 2, -10) in the
+    /// frame of its parent. `cam` and `target` are the tracks of the camera's two nodes.
+    fn beside_a_camera(parent: u16, cam: &[Vec<u8>], target: &[Vec<u8>]) -> Document {
+        // Looking along +Y with Z up, the camera's X is the world's, its Y the world's Z and its Z the world's -Y:
+        // (1, 2, -10) from the camera is (1, 0, 2) in the world.
+        let saved = [[1., 0., 2.], [2., 0., 2.], [1., 0., 3.]];
+        let mut mesh = trimesh(&saved, &[[0, 1, 2]], None);
+        mesh.extend(chunk(
+            MESH_MATRIX,
+            &f32s(&[1., 0., 0., 0., 0., 1., 0., -1., 0., 1., 0., 2.]),
+        ));
+        let mut editor = object("Tri", &chunk(TRIMESH, &mesh));
+        editor.extend(object(
+            "Cam",
+            &chunk(CAMERA, &f32s(&[0., -10., 0., 0., 0., 0., 0., 50.])),
+        ));
+        let mut kf = other(CAMERA_NODE_TAG, 0, "Cam", u16::MAX, cam);
+        kf.extend(node(
+            1,
+            "Tri",
+            parent,
+            [0.; 3],
+            &[track(POS_TRACK, &[(0, &[1., 2., -10.])])],
+        ));
+        kf.extend(other(TARGET_NODE_TAG, 2, "Cam", u16::MAX, target));
+        let mut main = chunk(EDITOR, &editor);
+        main.extend(chunk(KEYFRAMER, &kf));
+        read("cam.3ds", &chunk(MAIN, &main)).unwrap()
+    }
+
+    /// How many keys the rotation channel of `node` has.
+    fn rotation_keys(doc: &Document, node: usize) -> Option<u64> {
+        let anim = &doc.json()["animations"][0];
+        let channel = anim["channels"]
+            .as_array()?
+            .iter()
+            .find(|c| c["target"]["node"] == json!(node) && c["target"]["path"] == "rotation")?;
+        let input = anim["samplers"][usize_of(channel["sampler"].as_u64()?)]["input"].as_u64()?;
+        doc.json()["accessors"][usize_of(input)]["count"].as_u64()
+    }
+
+    #[test]
+    fn a_child_of_a_camera_is_in_the_frame_the_camera_aims() {
+        let doc = beside_a_camera(
+            0,
+            &[track(POS_TRACK, &[(0, &[0., -10., 0.])])],
+            &[track(POS_TRACK, &[(0, &[0., 0., 0.]), (30, &[10., -10., 0.])])],
+        );
+        let nodes = &doc.json()["nodes"];
+        assert_eq!(nodes[0]["name"], "Cam");
+        assert_eq!(nodes[0]["camera"], json!(0));
+        assert_eq!(nodes[0]["children"], json!([1]));
+        assert_eq!(nodes[1]["name"], "Tri");
+        assert_eq!(nodes[2]["name"], "Cam.Target");
+        assert_eq!(nodes[3]["children"], json!([0, 2]));
+        assert_eq!(doc.json()["cameras"].as_array().unwrap().len(), 1);
+        // Looking along +Y: glTF's camera, looking down its -Z, turned a quarter about X.
+        let q: Vec<f64> = nodes[0]["rotation"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c.as_f64().unwrap())
+            .collect();
+        let h = std::f64::consts::FRAC_1_SQRT_2;
+        assert!((q[0] - h).abs() < 1e-9 && (q[3] - h).abs() < 1e-9, "{q:?}");
+        // At rest the triangle is where the editor has it.
+        let rest = drawn(&doc, Pose::Rest);
+        assert!(same(&rest, &[[1., 0., 2.], [2., 0., 2.], [1., 0., 3.]]), "{rest:?}");
+        // On frame 30 the target is at (10, -10, 0) and the camera looks along +X: its X is the world's -Y, its Y
+        // the world's Z, its Z the world's -X. The triangle has swung round with it.
+        let then = drawn(&doc, Pose::Animation { index: 0, time: 1.0 });
+        assert!(
+            same(&then, &[[10., -11., 2.], [10., -12., 2.], [10., -11., 3.]]),
+            "{then:?}"
+        );
+        // The camera's turn is sampled on every frame of the target's track.
+        assert_eq!(rotation_keys(&doc, 0), Some(31));
+    }
+
+    #[test]
+    fn a_cameras_roll_turns_its_children() {
+        let doc = beside_a_camera(
+            0,
+            &[
+                track(POS_TRACK, &[(0, &[0., -10., 0.])]),
+                track(ROLL_TRACK, &[(0, &[0.]), (30, &[90.])]),
+            ],
+            &[track(POS_TRACK, &[(0, &[0., 0., 0.])])],
+        );
+        let rest = drawn(&doc, Pose::Rest);
+        assert!(same(&rest, &[[1., 0., 2.], [2., 0., 2.], [1., 0., 3.]]), "{rest:?}");
+        // Rolled a quarter, the camera's X is the world's Z and its Y the world's -X (its Z still the world's -Y),
+        // the way the editor's cameras roll here.
+        let then = drawn(&doc, Pose::Animation { index: 0, time: 1.0 });
+        assert!(same(&then, &[[-2., 0., 1.], [-2., 0., 2.], [-3., 0., 1.]]), "{then:?}");
+        assert_eq!(rotation_keys(&doc, 0), Some(31));
+    }
+
+    #[test]
+    fn a_camera_with_nothing_under_it_stays_where_the_editor_has_it() {
+        let doc = beside_a_camera(
+            u16::MAX,
+            &[
+                track(POS_TRACK, &[(0, &[0., -10., 0.])]),
+                track(ROLL_TRACK, &[(0, &[0.]), (30, &[90.])]),
+            ],
+            &[track(POS_TRACK, &[(0, &[0., 0., 0.]), (30, &[10., -10., 0.])])],
+        );
+        let nodes = doc.json()["nodes"].as_array().unwrap();
+        let names: Vec<&str> = nodes.iter().map(|n| n["name"].as_str().unwrap()).collect();
+        assert_eq!(names, ["Cam", "Tri", "RootNode"]);
+        assert_eq!(nodes[0]["camera"], json!(0));
+        assert_eq!(nodes[0]["translation"], json!([0.0, -10.0, 0.0]));
+        assert!(nodes[0].get("extras").is_none(), "{}", nodes[0]);
+        assert!(doc.json().get("animations").is_none());
+    }
+
+    #[test]
+    fn children_of_lights_and_of_targets() {
+        // A triangle under a light that rises, and another under the target of a spotlight shining straight down,
+        // which rises too.
+        let a = trimesh(&at([1., 0., 5.]), &[[0, 1, 2]], Some([1., 0., 5.]));
+        let b = trimesh(&at([3., 1., 0.]), &[[0, 1, 2]], Some([3., 1., 0.]));
+        let mut omni = f32s(&[0., 0., 5.]);
+        omni.extend(chunk(COLOR_U8, &[255, 255, 255]));
+        let mut spot = f32s(&[3., 0., 10.]);
+        spot.extend(chunk(COLOR_U8, &[255, 255, 255]));
+        spot.extend(chunk(DL_SPOTLIGHT, &f32s(&[3., 0., 0., 30., 60.])));
+        let mut editor = object("A", &chunk(TRIMESH, &a));
+        editor.extend(object("B", &chunk(TRIMESH, &b)));
+        editor.extend(object("Omni", &chunk(LIGHT, &omni)));
+        editor.extend(object("Spot", &chunk(LIGHT, &spot)));
+        let mut kf = other(
+            LIGHT_NODE_TAG,
+            0,
+            "Omni",
+            u16::MAX,
+            &[track(POS_TRACK, &[(0, &[0., 0., 5.]), (30, &[0., 0., 7.])])],
+        );
+        kf.extend(node(1, "A", 0, [0.; 3], &[track(POS_TRACK, &[(0, &[1., 0., 0.])])]));
+        kf.extend(other(
+            L_TARGET_NODE_TAG,
+            2,
+            "Spot",
+            u16::MAX,
+            &[track(POS_TRACK, &[(0, &[3., 0., 0.]), (30, &[3., 0., 4.])])],
+        ));
+        kf.extend(node(3, "B", 2, [0.; 3], &[track(POS_TRACK, &[(0, &[0., 1., 0.])])]));
+        kf.extend(other(
+            SPOTLIGHT_NODE_TAG,
+            4,
+            "Spot",
+            u16::MAX,
+            &[track(POS_TRACK, &[(0, &[3., 0., 10.])])],
+        ));
+        let mut main = chunk(EDITOR, &editor);
+        main.extend(chunk(KEYFRAMER, &kf));
+        let doc = read("lights.3ds", &chunk(MAIN, &main)).unwrap();
+        let nodes = doc.json()["nodes"].as_array().unwrap();
+        let names: Vec<&str> = nodes.iter().map(|n| n["name"].as_str().unwrap()).collect();
+        assert_eq!(names, ["Omni", "A", "Spot.Target", "B", "Spot", "RootNode"]);
+        assert_eq!(nodes[0]["children"], json!([1]));
+        assert_eq!(nodes[2]["children"], json!([3]));
+        let light = |n: &Value| n["extensions"]["KHR_lights_punctual"]["light"].clone();
+        assert_eq!(light(&nodes[0]), json!(0));
+        assert_eq!(light(&nodes[4]), json!(1));
+        assert_eq!(nodes[4]["translation"], json!([3.0, 0.0, 10.0]));
+        // Straight down is the way a glTF spotlight shines already.
+        assert!(nodes[4].get("rotation").is_none(), "{}", nodes[4]);
+        let lights = &doc.json()["extensions"]["KHR_lights_punctual"]["lights"];
+        assert_eq!(lights[0]["type"], "point");
+        assert_eq!(lights[1]["type"], "spot");
+
+        let both = |a: [f32; 3], b: [f32; 3]| -> Vec<[f32; 3]> { at(a).into_iter().chain(at(b)).collect() };
+        let rest = drawn(&doc, Pose::Rest);
+        assert!(same(&rest, &both([1., 0., 5.], [3., 1., 0.])), "{rest:?}");
+        let then = drawn(&doc, Pose::Animation { index: 0, time: 1.0 });
+        assert!(same(&then, &both([1., 0., 7.], [3., 1., 4.])), "{then:?}");
+    }
+
+    #[test]
+    fn nodes_of_every_kind_count_toward_ids_a_file_leaves_out() {
+        // No node has an id: each is numbered by where it comes, the camera's nodes too, so parent 2 is the third
+        // node, the camera.
+        let unnumbered = |tag: u16, name: &str, parent: u16, at: [f32; 3]| {
+            let mut hdr = name.as_bytes().to_vec();
+            hdr.push(0);
+            hdr.extend(u16s(&[0, 0, parent]));
+            let mut n = chunk(NODE_HDR, &hdr);
+            n.extend(track(POS_TRACK, &[(0, &at)]));
+            chunk(tag, &n)
+        };
+        let mut editor = object("Tri", &chunk(TRIMESH, &trimesh(&at([0.; 3]), &[[0, 1, 2]], None)));
+        editor.extend(object(
+            "Cam",
+            &chunk(CAMERA, &f32s(&[0., -10., 0., 0., 0., 0., 0., 50.])),
+        ));
+        let mut kf = unnumbered(OBJECT_NODE_TAG, "$$$DUMMY", u16::MAX, [0.; 3]);
+        kf.extend(unnumbered(TARGET_NODE_TAG, "Cam", u16::MAX, [0.; 3]));
+        kf.extend(unnumbered(CAMERA_NODE_TAG, "Cam", u16::MAX, [0., -10., 0.]));
+        kf.extend(unnumbered(OBJECT_NODE_TAG, "Tri", 2, [0., 0., -10.]));
+        let mut main = chunk(EDITOR, &editor);
+        main.extend(chunk(KEYFRAMER, &kf));
+        let doc = read("old.3ds", &chunk(MAIN, &main)).unwrap();
+        let nodes = &doc.json()["nodes"];
+        assert_eq!(nodes[2]["name"], "Cam");
+        assert_eq!(nodes[2]["children"], json!([3]));
+        assert_eq!(nodes[3]["name"], "Tri");
     }
 
     /// The flattened mesh's triangles, each as its winding's normal and its corners' normals.
@@ -2176,7 +2936,7 @@ mod tests {
         let assets = crate::assets::Memory::new().with("leaf.png", png);
         let file = chunk(MAIN, &chunk(EDITOR, &editor));
         let doc = crate::formats::load_bytes(&file, "l.3ds", "3ds", &assets, Keep::ALL).unwrap();
-        let leaf = &doc.json["materials"][0];
+        let leaf = &doc.json()["materials"][0];
         assert!(leaf["pbrMetallicRoughness"]["baseColorTexture"].is_object(), "{leaf}");
         assert_eq!(leaf["alphaMode"], "BLEND", "{leaf}");
     }
@@ -2276,7 +3036,7 @@ mod tests {
         ]);
         let doc = crate::formats::load_bytes(&file, "b.3ds", "3ds", &assets, Keep::ALL).unwrap();
         let normal = |name: &str| {
-            let m = doc.json["materials"]
+            let m = doc.json()["materials"]
                 .as_array()
                 .unwrap()
                 .iter()
@@ -2360,5 +3120,45 @@ mod tests {
     #[test]
     fn not_3ds_is_refused() {
         assert!(read("x.3ds", b"hello").is_err());
+    }
+
+    #[test]
+    fn a_spotlight_with_nan_cones_is_read_not_a_panic() {
+        let mut spot = f32s(&[0., 0., 10.]);
+        spot.extend(chunk(DL_SPOTLIGHT, &f32s(&[0., 0., 0., f32::NAN, f32::NAN])));
+        let mut editor = object("Tri", &chunk(TRIMESH, &trimesh(&at([0.; 3]), &[[0, 1, 2]], None)));
+        editor.extend(object("Spot", &chunk(LIGHT, &spot)));
+        let doc = read("nan.3ds", &chunk(MAIN, &chunk(EDITOR, &editor))).unwrap();
+        let cone = &doc.json()["extensions"]["KHR_lights_punctual"]["lights"][0]["spot"];
+        let outer = cone["outerConeAngle"].as_f64().unwrap();
+        let inner = cone["innerConeAngle"].as_f64().unwrap();
+        assert!((outer - std::f64::consts::FRAC_PI_2).abs() < 1e-9, "{cone}");
+        assert!(inner < outer, "{cone}");
+    }
+
+    #[test]
+    fn counts_and_lengths_past_the_end_take_only_what_is_there() {
+        // Vertex, UV and face counts of 65535 over a few records, and a chunk claiming 4 GiB.
+        let mut verts = u16s(&[u16::MAX]);
+        verts.extend(f32s(&[0., 0., 0., 1., 0., 0., 0., 1., 0., 9.]));
+        let mut uvs = u16s(&[u16::MAX]);
+        uvs.extend(f32s(&[0., 0., 1.]));
+        let mut tri = chunk(VERTICES, &verts);
+        tri.extend(chunk(UVS, &uvs));
+        tri.extend(chunk(FACES, &u16s(&[u16::MAX, 0, 1, 2, 0, 7])));
+        let t = super::trimesh(&tri);
+        assert_eq!((t.vertices.len(), t.uvs.len(), t.faces.len()), (3, 1, 1));
+        // A face material list counting 65535 faces over one.
+        let mut faces = u16s(&[1, 0, 1, 2, 0]);
+        let mut fm = b"M\0".to_vec();
+        fm.extend(u16s(&[u16::MAX, 0]));
+        faces.extend(chunk(FACE_MATERIAL, &fm));
+        let t = super::trimesh(&chunk(FACES, &faces));
+        assert_eq!(t.materials, [("M".to_owned(), vec![0])]);
+        let mut file = chunk(MAIN, &[]);
+        file.extend([0x00, 0x40, 0xFF, 0xFF, 0xFF, 0xFF, 1, 2, 3]);
+        let all: Vec<_> = chunks(&file).collect();
+        assert_eq!(all, [(MAIN, &[][..]), (0x4000, &[1, 2, 3][..])]);
+        assert_eq!(jpeg_components(&[0xFF, 0xD8, 0xFF, 0xE0, 0xFF, 0xFF]), None);
     }
 }

@@ -1,11 +1,13 @@
 //! `OpenGEX` (`.ogex`), the Open Game Engine Exchange format: a scene written in `OpenDDL`, a
 //! tree of nodes (plain, bone, geometry, light and camera nodes) placed by transforms, the
-//! objects they reference (meshes, lights, cameras), materials, and animation tracks. Version
-//! 3.0 is read, and the earlier versions it extends.
+//! objects they reference (meshes, lights, cameras), materials, and animation tracks. The format
+//! is read as version 3.0 of its specification gives it, which extends the earlier ones; a file doesn't say
+//! which version it was written to, so none is checked or reported.
 //!
 //! Each node becomes a glTF node, placed by its node transforms (matrices, translations,
 //! rotations and scales, multiplied in order); its object transforms, which only its object
-//! takes, go on a child node that holds the object. A geometry object's most detailed mesh
+//! takes, go on a child node that holds the object; a file with no nodes has each of its objects
+//! placed under the root by itself. A geometry object's most detailed mesh
 //! becomes a glTF mesh, a primitive for each index array, its material the one the geometry
 //! node's material reference with that index names. Points, lines, line strips, triangles,
 //! triangle strips and quads are read; positions, normals, tangents (their handedness from the
@@ -17,10 +19,13 @@
 //! Materials map onto glTF's metallic-roughness model: diffuse is the base color, metalness
 //! and roughness theirs, emission emissive, opacity alpha, transparency transmission,
 //! clearcoat, sheen and the index of refraction their extensions, and a material with only a
-//! specular color and power (no roughness or metalness) is read as glossy plastic, its
-//! specular color the specular extension's. Textures keep their coordinate set, addressing
+//! specular color and power (no roughness or metalness) is the classic material every reader
+//! reads one way (`legacy_material`): the power its roughness, the color its highlight's.
+//! Faces no material reference covers take the default material. Textures keep their coordinate set, addressing
 //! and transform. Lights become `KHR_lights_punctual` lights, their attenuation the spot cone
-//! and range; cameras glTF perspective cameras.
+//! and range; cameras glTF perspective cameras. A camera's `fov` (or `fovx`) is its horizontal
+//! field of view: with a `fovy` the two give the aspect ratio, and without one a 16:9 frame is
+//! assumed, the vertical angle worked out from it and the ratio written beside it.
 //!
 //! Animation tracks (of transforms and morph weights) become glTF animations, one for each
 //! clip. Tracks that map onto a node's translation, rotation or scale, with linear times, are
@@ -28,9 +33,14 @@
 //! cubic splines. Others (a track inside a stack of transforms glTF can't split, Bézier
 //! times) are sampled, at every key and four times between.
 //!
-//! `OpenGEX` is Z up by default, in its distance metric's units: the scene's root turns it Y up
-//! and scales it to meters. Angles and times are scaled by their metrics, and colors are
+//! `OpenGEX` is Z up by default, in its distance metric's units: the document's `RootNode`, its first node, turns it Y up
+//! and scales it to meters (and has no transform for a file that is Y up, in meters). Angles and times are scaled by their metrics, and colors are
 //! converted from the file's primaries to sRGB's. What has no glTF slot stays in `extras`.
+//!
+//! The asset's `extras.source` records the distance metric (a meter, assumed, when there's
+//! none), the up axis (+Z, assumed, likewise) and the forward axis the file gives, what was
+//! converted, the angle and time metrics, primaries other than sRGB's, and counts of what
+//! couldn't be read.
 
 mod anim;
 mod ddl;
@@ -44,20 +54,25 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value, json};
 
+use super::frame::{self, Frame};
+use super::xform::col::{self, IDENTITY, M4, mul, scaling, translation};
+use super::xform::set_trs;
 use crate::Result;
 use crate::assets::Assets;
-use crate::document::{Builder, Document, Keep, Part};
+use crate::document::{Builder, Document, Keep, Limits, Part};
 use crate::images::Images;
 use crate::material::Full;
 use crate::mesh::FastMap;
 use crate::num::f32_of;
+use crate::quat;
+use crate::source::{Axis, Converted, Fact, Handedness, SourceInfo};
 use ddl::{ROOT, Tree};
-use math::{
-    IDENTITY, M4, is_identity, mul, place, quat_axis, quat_matrix, quat_unit, scaling, set_trs, translation, trs,
-};
+use math::{is_identity, place, trs};
 
 /// The structures that are nodes.
 const NODE_KINDS: [&str; 5] = ["Node", "BoneNode", "GeometryNode", "LightNode", "CameraNode"];
+/// The frame a camera is taken to have when the file gives only its horizontal field of view.
+const ASSUMED_ASPECT: f64 = 16.0 / 9.0;
 
 /// The units, directions and color space of a file.
 struct Metric {
@@ -69,11 +84,35 @@ struct Metric {
     time: f64,
     /// Whether +Y is up (else +Z).
     y_up: bool,
-    forward: Option<String>,
+    /// The forward axis, when the file gives one.
+    forward: Option<Axis>,
+    /// Whether the file gives its distance metric, and its up axis.
+    has_distance: bool,
+    has_up: bool,
     /// The file's red, green and blue primaries and white point, when they aren't sRGB's.
     primaries: Option<[[f64; 2]; 4]>,
     /// The file's linear RGB to linear sRGB.
     to_srgb: Option<[[f64; 3]; 3]>,
+}
+
+/// A value the file declares, or else the format's default.
+fn fact<T>(declared: bool, v: T) -> Fact<T> {
+    if declared { Fact::Declared(v) } else { Fact::Assumed(v) }
+}
+
+/// A forward direction as the file writes it: `"x"`, `"-x"`, ... `"-z"`.
+fn forward_axis(s: &str) -> Option<Axis> {
+    let (negative, letter) = s.strip_prefix('-').map_or((false, s), |l| (true, l));
+    let axis = match (letter, negative) {
+        ("x", false) => Axis::PosX,
+        ("x", true) => Axis::NegX,
+        ("y", false) => Axis::PosY,
+        ("y", true) => Axis::NegY,
+        ("z", false) => Axis::PosZ,
+        ("z", true) => Axis::NegZ,
+        _ => return None,
+    };
+    Some(axis)
 }
 
 /// A number stored as a `float` as the decimal it was most likely written as (0.01 rather
@@ -95,6 +134,8 @@ impl Metric {
             time: 1.0,
             y_up: false,
             forward: None,
+            has_distance: false,
+            has_up: false,
             primaries: None,
             to_srgb: None,
         };
@@ -104,11 +145,17 @@ impl Metric {
             let (v, _) = t.values(k);
             let scale = v.first().copied().filter(|x| x.is_finite() && *x > 0.0).map(decimal);
             match t.prop_str(k, "key") {
-                Some("distance") => m.distance = scale.unwrap_or(1.0),
+                Some("distance") => {
+                    m.distance = scale.unwrap_or(1.0);
+                    m.has_distance = scale.is_some();
+                }
                 Some("angle") => m.angle = scale.unwrap_or(1.0),
                 Some("time") => m.time = scale.unwrap_or(1.0),
-                Some("up") => m.y_up = t.string(k) == Some("y"),
-                Some("forward") => m.forward = t.string(k).map(str::to_owned),
+                Some("up") => {
+                    m.y_up = t.string(k) == Some("y");
+                    m.has_up = matches!(t.string(k), Some("y" | "z"));
+                }
+                Some("forward") => m.forward = t.string(k).and_then(forward_axis),
                 Some(key @ ("red" | "green" | "blue" | "white")) => {
                     let at = ["red", "green", "blue", "white"]
                         .iter()
@@ -300,7 +347,7 @@ fn expand(v: &[f64], width: usize) -> M4 {
 
 /// The unit axis an axis-angle rotation's values name, if they name one.
 fn axis_of(v: &[f64]) -> Option<[f64; 3]> {
-    math::unit([v[1], v[2], v[3]])
+    crate::vec3::unit([v[1], v[2], v[3]])
 }
 
 /// The matrix of a transform of `kind` with values `v`, angles in units of `angle` radians.
@@ -319,7 +366,7 @@ fn matrix(kind: Kind, v: &[f64], angle: f64) -> M4 {
             scaling(s)
         }
         Kind::Scale(Comp::All) => scaling([v[0], v[1], v[2]]),
-        Kind::Rotate(r) => quat_matrix(rotation(r, v, angle)),
+        Kind::Rotate(r) => col::rotation(rotation(r, v, angle)),
     }
 }
 
@@ -329,10 +376,10 @@ fn rotation(r: Rot, v: &[f64], angle: f64) -> [f64; 4] {
         Rot::Axis(k) => {
             let mut axis = [0.0; 3];
             axis[k] = 1.0;
-            quat_axis(axis, v[0] * angle)
+            quat::about_axis(axis, v[0] * angle)
         }
-        Rot::AxisAngle => axis_of(v).map_or([0.0, 0.0, 0.0, 1.0], |a| quat_axis(a, v[0] * angle)),
-        Rot::Quaternion => quat_unit([v[0], v[1], v[2], v[3]]),
+        Rot::AxisAngle => axis_of(v).map_or([0.0, 0.0, 0.0, 1.0], |a| quat::about_axis(a, v[0] * angle)),
+        Rot::Quaternion => quat::unit([v[0], v[1], v[2], v[3]]),
     }
 }
 
@@ -374,6 +421,8 @@ struct Ctx<'a> {
     materials: Vec<Full>,
     /// How many texture coordinate sets each material reads (its highest set and one).
     material_uvs: Vec<usize>,
+    /// The material of faces with none, and the one for those with vertex colors.
+    default_materials: [Option<usize>; 2],
     material_of: FastMap<u32, Option<usize>>,
     meshes: Vec<Value>,
     geoms: FastMap<u32, Option<geometry::Geom>>,
@@ -389,7 +438,6 @@ struct Ctx<'a> {
     light_of: FastMap<u32, Option<usize>>,
     cameras: Vec<Value>,
     camera_of: FastMap<u32, Option<usize>>,
-    animations: Vec<Value>,
     /// The triangles drawn, each placement of a mesh counted.
     triangles: usize,
     /// The triangles built, each mesh counted once; bounded by the limit.
@@ -424,9 +472,39 @@ struct Stats {
     spectra: usize,
 }
 
-pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document<'static>> {
+/// An `OpenDDL` parse error, of the kind other readers give the same failure: text with no structure in it (no
+/// brace at all) isn't `OpenGEX`, and a parse that ran into the end of the file with structures still open is a
+/// file cut short.
+fn same_failure(e: crate::Error, data: &[u8]) -> crate::Error {
+    if e.kind() != crate::ErrorKind::Corrupt {
+        return e;
+    }
+    if !data.contains(&b'{') {
+        return e.of_kind(crate::ErrorKind::UnknownFormat).within("not an OpenGEX file");
+    }
+    // Braces outside strings: more opened than closed means the file ends inside a structure.
+    let (mut depth, mut quoted, mut escaped) = (0i64, false, false);
+    for &c in data {
+        match c {
+            _ if escaped => escaped = false,
+            b'\\' if quoted => escaped = true,
+            b'"' => quoted = !quoted,
+            b'{' if !quoted => depth += 1,
+            b'}' if !quoted => depth -= 1,
+            _ => {}
+        }
+    }
+    if depth > 0 || quoted {
+        return e
+            .of_kind(crate::ErrorKind::Truncated)
+            .within("OpenGEX file is cut short");
+    }
+    e
+}
+
+pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document> {
     let data = input.read()?;
-    let t = Tree::parse(&data)?;
+    let t = Tree::parse(&data).map_err(|e| same_failure(e, &data))?;
     let dir = input.dir().to_path_buf();
     let mut c = Ctx {
         t: &t,
@@ -434,13 +512,14 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         keep,
         limit: input.limit,
         metric: Metric::read(&t),
-        b: Builder::default(),
+        b: Builder::new(keep.crease_angle()),
         images: Images::new(!keep.image_bytes, &dir),
         dir,
         image_of: FastMap::default(),
         counted: std::collections::HashSet::new(),
         materials: Vec::new(),
         material_uvs: Vec::new(),
+        default_materials: [None; 2],
         material_of: FastMap::default(),
         meshes: Vec::new(),
         geoms: FastMap::default(),
@@ -456,19 +535,20 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         light_of: FastMap::default(),
         cameras: Vec::new(),
         camera_of: FastMap::default(),
-        animations: Vec::new(),
         triangles: 0,
         built_triangles: 0,
         lines_or_points: false,
         stats: Stats::default(),
     };
-    nodes(&mut c);
+    let scene = nodes(&mut c);
     geometry::meshes(&mut c)?;
     if keep.animations {
         anim::animations(&mut c);
     }
+    // A file of nodes alone (a skeleton, or empty groups) is a scene still; one with nothing is not.
     ensure!(
-        !c.meshes.is_empty() || !c.lights.is_empty() || !c.cameras.is_empty(),
+        !c.meshes.is_empty() || !c.lights.is_empty() || !c.cameras.is_empty() || scene,
+        Empty,
         "this OpenGEX file has no geometry"
     );
     Ok(finish(c))
@@ -502,19 +582,21 @@ fn track_targets(t: &Tree<'_>, n: u32) -> Vec<u32> {
     out
 }
 
-/// Builds the glTF nodes: the root (turning the file Y up, in meters), then every node.
-fn nodes(c: &mut Ctx<'_>) {
+/// What brings the file to glTF's Y up and meters: its `up` and `distance` metrics.
+fn frame_of(metric: &Metric) -> Frame {
+    let up = if metric.y_up {
+        Frame::IDENTITY
+    } else {
+        Frame::up(Axis::PosZ)
+    };
+    up.scaled(metric.distance)
+}
+
+/// Builds the glTF nodes: the root (turning the file Y up, in meters), then every node. Returns whether that's a
+/// scene even without meshes: the file has nodes, or lights or cameras to place without them.
+fn nodes(c: &mut Ctx<'_>) -> bool {
     let t = c.t;
-    let mut root = json!({ "name": "RootNode" });
-    if !c.metric.y_up {
-        let h = std::f64::consts::FRAC_1_SQRT_2;
-        root["rotation"] = json!([-h, 0.0, 0.0, h]);
-    }
-    let d = c.metric.distance;
-    if (d - 1.0).abs() > 0.0 {
-        root["scale"] = json!([d, d, d]);
-    }
-    c.nodes.push(root);
+    c.nodes.push(frame::node(frame_of(&c.metric)));
     c.kids.push(Vec::new());
     let mut stack: Vec<(u32, usize)> = Vec::new();
     let push_kids = |stack: &mut Vec<(u32, usize)>, n: u32, parent: usize| {
@@ -606,6 +688,41 @@ fn nodes(c: &mut Ctx<'_>) {
         });
         push_kids(&mut stack, n, k);
     }
+    c.nodes.len() > 1 || objects(c)
+}
+
+/// Places a file's objects when it has no nodes to place them: each under the root, untransformed, so a file of
+/// only cameras or lights (or meshes) still shows them. Returns whether it placed a light or camera.
+fn objects(c: &mut Ctx<'_>) -> bool {
+    let t = c.t;
+    let mut seen = false;
+    for o in t.kids(ROOT).collect::<Vec<_>>() {
+        let ident = t.ident(o);
+        let kind = match ident {
+            "GeometryObject" => "geometry",
+            "LightObject" => "light",
+            "CameraObject" => "camera",
+            _ => continue,
+        };
+        seen |= kind != "geometry";
+        let name = node_name(t, o).unwrap_or_else(|| kind.to_owned());
+        let k = attach(c, json!({ "name": name }), 0);
+        match ident {
+            "GeometryObject" => c.geometry_nodes.push((o, k)),
+            "LightObject" if c.keep.lights => {
+                if let Some(l) = light(c, o) {
+                    c.nodes[k]["extensions"] = json!({ "KHR_lights_punctual": { "light": l } });
+                }
+            }
+            "CameraObject" if c.keep.cameras => {
+                if let Some(cam) = camera(c, o) {
+                    c.nodes[k]["camera"] = json!(cam);
+                }
+            }
+            _ => {}
+        }
+    }
+    seen
 }
 
 /// Adds a glTF node under `parent`; returns its index.
@@ -774,9 +891,11 @@ fn camera(c: &mut Ctx<'_>, o: u32) -> Option<usize> {
                 p.insert("yfov".into(), json!(y));
             }
             (Some(x), None) => {
-                // The horizontal field of view alone: glTF wants the vertical, which needs the
-                // aspect ratio the file leaves to the viewer.
-                p.insert("yfov".into(), json!(x));
+                // The horizontal field of view alone ("fov" and "fovx" are both it): glTF wants the
+                // vertical, which needs the aspect ratio the file leaves to the viewer. A 16:9 frame
+                // is assumed and written with it, so the two together are the file's angle across.
+                p.insert("yfov".into(), json!(2.0 * ((x * 0.5).tan() / ASSUMED_ASPECT).atan()));
+                p.insert("aspectRatio".into(), json!(ASSUMED_ASPECT));
                 extras.insert("horizontalFov".into(), json!(x));
             }
             (None, None) => {
@@ -805,7 +924,7 @@ fn camera(c: &mut Ctx<'_>, o: u32) -> Option<usize> {
 
 /// A float accessor of `kind` (`SCALAR`, `VEC3`, `VEC4` or `MAT4`) with no target, for skins
 /// and animations; `bounds` adds the `min` and `max` an animation's times need.
-fn floats(b: &mut Builder, v: Vec<f32>, kind: &str, bounds: bool) -> usize {
+fn floats(b: &mut Builder, v: Vec<f32>, kind: &'static str, bounds: bool) -> usize {
     let width = match kind {
         "VEC3" => 3,
         "VEC4" => 4,
@@ -826,13 +945,13 @@ fn floats(b: &mut Builder, v: Vec<f32>, kind: &str, bounds: bool) -> usize {
     });
     let a = b.accessor(Part::f32(v), 5126, count, kind, None);
     if let Some((min, max)) = range {
-        b.accessors[a]["min"] = json!(min);
-        b.accessors[a]["max"] = json!(max);
+        b.accessors[a].min = Some(Limits::floats(&min));
+        b.accessors[a].max = Some(Limits::floats(&max));
     }
     a
 }
 
-fn finish(mut c: Ctx<'_>) -> Document<'static> {
+fn finish(mut c: Ctx<'_>) -> Document {
     let mut nodes = std::mem::take(&mut c.nodes);
     for (k, kids) in c.kids.iter().enumerate() {
         if !kids.is_empty() {
@@ -840,30 +959,42 @@ fn finish(mut c: Ctx<'_>) -> Document<'static> {
         }
     }
     let m = &c.metric;
-    let mut source = json!({
-        "format": "OpenGEX",
-        "metersPerUnit": m.distance,
-        "radiansPerUnit": m.angle,
-        "secondsPerUnit": m.time,
-        "upAxis": if m.y_up { "Y" } else { "Z" },
-    });
-    if let Some(f) = &m.forward {
-        source["forward"] = json!(f);
-    }
+    let mut source = Map::new();
+    source.insert("radiansPerUnit".into(), json!(m.angle));
+    source.insert("secondsPerUnit".into(), json!(m.time));
     if let Some(p) = &m.primaries {
-        source["primaries"] = json!({ "red": p[0], "green": p[1], "blue": p[2], "white": p[3] });
+        source.insert(
+            "primaries".into(),
+            json!({ "red": p[0], "green": p[1], "blue": p[2], "white": p[3] }),
+        );
     }
+    SourceInfo {
+        format: Some("OpenGEX".into()),
+        // A unit is a meter, and +Z is up, unless the file's metrics say otherwise.
+        meters_per_unit: fact(m.has_distance, m.distance),
+        unit: crate::source::unit_name(m.distance).map(str::to_owned),
+        up_axis: fact(m.has_up, if m.y_up { Axis::PosY } else { Axis::PosZ }),
+        forward_axis: m.forward.map_or(Fact::Unknown, Fact::Declared),
+        handedness: Fact::Declared(Handedness::Right),
+        converted: Converted {
+            units: (m.distance - 1.0).abs() > 0.0,
+            up_axis: !m.y_up,
+            handedness: false,
+        },
+        ..SourceInfo::default()
+    }
+    .write(&mut source);
     let st = &c.stats;
     for (key, n) in [
         ("missingObjects", st.missing_objects),
         ("missingMaterials", st.missing_materials),
-        ("missingTextures", st.missing_textures),
+        ("droppedTextures", st.missing_textures),
         ("droppedLevelsOfDetail", st.dropped_lods),
         ("badTransforms", st.bad_transforms),
         ("shearedTransforms", st.sheared_transforms),
         ("badArrays", st.bad_arrays),
         ("unknownArrays", st.unknown_arrays),
-        ("badPrimitives", st.bad_primitives),
+        (crate::geometry::DROPPED, st.bad_primitives),
         ("unknownPrimitives", st.unknown_primitives),
         ("badSkins", st.bad_skins),
         ("droppedInfluences", st.dropped_influences),
@@ -879,21 +1010,21 @@ fn finish(mut c: Ctx<'_>) -> Document<'static> {
         ("stateIdentifiers", c.t.states),
     ] {
         if n > 0 {
-            source[key] = json!(n);
+            source.insert(key.into(), json!(n));
         }
     }
     let mut facts = Map::new();
     facts.insert("triangles".into(), json!(c.triangles));
     facts.insert("nodes".into(), json!(nodes.len()));
-    facts.insert("materials".into(), json!(c.materials.len()));
+    // The file's materials: the default one that faces with none take isn't one of them.
+    let defaults = c.default_materials.iter().flatten().count();
+    facts.insert("materials".into(), json!(c.materials.len() - defaults));
 
     let mut json = Map::new();
     json.insert("asset".into(), json!({ "extras": { "source": source } }));
     json.insert("scene".into(), json!(0));
     json.insert("scenes".into(), json!([{ "nodes": [0] }]));
-    if !c.animations.is_empty() {
-        json.insert("animations".into(), Value::Array(std::mem::take(&mut c.animations)));
-    }
+    crate::skin::set_skeletons(&nodes, &mut c.skins);
     json.insert("nodes".into(), Value::Array(nodes));
     if !c.meshes.is_empty() {
         json.insert("meshes".into(), Value::Array(std::mem::take(&mut c.meshes)));
@@ -914,7 +1045,9 @@ fn finish(mut c: Ctx<'_>) -> Document<'static> {
     let images = std::mem::replace(&mut c.images, Images::new(true, Path::new(""))).list;
     c.b.materials(&c.materials, images, &mut json);
     let lines_or_points = c.lines_or_points;
+    let frame = frame_of(&c.metric);
     let mut doc = c.b.finish(json, facts);
+    frame::placed(&mut doc, frame);
     if lines_or_points {
         doc.set_lines_and_points(true);
     }

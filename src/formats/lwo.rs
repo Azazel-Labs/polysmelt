@@ -7,7 +7,8 @@
 //! lines and one-point polygons points. Curves, bones and metaballs have no glTF form and are counted.
 //!
 //! A surface is a material: its color times its diffuse level, its luminosity as emission, its transparency as
-//! alpha (with its refractive index then), its glossiness as roughness (fully rough without specularity), and two
+//! alpha (with its refractive index then), its specular level and glossiness as the highlight (none without
+//! specularity; the classic material every reader reads one way, `legacy_material`), and two
 //! sides when it says so. Polygons are smoothed across shared points up to the surface's smoothing angle, within a
 //! smoothing group, unless vertex normal maps give the normals; a surface without the angle is flat. A vertex color
 //! map blends into the color by its intensity. The surface's top image layer on the color channel is the base
@@ -19,6 +20,9 @@
 //!
 //! LightWave is Y up and in meters but left-handed: Z is mirrored, and polygons, clockwise seen from the front, are
 //! turned around. Colors in the classic chunks are sRGB; node values, from LightWave's linear workflow, are linear.
+//!
+//! The source info has the format's meters, Y up and left-handed (declared, as the format fixes them; the handedness
+//! converted), the description chunk (`DESC`) as its description and the comment chunk (`TEXT`) as its comments.
 
 // LightWave is a name, not code.
 #![allow(clippy::doc_markdown, reason = "LightWave is a name")]
@@ -32,9 +36,12 @@ use crate::Result;
 use crate::assets::Assets;
 use crate::document::{Builder, Document, Keep};
 use crate::images::Images;
-use crate::material::{Alpha, CLAMP, Clearcoat, Factor, Full, MIRROR, REPEAT, Tex};
+use crate::legacy_material::{self, Phong, Rgb, Transparency};
+use crate::material::{CLAMP, Clearcoat, Factor, Full, MIRROR, REPEAT, Specular, Tex};
 use crate::mesh::{FastMap, Prim, srgb_to_linear};
 use crate::num::u32_of;
+use crate::source::{Axis, Fact, Handedness, SourceInfo};
+use crate::vec3;
 
 const FORM: [u8; 4] = *b"FORM";
 /// The id of the chunk holding an LWO3 form's own data.
@@ -135,15 +142,12 @@ impl<'a> Rd<'a> {
         }
     }
 
-    /// A string: up to a zero byte (or the end), padded to an even length. UTF-8 when it is, else Latin-1.
+    /// A string: up to a zero byte (or the end), padded to an even length. UTF-8 when it is, else Windows-1252.
     fn s0(&mut self) -> Option<String> {
         let rest = self.d.get(self.i..).filter(|r| !r.is_empty())?;
         let n = rest.iter().position(|&c| c == 0).unwrap_or(rest.len());
         let b = &rest[..n];
-        let s = match std::str::from_utf8(b) {
-            Ok(s) => s.to_owned(),
-            Err(_) => b.iter().map(|&c| char::from(c)).collect(),
-        };
+        let s = crate::bytes::text(b).into_owned();
         self.i = (self.i + ((n + 2) & !1)).min(self.d.len());
         Some(s)
     }
@@ -374,14 +378,14 @@ impl Model {
 
 fn parse(data: &[u8]) -> Result<Model> {
     let mut r = Rd::new(data);
-    ensure!(r.id() == Some(FORM), "not a LightWave object");
+    ensure!(r.id() == Some(FORM), UnknownFormat, "not a LightWave object");
     let size = r.u4().unwrap_or(0) as usize;
     let kind = match &r.id().unwrap_or_default() {
         b"LWOB" => Kind::Lwob,
         b"LWLO" => Kind::Lwlo,
         b"LWO2" => Kind::Lwo2,
         b"LWO3" => Kind::Lwo3,
-        _ => bail!("not a LightWave object"),
+        _ => bail!(UnknownFormat, "not a LightWave object"),
     };
     let body = r.rest();
     let want = size.saturating_sub(4);
@@ -1224,11 +1228,10 @@ struct Look {
     color: [f32; 4],
 }
 
-/// Phong's highlight size as roughness: glossiness `g` is an exponent of 2^(10g + 2), Blinn-Phong's match for a
-/// GGX alpha of sqrt(2 / (n + 2)), which is roughness squared.
-fn gloss_roughness(g: f32) -> f32 {
-    let n = (10.0 * g.clamp(0.0, 1.0) + 2.0).exp2();
-    (2.0 / (n + 2.0)).sqrt().sqrt()
+/// The highlight's exponent for a glossiness `g`: 2^(10g + 2), as LightWave's renderer takes it (the LWO2
+/// specification's GLOS: 4 at no glossiness, 4096 at all of it).
+fn gloss_exponent(g: f32) -> f32 {
+    (10.0 * g.clamp(0.0, 1.0) + 2.0).exp2()
 }
 
 /// The glTF material for a surface, its color texture `tex` and whether vertex colors carry its color, with the
@@ -1250,23 +1253,25 @@ fn material(s: &Surf, tex: Option<Tex>, vcol: bool) -> (Full, [f32; 4]) {
     };
     let tran = num("Transparency").or(s.tran).unwrap_or(0.0).clamp(0.0, 1.0);
     let alpha = 1.0 - tran;
-    let (emissive, metallic, roughness) = if let Some(n) = principled {
+    let (emissive, metallic, roughness, specular) = if let Some(n) = principled {
         let c = n.rgb("Luminous Color").unwrap_or([1.0; 3]);
         let k = n.num("Luminous").unwrap_or(0.0).max(0.0);
         (
             c.map(|v| v.max(0.0) * k),
             n.num("Metallic").unwrap_or(0.0).clamp(0.0, 1.0),
             n.num("Roughness").unwrap_or(0.5).clamp(0.0, 1.0),
+            None,
         )
     } else {
         let k = num("Luminosity").or(s.lumi).unwrap_or(0.0).max(0.0);
-        let spec = num("Specular").or(s.spec).unwrap_or(0.0);
-        let glos = num("Glossiness").or(s.glos).unwrap_or(0.4);
-        (
-            color.map(|v| v * k),
-            0.0,
-            if spec > 0.0 { gloss_roughness(glos) } else { 1.0 },
-        )
+        // The classic surface: a white highlight of strength SPEC (none by default) and glossiness GLOS
+        // (0.4 by default).
+        let mut phong = Phong::new(Rgb::WHITE);
+        phong.specular = Some(Rgb::Srgb([1.0; 3]));
+        phong.strength = num("Specular").or(s.spec).unwrap_or(0.0);
+        phong.exponent = Some(gloss_exponent(num("Glossiness").or(s.glos).unwrap_or(0.4)));
+        let look = phong.pbr();
+        (color.map(|v| v * k), 0.0, look.roughness, look.specular)
     };
     let rind = num("Refraction Index").or(s.rind).filter(|&r| r >= 1.0 && tran > 0.0);
     let clearcoat = principled.and_then(|n| {
@@ -1278,8 +1283,23 @@ fn material(s: &Surf, tex: Option<Tex>, vcol: bool) -> (Full, [f32; 4]) {
             normal: None,
         })
     });
-    let tint = if tex.is_some() || vcol { [1.0; 3] } else { color };
-    let base = tint.map(|c| (c * diff).clamp(0.0, 1.0));
+    // The diffuse level scales the color in the values the file stores, as the specular level does the
+    // highlight: display values for a classic surface's color, linear ones for a node's.
+    let stored = node.and_then(|n| n.rgb("Color")).is_none();
+    let leveled = |white: bool| -> [f32; 3] {
+        if stored {
+            let c = if white {
+                [1.0; 3]
+            } else {
+                s.color.unwrap_or([DEFAULT_COLOR; 3])
+            };
+            c.map(|c| srgb_to_linear((c.max(0.0) * diff).clamp(0.0, 1.0)))
+        } else {
+            let c = if white { [1.0; 3] } else { color };
+            c.map(|c| (c * diff).clamp(0.0, 1.0))
+        }
+    };
+    let base = leveled(tex.is_some() || vcol);
     let full = Full {
         name: s.name.clone(),
         base_color: [base[0], base[1], base[2], alpha],
@@ -1287,13 +1307,18 @@ fn material(s: &Surf, tex: Option<Tex>, vcol: bool) -> (Full, [f32; 4]) {
         metallic,
         roughness,
         emissive,
-        alpha: if alpha < 1.0 { Alpha::Blend } else { Alpha::Opaque },
+        alpha: Transparency::of(alpha).mode(),
         double_sided: s.sides == Some(3),
         ior: rind,
         clearcoat,
+        specular: specular.map(|h| Specular {
+            factor: Factor::of(h.factor),
+            color: h.color,
+            color_tex: None,
+        }),
         ..Full::default()
     };
-    let lit = color.map(|c| (c * diff).clamp(0.0, 1.0));
+    let lit = leveled(false);
     (full, [lit[0], lit[1], lit[2], alpha])
 }
 
@@ -1307,7 +1332,7 @@ fn cleans(v: &[f32]) -> Value {
 }
 
 fn id_str(id: [u8; 4]) -> String {
-    String::from_utf8_lossy(&id).trim_end().to_owned()
+    crate::bytes::text(&id).trim_end().to_owned()
 }
 
 /// Everything a texture layer says, for `extras`.
@@ -1573,15 +1598,8 @@ struct Built {
 fn face_normal(l: &Layer, p: &Poly) -> [f32; 3] {
     let s = p.start as usize;
     let cs = l.corners.get(s..s + usize::from(p.len)).unwrap_or(&[]);
-    let mut n = [0.0f32; 3];
-    for (i, &a) in cs.iter().enumerate() {
-        let a = l.points[a as usize];
-        let b = l.points[cs[(i + 1) % cs.len()] as usize];
-        n[0] += (a[1] - b[1]) * (a[2] + b[2]);
-        n[1] += (a[2] - b[2]) * (a[0] + b[0]);
-        n[2] += (a[0] - b[0]) * (a[1] + b[1]);
-    }
-    crease::unit([n[0], n[1], -n[2]]).unwrap_or([0.0, 1.0, 0.0])
+    let n = vec3::newell(cs.iter().map(|&a| l.points[a as usize]));
+    vec3::unit([n[0], n[1], -n[2]]).unwrap_or([0.0, 1.0, 0.0])
 }
 
 /// The bits of a vertex's attributes, which vertices are shared by.
@@ -1690,7 +1708,6 @@ fn build(l: &Layer, looks: &[Look], look_of: &[usize], budget: &mut Budget) -> R
             .vcol
             .as_ref()
             .and_then(|(i, n)| Some((*i, color_maps.get(n.as_str())?)));
-        let normals_on = look.cos.is_some() || norms.is_some();
         let mut prim = Prim {
             material: look.material,
             ..Prim::default()
@@ -1737,15 +1754,12 @@ fn build(l: &Layer, looks: &[Look], look_of: &[usize], budget: &mut Budget) -> R
             // LightWave's corners run clockwise; turned around, they run counter-clockwise in glTF's space.
             for j in (0..cs.len()).rev() {
                 let c = cs[j];
-                let normal = if normals_on {
-                    let given = norms
-                        .as_ref()
-                        .and_then(|n| n.get(pu, c))
-                        .and_then(|v| crease::unit([v[0], v[1], -v[2]]));
-                    given.unwrap_or_else(|| if look.cos.is_some() { smooth[s + j] } else { face[p] })
-                } else {
-                    [0.0; 3]
-                };
+                // A surface without a smoothing angle is flat: its polygons' corners carry their own normals.
+                let given = norms
+                    .as_ref()
+                    .and_then(|n| n.get(pu, c))
+                    .and_then(|v| vec3::unit([v[0], v[1], -v[2]]));
+                let normal = given.unwrap_or_else(|| if look.cos.is_some() { smooth[s + j] } else { face[p] });
                 let uv = if has_uv { uvs[j] } else { [0.0; 2] };
                 let color = colors.map(|(i, lk)| match lk.get(pu, c) {
                     Some(v) => {
@@ -1762,9 +1776,7 @@ fn build(l: &Layer, looks: &[Look], look_of: &[usize], budget: &mut Budget) -> R
                 );
                 let v = *index.entry(key).or_insert_with(|| {
                     prim.positions.push(out(l.points[c as usize]));
-                    if normals_on {
-                        prim.normals.push(normal);
-                    }
+                    prim.normals.push(normal);
                     if has_uv {
                         prim.uvs.push(uv);
                     }
@@ -1784,7 +1796,12 @@ fn build(l: &Layer, looks: &[Look], look_of: &[usize], budget: &mut Budget) -> R
                     tris.clear();
                     triangles(&pos, budget, &mut tris);
                     budget.triangles += tris.len();
-                    ensure!(budget.triangles <= budget.limit, "more than {} triangles", budget.limit);
+                    ensure!(
+                        budget.triangles <= budget.limit,
+                        LimitExceeded,
+                        "more than {} triangles",
+                        budget.limit
+                    );
                     prim.indices
                         .extend(tris.iter().flatten().map(|&k| corner_idx[k as usize]));
                 }
@@ -1834,12 +1851,11 @@ fn parents(layers: &[Layer]) -> Vec<Option<usize>> {
 }
 
 /// Reads a LightWave object.
-pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document<'static>> {
+pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document> {
     let data = input.read()?;
     let m = parse(&data)?;
     let dir = input.dir();
     let mut images = Images::new(!keep.image_bytes, dir);
-    let mut image_of: HashMap<String, Option<usize>> = HashMap::new();
     let textures = keep.materials && keep.textures;
     let clip_file = |b: &Block| -> Option<String> {
         if let Some(f) = &b.file {
@@ -1855,18 +1871,12 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         None
     };
     // Relative to the object, or to the content folder above the object's folder.
-    let find = |name: &str| {
-        assets
-            .find(name, dir)
-            .or_else(|| assets.find(name, dir.parent().unwrap_or(dir)))
-    };
+    let dirs = [dir];
     let mut image_for = |name: &str| -> Option<usize> {
         if !textures {
             return None;
         }
-        *image_of
-            .entry(name.to_owned())
-            .or_insert_with(|| images.file(assets, find(name)?, name))
+        images.find(assets, &[name], &dirs)
     };
 
     // The materials and looks, a surface's by its index; tags naming no surface get LightWave's default.
@@ -1889,10 +1899,22 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
             .or_else(|| color_blocks.last().copied());
         let image = block.and_then(|b| image_for(&clip_file(b)?));
         // A missing image is counted whether or not textures are kept, as a full read counts it.
-        let missing = || block.and_then(clip_file).is_none_or(|f| find(&f).is_none());
+        let missing = || {
+            block
+                .and_then(clip_file)
+                .is_none_or(|f| dirs.iter().all(|d| assets.find(&f, d).is_none()))
+        };
         if block.is_some() && image.is_none() && (textures || missing()) {
             dropped_textures += 1;
         }
+        // A block maps the mesh when its image is there: read, or, when textures aren't kept and nothing is read,
+        // found among the assets. The texture coordinates are the mesh's, kept whether or not the texture is, so
+        // they come out as a full read's do.
+        let there = |b: &Block, read: Option<usize>| {
+            read.is_some()
+                || (!textures && clip_file(b).is_some_and(|f| dirs.iter().any(|d| assets.find(&f, d).is_some())))
+        };
+        let color_block = block.filter(|&b| there(b, image));
         let tex = image.zip(block).map(|(i, b)| {
             let mut t = Tex::new(i);
             t.wrap = [wrap_mode(b.wrap[0]), wrap_mode(b.wrap[1])];
@@ -1912,8 +1934,9 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
             .as_ref()
             .and_then(|n| n.normal.as_ref())
             .filter(|n| n.file.is_some() && n.proj == 5)
-            .filter(|n| image.and(block).is_none_or(|b| b.proj == 5 && b.uv == n.uv));
+            .filter(|n| color_block.is_none_or(|b| b.proj == 5 && b.uv == n.uv));
         let normal = normal_block.and_then(|b| image_for(&clip_file(b)?));
+        let normal_block = normal_block.filter(|&b| there(b, normal));
         let (mut full, color) = material(s, tex, vcol.is_some());
         if let Some(i) = normal {
             let mut t = Tex::new(i);
@@ -1927,7 +1950,7 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         looks.push(Look {
             material: materials.len(),
             cos: (sman > 0.0).then(|| sman.min(std::f32::consts::PI).cos()),
-            tex: image.and(block).or(normal.and(normal_block)).cloned(),
+            tex: color_block.or(normal_block).cloned(),
             vcol,
             color,
         });
@@ -1939,16 +1962,20 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
     }
     let mut look_by_tag: HashMap<u32, usize> = HashMap::new();
     let mut default_look = |tag: u32, looks: &mut Vec<Look>, materials: &mut Vec<Full>| -> usize {
-        let name = m.tags.get(tag as usize).map_or("Default", String::as_str);
+        // Polygons whose tag names no surface take the default material, under the tag's name when it has one.
+        let name = m
+            .tags
+            .get(tag as usize)
+            .map_or(legacy_material::DEFAULT_NAME, String::as_str);
         if let Some(&s) = surf_by_name.get(name) {
             return s;
         }
         *look_by_tag.entry(tag).or_insert_with(|| {
-            let s = Surf {
+            let full = Full {
                 name: name.to_owned(),
-                ..Surf::default()
+                ..legacy_material::default_material(false).into()
             };
-            let (full, color) = material(&s, None, false);
+            let color = full.base_color;
             looks.push(Look {
                 material: materials.len(),
                 cos: None,
@@ -1966,7 +1993,7 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         triangles: 0,
         limit: input.limit,
     };
-    let mut b = Builder::default();
+    let mut b = Builder::new(keep.crease_angle());
     let mut meshes: Vec<Value> = Vec::new();
     let mut mesh_of: Vec<Option<usize>> = Vec::with_capacity(m.layers.len());
     let mut lines_or_points = false;
@@ -2047,14 +2074,20 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         meshes.push(mesh);
         mesh_of.push(Some(meshes.len() - 1));
     }
-    ensure!(!meshes.is_empty(), "this LightWave object has no polygons");
+    if meshes.is_empty() {
+        return Err(crate::Error::nothing_left(
+            m.truncated,
+            "LightWave object",
+            "this LightWave object has no polygons",
+        ));
+    }
 
     // The layers as nodes, each at its pivot, relative to its parent's.
     let parent = parents(&m.layers);
     let mut nodes: Vec<Value> = Vec::with_capacity(m.layers.len());
     let mut roots = Vec::new();
     for (i, l) in m.layers.iter().enumerate() {
-        let name = l.name.clone().unwrap_or_else(|| format!("Layer {}", l.number));
+        let name = l.name.clone().unwrap_or_else(|| format!("layer{}", l.number));
         let mut node = json!({ "name": name });
         let base = parent[i].map_or([0.0; 3], |p| m.layers[p].pivot);
         let t = [l.pivot[0] - base[0], l.pivot[1] - base[1], -(l.pivot[2] - base[2])];
@@ -2107,19 +2140,28 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         nodes.push(node);
     }
 
-    let mut source = json!({ "format": m.kind.name(), "upAxis": "Y", "handedness": "left", "unit": "m" });
-    if let Some(d) = &m.description {
-        source["description"] = json!(d);
-    }
-    if let Some(c) = &m.comment {
-        source["comment"] = json!(c);
-    }
+    // The format fixes the units and axes, so they are declared.
+    let mut info = SourceInfo {
+        format: Some("LWO".into()),
+        // The form's type: LWOB (LightWave 5 and before), LWO2 (6 on) or LWO3 (2018 on).
+        version: Some(m.kind.name().into()),
+        meters_per_unit: Fact::Declared(1.0),
+        unit: Some("meter".into()),
+        up_axis: Fact::Declared(Axis::PosY),
+        handedness: Fact::Declared(Handedness::Left),
+        description: m.description.clone(),
+        comments: m.comment.iter().cloned().collect(),
+        ..SourceInfo::default()
+    };
+    info.converted.handedness = true;
+    let mut source = json!({});
     for (key, n) in [
         ("subdivisionPatches", m.patches),
         ("droppedCurves", m.curves),
         ("droppedBones", m.bones),
         ("droppedMetaballs", m.metaballs),
-        ("droppedPolygons", m.bad_polys + m.other_polys),
+        (crate::geometry::DROPPED, m.bad_polys),
+        ("droppedPolygons", m.other_polys),
         ("droppedEnvelopes", m.envelopes),
         ("droppedTextures", dropped_textures),
     ] {
@@ -2130,11 +2172,13 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
     if m.truncated {
         source["truncated"] = json!(true);
     }
+    if let Value::Object(map) = &mut source {
+        info.write(map);
+    }
     let mut facts = Map::new();
     facts.insert("triangles".into(), json!(budget.triangles));
     facts.insert("layers".into(), json!(m.layers.len()));
     facts.insert("surfaces".into(), json!(m.surfs.len()));
-    facts.insert("unit".into(), json!("m"));
 
     let mut json = Map::new();
     json.insert("asset".into(), json!({ "extras": { "source": source } }));
@@ -2322,11 +2366,11 @@ mod tests {
         png
     }
 
-    fn read(bytes: &[u8], assets: &Memory) -> Result<Document<'static>> {
+    fn read(bytes: &[u8], assets: &Memory) -> Result<Document> {
         load(Input::memory(bytes, "t.lwo"), assets, Keep::ALL)
     }
 
-    fn flat(doc: &Document<'_>) -> Mesh {
+    fn flat(doc: &Document) -> Mesh {
         doc.flatten(Pose::Rest).unwrap().unwrap()
     }
 
@@ -2370,7 +2414,7 @@ mod tests {
         assert!((area - 6.0).abs() < 1e-5 && (vol - 1.0).abs() < 1e-5, "{area} {vol}");
         assert_eq!(doc.facts["triangles"], 12);
         // The layer's node sits at its pivot, and its points are relative to it.
-        let node = &doc.json["nodes"][0];
+        let node = &doc.json()["nodes"][0];
         assert_eq!(node["name"], "Box");
         assert_eq!(node["translation"], json!([1.0, 2.0, 3.0]));
         let p = &m.prims[0];
@@ -2392,27 +2436,41 @@ mod tests {
         // The textured surface: white under the image, which repeats across and mirrors down.
         let mat = &m.materials[0];
         assert_eq!(mat.name, "Skin");
-        assert_eq!(mat.color, [0.8, 0.8, 0.8, 1.0]);
+        // Its diffuse level of 0.8 scales that white as stored: sRGB 0.8, 0.603827 linear.
+        assert!(
+            mat.color[..3].iter().all(|c| (c - 0.603_827).abs() < 1e-5),
+            "{:?}",
+            mat.color
+        );
+        assert_eq!(mat.color[3], 1.0);
         assert_eq!(m.images.len(), 1);
-        assert_eq!(doc.json["samplers"][0]["wrapS"], REPEAT);
-        assert_eq!(doc.json["samplers"][0]["wrapT"], MIRROR);
+        assert_eq!(doc.json()["samplers"][0]["wrapS"], REPEAT);
+        assert_eq!(doc.json()["samplers"][0]["wrapT"], MIRROR);
         // The morph is named and starts at rest.
-        let mesh = &doc.json["meshes"][0];
+        let mesh = &doc.json()["meshes"][0];
         assert_eq!(mesh["extras"]["targetNames"], json!(["smile"]));
         assert_eq!(mesh["weights"], json!([0.0]));
-        let source = &doc.json["asset"]["extras"]["source"];
-        assert_eq!(source["format"], "LWO2");
+        let source = &doc.json()["asset"]["extras"]["source"];
+        assert_eq!((&source["format"], &source["version"]), (&json!("LWO"), &json!("LWO2")));
         assert_eq!(source["description"], "a box");
+        let info = doc.source_info();
+        assert_eq!(info.meters_per_unit, Fact::Declared(1.0));
+        assert_eq!(info.unit.as_deref(), Some("meter"));
+        assert_eq!(info.up_axis, Fact::Declared(Axis::PosY));
+        assert_eq!(info.handedness, Fact::Declared(Handedness::Left));
+        assert!(info.converted.handedness && !info.converted.units && !info.converted.up_axis);
+        assert_eq!(info.description.as_deref(), Some("a box"));
         assert_eq!(
-            doc.json["nodes"][0]["extras"]["vertexMaps"].as_array().unwrap().len(),
+            doc.json()["nodes"][0]["extras"]["vertexMaps"].as_array().unwrap().len(),
             3
         );
 
         // Without the image the texture is dropped and counted, and the surface keeps its color.
         let doc = read(&cube(0.5), &Memory::new()).unwrap();
-        assert_eq!(doc.json["asset"]["extras"]["source"]["droppedTextures"], 1);
+        assert_eq!(doc.json()["asset"]["extras"]["source"]["droppedTextures"], 1);
         let m = flat(&doc);
-        let red = srgb_to_linear(1.0) * 0.8;
+        // Red at a diffuse level of 0.8, scaled as stored: sRGB 0.8.
+        let red = srgb_to_linear(0.8);
         assert_eq!(m.materials[0].color, [red, 0.0, 0.0, 1.0]);
         assert_eq!(m.images.len(), 0);
     }
@@ -2451,14 +2509,14 @@ mod tests {
             ],
         );
         let doc = read(&bytes, &Memory::new()).unwrap();
-        let nodes = doc.json["nodes"].as_array().unwrap();
-        assert_eq!(doc.json["scenes"][0]["nodes"], json!([0]));
+        let nodes = doc.json()["nodes"].as_array().unwrap();
+        assert_eq!(doc.json()["scenes"][0]["nodes"], json!([0]));
         assert_eq!(nodes[0]["children"], json!([1]));
         assert_eq!(nodes[1]["children"], json!([2]));
         assert_eq!(nodes[1]["translation"], json!([1.0, 2.0, 3.0]));
         assert_eq!(nodes[2]["translation"], json!([0.0, 1.0, 0.0]));
-        assert_eq!(nodes[2]["name"], "Layer 3");
-        assert_eq!(doc.json["asset"]["extras"]["source"]["droppedCurves"], 1);
+        assert_eq!(nodes[2]["name"], "layer3");
+        assert_eq!(doc.json()["asset"]["extras"]["source"]["droppedCurves"], 1);
         let m = flat(&doc);
         assert_eq!(m.triangles(), 3);
         assert_eq!(m.lines(), 1);
@@ -2483,8 +2541,8 @@ mod tests {
         );
         let doc = read(&looped, &Memory::new()).unwrap();
         assert_eq!(flat(&doc).triangles(), 2);
-        assert_eq!(doc.json["scenes"][0]["nodes"].as_array().unwrap().len(), 2);
-        assert_eq!(doc.json["nodes"][2]["extras"]["missingParent"], 9);
+        assert_eq!(doc.json()["scenes"][0]["nodes"].as_array().unwrap().len(), 2);
+        assert_eq!(doc.json()["nodes"][2]["extras"]["missingParent"], 9);
     }
 
     #[test]
@@ -2553,8 +2611,10 @@ mod tests {
         let (area, vol) = measure(&m);
         assert!((area - 6.0).abs() < 1e-5 && (vol - 1.0).abs() < 1e-5, "{area} {vol}");
         assert_eq!(m.materials[0].name, "Red");
-        assert_eq!(m.materials[0].color, [0.75, 0.0, 0.0, 1.0]);
-        assert_eq!(doc.json["asset"]["extras"]["source"]["format"], "LWOB");
+        // Red at a diffuse level of 0.75 is sRGB 0.75: 0.522522 linear.
+        let c = m.materials[0].color;
+        assert!((c[0] - 0.522_522).abs() < 1e-5 && c[1..] == [0.0, 0.0, 1.0], "{c:?}");
+        assert_eq!(doc.json()["asset"]["extras"]["source"]["version"], "LWOB");
     }
 
     #[test]
@@ -2578,9 +2638,10 @@ mod tests {
         assert_eq!(m.triangles(), 12);
         let gold = m.materials.iter().find(|x| x.name == "Gold").unwrap();
         assert_eq!(gold.color, [1.0, 1.0, 0.0, 1.0]);
-        // Untagged polygons get LightWave's default surface.
-        assert!(m.materials.iter().any(|x| x.name == "Default"));
-        assert_eq!(doc.json["asset"]["extras"]["source"]["format"], "LWO3");
+        // Untagged polygons get the default material.
+        let d = m.materials.iter().find(|x| x.name == "default").unwrap();
+        assert_eq!((d.color, d.roughness), (crate::mesh::GRAY, 0.85));
+        assert_eq!(doc.json()["asset"]["extras"]["source"]["version"], "LWO3");
     }
 
     #[test]
@@ -2592,12 +2653,41 @@ mod tests {
     }
 
     #[test]
+    fn projected_coordinates_stay_when_textures_are_not_read() {
+        // A planar image map: the texture coordinates come from the points, not from a UV map.
+        let textured = classic(
+            true,
+            &[
+                s0("Red"),
+                sub(*b"CTEX", &s0("Planar Image Map")),
+                sub(*b"TIMG", &s0("skin.png")),
+            ],
+        );
+        let assets = Memory::new().with("skin.png", png());
+        let attributes = |keep: Keep| {
+            let doc = load(Input::memory(&textured, "t.lwo"), &assets, keep).unwrap();
+            doc.json()["meshes"][0]["primitives"][0]["attributes"].clone()
+        };
+        let full = attributes(Keep::ALL);
+        assert!(full.get("TEXCOORD_0").is_some(), "{full}");
+        assert_eq!(attributes(Keep::ALL.with_textures(false)), full);
+        assert_eq!(attributes(Keep::ALL.with_materials(false)), full);
+        // An image that isn't there maps nothing, read or not.
+        let none = Memory::new();
+        for keep in [Keep::ALL, Keep::ALL.with_textures(false)] {
+            let doc = load(Input::memory(&textured, "t.lwo"), &none, keep).unwrap();
+            let attributes = &doc.json()["meshes"][0]["primitives"][0]["attributes"];
+            assert!(attributes.get("TEXCOORD_0").is_none(), "{attributes}");
+        }
+    }
+
+    #[test]
     fn hostile_files_never_panic() {
         let assets = Memory::new().with("skin.png", png());
         let mut cut_short = cube(0.5);
         cut_short.truncate(cut_short.len() - 40);
         let doc = read(&cut_short, &assets).unwrap();
-        assert_eq!(doc.json["asset"]["extras"]["source"]["truncated"], true);
+        assert_eq!(doc.json()["asset"]["extras"]["source"]["truncated"], true);
         // Huge counts and indices.
         let wild = file(
             *b"LWO2",

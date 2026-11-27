@@ -4,30 +4,27 @@ use super::*;
 use crate::assets::Memory;
 use crate::document::Pose;
 use crate::keep::Keep;
-use crate::mesh::Mesh;
+use crate::mesh::{Mesh, srgb_to_linear};
 
-fn read_bytes(bytes: &[u8], max: usize) -> Result<Document<'static>> {
-    let keep = Keep {
-        max_triangles: max,
-        ..Keep::ALL
-    };
-    super::super::load_bytes(bytes, "a.dxf", "dxf", &Memory::new(), keep).map(Document::into_owned)
+fn read_bytes(bytes: &[u8], max: usize) -> Result<Document> {
+    let keep = Keep::ALL.with_max_triangles(max);
+    super::super::load_bytes(bytes, "a.dxf", "dxf", &Memory::new(), keep)
 }
 
-fn read(text: &str) -> Document<'static> {
+fn read(text: &str) -> Document {
     read_bytes(text.as_bytes(), usize::MAX).unwrap()
 }
 
-fn mesh(doc: &Document<'_>) -> Mesh {
+fn mesh(doc: &Document) -> Mesh {
     doc.flatten(Pose::Rest).unwrap().unwrap()
 }
 
-fn triangles(doc: &Document<'_>) -> u64 {
+fn triangles(doc: &Document) -> u64 {
     doc.facts["triangles"].as_u64().unwrap()
 }
 
-fn source<'a>(doc: &'a Document<'_>) -> &'a Value {
-    &doc.json["asset"]["extras"]["source"]
+fn source(doc: &Document) -> &Value {
+    &doc.json()["asset"]["extras"]["source"]
 }
 
 fn bounds(m: &Mesh) -> ([f32; 3], [f32; 3]) {
@@ -136,11 +133,21 @@ fn faces_turn_y_up_in_meters() {
     assert_eq!(triangles(&doc), 12);
     let src = source(&doc);
     assert_eq!(src["format"], "DXF");
-    assert_eq!(src["encoding"], "ASCII");
+    assert_eq!(src["encoding"], "ascii");
     assert_eq!(src["version"], "AC1027");
-    assert_eq!(src["units"], "millimeters");
+    assert!(src.get("units").is_none());
     assert!(src.get("truncated").is_none());
-    assert_eq!(doc.json["nodes"][0]["name"], "RootNode");
+    let info = doc.source_info();
+    assert_eq!(info.meters_per_unit, Fact::Declared(0.001));
+    assert_eq!(info.unit.as_deref(), Some("millimeter"));
+    assert_eq!(info.up_axis, Fact::Declared(Axis::PosZ));
+    assert_eq!(info.handedness, Fact::Declared(Handedness::Right));
+    assert!(info.converted.units && info.converted.up_axis);
+    // Model space's faces are a node under the root node, which turns and scales them.
+    assert_eq!(doc.json()["nodes"][0], json!({ "mesh": 0 }));
+    assert_eq!(doc.json()["nodes"][1]["name"], "RootNode");
+    assert_eq!(doc.json()["nodes"][1]["children"], json!([0]));
+    assert_eq!(doc.json()["nodes"][1]["scale"], json!([0.001, 0.001, 0.001]));
     let m = mesh(&doc);
     assert_eq!(m.triangles(), 12);
     let (lo, hi) = bounds(&m);
@@ -149,8 +156,8 @@ fn faces_turn_y_up_in_meters() {
     assert_eq!(m.materials.len(), 1);
     assert_eq!(m.materials[0].name, "Walls");
     assert!(m.materials[0].double_sided);
-    // Shared corners are one vertex.
-    assert_eq!(m.prims[0].positions.len(), 8);
+    // The corners are welded, then split again where the cube's edges are hard: four to a face.
+    assert_eq!(m.prims[0].positions.len(), 24);
 }
 
 #[test]
@@ -161,10 +168,33 @@ fn a_three_corner_face_and_degenerate_ones() {
         &[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
     );
     let doc = read(&text(&drawing(0, "", "", &format!("{tri}{line}")), "\n"));
-    assert_eq!(triangles(&doc), 1);
-    // A unitless drawing isn't scaled.
-    assert!(source(&doc).get("units").is_none());
-    assert!(doc.json["nodes"][0].get("scale").is_none());
+    // The triangle, and the two with no area the four corners in a line make, kept as the file has them.
+    assert_eq!(triangles(&doc), 3);
+    // A unitless drawing isn't scaled, its units unknown.
+    let info = doc.source_info();
+    assert_eq!(info.meters_per_unit, Fact::Unknown);
+    assert_eq!(info.unit, None);
+    assert!(!info.converted.units && info.converted.up_axis);
+    assert!(doc.json()["nodes"][0].get("scale").is_none());
+}
+
+#[test]
+fn the_header_dates_author_and_measurement_are_source_info() {
+    let header = "0 SECTION 2 HEADER 9 $ACADVER 1 AC1032 9 $LASTSAVEDBY 1 drafter         9 $TDCREATE 40 2451545.25 9 $TDUCREATE 40 2451545.0 9 $TDUPDATE 40 2460000.25         9 $MEASUREMENT 70 1 0 ENDSEC ";
+    let body = format!("0 SECTION 2 ENTITIES {} 0 ENDSEC 0 EOF", cube_faces("8 0"));
+    let doc = read(&text(
+        &groups(&format!("{header}{body}")),
+        "
+",
+    ));
+    let info = doc.source_info();
+    assert_eq!(info.version.as_deref(), Some("AC1032"));
+    assert_eq!(info.author.as_deref(), Some("drafter"));
+    // The UTC date is taken over the local one; with only a local one, it has no zone.
+    assert_eq!(info.created.as_deref(), Some("2000-01-01T12:00:00Z"));
+    assert_eq!(info.modified.as_deref(), Some("2023-02-24T18:00:00"));
+    assert_eq!(info.meters_per_unit, Fact::Unknown);
+    assert_eq!(source(&doc)["measurement"], "metric");
 }
 
 fn polyface_cube(extra: &str) -> String {
@@ -193,7 +223,8 @@ fn polyface_mesh() {
     let doc = read(&text(&drawing(6, "", "", &polyface_cube("")), "\n"));
     assert_eq!(triangles(&doc), 12);
     let m = mesh(&doc);
-    assert_eq!(m.prims[0].positions.len(), 8);
+    // Its edges are hard: each face has corners of its own.
+    assert_eq!(m.prims[0].positions.len(), 24);
     let (lo, hi) = bounds(&m);
     assert!(near(lo, [0.0, 0.0, -1.0]) && near(hi, [1.0, 1.0, 0.0]), "{lo:?} {hi:?}");
     // A face with its own color goes in its own primitive.
@@ -253,7 +284,7 @@ fn a_mesh_entity() {
     s += "94 12 90 0 90 1 95 0 140 1 ";
     let doc = read(&text(&drawing(0, "", "", &s), "\n"));
     assert_eq!(triangles(&doc), 12);
-    assert_eq!(mesh(&doc).prims[0].positions.len(), 8);
+    assert_eq!(mesh(&doc).prims[0].positions.len(), 24);
     let notes = source(&doc)["notes"].to_string();
     assert!(notes.contains("control mesh"), "{notes}");
 }
@@ -266,10 +297,10 @@ fn an_insert_by_base_scale_and_rotation() {
     let insert = "0 INSERT 8 0 2 tri 10 10 20 0 30 0 41 2 42 2 43 2 50 90 ";
     let doc = read(&text(&drawing(0, "", TRI_BLOCK, insert), "\n"));
     assert_eq!(triangles(&doc), 1);
-    let node = &doc.json["nodes"][0];
+    let node = &doc.json()["nodes"][0];
     assert_eq!(node["name"], "Tri");
     assert_eq!(node["mesh"], 0);
-    assert_eq!(doc.json["meshes"][0]["name"], "Tri");
+    assert_eq!(doc.json()["meshes"][0]["name"], "Tri");
     // The block's (2,0,0) and (1,1,0) are 1 and (0,1) from its base, doubled and turned a
     // quarter: (10,2,0) and (8,0,0); its base point lands on (10,0,0). Y-up, that's z = -y.
     let (lo, hi) = bounds(&mesh(&doc));
@@ -284,8 +315,8 @@ fn an_insert_array_shares_one_mesh() {
     let insert = "0 INSERT 8 0 2 Tri 10 0 20 0 30 0 70 2 71 3 44 5 45 7 ";
     let doc = read(&text(&drawing(0, "", TRI_BLOCK, insert), "\n"));
     assert_eq!(triangles(&doc), 6);
-    assert_eq!(doc.json["meshes"].as_array().unwrap().len(), 1);
-    assert_eq!(doc.json["nodes"].as_array().unwrap().len(), 7);
+    assert_eq!(doc.json()["meshes"].as_array().unwrap().len(), 1);
+    assert_eq!(doc.json()["nodes"].as_array().unwrap().len(), 7);
     let m = mesh(&doc);
     assert_eq!(m.triangles(), 6);
     let (lo, hi) = bounds(&m);
@@ -324,7 +355,7 @@ fn nested_blocks_cycles_and_depth() {
     let entities = "0 INSERT 2 Outer 10 0 20 0 30 0 0 INSERT 2 Loop 0 INSERT 2 Missing";
     let doc = read(&text(&drawing(0, "", &blocks, entities), "\n"));
     assert_eq!(triangles(&doc), 3);
-    assert_eq!(doc.json["meshes"].as_array().unwrap().len(), 1);
+    assert_eq!(doc.json()["meshes"].as_array().unwrap().len(), 1);
     let notes = source(&doc)["notes"].to_string();
     assert!(
         notes.contains("contains itself") && notes.contains("isn't there"),
@@ -341,8 +372,9 @@ fn nested_blocks_cycles_and_depth() {
         };
         write!(chain, "0 BLOCK 2 C{k} 0 INSERT 2 {inner} 0 ENDBLK ").unwrap();
     }
-    let doc = read(&text(&drawing(0, "", &chain, "0 INSERT 2 C39"), "\n"));
-    assert_eq!(triangles(&doc), 0);
+    let deep = "0 INSERT 2 C39 ".to_owned() + &face("8 0", &[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]);
+    let doc = read(&text(&drawing(0, "", &chain, &deep), "\n"));
+    assert_eq!(triangles(&doc), 1, "only the face beside the chain");
     assert!(source(&doc)["notes"].to_string().contains("too deep"));
 }
 
@@ -423,7 +455,7 @@ fn binary_files() {
     assert_eq!(triangles(&doc), 13);
     let src = source(&doc);
     assert_eq!(src["encoding"], "binary");
-    assert_eq!(src["units"], "centimeters");
+    assert_eq!(doc.source_info().unit.as_deref(), Some("centimeter"));
     let ascii = read(&text(&gs, "\n"));
     assert_eq!(mesh(&doc).prims.len(), mesh(&ascii).prims.len());
     assert_eq!(bounds(&mesh(&doc)), bounds(&mesh(&ascii)));
@@ -459,15 +491,19 @@ fn skipped_and_left_out() {
         + &face("8 0 67 1", &[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
         + "0 LINE 8 0 67 1 10 0 20 0 30 0 11 1 21 1 31 1 0 CIRCLE 67 1 40 1 \
            0 SPLINE 67 1 71 1 10 0 20 0 30 0 10 1 20 0 30 0";
+    // Nothing of it is drawn: a drawing with nothing to convert.
+    let err = read_bytes(text(&drawing(0, "", "", &entities), "\n").as_bytes(), usize::MAX).unwrap_err();
+    assert_eq!(err.kind(), crate::ErrorKind::Empty, "{err}");
+    // Beside a face in model space, what was skipped and left out is noted.
+    let entities = entities + " " + &face("8 0", &[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]);
     let doc = read(&text(&drawing(0, "", "", &entities), "\n"));
-    assert_eq!(triangles(&doc), 0);
+    assert_eq!(triangles(&doc), 1);
     let src = source(&doc);
     assert_eq!(
         src["skipped"],
         json!({ "3DSOLID": 1, "DIMENSION": 1, "HATCH": 1, "MTEXT": 1, "TEXT": 1 })
     );
     assert!(src["notes"].to_string().contains("paper space"));
-    assert!(doc.json["scenes"][0].get("nodes").is_none());
 }
 
 #[test]
@@ -540,14 +576,9 @@ fn lines_points_and_polylines() {
     let (lo, hi) = bounds(&m);
     assert!(near(lo, [0.0, 0.0, -2.0]) && near(hi, [5.0, 3.0, 0.0]), "{lo:?} {hi:?}");
     // Left out with lines and points.
-    let keep = Keep {
-        lines_and_points: false,
-        ..Keep::ALL
-    };
+    let keep = Keep::ALL.with_lines_and_points(false);
     let text = text(&drawing(6, "", "", entities), "\n");
-    let doc = super::super::load_bytes(text.as_bytes(), "a.dxf", "dxf", &Memory::new(), keep)
-        .map(Document::into_owned)
-        .unwrap();
+    let doc = super::super::load_bytes(text.as_bytes(), "a.dxf", "dxf", &Memory::new(), keep).unwrap();
     let m = doc.flatten(Pose::Rest).unwrap();
     assert_eq!(m.map_or(0, |m| m.lines() + m.points()), 0);
 }
@@ -611,8 +642,15 @@ fn circles_and_arcs() {
         "{lo:?} {hi:?}"
     );
     // No radius, or one that isn't a number, draws nothing.
-    let doc = read(&text(&drawing(6, "", "", "0 CIRCLE 40 0 0 ARC 40 nan 51 90"), "\n"));
-    assert!(doc.flatten(Pose::Rest).unwrap().is_none_or(|m| m.lines() == 0));
+    let none = text(&drawing(6, "", "", "0 CIRCLE 40 0 0 ARC 40 nan 51 90"), "\n");
+    let err = read_bytes(none.as_bytes(), usize::MAX).unwrap_err();
+    assert_eq!(err.kind(), crate::ErrorKind::Empty, "{err}");
+    // Beside something drawn, they add nothing.
+    let doc = read(&text(
+        &drawing(6, "", "", "0 CIRCLE 40 0 0 ARC 40 nan 51 90 0 CIRCLE 40 1"),
+        "\n",
+    ));
+    assert_eq!(doc.flatten(Pose::Rest).unwrap().unwrap().lines(), 32);
 }
 
 #[test]

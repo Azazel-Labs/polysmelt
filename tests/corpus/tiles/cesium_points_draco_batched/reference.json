@@ -1,0 +1,14 @@
+{
+ "kind": "pnts",
+ "draco": [
+  "BATCH_ID",
+  "NORMAL",
+  "POSITION",
+  "RGB"
+ ],
+ "twin": "cesium_points_batched",
+ "tolerance": {
+  "positions": 0.01,
+  "normals": 0.05
+ }
+}

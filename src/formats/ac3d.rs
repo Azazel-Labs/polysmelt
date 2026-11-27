@@ -5,30 +5,33 @@
 //!
 //! Each object becomes a node, the world's children the scene's roots. A surface's material, the object's texture
 //! (placed by `texrep` and `texoff`) and whether the surface has two sides make a glTF material: the color, with
-//! the texture over it as AC3D modulates it, the emissive color, the transparency as alpha and the shininess as
-//! roughness. Shaded surfaces are smoothed across shared vertices up to the object's crease angle (AC3D's 61°
+//! the texture over it as AC3D modulates it, the emissive color, the transparency as alpha, and the specular color
+//! and shininess as the highlight (the classic material every reader reads one way, `legacy_material`); a surface
+//! naming a material the file doesn't have takes the default one. Shaded surfaces are smoothed across shared vertices up to the object's crease angle (AC3D's 61°
 //! when it gives none); flat ones keep their faces' normals. Polygons are triangulated, lines drawn as lines.
-//! What has no glTF slot (ambient and specular colors, the subdivision level, `data`, `url`, hidden, locked and
+//! What has no glTF slot (the ambient color, the subdivision level, `data`, `url`, hidden, locked and
 //! folded flags, lights) stays in `extras`.
 //!
 //! AC3D works in OpenGL's space, Y up and right-handed, with polygons counterclockwise from the front, as glTF
-//! does; its units are whatever the model's are, read as meters. Colors are sRGB.
+//! does: the source's up axis is +Y and its handedness right (declared: the program's space is every file's).
+//! Its units are whatever the model's are, unknown, and lengths are kept as written. Colors are sRGB.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Mutex, PoisonError};
 
 use serde_json::{Map, Value, json};
 
 use super::crease;
-use super::stream::f32_from;
+use super::stream::{self, f32_from};
 use crate::Result;
 use crate::assets::Assets;
 use crate::document::{Builder, Document, Keep};
 use crate::images::Images;
-use crate::material::{Alpha, Full, Tex};
-use crate::mesh::{FastMap, Prim, srgb_to_linear};
-use crate::num::u32_of;
+use crate::legacy_material::{self, Phong, Rgb};
+use crate::material::{Full, Tex};
+use crate::mesh::{FastMap, Prim};
+use crate::num::{f32_of, u32_of};
+use crate::source::{Axis, Fact, Handedness, SourceInfo};
+use crate::vec3;
 
 /// AC3D's crease angle, in degrees, for an object that gives none.
 const DEFAULT_CREASE: f32 = 61.0;
@@ -126,28 +129,7 @@ struct Lines<'a> {
 impl<'a> Lines<'a> {
     /// The next line, without its line break; `None` at the end.
     fn next_line(&mut self) -> Option<&'a [u8]> {
-        if self.at >= self.d.len() {
-            return None;
-        }
-        let rest = &self.d[self.at..];
-        let n = rest
-            .iter()
-            .position(|&c| c == b'\n' || c == b'\r')
-            .unwrap_or(rest.len());
-        let line = &rest[..n];
-        self.at += n;
-        // A line ends at LF, CRLF or a lone CR.
-        match self.d.get(self.at) {
-            Some(b'\r') => {
-                self.at += 1;
-                if self.d.get(self.at) == Some(&b'\n') {
-                    self.at += 1;
-                }
-            }
-            Some(b'\n') => self.at += 1,
-            _ => {}
-        }
-        Some(line)
+        stream::next_line(self.d, &mut self.at)
     }
 
     /// The next line with something on it.
@@ -201,33 +183,23 @@ fn clean(x: f32) -> Value {
 }
 
 fn text(b: &[u8]) -> String {
-    match std::str::from_utf8(b) {
-        Ok(s) => s.to_owned(),
-        Err(_) => b.iter().map(|&c| char::from(c)).collect(),
-    }
+    crate::bytes::text(b).into_owned()
 }
 
-fn num(b: Option<&&[u8]>) -> Option<f32> {
-    b.and_then(|b| f32_from(b)).filter(|v| v.is_finite())
+/// A finite number.
+fn num(b: Option<&[u8]>) -> Option<f32> {
+    f32_from(b?).filter(|v| v.is_finite())
 }
 
 /// A whole number, decimal or `0x` hexadecimal.
-fn int(b: Option<&&[u8]>) -> Option<u32> {
-    int_of(b?)
-}
-
-fn int_of(b: &[u8]) -> Option<u32> {
-    let (digits, radix) = match b {
-        [b'0', b'x' | b'X', h @ ..] => (h, 16),
-        _ => (b, 10),
-    };
-    if digits.is_empty() {
-        return None;
+fn int(b: Option<&[u8]>) -> Option<u32> {
+    match b? {
+        [b'0', b'x' | b'X', h @ ..] if !h.is_empty() => h.iter().try_fold(0u32, |n, &c| {
+            let d = char::from(c).to_digit(16)?;
+            n.checked_mul(16)?.checked_add(d)
+        }),
+        b => stream::int(b),
     }
-    digits.iter().try_fold(0u32, |n, &c| {
-        let d = char::from(c).to_digit(radix)?;
-        n.checked_mul(radix)?.checked_add(d)
-    })
 }
 
 /// The words of a line without quotes: the fast way for vertex and corner lines.
@@ -235,14 +207,10 @@ fn fields(line: &[u8]) -> impl Iterator<Item = &[u8]> {
     line.split(u8::is_ascii_whitespace).filter(|w| !w.is_empty())
 }
 
-fn num_of(b: Option<&[u8]>) -> Option<f32> {
-    b.and_then(f32_from).filter(|v| v.is_finite())
-}
-
 fn nums<const N: usize>(w: &[&[u8]], from: usize) -> Option<[f32; N]> {
     let mut out = [0.0; N];
     for (k, o) in out.iter_mut().enumerate() {
-        *o = num(w.get(from + k))?;
+        *o = num(w.get(from + k).copied())?;
     }
     Some(out)
 }
@@ -266,11 +234,11 @@ fn mat_values(m: &mut Mat, w: &[&[u8]]) {
                 i += 4;
             }
             b"shi" => {
-                m.shi = num(w.get(i + 1)).unwrap_or(m.shi);
+                m.shi = num(w.get(i + 1).copied()).unwrap_or(m.shi);
                 i += 2;
             }
             b"trans" => {
-                m.trans = num(w.get(i + 1)).unwrap_or(m.trans);
+                m.trans = num(w.get(i + 1).copied()).unwrap_or(m.trans);
                 i += 2;
             }
             _ => {
@@ -297,7 +265,7 @@ fn mat_values(m: &mut Mat, w: &[&[u8]]) {
 
 fn parse(data: &[u8]) -> Result<Model> {
     let data = data.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(data);
-    ensure!(data.starts_with(b"AC3D"), "not an AC3D file");
+    ensure!(data.starts_with(b"AC3D"), UnknownFormat, "not an AC3D file");
     let mut lines = Lines { d: data, at: 0 };
     let head = lines.next_line().unwrap_or_default();
     let mut m = Model {
@@ -356,7 +324,7 @@ fn parse(data: &[u8]) -> Result<Model> {
                 cur = Some(i);
             }
             b"kids" => {
-                let n = int(w.get(1)).unwrap_or(0) as usize;
+                let n = int(w.get(1).copied()).unwrap_or(0) as usize;
                 if let Some(c) = cur.take()
                     && n > 0
                 {
@@ -372,7 +340,8 @@ fn parse(data: &[u8]) -> Result<Model> {
             }
         }
     }
-    m.truncated = owed.iter().any(|&(_, n)| n > 0);
+    // Children still owed, or an object whose `kids` line never came: the file stops early.
+    m.truncated = owed.iter().any(|&(_, n)| n > 0) || cur.is_some();
     Ok(m)
 }
 
@@ -382,7 +351,7 @@ fn object_line(o: &mut Obj, w: &[&[u8]], lines: &mut Lines<'_>, unknown: &mut us
     match w[0] {
         b"name" => o.name = s(1),
         b"data" => {
-            let n = int(w.get(1)).unwrap_or(0) as usize;
+            let n = int(w.get(1).copied()).unwrap_or(0) as usize;
             let d = lines.take(n);
             o.data = Some(text(d));
         }
@@ -396,20 +365,20 @@ fn object_line(o: &mut Obj, w: &[&[u8]], lines: &mut Lines<'_>, unknown: &mut us
         b"rot" => o.rot = nums(w, 1),
         b"loc" => o.loc = nums(w, 1),
         b"url" => o.url = s(1),
-        b"crease" => o.crease = num(w.get(1)),
-        b"subdiv" => o.subdiv = int(w.get(1)),
+        b"crease" => o.crease = num(w.get(1).copied()),
+        b"subdiv" => o.subdiv = int(w.get(1).copied()),
         b"hidden" => o.hidden = true,
         b"locked" => o.locked = true,
         b"folded" => o.folded = true,
         b"numvert" => {
-            let n = int(w.get(1)).unwrap_or(0) as usize;
+            let n = int(w.get(1).copied()).unwrap_or(0) as usize;
             // Each vertex takes six bytes at least, so what's left bounds the count.
             o.verts.reserve(n.min(lines.d.len().saturating_sub(lines.at) / 6));
             for _ in 0..n {
                 let back = lines.at;
                 let Some(l) = lines.next_full() else { break };
                 let mut f = fields(l);
-                let v = (|| Some([num_of(f.next())?, num_of(f.next())?, num_of(f.next())?]))();
+                let v = (|| Some([num(f.next())?, num(f.next())?, num(f.next())?]))();
                 let Some(v) = v else {
                     // The vertices ran short: what's there belongs to the object.
                     lines.at = back;
@@ -419,7 +388,7 @@ fn object_line(o: &mut Obj, w: &[&[u8]], lines: &mut Lines<'_>, unknown: &mut us
             }
         }
         b"numsurf" => {
-            let n = int(w.get(1)).unwrap_or(0) as usize;
+            let n = int(w.get(1).copied()).unwrap_or(0) as usize;
             let mut done = 0;
             let mut flags = 0;
             let mut mat = 0;
@@ -427,7 +396,7 @@ fn object_line(o: &mut Obj, w: &[&[u8]], lines: &mut Lines<'_>, unknown: &mut us
                 let back = lines.at;
                 let Some(l) = lines.next_full() else { break };
                 let mut f = fields(l);
-                let (key, value) = (f.next(), f.next().and_then(int_of));
+                let (key, value) = (f.next(), int(f.next()));
                 match key {
                     Some(b"SURF") => flags = value.unwrap_or(0),
                     Some(b"mat") => mat = value.unwrap_or(0),
@@ -442,14 +411,14 @@ fn object_line(o: &mut Obj, w: &[&[u8]], lines: &mut Lines<'_>, unknown: &mut us
                                 break;
                             };
                             let mut f = fields(l);
-                            let Some(v) = f.next().and_then(int_of) else {
+                            let Some(v) = int(f.next()) else {
                                 // Not a corner: the corners ran short.
                                 lines.at = back;
                                 ok = false;
                                 break;
                             };
                             ok &= (v as usize) < o.verts.len();
-                            let uv = num_of(f.next()).zip(num_of(f.next())).map_or([0.0; 2], |(u, v)| [u, v]);
+                            let uv = num(f.next()).zip(num(f.next())).map_or([0.0; 2], |(u, v)| [u, v]);
                             o.refs.push((v, uv));
                         }
                         done += 1;
@@ -509,16 +478,8 @@ fn strip(o: &mut Obj, flags: u32, mat: u32, start: usize) {
 
 /// The normal of a polygon (Newell's method), up when it has none.
 fn face_normal(pos: &[[f32; 3]], corners: &[(u32, [f32; 2])]) -> [f32; 3] {
-    let mut n = [0.0f64; 3];
-    for (k, &(a, _)) in corners.iter().enumerate() {
-        let b = corners[(k + 1) % corners.len()].0;
-        let (p, q) = (pos[a as usize].map(f64::from), pos[b as usize].map(f64::from));
-        n[0] += (p[1] - q[1]) * (p[2] + q[2]);
-        n[1] += (p[2] - q[2]) * (p[0] + q[0]);
-        n[2] += (p[0] - q[0]) * (p[1] + q[1]);
-    }
-    #[allow(clippy::cast_possible_truncation, reason = "a direction, made unit just after")]
-    crease::unit(n.map(|c| c as f32)).unwrap_or([0.0, 1.0, 0.0])
+    let n = vec3::newell(corners.iter().map(|&(a, _)| pos[a as usize].map(f64::from)));
+    vec3::unit(n.map(f32_of)).unwrap_or([0.0, 1.0, 0.0])
 }
 
 /// A material: the AC3D material's index (or none for AC3D's default), the texture's image, and two sides.
@@ -658,54 +619,27 @@ fn build(o: &Obj, mats: &[usize], textured: bool, mut clip: u64) -> Vec<Prim> {
     prims
 }
 
-/// `f` of each item, in order, spread over up to `threads` threads.
-fn par_map<T: Sync, R: Send>(items: &[T], threads: usize, f: impl Fn(&T) -> R + Sync) -> Vec<R> {
-    let next = AtomicUsize::new(0);
-    let done: Mutex<Vec<Option<R>>> = Mutex::new((0..items.len()).map(|_| None).collect());
-    let run = || {
-        loop {
-            let k = next.fetch_add(1, Ordering::Relaxed);
-            let Some(item) = items.get(k) else { break };
-            let r = f(item);
-            done.lock().unwrap_or_else(PoisonError::into_inner)[k] = Some(r);
-        }
+/// The glTF material for an AC3D one, with its texture and sides; for surfaces whose material the file doesn't
+/// have (`None`), the default one, white under a texture.
+fn material(m: Option<&Mat>, tex: Option<Tex>, two_sided: bool, extras: bool) -> Full {
+    let Some(m) = m else {
+        return Full {
+            base_color_tex: tex.clone(),
+            double_sided: two_sided,
+            ..legacy_material::default_material(tex.is_some()).into()
+        };
     };
-    std::thread::scope(|s| {
-        for _ in 1..threads.min(items.len()) {
-            if !crate::keep::spawn(s, run) {
-                break;
-            }
-        }
-        run();
-    });
-    done.into_inner()
-        .unwrap_or_else(PoisonError::into_inner)
-        .into_iter()
-        .flatten()
-        .collect()
-}
-
-/// The glTF material for an AC3D one, with its texture and sides.
-fn material(m: &Mat, tex: Option<Tex>, two_sided: bool, extras: bool) -> Full {
-    let lin = |c: [f32; 3]| c.map(|v| srgb_to_linear(v.clamp(0.0, 1.0)));
-    let rgb = lin(m.rgb);
-    let alpha = (1.0 - m.trans).clamp(0.0, 1.0);
-    // Blinn-Phong's exponent as GGX roughness: alpha = sqrt(2 / (n + 2)), roughness = sqrt(alpha).
-    let roughness = if m.spec.iter().all(|&c| c <= 0.0) {
-        1.0
-    } else {
-        (2.0 / (m.shi.clamp(0.0, 128.0) + 2.0)).powf(0.25)
-    };
+    // `MATERIAL name rgb r g b amb r g b emis r g b spec r g b shi n trans t`: OpenGL's material, whose
+    // shininess (0 to 128) is the Blinn-Phong exponent.
+    let mut phong = Phong::new(Rgb::Srgb(m.rgb));
+    phong.opacity = 1.0 - m.trans;
+    phong.emissive = Rgb::Srgb(m.emis);
+    phong.specular = Some(Rgb::Srgb(m.spec));
+    phong.exponent = Some(m.shi.clamp(0.0, 128.0));
     let mut full = Full {
-        name: m.name.clone(),
-        base_color: [rgb[0], rgb[1], rgb[2], alpha],
         base_color_tex: tex,
-        metallic: 0.0,
-        roughness,
-        emissive: lin(m.emis),
-        alpha: if alpha < 1.0 { Alpha::Blend } else { Alpha::Opaque },
         double_sided: two_sided,
-        ..Full::default()
+        ..phong.pbr().full(&m.name)
     };
     if extras {
         let mut e = json!({ "ambient": m.amb.map(clean), "specular": m.spec.map(clean), "shininess": clean(m.shi), "transparency": clean(m.trans) });
@@ -729,7 +663,7 @@ fn matrix(o: &Obj) -> Option<[f32; 16]> {
     ])
 }
 
-pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document<'static>> {
+pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<Document> {
     let data = input.read()?;
     let m = parse(&data)?;
     let dir = input.dir();
@@ -739,14 +673,9 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
     let mut dropped_textures = 0usize;
     let mut materials: Vec<Full> = Vec::new();
     let mut material_at: HashMap<MatKey, usize> = HashMap::new();
-    let default = Mat {
-        name: "default".into(),
-        ..Mat::default()
-    };
-    let mut b = Builder::default();
+    let mut b = Builder::new(keep.crease_angle());
     let mut meshes: Vec<Value> = Vec::new();
     let mut mesh_of: Vec<Option<usize>> = vec![None; m.objs.len()];
-    let mut lines_or_points = false;
     let bad_surfs: usize = m.objs.iter().map(|o| o.bad_surfs).sum();
 
     // First, in order, each object's materials, the triangles it will make and the ear clipping it may spend.
@@ -780,12 +709,12 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
             let mat = (mat as usize).lt(&m.mats.len()).then_some(mat);
             let two = flags & TWO_SIDED != 0;
             *material_at.entry((mat, image, two)).or_insert_with(|| {
-                let src = mat.map_or(&default, |i| &m.mats[i as usize]);
+                let src = mat.map(|i| &m.mats[i as usize]);
                 materials.push(material(src, image.map(Tex::new), two, keep.extras));
                 materials.len() - 1
             })
         };
-        // Vertices without surfaces are points, in AC3D's default material.
+        // Vertices without surfaces are points, in the default material.
         let mats: Vec<usize> = if o.surfs.is_empty() {
             vec![material_of(u32::MAX, 0)]
         } else {
@@ -800,7 +729,12 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
             triangles += s.len as usize - 2;
             need = need.saturating_add(clip_cost(s.len));
         }
-        ensure!(triangles <= input.limit, "more than {} triangles", input.limit);
+        ensure!(
+            triangles <= input.limit,
+            LimitExceeded,
+            "more than {} triangles",
+            input.limit
+        );
         let take = need.min(clip);
         clip -= take;
         corners += o.refs.len() + o.verts.len();
@@ -808,17 +742,21 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
     }
 
     // Then the objects' primitives, on threads when there's enough to share.
-    let threads = if corners > 200_000 { keep.threads() } else { 1 };
-    let built = par_map(&jobs, threads, |(oi, mats, clip)| {
-        let o = &m.objs[*oi];
-        build(o, mats, o.texture.is_some(), *clip)
-    });
+    let threads = if corners > 200_000 { keep.thread_count() } else { 1 };
+    let built = crate::keep::par_map_with(
+        &jobs,
+        threads,
+        || (),
+        |(), (oi, mats, clip)| {
+            let o = &m.objs[*oi];
+            build(o, mats, o.texture.is_some(), *clip)
+        },
+    );
     let mut triangles = 0;
     for ((oi, _, _), prims) in jobs.iter().zip(built) {
         let o = &m.objs[*oi];
         let mut primitives = Vec::new();
         for prim in prims {
-            lines_or_points |= !prim.lines.is_empty() || !prim.points.is_empty();
             triangles += prim.indices.len() / 3;
             let material = prim.material;
             for mut j in b.primitives(prim) {
@@ -836,7 +774,13 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         meshes.push(mesh);
         mesh_of[*oi] = Some(meshes.len() - 1);
     }
-    ensure!(!meshes.is_empty(), "this AC3D file has no geometry");
+    if meshes.is_empty() {
+        return Err(crate::Error::nothing_left(
+            m.truncated,
+            "AC3D",
+            "this AC3D file has no geometry",
+        ));
+    }
 
     // A plain world (no placement or surfaces of its own) gives way to its children.
     let plain = |i: usize| {
@@ -917,14 +861,20 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
     }
     let roots: Vec<usize> = roots.iter().filter_map(|&r| node_of[r]).collect();
 
-    let mut source = json!({ "format": "AC3D", "upAxis": "Y", "unit": "unspecified" });
-    if let Some(v) = m.version {
-        source["version"] = json!(v.to_string());
-    }
+    let mut source = Map::new();
+    let info = SourceInfo {
+        format: Some("AC3D".into()),
+        version: m.version.map(|v| v.to_string()),
+        up_axis: Fact::Declared(Axis::PosY),
+        handedness: Fact::Declared(Handedness::Right),
+        ..SourceInfo::default()
+    };
+    info.write(&mut source);
+    let mut source = Value::Object(source);
     let lights = m.objs.iter().filter(|o| o.kind == "light").count();
     let subdivided = m.objs.iter().filter(|o| o.subdiv.is_some_and(|s| s > 0)).count();
     for (key, n) in [
-        ("droppedSurfaces", bad_surfs),
+        (crate::geometry::DROPPED, bad_surfs),
         ("droppedTextures", dropped_textures),
         ("lights", lights),
         ("subdividedObjects", subdivided),
@@ -949,11 +899,9 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
     json.insert("nodes".into(), Value::Array(nodes));
     json.insert("meshes".into(), Value::Array(meshes));
     b.materials(&materials, images.list, &mut json);
-    let mut doc = b.finish(json, facts);
-    if lines_or_points {
-        doc.set_lines_and_points(true);
-    }
-    Ok(doc)
+    // Whether lines and points are drawn is the caller's choice (`Keep::lines_and_points`), which the load
+    // records on the document after this.
+    Ok(b.finish(json, facts))
 }
 
 #[cfg(test)]
@@ -963,6 +911,7 @@ mod tests {
     use crate::document::Pose;
     use crate::formats::Input;
     use crate::mesh::Mesh;
+    use crate::mesh::srgb_to_linear;
 
     fn png() -> Vec<u8> {
         let mut png = Vec::new();
@@ -972,11 +921,11 @@ mod tests {
         png
     }
 
-    fn read(text: &str, assets: &Memory) -> Result<Document<'static>> {
+    fn read(text: &str, assets: &Memory) -> Result<Document> {
         load(Input::memory(text.as_bytes(), "t.ac"), assets, Keep::ALL)
     }
 
-    fn flat(doc: &Document<'_>) -> Mesh {
+    fn flat(doc: &Document) -> Mesh {
         doc.flatten(Pose::Rest).unwrap().unwrap()
     }
 
@@ -1010,10 +959,10 @@ mod tests {
             square("hand", "0x00", "loc 3 0 0\n")
         );
         let doc = read(&text, &Memory::new()).unwrap();
-        let nodes = doc.json["nodes"].as_array().unwrap();
+        let nodes = doc.json()["nodes"].as_array().unwrap();
         // The plain world gives way: the group is the root.
         assert_eq!(nodes.len(), 2);
-        assert_eq!(doc.json["scenes"][0]["nodes"], json!([0]));
+        assert_eq!(doc.json()["scenes"][0]["nodes"], json!([0]));
         assert_eq!(nodes[0]["name"], "arm");
         assert_eq!(nodes[0]["children"], json!([1]));
         assert_eq!(nodes[1]["translation"], json!([3.0, 0.0, 0.0]));
@@ -1035,8 +984,8 @@ mod tests {
             square("s", "0x00", "")
         );
         let doc = read(&placed, &Memory::new()).unwrap();
-        assert_eq!(doc.json["nodes"][0]["extras"]["ac3d"]["type"], "world");
-        assert_eq!(doc.json["nodes"][0]["children"], json!([1]));
+        assert_eq!(doc.json()["nodes"][0]["extras"]["ac3d"]["type"], "world");
+        assert_eq!(doc.json()["nodes"][0]["children"], json!([1]));
     }
 
     #[test]
@@ -1066,8 +1015,8 @@ mod tests {
         assert_eq!(glass.emissive[0], 1.0);
         assert_eq!(glass.roughness, 1.0);
         assert_eq!(glass.color_image, None);
-        assert_eq!(doc.json["materials"][1]["extras"]["ac3d"]["glow"], 3.0);
-        assert_eq!(doc.json["materials"][1]["extras"]["ac3d"]["transparency"], 0.25);
+        assert_eq!(doc.json()["materials"][1]["extras"]["ac3d"]["glow"], 3.0);
+        assert_eq!(doc.json()["materials"][1]["extras"]["ac3d"]["transparency"], 0.25);
         // Texture coordinates are repeated, offset and flipped for glTF.
         let textured = m.prims.iter().find(|p| p.material == 0).unwrap();
         let mut uvs = textured.uvs.clone();
@@ -1080,7 +1029,14 @@ mod tests {
         );
         // A missing texture is counted, and the material keeps its color.
         let doc = read(&text, &Memory::new()).unwrap();
-        assert_eq!(doc.json["asset"]["extras"]["source"]["droppedTextures"], 1);
+        assert_eq!(doc.json()["asset"]["extras"]["source"]["droppedTextures"], 1);
+        let info = doc.source_info();
+        assert_eq!(info.format.as_deref(), Some("AC3D"));
+        assert_eq!(info.up_axis, Fact::Declared(Axis::PosY));
+        assert_eq!(info.handedness, Fact::Declared(Handedness::Right));
+        assert_eq!(info.meters_per_unit, Fact::Unknown);
+        assert!(info.unit.is_none());
+        assert_eq!(info.converted, crate::source::Converted::default());
         assert_eq!(flat(&doc).materials[0].color_image, None);
     }
 
@@ -1114,7 +1070,16 @@ mod tests {
             );
             assert!(u[0] * v[1] - u[1] * v[0] > 0.0, "{c:?}");
         }
-        assert_eq!(doc.json["meshes"][1]["name"], "dots");
+        assert_eq!(doc.json()["meshes"][1]["name"], "dots");
+        // Lines and points are drawn or not as the caller asks, whatever the file holds.
+        for on in [true, false] {
+            let keep = Keep::ALL.with_lines_and_points(on);
+            let doc = crate::formats::load_bytes(text.as_bytes(), "t.ac", "ac", &Memory::new(), keep).unwrap();
+            assert_eq!(doc.lines_and_points(), on);
+            let m = flat(&doc);
+            assert_eq!(m.prims.iter().any(|p| !p.lines.is_empty() || !p.points.is_empty()), on);
+            assert_eq!(m.triangles(), 2);
+        }
     }
 
     #[test]
@@ -1169,11 +1134,15 @@ mod tests {
         assert_eq!(m.materials[0].name, "blue");
         assert!(m.materials[0].double_sided);
         assert!((m.materials[0].color[3] - 0.5).abs() < 1e-6);
-        assert_eq!(doc.json["nodes"][0]["extras"]["ac3d"]["data"], "OBJECT poly\r\nki");
-        // No materials: AC3D's default white.
+        assert_eq!(doc.json()["nodes"][0]["extras"]["ac3d"]["data"], "OBJECT poly\r\nki");
+        // No materials: the default one, as every reader gives faces without one.
         let bare = format!("AC3Db\n{}", square("s", "0x00", "").replace("mat 0\n", ""));
         let m = flat(&read(&bare, &Memory::new()).unwrap());
-        assert_eq!(m.materials[0].color, [1.0; 4]);
+        let d = &m.materials[0];
+        assert_eq!(
+            (d.name.as_str(), d.color, d.roughness),
+            ("default", crate::mesh::GRAY, 0.85)
+        );
         // A concave polygon is triangulated, not fanned.
         let ell = "AC3Db\nOBJECT poly\nnumvert 6\n0 0 0\n2 0 0\n2 1 0\n1 1 0\n1 2 0\n0 2 0\nnumsurf 1\nSURF 0\nrefs 6\n\
                    1 0 0\n2 0 0\n3 0 0\n4 0 0\n5 0 0\n0 0 0\nkids 0\n";
@@ -1198,12 +1167,12 @@ mod tests {
         let wild = "AC3Db\nOBJECT poly\nnumvert 4000000000\n0 0 0\n1 0 0\n0 1 0\nnumsurf 99999999\nSURF 0x10\nmat 77\n\
                     refs 4000000000\n0 0 0\n1 0 0\n2 0 0\nkids 99999999\n";
         let doc = read(wild, &assets).unwrap();
-        assert_eq!(doc.json["asset"]["extras"]["source"]["truncated"], true);
+        assert_eq!(doc.json()["asset"]["extras"]["source"]["truncated"], true);
         // Vertex indices past the vertices drop their surface.
         let bad = "AC3Db\nOBJECT poly\nnumvert 3\n0 0 0\n1 0 0\n0 1 0\nnumsurf 2\nSURF 0\nrefs 3\n0 0 0\n1 0 0\n9 0 0\n\
                    SURF 0\nrefs 3\n0 0 0\n1 0 0\n2 0 0\nkids 0\n";
         let doc = read(bad, &assets).unwrap();
-        assert_eq!(doc.json["asset"]["extras"]["source"]["droppedSurfaces"], 1);
+        assert_eq!(doc.json()["asset"]["extras"]["source"][crate::geometry::DROPPED], 1);
         assert_eq!(flat(&doc).triangles(), 1);
         // Deep nesting doesn't recurse.
         let deep = format!(
@@ -1266,7 +1235,7 @@ mod tests {
             text += "kids 0\n";
         }
         let with = |threads: usize| {
-            let keep = Keep { threads, ..Keep::ALL };
+            let keep = Keep::ALL.with_threads(threads);
             load(Input::memory(text.as_bytes(), "t.ac"), &Memory::new(), keep)
                 .unwrap()
                 .to_glb()

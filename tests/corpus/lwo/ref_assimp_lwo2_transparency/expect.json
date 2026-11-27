@@ -1,0 +1,19 @@
+{
+  "spec": "LightWave object (LWO2 and LWOB file formats): a real file, an LWO2 transparent sphere",
+  "source": "assimp/assimp at 711b4e9bbde2, test/models/LWO/LWO2/transparency.lwo (BSD-3-Clause, see ../LICENSE-assimp); expectations measured with assimp 6.0.5 (assimp-py 1.2.0)",
+  "triangles": 540,
+  "bounds": {
+    "min": [
+      -4.2,
+      -4.65,
+      -3.35
+    ],
+    "max": [
+      4.5,
+      4.65,
+      2.95
+    ]
+  },
+  "area": 260.898834,
+  "position_set": "positions.f32"
+}

@@ -3,7 +3,8 @@
 use serde_json::{Map, Value, json};
 
 use super::{Ctx, color, param, product, transforms};
-use crate::material::{Alpha, CLAMP, Clearcoat, Factor, Full, MIRROR, REPEAT, Sheen, Specular, Tex, UvTransform};
+use crate::legacy_material::{Highlight, Phong, Rgb, Transparency};
+use crate::material::{CLAMP, Clearcoat, Factor, Full, MIRROR, REPEAT, Sheen, Specular, Tex, UvTransform};
 use crate::num::{f32_of, u32_of};
 
 /// A texture as read: the glTF texture and the channel the swizzle puts first (0 to 3, or
@@ -24,6 +25,19 @@ pub(super) fn material(c: &mut Ctx<'_>, m: u32) -> Option<usize> {
     let out = (c.t.ident(m) == "Material").then(|| build(c, m));
     c.material_of.insert(m, out);
     out
+}
+
+/// The material of faces with none, white under vertex colors (`colored`); its index.
+pub(super) fn default(c: &mut Ctx<'_>, colored: bool) -> usize {
+    if let Some(m) = c.default_materials[usize::from(colored)] {
+        return m;
+    }
+    c.materials
+        .push(crate::legacy_material::default_material(colored).into());
+    c.material_uvs.push(0);
+    let m = c.materials.len() - 1;
+    c.default_materials[usize::from(colored)] = Some(m);
+    m
 }
 
 /// The first channel swizzle `s` picks: 0 to 3, `None` for a constant.
@@ -193,7 +207,6 @@ fn build(c: &mut Ctx<'_>, m: u32) -> usize {
     if !opacity_fits {
         left_out();
     }
-    let blend = alpha < 1.0 || opacity_tex.is_some();
     let pbr = param(t, m, "roughness").is_some()
         || param(t, m, "metalness").is_some()
         || texs.iter().any(|(a, _)| a == "roughness" || a == "metalness");
@@ -213,7 +226,11 @@ fn build(c: &mut Ctx<'_>, m: u32) -> usize {
             f32_of(alpha),
         ],
         base_color_tex: base_tex,
-        alpha: if blend { Alpha::Blend } else { Alpha::Opaque },
+        alpha: Transparency {
+            texture_alpha: opacity_tex.is_some(),
+            ..Transparency::of(f32_of(alpha))
+        }
+        .mode(),
         double_sided: t.prop_bool(m, "two_sided").unwrap_or(false),
         ..Full::default()
     };
@@ -239,26 +256,24 @@ fn build(c: &mut Ctx<'_>, m: u32) -> usize {
             });
         }
     } else {
-        // A specular color and power alone: glossy plastic, its roughness from the power
-        // (Blinn-Phong's exponent to a microfacet roughness), its highlights' color the
-        // specular extension's.
+        // A specular color and power alone, the classic material every reader reads one way: the power is
+        // the highlight's exponent (1 when the file gives none) and the color, linear and black when the
+        // file gives none, the highlight's.
+        let mut phong = Phong::new(Rgb::WHITE);
+        phong.specular = Some(Rgb::Linear(rgb(specular.unwrap_or([0.0; 4]))));
+        phong.exponent = Some(f32_of(power));
+        let look = phong.pbr();
         full.metallic = 0.0;
-        full.roughness = f32_of((2.0 / (power + 2.0)).powf(0.25).clamp(0.0, 1.0));
-        let s = specular.unwrap_or([0.0; 4]);
-        let top = s[..3].iter().copied().fold(0.0f64, f64::max);
-        let spec_tex = tex("specular", None);
-        full.specular = Some(if top > 0.0 || spec_tex.is_some() {
-            Specular {
-                factor: Factor::of(1.0),
-                color: rgb(s).map(|v| v.clamp(0.0, 1.0)),
-                color_tex: spec_tex,
-            }
-        } else {
-            Specular {
-                factor: Factor::of(0.0),
-                color: [1.0; 3],
-                color_tex: None,
-            }
+        full.roughness = look.roughness;
+        let spec_tex = tex("specular", None).filter(|_| look.specular != Some(Highlight::NONE));
+        let h = look.specular.or(spec_tex.as_ref().map(|_| Highlight {
+            factor: 1.0,
+            color: [1.0; 3],
+        }));
+        full.specular = h.map(|h| Specular {
+            factor: Factor::of(h.factor),
+            color: h.color,
+            color_tex: spec_tex,
         });
     }
     let emission = col("emission").unwrap_or([0.0; 4]);

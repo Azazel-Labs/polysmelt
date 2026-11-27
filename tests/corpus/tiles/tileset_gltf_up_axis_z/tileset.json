@@ -1,0 +1,48 @@
+{
+ "asset": {
+  "version": "0.0",
+  "gltfUpAxis": "Z"
+ },
+ "geometricError": 10,
+ "root": {
+  "boundingVolume": {
+   "box": [
+    0,
+    0,
+    0,
+    4,
+    0,
+    0,
+    0,
+    4,
+    0,
+    0,
+    0,
+    4
+   ]
+  },
+  "geometricError": 0,
+  "refine": "ADD",
+  "transform": [
+   1,
+   0,
+   0,
+   0,
+   0,
+   1,
+   0,
+   0,
+   0,
+   0,
+   1,
+   0,
+   5,
+   6,
+   7,
+   1
+  ],
+  "content": {
+   "url": "wedge.b3dm"
+  }
+ }
+}

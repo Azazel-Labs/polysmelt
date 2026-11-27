@@ -22,9 +22,14 @@
 //! numbers, or one that isn't a finite number, or whose frame number doesn't follow the row before it, is left out
 //! and counted; so are rows in a section that names no segment. The scale factor column stretches the bone, which
 //! glTF has no way to say, so rows whose factor isn't 1 are counted, and the factor is dropped. The header's
-//! `ScaleFactor` is recorded and not applied. A missing or bad `DataFrameRate` is taken as 30, and noted.
+//! `ScaleFactor` is recorded and not applied. A missing or bad `DataFrameRate` is taken as 30.
 //!
-//! Lengths become meters, and a Z (or X) gravity axis is turned to glTF's Y up. Nothing is allocated from a count
+//! Lengths and axes stay the file's: the document's `RootNode` scales them to meters and turns a Z (or X) gravity
+//! axis to glTF's Y up. The source info has
+//! `CalibrationUnits` as the `unit` and its length as `metersPerUnit`, declared (unknown when it's missing or not a
+//! unit, which leaves lengths as they are), `GlobalAxisofGravity` as the up axis, declared (`+Y` assumed when it's
+//! missing, unknown when it isn't an axis), `DataFrameRate` as `frameRate`, declared (30 assumed), and
+//! `FileVersion` as the version. Nothing is allocated from a count
 //! the file gives: the segments are capped, and rows take room as they're read.
 
 use std::collections::HashMap;
@@ -33,14 +38,17 @@ use serde_json::{Map, json};
 
 use super::Input;
 use super::scene::{self, Animation, Channel, Interp, Node, Path, Scene};
+use super::stream::f64_from;
 use crate::Result;
 use crate::document::{Document, Keep};
 use crate::num::f32_of;
+use crate::quat;
+use crate::source::{Axis, Fact, meters_in};
 
 /// Segments a file may have: far past any capture rig.
 const MAX_SEGMENTS: usize = 32_768;
 /// Frames per second when the file doesn't say.
-const DEFAULT_RATE: f64 = 30.0;
+const DEFAULT_RATE: f64 = super::keys::ASSUMED_FRAME_RATE;
 
 /// A segment and its rows.
 struct Segment {
@@ -79,15 +87,7 @@ fn unit_length(s: &str) -> Option<f64> {
         let split = s.find(|c: char| c.is_ascii_alphabetic()).unwrap_or(s.len());
         (s[..split].trim(), &s[split..])
     };
-    let base = match unit.to_ascii_lowercase().as_str() {
-        "mm" | "millimeter" | "millimeters" | "millimetre" | "millimetres" => 0.001,
-        "cm" | "centimeter" | "centimeters" | "centimetre" | "centimetres" => 0.01,
-        "dm" | "decimeter" | "decimeters" => 0.1,
-        "m" | "meter" | "meters" | "metre" | "metres" => 1.0,
-        "in" | "inch" | "inches" => 0.0254,
-        "ft" | "foot" | "feet" => 0.3048,
-        _ => return None,
-    };
+    let base = meters_in(unit)?;
     let factor = if amount.is_empty() {
         1.0
     } else if let Some((n, d)) = amount.split_once('/') {
@@ -105,11 +105,11 @@ fn up_rotation(axis: &str) -> Option<[f64; 4]> {
     let a = axis.trim().to_ascii_uppercase();
     let q = match a.trim_start_matches('+') {
         "Y" => [0.0, 0.0, 0.0, 1.0],
-        "-Y" => scene::about(0, PI),
-        "Z" => scene::about(0, -FRAC_PI_2),
-        "-Z" => scene::about(0, FRAC_PI_2),
-        "X" => scene::about(2, FRAC_PI_2),
-        "-X" => scene::about(2, -FRAC_PI_2),
+        "-Y" => quat::about(0, PI),
+        "Z" => quat::about(0, -FRAC_PI_2),
+        "-Z" => quat::about(0, FRAC_PI_2),
+        "X" => quat::about(2, FRAC_PI_2),
+        "-X" => quat::about(2, -FRAC_PI_2),
         _ => return None,
     };
     Some(q)
@@ -119,7 +119,7 @@ fn up_rotation(axis: &str) -> Option<[f64; 4]> {
 fn euler(order: &[usize; 3], angles: [f64; 3]) -> [f64; 4] {
     let mut q = [0.0, 0.0, 0.0, 1.0];
     for &a in order {
-        q = scene::quat_mul(q, scene::about(a, angles[a]));
+        q = quat::mul(q, quat::about(a, angles[a]));
     }
     q
 }
@@ -128,8 +128,8 @@ fn euler(order: &[usize; 3], angles: [f64; 3]) -> [f64; 4] {
 fn numbers<'a>(tokens: impl Iterator<Item = &'a str>, n: usize) -> Vec<f64> {
     let mut out = Vec::with_capacity(n);
     for t in tokens.take(n) {
-        match t.parse::<f64>() {
-            Ok(v) if v.is_finite() => out.push(v),
+        match f64_from(t.as_bytes()) {
+            Some(v) if v.is_finite() => out.push(v),
             _ => break,
         }
     }
@@ -137,7 +137,7 @@ fn numbers<'a>(tokens: impl Iterator<Item = &'a str>, n: usize) -> Vec<f64> {
 }
 
 /// Reads an HTR file.
-pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document<'static>> {
+pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document> {
     let bytes = input.read()?;
     let text = scene::text(&bytes);
     let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
@@ -153,6 +153,7 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document<'static>> {
         }
         ensure!(
             segments.len() < MAX_SEGMENTS,
+            LimitExceeded,
             "HTR has more than {MAX_SEGMENTS} segments"
         );
         index.insert(name.to_owned(), segments.len());
@@ -186,6 +187,7 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document<'static>> {
                 _ => {
                     ensure!(
                         section.is_some(),
+                        UnknownFormat,
                         "not an HTR file: it starts with `[{}]`, not [Header]",
                         show(name)
                     );
@@ -202,7 +204,11 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document<'static>> {
             continue;
         }
         let Some(at) = section else {
-            bail!("not an HTR file: it starts with `{}`, not [Header]", show(line));
+            bail!(
+                UnknownFormat,
+                "not an HTR file: it starts with `{}`, not [Header]",
+                show(line)
+            );
         };
         let mut tokens = line.split_whitespace();
         let first = tokens.next().unwrap_or("");
@@ -221,6 +227,7 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document<'static>> {
                 let v = numbers(tokens, 7);
                 ensure!(
                     v.len() == 7,
+                    Corrupt,
                     "HTR line {no}: segment `{}`'s base position needs seven numbers",
                     show(first)
                 );
@@ -246,9 +253,9 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document<'static>> {
         }
     }
     let Some(_) = section else {
-        bail!("not an HTR file: it's empty");
+        bail!(Empty, "not an HTR file: it's empty");
     };
-    ensure!(!segments.is_empty(), "HTR has no segments");
+    ensure!(!segments.is_empty(), Empty, "HTR has no segments");
 
     let get = |k: &str| header.get(&k.to_ascii_lowercase()).map(String::as_str);
     let order_text = get("EulerRotationOrder").unwrap_or("ZYX");
@@ -263,12 +270,14 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document<'static>> {
         .collect();
     let Ok(order) = <[usize; 3]>::try_from(order) else {
         bail!(
+            Corrupt,
             "HTR EulerRotationOrder `{}` isn't three of X, Y and Z",
             show(order_text)
         );
     };
     ensure!(
         order_text.trim().len() == 3,
+        Corrupt,
         "HTR EulerRotationOrder `{}` isn't three of X, Y and Z",
         show(order_text)
     );
@@ -276,7 +285,7 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document<'static>> {
         None => false,
         Some(u) if u.starts_with("deg") => false,
         Some(u) if u.starts_with("rad") => true,
-        Some(u) => bail!("HTR RotationUnits `{}` isn't Degrees or Radians", show(u)),
+        Some(u) => bail!(Corrupt, "HTR RotationUnits `{}` isn't Degrees or Radians", show(u)),
     };
     let angle = if radians { 1.0 } else { std::f64::consts::PI / 180.0 };
     let rate = get("DataFrameRate")
@@ -319,7 +328,7 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document<'static>> {
     for (s, &parent) in segments.iter().zip(&parents) {
         let mut node = Node::named(s.name.clone(), parent);
         node.translation = [s.base[0], s.base[1], s.base[2]].map(f32_of);
-        node.rotation = scene::normalize(base_rotation(s));
+        node.rotation = quat::normalize(base_rotation(s));
         scene.add(node);
     }
     for (i, s) in segments.iter().enumerate() {
@@ -346,7 +355,7 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document<'static>> {
         for r in &s.rows {
             translations.extend([s.base[0] + r[0], s.base[1] + r[1], s.base[2] + r[2]].map(f32_of));
             let qf = euler(&order, [r[3] * angle, r[4] * angle, r[5] * angle]);
-            rotations.extend(scene::normalize(scene::quat_mul(qb, qf)));
+            rotations.extend(quat::normalize(quat::mul(qb, qf)));
         }
         channels.push(Channel {
             node: i,
@@ -366,19 +375,26 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document<'static>> {
     let frames = segments.iter().map(|s| s.frames.len()).max().unwrap_or(0);
     if keep.animations && !channels.is_empty() {
         scene.animations.push(Animation {
-            name: "motion".into(),
+            name: super::keys::clip_name(input.path).unwrap_or_default(),
             channels,
             extras: None,
         });
     }
 
+    let info = &mut scene.info;
+    info.format = Some("HTR".into());
+    info.version = get("FileVersion").map(str::to_owned);
+    info.unit = units.map(str::to_owned);
+    info.meters_per_unit = meters.map_or(Fact::Unknown, Fact::Declared);
+    info.up_axis = match (get("GlobalAxisofGravity"), gravity.parse().ok()) {
+        (Some(_), Some(a)) if up.is_some() => Fact::Declared(a),
+        (None, _) => Fact::Assumed(Axis::PosY),
+        _ => Fact::Unknown,
+    };
+    info.frame_rate = rate.map_or(Fact::Assumed(DEFAULT_RATE), Fact::Declared);
     let mut source = Map::new();
-    source.insert("format".into(), json!("HTR"));
-    source.insert("upAxis".into(), json!(gravity));
     for (key, name) in [
-        ("FileVersion", "fileVersion"),
         ("DataType", "dataType"),
-        ("CalibrationUnits", "units"),
         ("RotationUnits", "rotationUnits"),
         ("EulerRotationOrder", "eulerRotationOrder"),
         ("BoneLengthAxis", "boneLengthAxis"),
@@ -392,14 +408,17 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document<'static>> {
             source.insert(name.into(), json!(v));
         }
     }
-    source.insert("frameTime".into(), json!(frame_time));
+    // Fewer frames than the header counts: the file is cut short.
+    #[allow(clippy::cast_precision_loss, reason = "frame counts are small")]
+    if get("NumFrames")
+        .and_then(|v| v.parse::<f64>().ok())
+        .is_some_and(|n| n.is_finite() && n > frames as f64)
+    {
+        source.insert("truncated".into(), json!(true));
+    }
     let facts = &mut scene.facts;
     facts.insert("segments".into(), json!(segments.len()));
     facts.insert("frames".into(), json!(frames));
-    facts.insert("frame_time".into(), json!(frame_time));
-    if rate.is_none() {
-        facts.insert("frame_time_guessed".into(), json!(true));
-    }
     if dropped > 0 {
         facts.insert("dropped_rows".into(), json!(dropped));
     }
@@ -412,12 +431,6 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document<'static>> {
     if unknown_parents > 0 {
         facts.insert("unknown_parents".into(), json!(unknown_parents));
     }
-    if meters.is_none() {
-        facts.insert("units_unknown".into(), json!(true));
-    }
-    if up.is_none() {
-        facts.insert("up_axis_unknown".into(), json!(true));
-    }
     if length_axis.is_none() {
         facts.insert("bone_length_axis_unknown".into(), json!(true));
     }
@@ -425,10 +438,10 @@ pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document<'static>> {
         facts.insert("global".into(), json!(true));
     }
     scene.source = source;
-    scene.scale(f32_of(meters.unwrap_or(1.0)));
+    scene.unit(meters.unwrap_or(1.0));
     // Y up needs no turn; every other axis's quaternion has w below 1.
     if let Some(q) = up.filter(|q| q[3] < 1.0) {
-        scene.rotate_roots(scene::normalize(q));
+        scene.turn(quat::normalize(q));
     }
     scene.finish(keep)
 }
@@ -466,7 +479,7 @@ knee 0 -400 0 0 0 90 300
 [EndOfFile]
 ";
 
-    fn read(text: &str) -> Result<Document<'static>> {
+    fn read(text: &str) -> Result<Document> {
         load(Input::memory(text.as_bytes(), "t.htr"), Keep::ALL)
     }
 
@@ -484,24 +497,29 @@ knee 0 -400 0 0 0 90 300
     #[test]
     fn two_segments() {
         let doc = read(HTR).unwrap();
-        let nodes = doc.json["nodes"].as_array().unwrap();
+        let nodes = doc.json()["nodes"].as_array().unwrap();
         let names: Vec<_> = nodes.iter().map(|n| n["name"].as_str().unwrap()).collect();
-        assert_eq!(names, ["hip", "knee", "knee_end"]);
+        assert_eq!(names, ["hip", "knee", "knee_end", "RootNode"]);
+        // Millimeters, Y up: the root node scales and doesn't turn.
+        assert_eq!(
+            nodes[3],
+            json!({ "name": "RootNode", "children": [0], "scale": [0.001, 0.001, 0.001] })
+        );
         assert_eq!(doc.facts["segments"], json!(2));
         assert_eq!(doc.facts["frames"], json!(2));
         assert_eq!(doc.facts["scale_factors_dropped"], json!(1));
         let rig = doc.rig().unwrap();
-        assert!(near(&rig.nodes[0].rest.translation, &[0.0, 1.0, 0.0]));
+        assert!(near(&rig.nodes[0].rest.translation, &[0.0, 1000.0, 0.0]));
         let s = std::f32::consts::FRAC_1_SQRT_2;
         assert!(near(&rig.nodes[1].rest.rotation, &[0.0, 0.0, s, s]));
-        assert!(near(&rig.nodes[2].rest.translation, &[0.0, 0.3, 0.0]));
+        assert!(near(&rig.nodes[2].rest.translation, &[0.0, 300.0, 0.0]));
         let pose = rig.pose(Some(0), 0.1);
-        assert!(near(&pose[0].translation, &[0.1, 1.0, 0.0]));
+        assert!(near(&pose[0].translation, &[100.0, 1000.0, 0.0]));
         assert!(near(&pose[0].rotation, &[0.0, s, 0.0, s]));
         // knee: the base's 90° about Z, then the row's 90° about X.
-        let want = scene::normalize(scene::quat_mul(
-            scene::about(2, std::f64::consts::FRAC_PI_2),
-            scene::about(0, std::f64::consts::FRAC_PI_2),
+        let want = quat::normalize(quat::mul(
+            quat::about(2, std::f64::consts::FRAC_PI_2),
+            quat::about(0, std::f64::consts::FRAC_PI_2),
         ));
         assert!(near(&pose[1].rotation, &want), "{:?}", pose[1].rotation);
         assert_eq!(rig.animations[0].channels[0].times, [0.0, 0.1]);
@@ -514,9 +532,9 @@ knee 0 -400 0 0 0 90 300
             &[2, 1, 0],
             [std::f64::consts::FRAC_PI_2, 0.0, std::f64::consts::FRAC_PI_2],
         );
-        let v = scene::rotate(q, [0.0, 1.0, 0.0]);
+        let v = quat::rotate(q, [0.0, 1.0, 0.0]);
         assert!(near(&v.map(f32_of), &[0.0, 0.0, 1.0]));
-        let v = scene::rotate(q, [1.0, 0.0, 0.0]);
+        let v = quat::rotate(q, [1.0, 0.0, 0.0]);
         assert!(near(&v.map(f32_of), &[0.0, 1.0, 0.0]));
     }
 
@@ -525,9 +543,24 @@ knee 0 -400 0 0 0 90 300
         let text = HTR
             .replace("GlobalAxisofGravity Y", "GlobalAxisofGravity Z")
             .replace("CalibrationUnits mm", "CalibrationUnits 1/10.000 m");
-        let rig = read(&text).unwrap().rig().unwrap();
-        // 1000 tenths of a meter up Z is 100 m up Y.
-        assert!(near(&rig.nodes[0].rest.translation, &[0.0, 0.0, -100.0]));
+        let doc = read(&text).unwrap();
+        let info = doc.source_info();
+        assert_eq!(info.format.as_deref(), Some("HTR"));
+        assert_eq!(info.up_axis, Fact::Declared(Axis::PosZ));
+        assert_eq!(info.meters_per_unit, Fact::Declared(0.1));
+        assert_eq!(info.unit.as_deref(), Some("1/10.000 m"));
+        assert_eq!(info.frame_rate, Fact::Declared(10.0));
+        assert!(info.converted.units && info.converted.up_axis);
+        let rig = doc.rig().unwrap();
+        // The hip stays where the file has it, 1000 tenths of a meter along Y; the root node turns Z up to Y up
+        // and scales, so it is 100 m along -Z.
+        assert!(near(&rig.nodes[0].rest.translation, &[0.0, 1000.0, 0.0]));
+        assert!(near(&rig.nodes[0].rest.rotation, &[0.0, 0.0, 0.0, 1.0]));
+        let top = &doc.json()["nodes"][3];
+        assert_eq!(top["name"], "RootNode");
+        assert_eq!(top["scale"], json!([0.1, 0.1, 0.1]));
+        let at = rig.world(&rig.pose(None, 0.0))[0];
+        assert!(near(&at[12..15], &[0.0, 0.0, -100.0]));
         assert_eq!(unit_length("mm"), Some(0.001));
         assert_eq!(unit_length("1/10.000 m"), Some(0.1));
         assert!((unit_length("2.54cm").unwrap() - 0.0254).abs() < 1e-12);
@@ -556,8 +589,25 @@ knee 0 -400 0 0 0 90 300
             "[Header]\nDataFrameRate 0\n[BasePosition]\na 0 0 0 0 0 0 1\nb 1 0 0 0 0 0 1\n[a]\n0 0 0 0 0 0 0 1\n";
         let doc = read(text).unwrap();
         assert_eq!(doc.facts["global"], json!(true));
-        assert_eq!(doc.facts["frame_time_guessed"], json!(true));
-        assert_eq!(doc.json["scenes"][0]["nodes"], json!([0, 1]));
+        let info = doc.source_info();
+        assert_eq!(info.frame_rate, Fact::Assumed(30.0));
+        assert_eq!(info.up_axis, Fact::Assumed(Axis::PosY));
+        assert_eq!(info.meters_per_unit, Fact::Unknown);
+        // Both segments are roots of the file: both are under the one root node.
+        let top = doc.json()["scenes"][0]["nodes"][0].as_u64().unwrap();
+        let top = &doc.json()["nodes"][usize::try_from(top).unwrap()];
+        assert_eq!(top["name"], "RootNode");
+        let rig = doc.rig().unwrap();
+        let roots: Vec<_> = top["children"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c.as_u64().unwrap())
+            .collect();
+        assert_eq!(roots.len(), 2);
+        for (r, name) in roots.iter().zip(["a", "b"]) {
+            assert_eq!(rig.nodes[usize::try_from(*r).unwrap()].name.as_deref(), Some(name));
+        }
     }
 
     #[test]

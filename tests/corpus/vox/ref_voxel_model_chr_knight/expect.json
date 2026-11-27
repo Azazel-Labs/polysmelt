@@ -1,0 +1,22 @@
+{
+  "spec": "MagicaVoxel .vox (ephtracy/voxel-model, MagicaVoxel-file-format-vox.txt): a real file, a knight of 398 voxels",
+  "source": "ephtracy/voxel-model at 3bff8feaa7d9, vox/character/chr_knight.vox (MIT, see ../LICENSE-voxel-model); expectations measured with py-vox-io 0.1",
+  "area": 730,
+  "bounds": {
+    "min": [
+      0.0,
+      0.0,
+      -15.0
+    ],
+    "max": [
+      18.0,
+      15.0,
+      -7.0
+    ]
+  },
+  "facts": {
+    "voxels": 398,
+    "voxel_size": "20x21x20"
+  },
+  "material_count": 21
+}

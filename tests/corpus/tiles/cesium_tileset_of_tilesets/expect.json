@@ -1,0 +1,30 @@
+{
+  "spec": "3D Tiles 1.0 (OGC 18-053r2): tileset.json whose content is a tileset, whose content is one more: ADD at the root, REPLACE below",
+  "source": "CesiumGS/cesium Specs/Data/Cesium3DTiles/Tilesets/TilesetOfTilesets at 49f9cfe7c2c0 (Apache-2.0, LICENSE-cesium); expectations decoded by tools/corpus/tiles.py",
+  "file": "tileset.json",
+  "triangles": 600,
+  "facts": {
+    "tiles": 5,
+    "triangles": 600,
+    "features": 50
+  },
+  "vertices": 1200,
+  "bounds": {
+    "min": [
+      1214813.0948,
+      4081477.3223,
+      4736180.6251
+    ],
+    "max": [
+      1215198.162,
+      4081758.8899,
+      4736454.0898
+    ]
+  },
+  "document": {
+    "source": {
+      "format": "3D Tiles",
+      "version": "1.0"
+    }
+  }
+}

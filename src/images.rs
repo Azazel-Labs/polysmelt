@@ -17,10 +17,45 @@ use crate::assets::Assets;
 use crate::document::Document;
 use crate::gltf::{data_uri, mime_from_name, sniff_mime};
 use crate::mesh::Image;
-use crate::{Context as _, Result};
+use crate::{Context as _, ErrorKind, Result};
+
+/// The most pixels a texture is decoded to, whichever decoder reads it: 16384 by 16384, the largest 2D texture
+/// Direct3D 11 and 12 require of a GPU and the largest a WebP can be, so nothing a renderer can draw whole is
+/// refused. At four bytes a pixel that is 1 GiB, which a decoder only makes room for when the file holds the data
+/// (see [`FREE`]).
+#[cfg(any(
+    feature = "flt",
+    feature = "skp",
+    feature = "tga",
+    feature = "bmp",
+    feature = "gif",
+    feature = "tiff",
+    feature = "psd",
+    feature = "dds",
+    all(feature = "obj", any(feature = "webp", feature = "amf"))
+))]
+pub(crate) const MAX_PIXELS: usize = 1 << 28;
+
+/// Bytes a decoded image may take whatever data its file holds: a small image needs no proof, but a bigger one is
+/// decoded only when at least half its data is there, so a header claiming a huge image over a few bytes makes
+/// nothing.
+#[cfg(any(
+    feature = "flt",
+    feature = "tga",
+    feature = "bmp",
+    feature = "gif",
+    feature = "tiff",
+    feature = "psd",
+    feature = "dds"
+))]
+pub(crate) const FREE: usize = 1 << 22;
 
 /// Where an image is.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Non-exhaustive: other places an image can be may be added, so a `match` on one needs a
+/// wildcard arm.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Location {
     /// A file, found through the [`Assets`].
     File(PathBuf),
@@ -95,14 +130,97 @@ pub(crate) enum Source {
         allow(dead_code, reason = "only readers with textures make references")
     )]
     Ref(Reference, String),
-    /// A PNG or JPEG file, left in the file until its bytes are wanted, and its type.
-    #[cfg(feature = "fs")]
-    File(crate::document::FileSpan, &'static str),
 }
 
 impl From<Image> for Source {
     fn from(i: Image) -> Self {
         Source::Image(i)
+    }
+}
+
+/// The textures a model names that its document doesn't have, as every reader reports them: the one path from
+/// a reader's lookups to `droppedTextures` and `missingFiles` in `asset.extras.source` (see [`crate::source`]).
+/// [`Images`] counts them as it looks textures up, they travel with its [`List`], and the document's builder
+/// writes them.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub(crate) struct Missed {
+    /// How many textures the model names and the document doesn't have: not found, or found and not an image
+    /// that can be embedded. Each texture once, however many materials name it.
+    pub dropped: usize,
+    /// The names, as the model wrote them, of those that weren't found.
+    pub files: Vec<String>,
+}
+
+impl Missed {
+    /// Whether nothing was missed.
+    pub fn is_empty(&self) -> bool {
+        self.dropped == 0 && self.files.is_empty()
+    }
+
+    /// Takes in what another list of images missed.
+    pub fn add(&mut self, other: Missed) {
+        self.dropped += other.dropped;
+        for f in other.files {
+            if !self.files.contains(&f) {
+                self.files.push(f);
+            }
+        }
+    }
+
+    /// Writes what was missed into a document's `asset.extras.source`: `droppedTextures`, unless the reader
+    /// counted its own there, and the names added to `missingFiles`.
+    pub fn write(&self, source: &mut serde_json::Map<String, serde_json::Value>) {
+        use serde_json::{Value, json};
+        if self.dropped > 0 && !source.contains_key("droppedTextures") {
+            source.insert("droppedTextures".into(), json!(self.dropped));
+        }
+        if !self.files.is_empty() {
+            let list = source.entry("missingFiles").or_insert_with(|| json!([]));
+            if let Some(list) = list.as_array_mut() {
+                for f in &self.files {
+                    if !list.iter().any(|v| v.as_str() == Some(f)) {
+                        list.push(Value::from(f.as_str()));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A reader's images in order, with what it looked for and didn't get.
+#[derive(Debug, Default)]
+pub(crate) struct List {
+    items: Vec<Source>,
+    pub missed: Missed,
+}
+
+impl std::ops::Deref for List {
+    type Target = Vec<Source>;
+
+    fn deref(&self) -> &Vec<Source> {
+        &self.items
+    }
+}
+
+impl std::ops::DerefMut for List {
+    fn deref_mut(&mut self) -> &mut Vec<Source> {
+        &mut self.items
+    }
+}
+
+impl From<Vec<Source>> for List {
+    fn from(items: Vec<Source>) -> Self {
+        List {
+            items,
+            missed: Missed::default(),
+        }
+    }
+}
+
+impl List {
+    /// The images, and what was missed.
+    pub fn parts(self) -> (Vec<Source>, Missed) {
+        (self.items, self.missed)
     }
 }
 
@@ -122,7 +240,7 @@ impl From<Image> for Source {
 )]
 #[derive(Debug, Default)]
 pub(crate) struct Images {
-    pub list: Vec<Source>,
+    pub list: List,
     lazy: bool,
     /// The model's folder, which URIs of files are made relative to.
     #[cfg_attr(
@@ -140,6 +258,9 @@ pub(crate) struct Images {
     dir: PathBuf,
     /// The texture files read so far, so a file named twice is one image.
     files: std::collections::HashMap<PathBuf, Option<usize>>,
+    /// What [`find`](Self::find) made of each set of names and folders, so a texture many
+    /// materials name is looked for once.
+    found: std::collections::HashMap<(Vec<String>, Vec<PathBuf>), Option<usize>>,
 }
 
 #[cfg_attr(
@@ -159,10 +280,11 @@ impl Images {
     /// Collects references when `lazy`; `dir` is the model's folder.
     pub fn new(lazy: bool, dir: &Path) -> Self {
         Self {
-            list: Vec::new(),
+            list: List::default(),
             lazy,
             dir: dir.to_path_buf(),
             files: std::collections::HashMap::new(),
+            found: std::collections::HashMap::new(),
         }
     }
 
@@ -190,7 +312,99 @@ impl Images {
             return i;
         }
         let i = self.read_file(assets, path.clone(), reference);
+        if i.is_none() {
+            // Found, and not an image that can be embedded.
+            self.list.missed.dropped += 1;
+        }
         self.files.insert(path, i);
+        i
+    }
+
+    #[cfg_attr(
+        not(any(feature = "ply", feature = "3ds", feature = "lwo", feature = "fbx", feature = "usd")),
+        allow(dead_code, reason = "only readers of texture files use it")
+    )]
+    /// The texture file a model names: the first of `names` the assets find, each looked for
+    /// from `dirs` in turn. Its index, or `None` when none is found or the one found isn't an
+    /// image the assets can embed; a later name isn't tried then, as the model named the first.
+    pub fn find(&mut self, assets: &dyn Assets, names: &[impl AsRef<str>], dirs: &[&Path]) -> Option<usize> {
+        let key = (
+            names.iter().map(|n| n.as_ref().to_owned()).collect(),
+            dirs.iter().map(|d| d.to_path_buf()).collect(),
+        );
+        if let Some(&i) = self.found.get(&key) {
+            return i;
+        }
+        let path = names.iter().find_map(|n| {
+            let n = n.as_ref();
+            Some((dirs.iter().find_map(|d| assets.find(n, d))?, n))
+        });
+        if path.is_none()
+            && let Some(first) = names.first()
+        {
+            self.miss(first.as_ref());
+        }
+        let i = path.and_then(|(p, n)| self.file(assets, p, n));
+        self.found.insert(key, i);
+        i
+    }
+
+    /// Notes a texture the model names as `reference` that wasn't found: for a reader that looks its textures up
+    /// itself. Named twice, it is missed once.
+    pub fn miss(&mut self, reference: &str) {
+        let name = reference.trim();
+        if !name.is_empty() && !self.list.missed.files.iter().any(|f| f == name) {
+            self.list.missed.files.push(name.to_owned());
+            self.list.missed.dropped += 1;
+        }
+    }
+
+    #[cfg_attr(
+        not(any(feature = "md3", feature = "md5", feature = "iqm")),
+        allow(
+            dead_code,
+            reason = "only readers of formats that name textures without extensions use it"
+        )
+    )]
+    /// The texture a material or shader names when the name may be a file's without its extension, as game
+    /// formats write them (`models/imp/imp`): as written (the assets find a file of that name in any image
+    /// format), then with each of `endings` added (`.tga`, `_d.tga`: the format's own conventions). A name with
+    /// an extension is only looked for as written.
+    pub fn find_bare(&mut self, assets: &dyn Assets, name: &str, endings: &[&str], dir: &Path) -> Option<usize> {
+        if name.is_empty() {
+            return None;
+        }
+        let mut tries = vec![name.to_owned()];
+        // An extension is short: a dot further back is part of the name.
+        if Path::new(name).extension().is_none_or(|e| e.len() > 4) {
+            tries.extend(endings.iter().map(|e| format!("{name}{e}")));
+        }
+        self.find(assets, &tries, &[dir])
+    }
+
+    #[cfg_attr(
+        not(feature = "obj"),
+        allow(dead_code, reason = "only the OBJ reader reads texture files itself")
+    )]
+    /// What became of the texture file at `path`, when it has been asked for: its index, or
+    /// `None` for one that isn't an image the assets can embed.
+    #[allow(clippy::option_option, reason = "not asked for and not an image differ")]
+    pub fn known(&self, path: &Path) -> Option<Option<usize>> {
+        self.files.get(path).copied()
+    }
+
+    #[cfg_attr(
+        not(feature = "obj"),
+        allow(dead_code, reason = "only the OBJ reader reads texture files itself")
+    )]
+    /// The texture file at `path`, read by the caller as `img`: kept as that file's image, so
+    /// asking for the file again finds it rather than reading it twice.
+    pub fn read(&mut self, path: PathBuf, img: Image) -> usize {
+        if let Some(&Some(i)) = self.files.get(&path) {
+            return i;
+        }
+        let i = self.push(Source::Image(img));
+        self.files.insert(path, Some(i));
         i
     }
 
@@ -208,14 +422,6 @@ impl Images {
     )]
     fn read_file(&mut self, assets: &dyn Assets, path: PathBuf, reference: &str) -> Option<usize> {
         if !self.lazy {
-            // A PNG or JPEG file as it is stays in the file: only its first bytes are read.
-            #[cfg(feature = "fs")]
-            if assets.reads_files()
-                && let Some((head, span)) = crate::document::FileSpan::open(&path, 4)
-                && let Some(mime) = crate::mesh::Image::mime_of(&head)
-            {
-                return Some(self.push(Source::File(span, mime)));
-            }
             let img = assets.load_image(&path)?;
             return Some(self.push(Source::Image(img)));
         }
@@ -355,7 +561,7 @@ pub struct ImageHandle<'d> {
     index: usize,
     json: &'d Value,
     reference: Option<&'d Reference>,
-    doc: &'d Document<'d>,
+    doc: &'d Document,
 }
 
 impl<'d> ImageHandle<'d> {
@@ -430,18 +636,19 @@ impl<'d> ImageHandle<'d> {
                 self.doc.view_shared(crate::num::usize_of(v))?
             } else {
                 let uri = self.json.get("uri").and_then(Value::as_str);
-                data_uri(uri.with_context(|| format!("image {i} has no bytes"))?)?
+                data_uri(uri.with_context(ErrorKind::Corrupt, || format!("image {i} has no bytes"))?)?
                     .1
                     .into()
             };
-            return image_of(bytes, self.mime()).with_context(|| format!("image {i}: unknown image format"));
+            return image_of(bytes, self.mime())
+                .with_context(ErrorKind::Unsupported, || format!("image {i}: unknown image format"));
         };
         let bytes: Cow<'_, [u8]> = match (r.location(), &r.bytes) {
             (_, Some(b)) => Cow::Borrowed(b),
             (Location::File(p), None) => assets
                 .read(p)
-                .with_context(|| format!("image {i}: can't read {}", p.display()))?,
-            _ => bail!("image {i} ({:?}) wasn't found", r.name),
+                .ok_or_else(|| crate::Error::missing(format!("image {i} can't be read")).at(p))?,
+            _ => bail!(MissingAsset, "image {i} ({:?}) wasn't found", r.name),
         };
         let img = if r.raw {
             image_of(crate::Bytes::from(bytes.into_owned()), self.mime())
@@ -449,17 +656,19 @@ impl<'d> ImageHandle<'d> {
             let name = self.path().map_or_else(|| PathBuf::from(&r.name), Path::to_path_buf);
             assets.image(&bytes, &name)
         };
-        img.with_context(|| format!("image {i} ({:?}) isn't an image that can be embedded", r.name))
+        img.with_context(ErrorKind::Unsupported, || {
+            format!("image {i} ({:?}) isn't an image that can be embedded", r.name)
+        })
     }
 }
 
-impl Document<'_> {
+impl Document {
     /// The document's images, read or not. A load with
     /// [`Keep::image_bytes`](crate::document::Keep::image_bytes) off leaves the images it found
     /// unread: each is a glTF image with a `uri` (relative to the model's folder, for a file
     /// under it), and its handle says where it is and reads it.
     pub fn images(&self) -> impl Iterator<Item = ImageHandle<'_>> {
-        let list = self.json.get("images").and_then(Value::as_array);
+        let list = self.base.get("images").and_then(Value::as_array);
         list.into_iter()
             .flatten()
             .enumerate()
@@ -487,7 +696,7 @@ impl Document<'_> {
             let len = bytes.len();
             let buffer = self.push_buffer(bytes);
             let view = self.push_view(serde_json::json!({ "buffer": buffer, "byteLength": len }));
-            if let Some(img) = self.json["images"][i].as_object_mut() {
+            if let Some(img) = self.base_mut()["images"][i].as_object_mut() {
                 img.remove("uri");
                 img.insert("bufferView".into(), view.into());
                 img.insert("mimeType".into(), mime.into());

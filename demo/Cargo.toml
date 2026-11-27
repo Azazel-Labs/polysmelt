@@ -1,0 +1,77 @@
+[package]
+name = "polysmelt-demo"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "MIT-0"
+description = "Browser demo of polysmelt: drop a model in any format, see it lit and animated, download it as GLB"
+
+# Its own workspace: the library's manifest stays as it is, and `cargo package` there never sees this.
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# Renders the README hero and the social preview from real models, offscreen (native only).
+[[bin]]
+name = "media"
+required-features = ["media"]
+
+[features]
+media = ["dep:pollster", "dep:image", "wgpu/dx12", "wgpu/vulkan", "wgpu/metal"]
+
+[dependencies]
+# Every reader that builds for wasm: the list CI checks with clippy on wasm32. `usd` needs openusd,
+# which doesn't build for wasm, and `fs` has no file system to read.
+polysmelt = { path = "..", default-features = false, features = [
+    "stl", "ply", "obj", "gltf", "draco", "vox", "3ds", "webp", "skp", "bvh", "off", "dxf", "fbx", "3mf", "dae",
+    "x3d", "tga", "bmp", "gif", "tiff", "psd", "dds", "splat", "spz", "sog", "mmd", "directx", "md2", "md3", "md5", "iqm",
+    "smd", "ms3d", "b3d", "asf", "c3d", "trc", "htr", "las", "laz", "pcd", "xyz", "e57", "amf", "lwo", "ac3d", "ogre",
+    "flt", "ogex", "vtk", "tiles", "msh", "medit",
+] }
+wgpu = { version = "30.0.2", default-features = false, features = ["std", "wgsl"] }
+glam = { version = "0.34", features = ["bytemuck"] }
+bytemuck = { version = "1", features = ["derive"] }
+serde_json = "1"
+pollster = { version = "1", optional = true }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"], optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# WebGPU where the browser has it, WebGL 2 where it doesn't.
+wgpu = { version = "30.0.2", default-features = false, features = ["webgpu", "webgl"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["HtmlCanvasElement", "ImageBitmap", "Performance", "Window", "console"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+# Rendering is casts between counts, pixels and floats, and short math names.
+cast_possible_truncation = "allow"
+cast_precision_loss = "allow"
+cast_sign_loss = "allow"
+cast_possible_wrap = "allow"
+many_single_char_names = "allow"
+similar_names = "allow"
+too_many_lines = "allow"
+# wasm-bindgen methods take owned values and return what JavaScript reads.
+needless_pass_by_value = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+
+# For the media binary: the release build without the slow link.
+[profile.media]
+inherits = "release"
+lto = false
+codegen-units = 16
+panic = "unwind"

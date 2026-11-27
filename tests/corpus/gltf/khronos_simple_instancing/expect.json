@@ -1,0 +1,21 @@
+{
+  "spec": "EXT_mesh_gpu_instancing: Khronos sample SimpleInstancing, 125 cubes placed by translation, rotation and scale",
+  "source": "KhronosGroup/glTF-Sample-Assets@e124e8d, Models/SimpleInstancing/glTF (CC0-1.0, Marco Hutter)",
+  "file": "SimpleInstancing.gltf",
+  "triangles": 1500,
+  "vertices": 3000,
+  "area": 1687.500062,
+  "bounds": {
+    "min": [
+      -1.666667,
+      -1.666667,
+      -1.666667
+    ],
+    "max": [
+      12.731707,
+      12.731707,
+      12.731707
+    ]
+  },
+  "material_count": 1
+}

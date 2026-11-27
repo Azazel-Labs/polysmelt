@@ -1,0 +1,19 @@
+{
+  "spec": "Blitz3D (B3D version 1): a real file, a creature of 3732 triangles",
+  "source": "assimp/assimp at 711b4e9bbde2, test/models/B3D/WusonBlitz.b3d (BSD-3-Clause, see ../LICENSE-assimp); expectations measured with assimp 6.0.5 (assimp-py 1.2.0)",
+  "triangles": 3732,
+  "bounds": {
+    "min": [
+      -0.459976,
+      -0.000566,
+      -1.622242
+    ],
+    "max": [
+      0.459976,
+      1.515251,
+      1.622242
+    ]
+  },
+  "area": 9.025804,
+  "position_set": "positions.f32"
+}

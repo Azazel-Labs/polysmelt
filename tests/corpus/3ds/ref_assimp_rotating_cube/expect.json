@@ -1,0 +1,51 @@
+{
+  "spec": "3DS (Autodesk 3D Studio chunk format, as lib3ds documents it): a real file, a cube turning through 182 rotation keys, saved on frame 180",
+  "source": "assimp/assimp at 711b4e9bbde2, test/models/3DS/RotatingCube.3DS (BSD-3-Clause, see ../LICENSE-assimp); expectations measured with assimp 6.0.5 (assimp-py 1.2.0). assimp multiplies each rotation key onto the wrong side of the turns before it: the file's mesh matrix, saved on frame 180, is where the keys put the cube only when each turns the ones before it. So the pose is compared on frame 40, while every key still turns about X",
+  "triangles": 12,
+  "poses": [
+    {
+      "animation": 0,
+      "time": 0.0,
+      "bounds": {
+        "min": [
+          -29.34472,
+          -4.08618,
+          -29.25846
+        ],
+        "max": [
+          37.32193,
+          49.20827,
+          34.18132
+        ]
+      }
+    },
+    {
+      "animation": 0,
+      "time": 1.333333,
+      "bounds": {
+        "min": [
+          -29.34472,
+          -15.65707,
+          -18.44433
+        ],
+        "max": [
+          37.32193,
+          53.90236,
+          54.64362
+        ]
+      }
+    }
+  ],
+  "animation_spans": [
+    [
+      0.0,
+      6.03333
+    ]
+  ],
+  "document": {
+    "node_names": [
+      "Box01"
+    ],
+    "animations": 1
+  }
+}

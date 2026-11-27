@@ -4,17 +4,18 @@
 //! Cartesian positions are used where they're valid, spherical ones (range, azimuth, elevation)
 //! turned Cartesian where they aren't; points with neither are left out and counted in the facts.
 //! Each scan's pose (a rotation and translation) is applied in double precision. E57 is in
-//! meters, right-handed and Z-up by convention, so positions turn Y-up. Colors are scaled by the
+//! meters, right-handed and Z-up, so positions turn Y-up. Colors are scaled by the
 //! scan's color limits (or the fields' own range) and taken as sRGB; a point whose color is
 //! marked invalid is transparent black. Normals from the `nor` extension are `NORMAL`.
 //! Intensity is `_INTENSITY`, as stored (the limits are in the extras); row and column indices,
 //! return index and count, time stamps and any other field are float custom attributes, up to
 //! [`COLUMNS`] of them. A file with several scans adds `_SCAN`, the scan's index.
 //!
-//! The file's and each scan's metadata (names, sensor, pose, limits, bounds, acquisition times,
-//! the images' names and projections) are in the asset's extras, and the coordinate system the
-//! file names, if any, under the facts' `georeference`. The images themselves are left in the
-//! file.
+//! The source info has the format's meters, right-handed and Z up (all declared: the standard fixes them), the library
+//! that wrote the file as its tool, the file's creation time (GPS time) as its creation date in
+//! UTC, and the coordinate system the file names, if any, as its georeference. Each scan's
+//! metadata (names, sensor, pose, limits, bounds, acquisition times) and the images' names and
+//! projections are kept beside them. The images themselves are left in the file.
 
 use std::cell::Cell;
 use std::io::{self, BufReader, Read, Seek, SeekFrom};
@@ -23,11 +24,14 @@ use std::rc::Rc;
 use e57::{E57Reader, PointCloud, Projection, RecordDataType, RecordName, RecordValue, Transform};
 use serde_json::{Map, Value, json};
 
+use super::dates;
 use super::points::{self, Cloud, Column};
 use super::{Input, ReadSeek};
 use crate::document::{Document, Keep};
 use crate::num::f32_of;
-use crate::{Context as _, Result};
+use crate::quat;
+use crate::source::{Axis, Fact, Handedness, SourceInfo};
+use crate::{Context as _, ErrorKind, Result};
 
 /// The most custom attributes made from fields that aren't position, normal or color.
 const COLUMNS: usize = 64;
@@ -77,22 +81,33 @@ fn open<'a>(input: &Input<'a>) -> Result<(Reader<'a>, Rc<Meter>)> {
         since: Cell::new(0),
         limit: Cell::new(u64::MAX),
     });
-    let stream = input.seekable().context("reading the E57 file")?;
+    // The header gives the file's length: a shorter file is cut short, whatever the library makes of it.
+    let head = input.head(24)?;
+    ensure!(head.starts_with(b"ASTM-E57"), UnknownFormat, "not an E57 file");
+    if let (Some(declared), Some(len)) = (crate::bytes::u64_at(&head, 16), input.len()) {
+        ensure!(
+            declared <= len,
+            Truncated,
+            "E57 file is cut short: its header gives {declared} bytes and the file holds {len}"
+        );
+    }
+    ensure!(head.len() >= 24, Truncated, "E57 header is cut short");
+    let stream = input.seekable().context(ErrorKind::Corrupt, "reading the E57 file")?;
     let inner = BufReader::with_capacity(1 << 16, stream);
     let reader = E57Reader::new(Watched {
         inner,
         meter: Rc::clone(&meter),
     })
-    .context("not a readable E57 file")?;
+    .context(ErrorKind::Corrupt, "not a readable E57 file")?;
     Ok((reader, meter))
 }
 
-pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document<'static>> {
+pub(crate) fn load(input: Input<'_>, keep: Keep) -> Result<Document> {
     let (mut reader, meter) = open(&input)?;
     let scans = reader.pointclouds();
     let total = scans.iter().fold(0_u64, |a, s| a.saturating_add(s.records));
     points::check_count(total, keep.points(), "E57")?;
-    let threads = keep.threads();
+    let threads = keep.thread_count();
     let parts: Vec<Part> = if threads > 1 && scans.len() > 1 {
         // Each thread opens the file for itself: a reader holds its place in the file.
         let jobs: Vec<usize> = (0..scans.len()).collect();
@@ -292,18 +307,10 @@ fn pose(t: Option<&Transform>) -> ([f64; 9], [f64; 3]) {
     let q = &t.rotation;
     let len = (q.w * q.w + q.x * q.x + q.y * q.y + q.z * q.z).sqrt();
     let rotation = if len.is_finite() && len > 1e-12 {
-        let (w, x, y, z) = (q.w / len, q.x / len, q.y / len, q.z / len);
-        [
-            1.0 - 2.0 * (y * y + z * z),
-            2.0 * (x * y - w * z),
-            2.0 * (x * z + w * y),
-            2.0 * (x * y + w * z),
-            1.0 - 2.0 * (x * x + z * z),
-            2.0 * (y * z - w * x),
-            2.0 * (x * z - w * y),
-            2.0 * (y * z + w * x),
-            1.0 - 2.0 * (x * x + y * y),
-        ]
+        // E57 lists `w` first, and its length is summed in that order.
+        let r = quat::matrix([q.x / len, q.y / len, q.z / len, q.w / len]);
+        // Row-major, as `rotate` reads it.
+        std::array::from_fn(|k| r[k % 3 * 3 + k / 3])
     } else {
         identity
     };
@@ -339,6 +346,7 @@ fn scan(reader: &mut Reader<'_>, meter: &Meter, pc: &PointCloud) -> Result<Part>
     let f = Fields::new(pc);
     ensure!(
         f.cartesian.is_some() || f.spherical.is_some(),
+        Corrupt,
         "an E57 scan has neither Cartesian nor spherical positions"
     );
     // When every field is constant, the `e57` crate can't tell how many values a packet holds.
@@ -399,10 +407,12 @@ fn scan(reader: &mut Reader<'_>, meter: &Meter, pc: &PointCloud) -> Result<Part>
     let mut origin = None;
     meter.since.set(0);
     meter.limit.set(STALL);
-    let points = reader.pointcloud_raw(pc).context("reading an E57 scan")?;
+    let points = reader
+        .pointcloud_raw(pc)
+        .context(ErrorKind::Corrupt, "reading an E57 scan")?;
     for p in points {
         meter.since.set(0);
-        let p = p.context("reading an E57 scan")?;
+        let p = p.context(ErrorKind::Corrupt, "reading an E57 scan")?;
         let local = match (f.cartesian, f.spherical) {
             (Some(c), _) if !flag(&p, f.cartesian_state) => Some(c.map(|k| value(&p, k))),
             (_, Some([r, a, e])) if !flag(&p, f.spherical_state) => {
@@ -442,7 +452,7 @@ fn scan(reader: &mut Reader<'_>, meter: &Meter, pc: &PointCloud) -> Result<Part>
 }
 
 /// The scans together in one document.
-fn document(reader: &Reader<'_>, scans: &[PointCloud], parts: Vec<Part>) -> Result<Document<'static>> {
+fn document(reader: &Reader<'_>, scans: &[PointCloud], parts: Vec<Part>) -> Result<Document> {
     let n: usize = parts.iter().map(|p| p.positions.len()).sum();
     let origin = parts
         .iter()
@@ -513,20 +523,32 @@ fn document(reader: &Reader<'_>, scans: &[PointCloud], parts: Vec<Part>) -> Resu
     cloud.columns = columns;
 
     let scan_list: Vec<Value> = scans.iter().map(describe).collect();
-    let mut source = json!({
-        "format": "E57",
-        "units": "meters",
-        "axes": "Z-up source turned Y-up: glTF x = x, y = z, z = -y",
-        "scans": scan_list,
-    });
+    let mut source = json!({ "scans": scan_list });
     let h = reader.header();
-    source["version"] = json!(format!("{}.{}", h.major, h.minor));
     source["guid"] = json!(reader.guid());
-    if let Some(v) = reader.library_version().filter(|v| !v.is_empty()) {
-        source["libraryVersion"] = json!(v);
-    }
+    // Meters, right-handed and Z up (the axis its spherical coordinates rise from) by the standard.
+    let mut info = SourceInfo {
+        format: Some("E57".into()),
+        version: Some(format!("{}.{}", h.major, h.minor)),
+        meters_per_unit: Fact::Declared(1.0),
+        unit: Some("meter".into()),
+        up_axis: Fact::Declared(Axis::PosZ),
+        handedness: Fact::Declared(Handedness::Right),
+        tool: reader
+            .library_version()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_owned),
+        ..SourceInfo::default()
+    };
+    info.converted.up_axis = true;
     if let Some(c) = reader.creation() {
-        source["creation"] = json!({ "gpsTime": c.gps_time, "atomicReference": c.atomic_reference });
+        info.created = dates::gps(c.gps_time).filter(|_| c.gps_time > 0.0);
+        if info.created.is_none() {
+            source["creation"] = json!({ "gpsTime": c.gps_time, "atomicReference": c.atomic_reference });
+        } else if c.atomic_reference {
+            source["creationAtomicReference"] = json!(true);
+        }
     }
     let images: Vec<Value> = reader
         .images()
@@ -571,7 +593,7 @@ fn document(reader: &Reader<'_>, scans: &[PointCloud], parts: Vec<Part>) -> Resu
     }
     let mut facts = Map::new();
     if dropped > 0 {
-        facts.insert("droppedPoints".into(), json!(dropped));
+        facts.insert("dropped_points".into(), json!(dropped));
     }
     if let Some(w) = reader.coordinate_metadata().map(str::trim).filter(|w| !w.is_empty()) {
         // glTF's axes back to the file's: x, -z, y.
@@ -591,9 +613,10 @@ fn document(reader: &Reader<'_>, scans: &[PointCloud], parts: Vec<Part>) -> Resu
                 g["verticalEpsg"] = json!(e);
             }
         }
-        facts.insert("georeference".into(), g);
+        info.georeference = Some(g);
     }
-    Ok(cloud.document(source, facts))
+    let Value::Object(source) = source else { unreachable!() };
+    Ok(cloud.document(&info, source, facts))
 }
 
 fn put(v: &mut Value, key: &str, s: Option<&String>) {
@@ -750,6 +773,10 @@ mod tests {
         {
             let mut w = E57Writer::new(&mut out, "file-guid").unwrap();
             w.set_coordinate_metadata(wkt.map(String::from));
+            w.set_creation(Some(e57::DateTime {
+                gps_time: 1_300_000_018.0,
+                atomic_reference: false,
+            }));
             for (k, (n, pose)) in scans.iter().enumerate() {
                 line(&mut w, &format!("g{k}"), *n, pose.clone(), far);
             }
@@ -758,12 +785,12 @@ mod tests {
         out.into_inner()
     }
 
-    fn read(bytes: &[u8], keep: Keep) -> Result<Document<'static>> {
+    fn read(bytes: &[u8], keep: Keep) -> Result<Document> {
         load(Input::memory(bytes, "t.e57"), keep)
     }
 
-    fn data(doc: &Document<'_>, key: &str) -> Vec<u8> {
-        let j = &doc.json;
+    fn data(doc: &Document, key: &str) -> Vec<u8> {
+        let j = &doc.json();
         let a = j["meshes"][0]["primitives"][0]["attributes"][key].as_u64().unwrap() as usize;
         let acc = &j["accessors"][a];
         let view = &j["bufferViews"][acc["bufferView"].as_u64().unwrap() as usize];
@@ -773,14 +800,14 @@ mod tests {
         doc.buffer(0).unwrap()[start..start + len].to_vec()
     }
 
-    fn floats(doc: &Document<'_>, key: &str) -> Vec<f32> {
+    fn floats(doc: &Document, key: &str) -> Vec<f32> {
         data(doc, key)
             .chunks_exact(4)
             .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect()
     }
 
-    fn u16s(doc: &Document<'_>, key: &str) -> Vec<u16> {
+    fn u16s(doc: &Document, key: &str) -> Vec<u16> {
         data(doc, key)
             .chunks_exact(2)
             .map(|c| u16::from_le_bytes([c[0], c[1]]))
@@ -801,13 +828,21 @@ mod tests {
         // Red 255 at point 255, green full everywhere, blue none, opaque.
         assert_eq!(&c[255 * 4..256 * 4], &[65535, 65535, 0, 65535]);
         assert_eq!(c[0], 0);
-        let s = &doc.json["asset"]["extras"]["source"];
+        let s = &doc.json()["asset"]["extras"]["source"];
         assert_eq!(s["format"], "E57");
         assert_eq!(s["scans"][0]["name"], "scan g0");
         assert_eq!(s["scans"][0]["sensor"]["vendor"], "test");
-        assert!(doc.facts.get("georeference").is_none());
+        let info = doc.source_info();
+        assert_eq!(info.version.as_deref(), Some("1.0"));
+        assert_eq!(info.meters_per_unit, Fact::Declared(1.0));
+        assert_eq!(info.up_axis, Fact::Declared(Axis::PosZ));
+        assert_eq!(info.handedness, Fact::Declared(Handedness::Right));
+        assert!(info.converted.up_axis && !info.converted.units);
+        assert!(info.tool.as_deref().is_some_and(|t| t.starts_with("Rust E57 Library")));
+        assert_eq!(info.created.as_deref(), Some("2021-03-17T07:06:40Z"));
+        assert!(info.georeference.is_none());
         assert!(
-            doc.json["meshes"][0]["primitives"][0]["attributes"]
+            doc.json()["meshes"][0]["primitives"][0]["attributes"]
                 .get("_SCAN")
                 .is_none()
         );
@@ -832,7 +867,7 @@ mod tests {
         };
         let bytes = file(&[(5, None), (5, Some(turn))], 0.0, None);
         for threads in [1, 2] {
-            let doc = read(&bytes, Keep { threads, ..Keep::ALL }).unwrap();
+            let doc = read(&bytes, Keep::ALL.with_threads(threads)).unwrap();
             assert_eq!(doc.facts["points"], 10);
             let p = floats(&doc, "POSITION");
             // The second scan's first point, local (0, 2, 3): file (8, 20, 3), glTF (8, 3, -20).
@@ -841,7 +876,7 @@ mod tests {
             }
             let scan = floats(&doc, "_SCAN");
             assert_eq!((scan[4], scan[5]), (0.0, 1.0));
-            assert!(doc.json["asset"]["extras"]["source"]["scans"][1]["pose"].is_object());
+            assert!(doc.json()["asset"]["extras"]["source"]["scans"][1]["pose"].is_object());
         }
     }
 
@@ -849,12 +884,13 @@ mod tests {
     fn far_scans_keep_their_detail_and_their_coordinate_system() {
         let wkt = r#"PROJCS["WGS 84 / UTM zone 17N",GEOGCS["WGS 84"],UNIT["metre",1],AUTHORITY["EPSG","32617"]]"#;
         let doc = read(&file(&[(50, None)], 500_000.0, Some(wkt)), Keep::ALL).unwrap();
-        let t = doc.json["nodes"][0]["translation"].as_array().unwrap();
+        let t = doc.json()["nodes"][0]["translation"].as_array().unwrap();
         assert_eq!(t[0], 500_000.0);
         let p = floats(&doc, "POSITION");
         // A millimeter apart, half a million meters out.
         assert!((p[3] - p[0] - 0.001).abs() < 1e-6, "{} {}", p[0], p[3]);
-        let g = &doc.facts["georeference"];
+        assert!(doc.facts.get("georeference").is_none());
+        let g = &doc.source_info().georeference.unwrap();
         assert_eq!(g["epsg"], 32617);
         assert_eq!(g["kind"], "projected");
         assert_eq!(g["origin"][0], 500_000.0);
@@ -915,7 +951,7 @@ mod tests {
         }
         let doc = read(out.get_ref(), Keep::ALL).unwrap();
         assert_eq!(doc.facts["points"], 3);
-        assert_eq!(doc.facts["droppedPoints"], 1);
+        assert_eq!(doc.facts["dropped_points"], 1);
         let p = floats(&doc, "POSITION");
         let want = [[2.0, 0.0, 0.0], [0.0, 0.0, -3.0], [0.0, -5.0, 0.0]];
         for (got, want) in p.chunks_exact(3).zip(want) {
@@ -932,14 +968,7 @@ mod tests {
     #[test]
     fn too_many_points_are_refused() {
         let bytes = file(&[(100, None)], 0.0, None);
-        let err = read(
-            &bytes,
-            Keep {
-                max_points: 99,
-                ..Keep::ALL
-            },
-        )
-        .unwrap_err();
+        let err = read(&bytes, Keep::ALL.with_max_points(99)).unwrap_err();
         assert!(err.to_string().contains("max_points"), "{err}");
     }
 
@@ -1005,6 +1034,6 @@ mod tests {
         checksum(&mut b);
         let doc = read(&b, Keep::ALL).unwrap();
         assert_eq!(doc.facts["points"], 0);
-        assert_eq!(doc.facts["droppedPoints"], 10);
+        assert_eq!(doc.facts["dropped_points"], 10);
     }
 }

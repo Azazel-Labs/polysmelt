@@ -212,7 +212,8 @@ fn color(block: &[u8], four: bool, out: &mut [[u8; 4]; 16]) {
 fn ramp(block: &[u8]) -> [u8; 16] {
     let (a, b) = (u32::from(block[0]), u32::from(block[1]));
     let mut values = [0u8; 8];
-    let mix = |wa: u32, wb: u32, sum: u32| u8::try_from((a * wa + b * wb) / sum).unwrap_or(u8::MAX);
+    // Direct3D blends the two ends as fractions, so a step is the nearest value, not the one below it.
+    let mix = |wa: u32, wb: u32, sum: u32| u8::try_from((2 * (a * wa + b * wb) + sum) / (2 * sum)).unwrap_or(u8::MAX);
     values[0] = mix(1, 0, 1);
     values[1] = mix(0, 1, 1);
     if a > b {
@@ -261,12 +262,12 @@ mod tests {
         b.extend([0b0100, 0b1110, 0, 0]);
         let px = decoded(&b, "a.dds").unwrap().2;
         assert_eq!(px, [0, 0, 255, 255, 255, 0, 0, 255, 127, 0, 127, 255, 0, 0, 0, 0]);
-        // BC3: an alpha ramp from 255 to 0 over a white block.
+        // BC3: an alpha ramp from 255 to 0 over a white block. Six sevenths of 255 is 218.57, five sevenths 182.14.
         let mut b = dds(4, 1, 4, *b"DXT5", 0, [0; 4]);
         b.extend([255, 0, 0b1000_1000, 0b0000_0110, 0, 0, 0, 0]);
         b.extend([0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0]);
         let alpha: Vec<u8> = decoded(&b, "a.dds").unwrap().2.chunks(4).map(|p| p[3]).collect();
-        assert_eq!(alpha, [255, 0, 218, 182]);
+        assert_eq!(alpha, [255, 0, 219, 182]);
         // BC5 by DX10 format 83: a flat normal's z is all but full.
         let mut b = dds(1, 1, 4, *b"DX10", 0, [0; 4]);
         b.extend(83u32.to_le_bytes());

@@ -1,0 +1,28 @@
+{
+  "spec": "VTK File Formats: a real file: XML ASCII, one quadratic tetrahedron",
+  "source": "VTK's test data (Testing/Data), BSD license, see ../LICENSE-VTK; expectations computed with VTK 9.7.2",
+  "triangles": 6,
+  "bounds": {
+    "min": [
+      0.0,
+      -0.5,
+      -2.0
+    ],
+    "max": [
+      3.0,
+      0.800000011920929,
+      1.0
+    ]
+  },
+  "area": 2.902882,
+  "facts": {
+    "triangles": 6
+  },
+  "document": {
+    "attributes": [
+      "_SCALARS"
+    ]
+  },
+  "colors": false,
+  "uvs": false
+}

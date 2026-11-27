@@ -1,0 +1,111 @@
+{
+ "asset": {
+  "version": "1.0"
+ },
+ "geometricError": 10,
+ "root": {
+  "boundingVolume": {
+   "box": [
+    0,
+    0,
+    0,
+    4,
+    0,
+    0,
+    0,
+    4,
+    0,
+    0,
+    0,
+    4
+   ]
+  },
+  "geometricError": 5,
+  "refine": "ADD",
+  "content": {
+   "uri": "here.b3dm"
+  },
+  "children": [
+   {
+    "boundingVolume": {
+     "box": [
+      0,
+      0,
+      0,
+      4,
+      0,
+      0,
+      0,
+      4,
+      0,
+      0,
+      0,
+      4
+     ]
+    },
+    "geometricError": 0,
+    "transform": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     9,
+     9,
+     9,
+     1
+    ],
+    "content": {
+     "uri": "gone.b3dm"
+    }
+   },
+   {
+    "boundingVolume": {
+     "box": [
+      0,
+      0,
+      0,
+      4,
+      0,
+      0,
+      0,
+      4,
+      0,
+      0,
+      0,
+      4
+     ]
+    },
+    "geometricError": 0,
+    "transform": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     1,
+     1,
+     1,
+     1
+    ],
+    "content": {
+     "uri": "https://example.com/far.b3dm"
+    }
+   }
+  ]
+ }
+}

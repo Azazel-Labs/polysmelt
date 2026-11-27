@@ -11,25 +11,26 @@
     ]
   },
   "document": {
-    "nodes": 3,
+    "nodes": 4,
     "animations": 1,
     "channels": 3,
     "node_names": [
       "hip",
       "knee",
-      "foot"
+      "foot",
+      "RootNode"
     ],
     "source": {
       "format": "OGRE",
       "version": "Serializer_v1.80",
       "kind": "skeleton",
-      "byteOrder": "big-endian"
+      "byteOrder": "big"
     }
   },
   "rig": [
     {
       "node": "hip",
-      "parent": null,
+      "parent": "RootNode",
       "translation": [
         0,
         1,

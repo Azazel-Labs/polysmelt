@@ -1,0 +1,13 @@
+{
+ "kind": "pnts",
+ "draco": [
+  "NORMAL",
+  "POSITION",
+  "RGB"
+ ],
+ "twin": "cesium_points_normals",
+ "tolerance": {
+  "positions": 0.01,
+  "normals": 0.05
+ }
+}

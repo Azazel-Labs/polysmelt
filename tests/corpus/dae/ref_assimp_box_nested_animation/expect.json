@@ -1,0 +1,67 @@
+{
+  "spec": "COLLADA 1.4.1: a real file, a skinned box with animations nested in one another",
+  "source": "assimp/assimp at 711b4e9bbde2, test/models/Collada/box_nested_animation.dae (BSD-3-Clause, see ../LICENSE-assimp); expectations measured with assimp 6.0.5 (assimp-py 1.2.0)",
+  "triangles": 12,
+  "bounds": {
+    "min": [
+      -2.000001,
+      0.0,
+      -2.000001
+    ],
+    "max": [
+      0.0,
+      2.000001,
+      0.0
+    ]
+  },
+  "area": 24.000005,
+  "position_set": "positions.f32",
+  "poses": [
+    {
+      "animation": 0,
+      "time": 0.833333,
+      "bounds": {
+        "min": [
+          1.10355,
+          0.16363,
+          -1.69045
+        ],
+        "max": [
+          3.80834,
+          3.15099,
+          0.77295
+        ]
+      }
+    }
+  ],
+  "animation_spans": [
+    [
+      0.0,
+      1.625
+    ]
+  ],
+  "document": {
+    "animations": 1
+  },
+  "rig": [
+    {
+      "node": "Bone",
+      "world": [
+        1.0,
+        0.0,
+        1.0
+      ],
+      "parent": "Armature"
+    },
+    {
+      "node": "Bone",
+      "animation": 0,
+      "time": 0.833333,
+      "world": [
+        2.0,
+        0.0,
+        2.0
+      ]
+    }
+  ]
+}

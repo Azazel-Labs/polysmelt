@@ -1,4 +1,6 @@
-//! `MagicaVoxel` `.vox` (the format as documented in ephtracy/voxel-model, versions 150 and 200).
+//! `MagicaVoxel` `.vox` (the format as documented in ephtracy/voxel-model, which `MagicaVoxel` has written as
+//! versions 150 and 200). The header's version isn't checked: the chunks are the same in both, and a file that
+//! gives another number is read by its chunks all the same, its version reported as written.
 //!
 //! Each model becomes a mesh of the faces between a voxel and empty space, a primitive per
 //! palette color, in its own space: centered on its pivot, `floor(size / 2)`, when a scene graph
@@ -12,18 +14,22 @@
 //! are kept, hidden with `KHR_node_visibility`. More than one transform frame is a step animation
 //! at [`FRAMES_PER_SECOND`]. Colors are sRGB (the default palette when the file has none), and
 //! `MATL` (or legacy `MATT`) metal, roughness, emission and glass carry over, glass's
-//! transparency as opacity too. The asset's `extras.source` keeps the palette, every material,
+//! transparency as `KHR_materials_transmission` alone: the material stays opaque to alpha, as the
+//! extension means it to be. The asset's `extras.source` keeps the palette, every material,
 //! the layers, render settings, cameras, notes and index map. Coordinates turn from Z-up to
-//! glTF's Y-up.
+//! glTF's Y-up. The source info has Z up and right-handed (declared: the editor's space is every
+//! file's), and an assumed frame rate when the file has a step animation; a voxel's size is unknown.
 
 use std::collections::HashMap;
 
 use serde_json::{Map, Value, json};
 
+use super::keys::{self, Interp, Path, Track};
 use crate::document::{Builder, Document, Keep};
 use crate::material::{Factor, Full};
 use crate::mesh::{Material, Prim, srgb_to_linear};
-use crate::{Context as _, Result};
+use crate::source::{Axis, Fact, Handedness, SourceInfo};
+use crate::{Context as _, ErrorKind, Result};
 
 /// The most voxels a file may hold, unless [`Keep::max_triangles`] is raised past its default,
 /// which raises this in proportion.
@@ -110,32 +116,33 @@ struct Body<'a> {
 
 impl Body<'_> {
     fn u32(&mut self) -> Result<u32> {
-        let v = self.b.get(self.at..self.at + 4).context("VOX chunk ends early")?;
+        let v = self.b.get(self.at..self.at + 4).and_then(|v| v.try_into().ok());
+        let v = v.context(ErrorKind::Truncated, "VOX chunk is cut short")?;
         self.at += 4;
-        Ok(u32::from_le_bytes(v.try_into()?))
+        Ok(u32::from_le_bytes(v))
     }
 
     fn i32(&mut self) -> Result<i32> {
         Ok(self.u32()?.cast_signed())
     }
 
-    fn string(&mut self) -> Result<&str> {
+    fn string(&mut self) -> Result<String> {
         let n = self.u32()? as usize;
         let s = self
             .b
             .get(self.at..self.at.saturating_add(n))
-            .context("VOX chunk ends early")?;
+            .context(ErrorKind::Truncated, "VOX chunk is cut short")?;
         self.at += n;
-        Ok(std::str::from_utf8(s).unwrap_or(""))
+        Ok(crate::bytes::text(s).into_owned())
     }
 
     fn dict(&mut self) -> Result<HashMap<String, String>> {
         let n = self.u32()?;
-        ensure!(n <= 4096, "VOX dictionary too large");
+        ensure!(n <= 4096, LimitExceeded, "VOX dictionary too large");
         let mut d = HashMap::new();
         for _ in 0..n {
-            let k = self.string()?.to_owned();
-            let v = self.string()?.to_owned();
+            let k = self.string()?;
+            let v = self.string()?;
             d.insert(k, v);
         }
         Ok(d)
@@ -176,16 +183,11 @@ struct Matl {
     metal: f32,
     rough: Option<f32>,
     emit: f32,
+    /// Glass's or a blend's transparency (`_trans`, or the older `_alpha`). It is light let through, not
+    /// coverage: the material stays opaque to alpha, so a renderer with transmission doesn't thin it twice.
     transmission: Option<f32>,
     ior: Option<f32>,
-    /// Glass's or a blend's opacity, from the transparency it gives (`_trans`, or the older
-    /// `_alpha`), so a client without transmission still shows it see-through; never below
-    /// [`MIN_OPACITY`], so clear glass doesn't vanish there.
-    opacity: Option<f32>,
 }
-
-/// The least opacity glass is given.
-const MIN_OPACITY: f32 = 0.1;
 
 impl Matl {
     fn new(d: &Dict) -> Matl {
@@ -206,12 +208,12 @@ impl Matl {
             } else {
                 0.0
             },
-            transmission: glass.then(|| f("_trans").unwrap_or(if ty == "_glass" { 1.0 } else { 0.0 })),
+            transmission: glass.then(|| {
+                f("_trans")
+                    .or_else(|| f("_alpha"))
+                    .unwrap_or(if ty == "_glass" { 1.0 } else { 0.0 })
+            }),
             ior: (metal || glass).then(|| f("_ior")).flatten().map(|i| 1.0 + i),
-            opacity: glass
-                .then(|| f("_trans").or_else(|| f("_alpha")))
-                .flatten()
-                .map(|t| (1.0 - t.clamp(0.0, 1.0)).max(MIN_OPACITY)),
         }
     }
 
@@ -247,8 +249,10 @@ impl Matl {
     }
 }
 
-/// `.vox` has no frame rate; animation frames are this many to a second.
-const FRAMES_PER_SECOND: f32 = 10.0;
+/// `.vox` has no frame rate, and its editor documents none: animation frames are this many to a second, the
+/// readers' shared assumption.
+#[allow(clippy::cast_possible_truncation, reason = "a small whole number")]
+const FRAMES_PER_SECOND: f32 = keys::ASSUMED_FRAME_RATE as f32;
 
 /// The most glTF nodes a scene graph may unfold into (a group listed twice is walked twice).
 const MAX_NODES: usize = 1 << 16;
@@ -277,7 +281,7 @@ struct Vox {
 
 /// `MagicaVoxel`: each model a mesh of the faces between its voxels and empty space, one
 /// primitive per color; the scene graph as nodes, hidden ones kept but hidden.
-pub(crate) fn vox(data: &[u8], keep: Keep) -> Result<Document<'static>> {
+pub(crate) fn vox(data: &[u8], keep: Keep) -> Result<Document> {
     let per_voxel = crate::mesh::MAX_TRIANGLES / MAX_VOXELS;
     let v = read(data, (keep.triangles() / per_voxel).max(MAX_VOXELS))?;
     let scene = v.nodes.contains_key(&0);
@@ -307,7 +311,7 @@ pub(crate) fn vox(data: &[u8], keep: Keep) -> Result<Document<'static>> {
         return Ok(Document::empty(facts));
     }
 
-    let mut b = Builder::default();
+    let mut b = Builder::new(keep.crease_angle());
     let mut meshes = Vec::new();
     let mut mesh_of = Vec::with_capacity(models.len());
     for (m, prims) in meshed.into_iter().enumerate() {
@@ -319,7 +323,7 @@ pub(crate) fn vox(data: &[u8], keep: Keep) -> Result<Document<'static>> {
             })
             .collect();
         mesh_of.push(b.mesh(prims, colors.len()).map(|mut mesh| {
-            mesh["name"] = json!(format!("model_{m}"));
+            mesh["name"] = json!(format!("model{m}"));
             meshes.push(mesh);
             meshes.len() - 1
         }));
@@ -363,7 +367,9 @@ pub(crate) fn vox(data: &[u8], keep: Keep) -> Result<Document<'static>> {
         json.insert("extensionsUsed".into(), json!(["KHR_node_visibility"]));
     }
     if keep.animations && !animated.is_empty() {
-        json.insert("animations".into(), json!([animation(&mut b, &animated)]));
+        let mut writer = keys::Writer::new(keep.extras);
+        writer.animation(&mut b, None, None, animation(&animated));
+        writer.finish(&mut b);
     }
 
     let palette = v.palette.unwrap_or_else(default_palette);
@@ -374,8 +380,7 @@ pub(crate) fn vox(data: &[u8], keep: Keep) -> Result<Document<'static>> {
             let rgba = palette[usize::from(c)];
             let [r, g, b] = [rgba[0], rgba[1], rgba[2]].map(|v| srgb_to_linear(f32::from(v) / 255.0));
             let x = matl.get(&u32::from(c));
-            let alpha = x.and_then(|x| x.opacity).unwrap_or(1.0);
-            let mut mat = Full::from(Material::plain(&format!("color_{c}"), [r, g, b, alpha]));
+            let mut mat = Full::from(Material::plain(&format!("color{c}"), [r, g, b, 1.0]));
             if let Some(x) = x {
                 mat.metallic = x.metal;
                 if let Some(rough) = x.rough {
@@ -402,9 +407,6 @@ pub(crate) fn vox(data: &[u8], keep: Keep) -> Result<Document<'static>> {
 /// The asset's `extras.source`: what the file says that the nodes and materials don't.
 fn source(v: &Vox) -> Value {
     let mut s = Map::new();
-    s.insert("format".into(), json!("VOX"));
-    s.insert("version".into(), json!(v.version));
-    s.insert("upAxis".into(), json!("Z"));
     if let Some(p) = &v.palette {
         let hex: Vec<String> = p[1..]
             .iter()
@@ -432,9 +434,6 @@ fn source(v: &Vox) -> Value {
             .collect();
         s.insert("layers".into(), json!(layers));
     }
-    if v.nodes.contains_key(&0) {
-        s.insert("framesPerSecond".into(), json!(FRAMES_PER_SECOND));
-    }
     for (key, list) in [("render", &v.render), ("cameras", &v.cameras)] {
         if !list.is_empty() {
             s.insert(key.into(), json!(list));
@@ -449,18 +448,39 @@ fn source(v: &Vox) -> Value {
     if !v.skipped.is_empty() {
         s.insert("skipped".into(), json!(v.skipped));
     }
+    // Z up and right-handed is the editor's space, the same in every file; a voxel has no size.
+    let mut info = SourceInfo {
+        format: Some("VOX".into()),
+        version: Some(v.version.to_string()),
+        up_axis: Fact::Declared(Axis::PosZ),
+        handedness: Fact::Declared(Handedness::Right),
+        frame_rate: if v.nodes.contains_key(&0) {
+            Fact::Assumed(f64::from(FRAMES_PER_SECOND))
+        } else {
+            Fact::Unknown
+        },
+        ..SourceInfo::default()
+    };
+    info.converted.up_axis = true;
+    info.write(&mut s);
     Value::Object(s)
 }
 
 /// Reads every chunk, refusing a file of more than `max_voxels` voxels.
 fn read(data: &[u8], max_voxels: usize) -> Result<Vox> {
-    ensure!(data.len() >= 20 && &data[..4] == b"VOX ", "not a MagicaVoxel file");
+    ensure!(
+        data.len() >= 20 && &data[..4] == b"VOX ",
+        UnknownFormat,
+        "not a MagicaVoxel file"
+    );
     let le = |at: usize| -> Result<u32> {
         Ok(u32::from_le_bytes(
-            data.get(at..at + 4).context("VOX ends early")?.try_into()?,
+            data.get(at..at + 4)
+                .and_then(|b| b.try_into().ok())
+                .context(ErrorKind::Truncated, "VOX file is cut short")?,
         ))
     };
-    ensure!(&data[8..12] == b"MAIN", "VOX file has no MAIN chunk");
+    ensure!(&data[8..12] == b"MAIN", Corrupt, "VOX file has no MAIN chunk");
     let mut v = Vox {
         version: le(4)?,
         ..Vox::default()
@@ -473,18 +493,30 @@ fn read(data: &[u8], max_voxels: usize) -> Result<Vox> {
         let id = &data[at..at + 4];
         let content = le(at + 4)? as usize;
         let start = at + 12;
-        let end = start.checked_add(content).context("VOX chunk overflow")?;
-        let next = end.checked_add(le(at + 8)? as usize).context("VOX chunk overflow")?;
-        let body = data.get(start..end).context("VOX chunk ends early")?;
+        let end = start
+            .checked_add(content)
+            .context(ErrorKind::Corrupt, "VOX chunk overflow")?;
+        let next = end
+            .checked_add(le(at + 8)? as usize)
+            .context(ErrorKind::Corrupt, "VOX chunk overflow")?;
+        let body = data
+            .get(start..end)
+            .context(ErrorKind::Truncated, "VOX chunk is cut short")?;
         let mut b = Body { b: body, at: 0 };
         match id {
             b"SIZE" => size = Some([b.i32()?, b.i32()?, b.i32()?]),
             b"XYZI" => {
                 let n = b.u32()? as usize;
                 total = total.saturating_add(n);
-                ensure!(total <= max_voxels, "too many voxels to convert ({total})");
-                let raw = body.get(4..4 + n * 4).context("VOX voxels end early")?;
-                let size = size.take().context("VOX voxels without a SIZE")?;
+                ensure!(
+                    total <= max_voxels,
+                    LimitExceeded,
+                    "too many voxels to convert ({total})"
+                );
+                let raw = body
+                    .get(4..4 + n * 4)
+                    .context(ErrorKind::Truncated, "VOX voxels are cut short")?;
+                let size = size.take().context(ErrorKind::Corrupt, "VOX voxels without a SIZE")?;
                 v.models.push(Model {
                     size,
                     voxels: raw.as_chunks::<4>().0.to_vec(),
@@ -492,7 +524,9 @@ fn read(data: &[u8], max_voxels: usize) -> Result<Vox> {
             }
             b"RGBA" => {
                 // Entry i is color index i + 1.
-                let raw = body.get(..1024).context("VOX palette ends early")?;
+                let raw = body
+                    .get(..1024)
+                    .context(ErrorKind::Truncated, "VOX palette is cut short")?;
                 let mut p = [[0u8; 4]; 256];
                 for (i, c) in raw.as_chunks::<4>().0.iter().take(255).enumerate() {
                     p[i + 1] = *c;
@@ -508,7 +542,8 @@ fn read(data: &[u8], max_voxels: usize) -> Result<Vox> {
                 let n = b.u32()?;
                 ensure!(
                     n as usize <= body.len() / 4,
-                    "VOX transform lists more frames than it holds"
+                    Truncated,
+                    "VOX transform is cut short: it lists more frames than it holds"
                 );
                 let mut frames = Vec::new();
                 for k in 0..n {
@@ -542,7 +577,8 @@ fn read(data: &[u8], max_voxels: usize) -> Result<Vox> {
                 let n = b.u32()?;
                 ensure!(
                     n as usize <= body.len() / 4,
-                    "VOX group lists more children than it holds"
+                    Truncated,
+                    "VOX group is cut short: it lists more children than it holds"
                 );
                 let children = (0..n).map(|_| b.u32()).collect::<Result<_>>()?;
                 v.nodes.insert(id, Node::Group { attrs, children });
@@ -553,7 +589,8 @@ fn read(data: &[u8], max_voxels: usize) -> Result<Vox> {
                 let n = b.u32()?;
                 ensure!(
                     n as usize <= body.len() / 4,
-                    "VOX shape lists more models than it holds"
+                    Truncated,
+                    "VOX shape is cut short: it lists more models than it holds"
                 );
                 let mut models = Vec::new();
                 for _ in 0..n {
@@ -579,16 +616,25 @@ fn read(data: &[u8], max_voxels: usize) -> Result<Vox> {
             }
             b"NOTE" => {
                 let n = b.u32()?;
-                ensure!(n as usize <= body.len() / 4, "VOX note lists more names than it holds");
+                ensure!(
+                    n as usize <= body.len() / 4,
+                    Truncated,
+                    "VOX note is cut short: it lists more names than it holds"
+                );
                 for _ in 0..n {
-                    let note = b.string()?.to_owned();
+                    let note = b.string()?;
                     v.notes.push(note);
                 }
             }
-            b"IMAP" => v.index_map = body.get(..256).context("VOX index map ends early")?.to_vec(),
+            b"IMAP" => {
+                v.index_map = body
+                    .get(..256)
+                    .context(ErrorKind::Truncated, "VOX index map is cut short")?
+                    .to_vec();
+            }
             b"PACK" => {}
             _ => {
-                let name = String::from_utf8_lossy(id).into_owned();
+                let name = crate::bytes::text(id).into_owned();
                 if !v.skipped.contains(&name) {
                     v.skipped.push(name);
                 }
@@ -596,7 +642,7 @@ fn read(data: &[u8], max_voxels: usize) -> Result<Vox> {
         }
         at = next;
     }
-    ensure!(!v.models.is_empty(), "VOX file has no model");
+    ensure!(!v.models.is_empty(), Empty, "VOX file has no model");
     Ok(v)
 }
 
@@ -617,9 +663,10 @@ impl Walk<'_> {
     /// The glTF node for scene node `id` (a transform with the group or shape under it), its
     /// index; `None` for an id that isn't there.
     fn visit(&mut self, id: u32, depth: usize, visible: bool) -> Result<Option<usize>> {
-        ensure!(depth < 64, "VOX scene graph too deep");
+        ensure!(depth < 64, LimitExceeded, "VOX scene graph too deep");
         ensure!(
             self.out.len() < MAX_NODES,
+            LimitExceeded,
             "VOX scene graph unfolds into too many nodes"
         );
         let Some(node) = self.v.nodes.get(&id) else {
@@ -703,7 +750,7 @@ impl Walk<'_> {
                         && self.out.len() < MAX_NODES
                     {
                         self.out.push(json!({
-                            "name": format!("frame_{}", frame(d)),
+                            "name": format!("frame{}", frame(d)),
                             "mesh": mesh,
                             "extensions": { "KHR_node_visibility": { "visible": false } },
                             "extras": { "frame": frame(d), "model": m },
@@ -826,37 +873,34 @@ fn quaternion(r: &[[i32; 3]; 3]) -> [f32; 4] {
     q.map(|c| if c.abs() < 1e-6 { 0.0 } else { c })
 }
 
-/// One animation stepping each animated node through its frames.
+/// The tracks of the one animation stepping each animated node through its frames. The file gives it no name, so
+/// it has none.
 #[allow(clippy::float_cmp, reason = "exact: a scale is -1 or 1")]
-fn animation(b: &mut Builder, animated: &[(usize, &[Frame])]) -> Value {
-    let (mut channels, mut samplers) = (Vec::new(), Vec::new());
+fn animation(animated: &[(usize, &[Frame])]) -> Vec<Track> {
+    let mut tracks = Vec::new();
     for &(node, frames) in animated {
         let mut frames: Vec<&Frame> = frames.iter().collect();
         frames.sort_by_key(|f| f.number);
         frames.dedup_by_key(|f| f.number);
         #[allow(clippy::cast_precision_loss, reason = "frame numbers are small")]
         let times: Vec<f32> = frames.iter().map(|f| f.number as f32 / FRAMES_PER_SECOND).collect();
-        let input = b.floats(times, "SCALAR", true);
         let trs: Vec<_> = frames.iter().map(|f| gltf_trs(&f.xform)).collect();
         let mirrors = trs.iter().any(|(.., s)| *s != [1.0; 3]);
         let mut paths = vec![
-            (
-                "translation",
-                trs.iter().flat_map(|(t, ..)| *t).collect::<Vec<_>>(),
-                "VEC3",
-            ),
-            ("rotation", trs.iter().flat_map(|(_, q, _)| *q).collect(), "VEC4"),
+            (Path::Translation, trs.iter().flat_map(|(t, ..)| *t).collect::<Vec<_>>()),
+            (Path::Rotation, trs.iter().flat_map(|(_, q, _)| *q).collect()),
         ];
         if mirrors {
-            paths.push(("scale", trs.iter().flat_map(|(.., s)| *s).collect(), "VEC3"));
+            paths.push((Path::Scale, trs.iter().flat_map(|(.., s)| *s).collect()));
         }
-        for (path, values, kind) in paths {
-            let output = b.floats(values, kind, false);
-            channels.push(json!({ "sampler": samplers.len(), "target": { "node": node, "path": path } }));
-            samplers.push(json!({ "input": input, "output": output, "interpolation": "STEP" }));
+        for (path, values) in paths {
+            tracks.push(Track {
+                interp: Interp::Step,
+                ..Track::linear(node, path, times.clone(), values)
+            });
         }
     }
-    json!({ "name": "frames", "channels": channels, "samplers": samplers })
+    tracks
 }
 
 /// Each face direction as the axis it faces along, whether it faces the positive way, and the
@@ -1013,6 +1057,7 @@ fn mesh_model(model: &Model, centered: bool, prims: &mut HashMap<u8, Prim>) -> R
     let [sx, sy, sz] = model.size;
     ensure!(
         (1..=1024).contains(&sx) && (1..=1024).contains(&sy) && (1..=1024).contains(&sz),
+        Corrupt,
         "VOX model size {sx}x{sy}x{sz} is out of range"
     );
     let size = [sx as usize, sy as usize, sz as usize];
@@ -1182,7 +1227,8 @@ fn mesh_model(model: &Model, centered: bool, prims: &mut HashMap<u8, Prim>) -> R
         ids.clear();
         for q in &ring {
             let id = shared.get(r.color, q[0], q[1], || {
-                let id = u32::try_from(p.positions.len())?;
+                let id = u32::try_from(p.positions.len())
+                    .context(ErrorKind::LimitExceeded, "too many vertices for 32-bit indices")?;
                 p.positions.push(to_gltf(r.point(q[0], q[1]).map(|c| c as f32)));
                 p.normals.push(normal);
                 Ok(id)
@@ -1213,7 +1259,8 @@ fn mesh_model(model: &Model, centered: bool, prims: &mut HashMap<u8, Prim>) -> R
             strip(p, &ring, &ids, &a, &b, 1);
         } else {
             // A point in the middle, which no edge of any other rectangle passes through.
-            let id = u32::try_from(p.positions.len())?;
+            let id = u32::try_from(p.positions.len())
+                .context(ErrorKind::LimitExceeded, "too many vertices for 32-bit indices")?;
             let mut m = r.point(0, 0).map(|c| c as f32);
             m[ua] = (u0 + u1) as f32 / 2.0;
             m[va] = (v0 + v1) as f32 / 2.0;
@@ -1572,10 +1619,10 @@ mod tests {
         d
     }
 
-    /// Glass takes its opacity from its transparency, a legacy `MATT` chunk's glass too, and a
+    /// Glass lets light through by transmission, a legacy `MATT` chunk's glass too, and a
     /// shape with a model per frame draws the first and keeps the second as a hidden child.
     #[test]
-    fn glass_opacity_and_frame_models() {
+    fn glass_transmission_and_frame_models() {
         let mut extra = chunk(b"SIZE", &[2i32, 2, 2].map(i32::to_le_bytes).concat());
         extra.extend(chunk(b"XYZI", &[2, 0, 0, 0, 0, 0, 0, 2, 1, 1, 1, 2]));
         let mut trn = 0u32.to_le_bytes().to_vec();
@@ -1603,11 +1650,25 @@ mod tests {
         extra.extend(chunk(b"MATT", &matt));
 
         let doc = vox(&file([1, 1, 1], &[[0, 0, 0, 1]], &extra), Keep::ALL).unwrap();
-        let materials = doc.json["materials"].as_array().unwrap();
-        let alpha = |m: &Value| m["pbrMetallicRoughness"]["baseColorFactor"][3].as_f64().unwrap();
-        assert!((alpha(&materials[0]) - 0.25).abs() < 1e-6, "{}", materials[0]);
-        assert_eq!(materials[0]["alphaMode"], "BLEND");
-        assert!((alpha(&materials[1]) - 0.5).abs() < 1e-6, "{}", materials[1]);
+        let info = doc.source_info();
+        assert_eq!(info.format.as_deref(), Some("VOX"));
+        assert_eq!(info.up_axis, Fact::Declared(Axis::PosZ));
+        assert_eq!(info.handedness, Fact::Declared(Handedness::Right));
+        assert_eq!(info.meters_per_unit, Fact::Unknown);
+        assert!(info.converted.up_axis && !info.converted.units);
+        let materials = doc.json()["materials"].as_array().unwrap();
+        // Glass lets light through by transmission, and is opaque to alpha.
+        let alpha = |m: &Value| m["pbrMetallicRoughness"]["baseColorFactor"][3].as_f64().unwrap_or(1.0);
+        let through = |m: &Value| {
+            m["extensions"]["KHR_materials_transmission"]["transmissionFactor"]
+                .as_f64()
+                .unwrap()
+        };
+        for (m, t) in [(&materials[0], 0.75), (&materials[1], 0.5)] {
+            assert!((through(m) - t).abs() < 1e-6, "{m}");
+            assert!((alpha(m) - 1.0).abs() < 1e-6, "{m}");
+            assert!(m.get("alphaMode").is_none_or(|a| a == "OPAQUE"), "{m}");
+        }
         assert!(
             (materials[1]["pbrMetallicRoughness"]["roughnessFactor"]
                 .as_f64()
@@ -1617,10 +1678,10 @@ mod tests {
                 < 1e-6
         );
 
-        let nodes = doc.json["nodes"].as_array().unwrap();
+        let nodes = doc.json()["nodes"].as_array().unwrap();
         let shape = nodes.iter().find(|n| n.get("children").is_some()).unwrap();
         let alternate = &nodes[shape["children"][0].as_u64().unwrap() as usize];
-        assert_eq!(alternate["name"], "frame_3");
+        assert_eq!(alternate["name"], "frame3");
         assert_eq!(alternate["extensions"]["KHR_node_visibility"]["visible"], false);
         assert_ne!(alternate["mesh"], shape["mesh"]);
         assert_eq!(doc.facts["voxels"], 1);
@@ -1640,15 +1701,9 @@ mod tests {
         f[at..at + 4].copy_from_slice(&u32::try_from(MAX_VOXELS + 1).unwrap().to_le_bytes());
         let err = |keep| format!("{:#}", vox(&f, keep).unwrap_err());
         assert!(err(Keep::ALL).contains("too many voxels"), "{}", err(Keep::ALL));
-        let lower = Keep {
-            max_triangles: 10,
-            ..Keep::ALL
-        };
+        let lower = Keep::ALL.with_max_triangles(10);
         assert!(err(lower).contains("too many voxels"), "{}", err(lower));
-        let higher = Keep {
-            max_triangles: crate::mesh::MAX_TRIANGLES * 2,
-            ..Keep::ALL
-        };
-        assert!(err(higher).contains("end early"), "{}", err(higher));
+        let higher = Keep::ALL.with_max_triangles(crate::mesh::MAX_TRIANGLES * 2);
+        assert!(err(higher).contains("voxels are cut short"), "{}", err(higher));
     }
 }

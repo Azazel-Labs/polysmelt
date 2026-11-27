@@ -6,16 +6,13 @@ use crate::assets::Memory;
 use crate::document::Pose;
 use crate::mesh::Mesh;
 
-fn read_in(bytes: &[u8], name: &str, assets: &Memory, max: usize) -> Result<Document<'static>> {
-    let keep = Keep {
-        max_triangles: max,
-        ..Keep::ALL
-    };
+fn read_in(bytes: &[u8], name: &str, assets: &Memory, max: usize) -> Result<Document> {
+    let keep = Keep::ALL.with_max_triangles(max);
     let ext = name.rsplit('.').next().unwrap_or_default().to_owned();
-    super::super::load_bytes(bytes, name, &ext, assets, keep).map(Document::into_owned)
+    super::super::load_bytes(bytes, name, &ext, assets, keep)
 }
 
-fn read(text: &str, name: &str) -> Document<'static> {
+fn read(text: &str, name: &str) -> Document {
     read_in(text.as_bytes(), name, &Memory::new(), usize::MAX).unwrap()
 }
 
@@ -27,11 +24,11 @@ fn png() -> Vec<u8> {
     png
 }
 
-fn mesh(doc: &Document<'_>) -> Mesh {
+fn mesh(doc: &Document) -> Mesh {
     doc.flatten(Pose::Rest).unwrap().unwrap()
 }
 
-fn triangles(doc: &Document<'_>) -> u64 {
+fn triangles(doc: &Document) -> u64 {
     doc.facts["triangles"].as_u64().unwrap()
 }
 
@@ -79,7 +76,7 @@ const CUBE_X3D: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 </X3D>
 "#;
 
-fn check_cube(doc: &Document<'_>) {
+fn check_cube(doc: &Document) {
     assert_eq!(triangles(doc), 12);
     let m = mesh(doc);
     let (lo, hi) = bounds(&m);
@@ -103,18 +100,18 @@ fn check_cube(doc: &Document<'_>) {
 fn classic_cube() {
     let doc = read(CUBE_WRL, "cube.wrl");
     check_cube(&doc);
-    let source = &doc.json["asset"]["extras"]["source"];
+    let source = &doc.json()["asset"]["extras"]["source"];
     assert_eq!(source["format"], "VRML97");
     assert_eq!(source["version"], "2.0");
-    assert_eq!(doc.json["nodes"][1]["name"], "Cube");
+    assert_eq!(doc.json()["nodes"][1]["name"], "Cube");
 }
 
 #[test]
 fn xml_cube() {
     let doc = read(CUBE_X3D, "cube.x3d");
     check_cube(&doc);
-    let source = &doc.json["asset"]["extras"]["source"];
-    assert_eq!(source["encoding"], "XML");
+    let source = &doc.json()["asset"]["extras"]["source"];
+    assert_eq!(source["encoding"], "xml");
     assert_eq!(source["version"], "3.3");
 }
 
@@ -125,7 +122,7 @@ fn gzipped() {
     let bytes = z.finish().unwrap();
     let doc = read_in(&bytes, "cube.wrz", &Memory::new(), usize::MAX).unwrap();
     check_cube(&doc);
-    assert_eq!(doc.json["asset"]["extras"]["source"]["gzip"], true);
+    assert_eq!(doc.json()["asset"]["extras"]["source"]["gzip"], true);
     let mut z = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
     z.write_all(CUBE_X3D.as_bytes()).unwrap();
     let doc = read_in(&z.finish().unwrap(), "cube.x3dz", &Memory::new(), usize::MAX).unwrap();
@@ -160,18 +157,18 @@ Transform { translation 5 0 0 children USE S }
 ROUTE A.b TO C.d
 ";
     let doc = read(text, "a.x3dv");
-    assert_eq!(doc.json["meshes"].as_array().unwrap().len(), 1);
+    assert_eq!(doc.json()["meshes"].as_array().unwrap().len(), 1);
     assert_eq!(triangles(&doc), 24);
     let (lo, hi) = bounds(&mesh(&doc));
     assert_eq!((lo[0], hi[0]), (-1.0, 6.0));
-    assert_eq!(doc.json["asset"]["extras"]["source"]["skipped"]["ROUTE"], 1);
+    assert_eq!(doc.json()["asset"]["extras"]["source"]["skipped"]["ROUTE"], 1);
 }
 
 #[test]
 fn a_node_inside_itself_stops() {
     let text = "#VRML V2.0 utf8\nDEF A Group { children [ Shape { geometry Sphere {} } USE A ] }\n";
     let doc = read(text, "a.wrl");
-    assert_eq!(doc.json["meshes"].as_array().unwrap().len(), 1);
+    assert_eq!(doc.json()["meshes"].as_array().unwrap().len(), 1);
     let xml = r#"<X3D><Scene><Group DEF="A"><Shape><Box/></Shape><Group USE="A"/></Group></Scene></X3D>"#;
     let doc = read(xml, "a.x3d");
     assert_eq!(triangles(&doc), 12);
@@ -183,9 +180,12 @@ fn crease_angle_chooses_shading() {
         let text = CUBE_WRL.replace("coordIndex", &format!("creaseAngle {crease} coordIndex"));
         mesh(&read(&text, "c.wrl")).prims.remove(0)
     };
+    // No angle: every face's own normal at its corners, so 24 vertices.
     let flat = cube("0");
-    assert_eq!(flat.normals, Vec::<[f32; 3]>::new());
-    assert_eq!(flat.positions.len(), 8);
+    assert_eq!(flat.positions.len(), 24);
+    for n in &flat.normals {
+        assert!(n.iter().filter(|c| c.abs() > 0.99).count() == 1, "{n:?}");
+    }
     let smooth = cube("3.2");
     assert_eq!(smooth.positions.len(), 8);
     assert_eq!(smooth.normals.len(), 8);
@@ -234,10 +234,10 @@ Shape {
     assert_eq!(p.colors[p.indices[3] as usize], [1.0, 0.0, 0.0, 1.0]);
     // Texture coordinates flipped to glTF's.
     assert!(p.uvs.contains(&[1.0, 0.0]) && p.uvs.contains(&[0.0, 1.0]));
-    let mat = &doc.json["materials"][0];
+    let mat = &doc.json()["materials"][0];
     assert_eq!(mat["doubleSided"], true);
-    assert_eq!(doc.json["samplers"][0]["wrapS"], CLAMP);
-    assert_eq!(doc.json["images"].as_array().unwrap().len(), 1);
+    assert_eq!(doc.json()["samplers"][0]["wrapS"], CLAMP);
+    assert_eq!(doc.json()["images"].as_array().unwrap().len(), 1);
 }
 
 #[test]
@@ -297,6 +297,81 @@ Transform { translation 30 0 0 children Shape { geometry Cone { bottomRadius 1 h
 }
 
 #[test]
+fn a_spot_light_takes_its_versions_default_cone() {
+    use std::f64::consts::{FRAC_PI_2, FRAC_PI_4, PI};
+    let cone = |text: &str, name: &str| {
+        let doc = read(text, name);
+        let s = &doc.json()["extensions"]["KHR_lights_punctual"]["lights"][0]["spot"];
+        (
+            s["innerConeAngle"].as_f64().unwrap(),
+            s["outerConeAngle"].as_f64().unwrap(),
+        )
+    };
+    let near = |a: f64, b: f64| (a - b).abs() < 1e-3;
+    // VRML97 and X3D to 3.2: cutOffAngle pi/4, and beamWidth pi/2, which is cut to it.
+    for (text, name) in [
+        ("#VRML V2.0 utf8\nSpotLight {}\n", "a.wrl"),
+        ("#X3D V3.0 utf8\nPROFILE Interchange\nSpotLight {}\n", "a.x3dv"),
+        (
+            "<X3D profile='Interchange' version='3.2'><Scene><SpotLight/></Scene></X3D>",
+            "a.x3d",
+        ),
+    ] {
+        let (inner, outer) = cone(text, name);
+        assert!(
+            near(outer, FRAC_PI_4) && near(inner, FRAC_PI_4) && inner < outer,
+            "{name}: {inner} {outer}"
+        );
+    }
+    // X3D 3.3: beamWidth pi/4 in cutOffAngle pi/2. X3D 4: beamWidth 3 pi/16.
+    let (inner, outer) = cone("#X3D V3.3 utf8\nPROFILE Interchange\nSpotLight {}\n", "a.x3dv");
+    assert!(near(outer, FRAC_PI_2) && near(inner, FRAC_PI_4), "{inner} {outer}");
+    let (inner, outer) = cone(
+        "<X3D profile='Interchange' version='4.0'><Scene><SpotLight/></Scene></X3D>",
+        "a.x3d",
+    );
+    assert!(
+        near(outer, FRAC_PI_2) && near(inner, PI * 3.0 / 16.0),
+        "{inner} {outer}"
+    );
+    // A beam wider than the cut-off is the cut-off.
+    let (inner, outer) = cone(
+        "#VRML V2.0 utf8\nSpotLight { cutOffAngle 0.5 beamWidth 1.2 }\n",
+        "a.wrl",
+    );
+    assert!(near(outer, 0.5) && near(inner, 0.5) && inner < outer, "{inner} {outer}");
+}
+
+#[test]
+fn text_without_a_header_or_root_is_not_x3d() {
+    for (text, name) in [
+        ("just some words\n", "a.wrl"),
+        ("Shape { geometry Box {} }\n", "a.wrl"),
+        ("just some words\n", "a.x3dv"),
+        ("<html><body>hello</body></html>", "a.x3d"),
+        ("<?xml version='1.0'?>\n<!-- a note -->\n<svg/>", "a.x3d"),
+        ("#VRML\n", "a.wrl"),
+    ] {
+        let e = read_in(text.as_bytes(), name, &Memory::new(), usize::MAX).unwrap_err();
+        assert_eq!(e.kind(), crate::ErrorKind::UnknownFormat, "{name}: {text}");
+    }
+    let e = read_in(b" \n", "a.wrl", &Memory::new(), usize::MAX).unwrap_err();
+    assert_eq!(e.kind(), crate::ErrorKind::Empty);
+    // The root after a declaration, a comment and a doctype, and the headers the formats give.
+    let xml = "<?xml version='1.0'?>\n<!-- a note -->\n<!DOCTYPE X3D PUBLIC \"ISO//Web3D//DTD X3D 3.0//EN\" \
+               \"http://www.web3d.org/specifications/x3d-3.0.dtd\">\n<X3D><Scene><Shape><Box/></Shape></Scene></X3D>";
+    assert_eq!(triangles(&read(xml, "a.x3d")), 12);
+    assert_eq!(
+        triangles(&read("#VRML V2.0 utf8\nShape { geometry Box {} }\n", "a.wrl")),
+        12
+    );
+    assert_eq!(
+        triangles(&read("#X3D V3.0 utf8\nShape { geometry Box {} }\n", "a.x3dv")),
+        12
+    );
+}
+
+#[test]
 fn cameras_lights_and_materials() {
     let text = r#"#VRML V2.0 utf8
 WorldInfo { title "Room" }
@@ -311,7 +386,7 @@ Shape {
 }
 "#;
     let doc = read(text, "a.wrl");
-    let j = &doc.json;
+    let j = &doc.json();
     assert_eq!(j["asset"]["extras"]["source"]["title"], "Room");
     assert_eq!(j["cameras"][0]["perspective"]["yfov"], 0.5);
     let lights = j["extensions"]["KHR_lights_punctual"]["lights"].as_array().unwrap();
@@ -360,7 +435,7 @@ Transform { rotation 0 0 1 1.5707963 center 1 0 0 children Shape { geometry Inde
         "{first:?}"
     );
     // A PointSet with no points draws nothing, and isn't skipped either.
-    assert!(doc.json["asset"]["extras"]["source"].get("skipped").is_none());
+    assert!(doc.json()["asset"]["extras"]["source"].get("skipped").is_none());
 }
 
 #[test]
@@ -374,7 +449,7 @@ Inline { url "a.wrl" }
 "#;
     let doc = read_in(text.as_bytes(), "dir/a.wrl", &assets, usize::MAX).unwrap();
     assert_eq!(triangles(&doc), 24);
-    assert_eq!(doc.json["meshes"].as_array().unwrap().len(), 1);
+    assert_eq!(doc.json()["meshes"].as_array().unwrap().len(), 1);
 }
 
 #[test]
@@ -390,7 +465,7 @@ Shape { geometry Sphere {} }
 ROUTE T.fraction_changed TO I.set_fraction
 "#;
     let doc = read(text, "a.wrl");
-    let skipped = &doc.json["asset"]["extras"]["source"]["skipped"];
+    let skipped = &doc.json()["asset"]["extras"]["source"]["skipped"];
     for k in ["TimeSensor", "PositionInterpolator", "Script", "ROUTE"] {
         assert_eq!(skipped[k], 1, "{k}: {skipped}");
     }
@@ -398,7 +473,7 @@ ROUTE T.fraction_changed TO I.set_fraction
     for k in ["PROTO", "EXTERNPROTO", "Thing"] {
         assert!(skipped.get(k).is_none(), "{k}: {skipped}");
     }
-    assert_eq!(doc.json["meshes"].as_array().unwrap().len(), 2);
+    assert_eq!(doc.json()["meshes"].as_array().unwrap().len(), 2);
     assert!(notes(&doc).contains("external prototype"));
 }
 
@@ -427,13 +502,13 @@ fn deep_nesting_doesnt_overflow() {
         "Group { children [ ".repeat(n),
         " ] }".repeat(n)
     );
-    let _ = read(&text, "a.wrl");
+    let _ = read_in(text.as_bytes(), "a.wrl", &Memory::new(), usize::MAX);
     let xml = format!(
         "<X3D><Scene>{}<Shape><Box/></Shape>{}</Scene></X3D>",
         "<Group>".repeat(n),
         "</Group>".repeat(n)
     );
-    let _ = read(&xml, "a.x3d");
+    let _ = read_in(xml.as_bytes(), "a.x3d", &Memory::new(), usize::MAX);
 }
 
 #[test]
@@ -470,8 +545,8 @@ fn damaged_files_never_panic() {
         ),
     ];
     let assets = Memory::new()
-        .with("a.wrl", samples[3].0.as_str())
-        .with("a.x3d", samples[4].0.as_str());
+        .with("a.wrl", samples[3].0.clone())
+        .with("a.x3d", samples[4].0.clone());
     let check = |bytes: &[u8], name: &str| {
         if let Ok(doc) = read_in(bytes, name, &assets, 64) {
             let _ = doc.flatten(Pose::Rest);
@@ -516,7 +591,7 @@ fn line_and_point_sets() {
     let (lo, hi) = bounds(&m);
     assert_eq!((lo, hi), ([0.0; 3], [1.0, 1.0, 5.0]));
     // Lines and points are unlit.
-    assert!(doc.json["materials"][0]["extensions"]["KHR_materials_unlit"].is_object());
+    assert!(doc.json()["materials"][0]["extensions"]["KHR_materials_unlit"].is_object());
 }
 
 /// Whether every triangle faces away from `center`.
@@ -535,12 +610,12 @@ fn near(a: [f32; 3], b: [f32; 3]) -> bool {
     (0..3).all(|k| (a[k] - b[k]).abs() < 1e-5)
 }
 
-fn notes(doc: &Document<'_>) -> String {
-    doc.json["asset"]["extras"]["source"]["notes"].to_string()
+fn notes(doc: &Document) -> String {
+    doc.json()["asset"]["extras"]["source"]["notes"].to_string()
 }
 
-fn base_colors(doc: &Document<'_>) -> Vec<String> {
-    doc.json["materials"]
+fn base_colors(doc: &Document) -> Vec<String> {
+    doc.json()["materials"]
         .as_array()
         .unwrap()
         .iter()
@@ -580,9 +655,9 @@ USE A
     assert!(colors.contains(&"[0.0,0.0,1.0,1.0]".to_owned()), "{colors:?}");
     assert!(colors.contains(&"[1.0,0.0,0.0,1.0]".to_owned()), "{colors:?}");
     // The instance keeps its DEF name.
-    let nodes = doc.json["nodes"].as_array().unwrap();
+    let nodes = doc.json()["nodes"].as_array().unwrap();
     assert!(nodes.iter().any(|n| n["name"] == "A"));
-    assert!(doc.json["asset"]["extras"]["source"].get("skipped").is_none());
+    assert!(doc.json()["asset"]["extras"]["source"].get("skipped").is_none());
 }
 
 #[test]
@@ -621,10 +696,10 @@ fn prototypes_in_xml() {
     let colors = base_colors(&doc);
     assert!(colors.contains(&"[0.0,1.0,0.0,1.0]".to_owned()), "{colors:?}");
     assert!(colors.contains(&"[1.0,1.0,0.0,1.0]".to_owned()), "{colors:?}");
-    let nodes = doc.json["nodes"].as_array().unwrap();
+    let nodes = doc.json()["nodes"].as_array().unwrap();
     assert!(nodes.iter().any(|n| n["name"] == "Floor"));
     // The body's own names stay inside it.
-    assert!(doc.json["asset"]["extras"]["source"].get("skipped").is_none());
+    assert!(doc.json()["asset"]["extras"]["source"].get("skipped").is_none());
 }
 
 #[test]
@@ -652,7 +727,7 @@ Transform { translation 0 0 -5 children Same { } }
         near(lo, [-1.0, -2.0, -6.0]) && near(hi, [5.1, 2.0, 0.5]),
         "{lo:?} {hi:?}"
     );
-    assert_eq!(doc.json["asset"]["extras"]["source"]["skipped"]["Gone"], 1);
+    assert_eq!(doc.json()["asset"]["extras"]["source"]["skipped"]["Gone"], 1);
     assert!(notes(&doc).contains("external prototype"), "{}", notes(&doc));
 }
 
@@ -662,7 +737,7 @@ fn prototypes_that_instance_themselves_stop() {
     let text = "#VRML V2.0 utf8\nPROTO A [ ] { Transform { translation 1 0 0 children [ Shape { geometry Box { } } A { } ] } }\nA { }\n";
     let doc = read(text, "a.wrl");
     assert!(notes(&doc).contains("nested too deep"), "{}", notes(&doc));
-    assert_eq!(doc.json["meshes"].as_array().unwrap().len(), 32);
+    assert_eq!(doc.json()["meshes"].as_array().unwrap().len(), 32);
     // Doubling at each level: stopped by the node budget, or here the triangle limit.
     let text =
         "#VRML V2.0 utf8\nPROTO B [ ] { Group { children [ Shape { geometry Box { } } B { } B { } ] } }\nB { }\n";
@@ -674,7 +749,7 @@ fn prototypes_that_instance_themselves_stop() {
     assert!(start.elapsed().as_secs() < 60);
     // A default that holds an instance of its own prototype.
     let text = "#VRML V2.0 utf8\nPROTO C [ field MFNode c [ C { } ] ] { Group { children IS c } }\nC { }\n";
-    let _ = read(text, "a.wrl");
+    let _ = read_in(text.as_bytes(), "a.wrl", &Memory::new(), usize::MAX);
     // An external prototype from the file that declares it.
     let assets = Memory::new().with("a.wrl", "#VRML V2.0 utf8\nEXTERNPROTO D [ ] \"a.wrl#D\"\nD { }\n");
     let _ = read_in(
@@ -682,8 +757,7 @@ fn prototypes_that_instance_themselves_stop() {
         "a.wrl",
         &assets,
         usize::MAX,
-    )
-    .unwrap();
+    );
 }
 
 #[test]
@@ -800,11 +874,14 @@ fn extrusion_respects_the_triangle_limit() {
     let err = read_in(text.as_bytes(), "a.wrl", &Memory::new(), 1_000_000).unwrap_err();
     assert!(err.to_string().contains("triangles"), "{err}");
     // Too few points draw nothing.
-    let doc = read(
-        "#VRML V2.0 utf8\nShape { geometry Extrusion { spine [ 0 0 0 ] } }\n",
+    let err = read_in(
+        b"#VRML V2.0 utf8\nShape { geometry Extrusion { spine [ 0 0 0 ] } }\n",
         "a.wrl",
-    );
-    assert_eq!(triangles(&doc), 0);
+        &Memory::new(),
+        usize::MAX,
+    )
+    .unwrap_err();
+    assert_eq!(err.kind(), crate::ErrorKind::Empty, "{err}");
 }
 
 #[test]
@@ -832,7 +909,7 @@ Shape { geometry Polypoint2D { point [ 0 0, 1 1, 2 0 ] } }
     let (lo, hi) = bounds(&m);
     assert_eq!((lo, hi), ([-4.0, -4.0, 0.0], [6.0, 6.0, 0.0]));
     // Filled ones are seen from both sides unless solid; lines and points are unlit.
-    let materials = doc.json["materials"].as_array().unwrap();
+    let materials = doc.json()["materials"].as_array().unwrap();
     assert!(materials.iter().any(|m| m["doubleSided"] == true));
     assert!(
         materials
@@ -845,5 +922,62 @@ Shape { geometry Polypoint2D { point [ 0 0, 1 1, 2 0 ] } }
             .filter(|p| !p.indices.is_empty())
             .all(|p| p.normals.iter().all(|&n| near(n, [0.0, 0.0, 1.0])))
     );
-    assert!(doc.json["asset"]["extras"]["source"].get("skipped").is_none());
+    assert!(doc.json()["asset"]["extras"]["source"].get("skipped").is_none());
+}
+
+#[test]
+fn what_the_file_says_of_itself() {
+    let text = r#"#X3D V3.3 utf8
+PROFILE Interchange
+UNIT length centimeters 0.01
+META "creator" "Ann"
+META "generator" "Modeler 4"
+META "copyright" "(c) Ann"
+META "keywords" "room, chair"
+META "reference" "https://example.com"
+WorldInfo { title "Room" info [ "first", "second" ] }
+Shape { geometry Box {} }
+"#;
+    let doc = read(text, "a.x3dv");
+    let info = doc.source_info();
+    assert_eq!(info.format.as_deref(), Some("X3D"));
+    assert_eq!(info.version.as_deref(), Some("3.3"));
+    assert_eq!(info.meters_per_unit, Fact::Declared(0.01));
+    // The unit's usual name; the file's own word for it is beside it.
+    assert_eq!(info.unit.as_deref(), Some("centimeter"));
+    assert_eq!(doc.json()["asset"]["extras"]["source"]["unitAsWritten"], "centimeters");
+    assert_eq!(info.up_axis, Fact::Declared(Axis::PosY));
+    assert!(info.converted.units && !info.converted.up_axis);
+    assert_eq!(info.output_meters_per_unit(), Fact::Declared(1.0));
+    assert_eq!(info.title.as_deref(), Some("Room"));
+    assert_eq!(info.author.as_deref(), Some("Ann"));
+    assert_eq!(info.tool.as_deref(), Some("Modeler 4"));
+    assert_eq!(info.copyright.as_deref(), Some("(c) Ann"));
+    assert_eq!(info.keywords, ["room", "chair"]);
+    assert_eq!(info.comments, ["first", "second"]);
+    assert_eq!(
+        doc.json()["asset"]["extras"]["source"]["meta"]["reference"],
+        "https://example.com"
+    );
+
+    let doc = read(CUBE_X3D, "cube.x3d");
+    let info = doc.source_info();
+    assert_eq!(info.title.as_deref(), Some("cube"));
+    assert_eq!(info.meters_per_unit, Fact::Declared(1.0));
+    assert_eq!(info.unit.as_deref(), Some("meter"));
+    assert_eq!(info.converted, crate::source::Converted::default());
+}
+
+#[test]
+fn references_are_decoded_once() {
+    let xml = r#"<X3D><Scene><Transform DEF="A&amp;lt;B"><Shape><Box/></Shape></Transform></Scene></X3D>"#;
+    let doc = read(xml, "a.x3d");
+    let json = doc.json();
+    let names: Vec<&str> = json["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|n| n["name"].as_str())
+        .collect();
+    assert!(names.contains(&"A&lt;B"), "{names:?}");
 }

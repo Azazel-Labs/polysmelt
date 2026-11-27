@@ -326,7 +326,7 @@ fn declared(json: &Map<String, Value>) -> Stats {
 
 /// [`declared`], with every accessor read through the document (after `Document::decode`).
 fn polysmelt_stats(doc: &polysmelt::document::Document) -> Stats {
-    let json = &doc.json;
+    let json = doc.json();
     let mut s = declared(json);
     let (mut verts, mut indices) = (0, 0);
     s.pos_sum = 0.0;
@@ -418,11 +418,10 @@ fn step<T>(f: impl FnOnce() -> polysmelt::Result<T>) -> Result<T, String> {
     }
 }
 
-fn run_polysmelt(path: &Path, ext: &str, out: Option<&Path>) -> Value {
-    use polysmelt::document::{Keep, Pose};
+fn run_polysmelt(path: &Path, out: Option<&Path>) -> Value {
+    use polysmelt::document::Pose;
     let start = Instant::now();
-    let dir = path.parent().unwrap();
-    let loaded = step(|| polysmelt::formats::load(path, ext, &polysmelt::assets::Folder::new(dir), Keep::ALL));
+    let loaded = step(|| polysmelt::open(path));
     let load_ms = start.elapsed().as_secs_f64() * 1e3;
     let mut doc = match loaded {
         Ok(d) => d,
@@ -459,7 +458,7 @@ fn run_polysmelt(path: &Path, ext: &str, out: Option<&Path>) -> Value {
                     "ms": t.elapsed().as_secs_f64() * 1e3,
                 }),
             );
-            match step(|| polysmelt::mesh::to_glb(&mesh)) {
+            match step(|| mesh.to_glb()) {
                 Ok(glb) => {
                     if let Some(o) = out {
                         std::fs::write(o.with_extension("mesh.glb"), glb).unwrap();
@@ -491,9 +490,9 @@ fn run_polysmelt(path: &Path, ext: &str, out: Option<&Path>) -> Value {
             r.insert("rig_error".into(), json!(e));
         }
     }
-    let embedded = list(&doc.json, "images").iter().filter(|i| i.get("bufferView").is_some()).count();
+    let embedded = list(doc.json(), "images").iter().filter(|i| i.get("bufferView").is_some()).count();
     r.insert("images_embedded".into(), json!(embedded));
-    let undecoded = list(&doc.json, "accessors").iter().filter(|a| a.get("bufferView").is_none() && a.get("sparse").is_none()).count();
+    let undecoded = list(doc.json(), "accessors").iter().filter(|a| a.get("bufferView").is_none() && a.get("sparse").is_none()).count();
     if let Err(e) = step(|| doc.decode()) {
         r.insert("decode_error".into(), json!(e));
     }
@@ -556,12 +555,11 @@ fn main() {
     let mut results = Vec::new();
     for (k, path) in paths.iter().enumerate() {
         let rel = path.strip_prefix(&root).unwrap().to_string_lossy().replace('\\', "/");
-        let ext = path.extension().unwrap().to_string_lossy().to_ascii_lowercase();
         eprintln!("[{}/{}] {rel}", k + 1, paths.len());
         let o = out.as_ref().map(|o| o.join(&rel));
         let decl = source_json(path).map(|j| declared(&j).to_json());
         let g = run_gltf(path);
-        let p = run_polysmelt(path, &ext, o.as_deref());
+        let p = run_polysmelt(path, o.as_deref());
         results.push(json!({
             "file": rel, "bytes": std::fs::metadata(path).map(|m| m.len()).unwrap_or(0),
             "declared": decl, "gltf": g, "polysmelt": p,

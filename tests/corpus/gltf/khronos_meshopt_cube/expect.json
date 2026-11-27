@@ -1,0 +1,25 @@
+{
+  "spec": "KHR_meshopt_compression: Khronos sample MeshoptCubeTest with its fallback buffer beside it (every mode, filter and version), the same as its fallback data",
+  "source": "KhronosGroup/glTF-Sample-Assets@e124e8d, Models/MeshoptCubeTest/glTF (CC0-1.0, Arseny Kapoulkine); textures scaled down to 64 pixels",
+  "file": "MeshoptCubeTest.gltf",
+  "triangles": 320,
+  "vertices": 640,
+  "area": 201.2,
+  "bounds": {
+    "min": [
+      -6.1,
+      -0.8,
+      -0.5
+    ],
+    "max": [
+      17.6,
+      19.8,
+      0.5
+    ]
+  },
+  "material_count": 11,
+  "same_as": {
+    "case": "khronos_meshopt_cube_fallback"
+  },
+  "tolerance": 0.001
+}

@@ -2,12 +2,15 @@
 
 use serde_json::{Value, json};
 
-use super::math::{IDENTITY, M4, inverse, mul};
+use super::math::inverse;
 use super::{Ctx, Morphs, expand, referenced};
 use crate::Result;
 use crate::document::{Builder, Part};
+use crate::formats::xform::col::{IDENTITY, M4, mul};
 use crate::mesh::{FastMap, Prim};
 use crate::num::{f32_of, u32_of};
+use crate::skin::{self, Sets};
+use crate::vec3::{cross, dot, unit};
 
 /// The most morph targets a mesh keeps.
 const MAX_TARGETS: usize = 256;
@@ -15,8 +18,8 @@ const MAX_TARGETS: usize = 256;
 const MAX_TARGET_FLOATS: usize = 1 << 24;
 /// The highest texture coordinate or color set kept.
 const MAX_SET: usize = 7;
-/// The most bone influences a skin may list.
-const MAX_INFLUENCES: usize = 1 << 26;
+/// The most bone influences a skin may list, its vertices' together.
+const MAX_INFLUENCE_TOTAL: usize = 1 << 26;
 
 /// A geometry object as written into the buffer.
 pub(super) struct Geom {
@@ -53,13 +56,20 @@ struct Array {
     ddl: u32,
 }
 
-/// Builds the meshes of the geometry nodes and puts them on their nodes.
+/// Builds the meshes of the geometry nodes (or of geometry objects placed by themselves) and puts them on their
+/// nodes.
 pub(super) fn meshes(c: &mut Ctx<'_>) -> Result<()> {
     let t = c.t;
     let mut uses = Vec::new();
     let mut need: FastMap<u32, usize> = FastMap::default();
     for (n, holder) in std::mem::take(&mut c.geometry_nodes) {
-        let Some(g) = referenced(t, n, "ObjectRef").filter(|&g| t.ident(g) == "GeometryObject") else {
+        // A geometry object no node places is placed by itself (see `objects`).
+        let g = if t.ident(n) == "GeometryObject" {
+            Some(n)
+        } else {
+            referenced(t, n, "ObjectRef").filter(|&g| t.ident(g) == "GeometryObject")
+        };
+        let Some(g) = g else {
             c.stats.missing_objects += 1;
             continue;
         };
@@ -97,17 +107,34 @@ pub(super) fn meshes(c: &mut Ctx<'_>) -> Result<()> {
     }
     for (n, holder, g, mats) in uses {
         if !c.geoms.contains_key(&g) {
-            let geom = build(c, g, need.get(&g).copied().unwrap_or(0))?;
+            let geom = build(c, g, need.get(&g).copied().unwrap_or(0), holder)?;
             c.geoms.insert(g, geom);
         }
         let Some(Some(geom)) = c.geoms.get(&g) else {
             continue;
         };
-        let materials: Vec<Option<usize>> = geom
+        // Each primitive's material index, whether it draws faces, and whether its vertices have colors.
+        let wants: Vec<(u32, bool, bool)> = geom
             .prims
             .iter()
-            .map(|&(_, m)| mats.iter().find(|&&(i, _)| i == m).map(|&(_, k)| k))
+            .map(|(p, m)| {
+                let faces = p.get("mode").and_then(Value::as_u64).is_none_or(|mode| mode >= 4);
+                (*m, faces, p.pointer("/attributes/COLOR_0").is_some())
+            })
             .collect();
+        // Faces whose index no material reference has take the default material.
+        let materials: Vec<Option<usize>> = wants
+            .into_iter()
+            .map(|(m, faces, colored)| {
+                mats.iter()
+                    .find(|&&(i, _)| i == m)
+                    .map(|&(_, k)| k)
+                    .or_else(|| (c.keep.materials && faces).then(|| super::material::default(c, colored)))
+            })
+            .collect();
+        let Some(Some(geom)) = c.geoms.get(&g) else {
+            continue;
+        };
         let skin = geom.skin;
         c.triangles = c.triangles.saturating_add(geom.triangles);
         let (targets, base, absolute) = (geom.targets.clone(), geom.base, geom.absolute.clone());
@@ -300,10 +327,10 @@ fn vec3(p: &[f64], fill: f64) -> [f32; 3] {
     [0, 1, 2].map(|k| f32_of(p.get(k).copied().unwrap_or(fill)))
 }
 
-/// A normal at unit length; +Z when it has none.
+/// A normal at unit length; zero when it has none, which takes its faces' as the primitive is written.
 fn unit_normal(p: &[f64]) -> [f32; 3] {
     let v = [0, 1, 2].map(|k| p.get(k).copied().unwrap_or(0.0));
-    super::math::unit(v).map_or([0.0, 0.0, 1.0], |u| u.map(f32_of))
+    unit(v).map_or([0.0; 3], |u| u.map(f32_of))
 }
 
 /// What one index array draws: triangles, line segments or points.
@@ -320,17 +347,19 @@ impl Draws {
     }
 }
 
-/// Assembles the primitives of kind `primitive` from indices `idx` (on `n` vertices); bad
-/// indices are counted and what they'd be in dropped.
+/// Assembles the primitives of kind `primitive` from indices `idx` (on the vertices at
+/// `positions`); bad indices are counted and what they'd be in dropped.
 fn assemble(
     primitive: &str,
     idx: impl Iterator<Item = f64>,
-    n: usize,
+    positions: &[[f32; 3]],
     restart: Option<f64>,
     cw: bool,
     bad: &mut usize,
 ) -> Draws {
+    let n = positions.len();
     let mut d = Draws::default();
+    let mut cut: Vec<[u32; 3]> = Vec::new();
     let mut v = |x: f64| {
         let i = vertex(x, n);
         if i.is_none() {
@@ -363,12 +392,16 @@ fn assemble(
                         2 => d.lines.extend_from_slice(&buf[..2]),
                         3 if cw => d.triangles.extend_from_slice(&[buf[0], buf[2], buf[1]]),
                         3 => d.triangles.extend_from_slice(&buf[..3]),
-                        _ if cw => d
-                            .triangles
-                            .extend_from_slice(&[buf[0], buf[2], buf[1], buf[0], buf[3], buf[2]]),
-                        _ => d
-                            .triangles
-                            .extend_from_slice(&[buf[0], buf[1], buf[2], buf[0], buf[2], buf[3]]),
+                        // A quad is cut in its plane, as every format's polygons are, so one that isn't
+                        // convex keeps its outline.
+                        _ => {
+                            cut.clear();
+                            crate::mesh::triangulate(&buf.map(|i| positions[i as usize]), &mut cut);
+                            for t in &cut {
+                                let [a, b, c] = t.map(|k| buf[k as usize]);
+                                d.triangles.extend(if cw { [a, c, b] } else { [a, b, c] });
+                            }
+                        }
                     }
                 }
                 at = 0;
@@ -399,7 +432,8 @@ fn assemble(
                 if let (Some(p), Some(q)) = (a, b) {
                     // Every other triangle of a strip is wound the other way.
                     let (p0, p1) = if parity == cw { (p, q) } else { (q, p) };
-                    if p != q && q != i && p != i {
+                    // A strip's triangle on one vertex twice restarts the strip, and draws nothing.
+                    if crate::geometry::distinct([p, q, i]) {
                         d.triangles.extend_from_slice(&[p0, p1, i]);
                     }
                     parity = !parity;
@@ -425,7 +459,7 @@ fn index_accessor(b: &mut Builder, idx: Vec<u32>, n: usize) -> usize {
 
 /// Writes geometry object `g` (padding its texture coordinate sets to `need_uv`).
 #[allow(clippy::too_many_lines, reason = "one pass over a mesh's arrays")]
-fn build(c: &mut Ctx<'_>, g: u32, need_uv: usize) -> Result<Option<Geom>> {
+fn build(c: &mut Ctx<'_>, g: u32, need_uv: usize, holder: usize) -> Result<Option<Geom>> {
     let t = c.t;
     let meshes: Vec<u32> = t.kids(g).filter(|&k| t.ident(k) == "Mesh").collect();
     let Some(&mesh) = meshes.iter().min_by_key(|&&m| t.prop_num(m, "lod").map_or(0, index_of)) else {
@@ -495,8 +529,8 @@ fn build(c: &mut Ctx<'_>, g: u32, need_uv: usize) -> Result<Option<Geom>> {
                 } else if let Some((bv, bw)) = bitangents {
                     // The handedness: whether the bitangent agrees with normal × tangent.
                     let nrm = p.normals[i].map(f64::from);
-                    let cr = super::math::cross(nrm, d.map(f64::from));
-                    super::math::dot(
+                    let cr = cross(nrm, d.map(f64::from));
+                    dot(
                         cr,
                         [0, 1, 2].map(|k| bv[i * bw..i * bw + bw].get(k).copied().unwrap_or(0.0)),
                     )
@@ -566,7 +600,7 @@ fn build(c: &mut Ctx<'_>, g: u32, need_uv: usize) -> Result<Option<Geom>> {
     if index_arrays.is_empty() {
         #[allow(clippy::cast_precision_loss, reason = "vertex counts are far below 2^52")]
         let all = (0..n).map(|i| i as f64);
-        draws.push((assemble(primitive, all, n, None, false, &mut bad), 0));
+        draws.push((assemble(primitive, all, &p.positions, None, false, &mut bad), 0));
     }
     for &k in &index_arrays {
         let material = t.prop_num(k, "material").map_or(0, index_of);
@@ -574,7 +608,7 @@ fn build(c: &mut Ctx<'_>, g: u32, need_uv: usize) -> Result<Option<Geom>> {
         let cw = t.prop_str(k, "front") == Some("cw");
         let (v, _) = t.values(k);
         draws.push((
-            assemble(primitive, v.iter().copied(), n, restart, cw, &mut bad),
+            assemble(primitive, v.iter().copied(), &p.positions, restart, cw, &mut bad),
             material,
         ));
     }
@@ -585,30 +619,64 @@ fn build(c: &mut Ctx<'_>, g: u32, need_uv: usize) -> Result<Option<Geom>> {
     }
     let triangles: usize = draws.iter().map(|(d, _)| d.triangles.len() / 3).sum();
     c.built_triangles += triangles;
-    ensure!(c.built_triangles <= c.limit, "more than {} triangles", c.limit);
+    ensure!(
+        c.built_triangles <= c.limit,
+        LimitExceeded,
+        "more than {} triangles",
+        c.limit
+    );
     if draws.iter().any(|(d, _)| !d.lines.is_empty() || !d.points.is_empty()) {
         c.lines_or_points = true;
     }
 
-    let skin = if c.keep.skins { skin(c, mesh, n, &mut p) } else { None };
+    let skin = if c.keep.skins { skin(c, mesh, n, holder) } else { None };
 
     let has_normals = !p.normals.is_empty();
     // The primitives: the first index array's written with the vertex arrays, the others on
     // the same arrays with their own indices.
+    // What the other index arrays draw on a vertex that isn't a finite point goes as the first's does when it
+    // is written.
+    if !crate::geometry::finite(&p.positions) {
+        for (d, _) in draws.iter_mut().skip(1) {
+            for (list, width) in [(&mut d.triangles, 3), (&mut d.lines, 2), (&mut d.points, 1)] {
+                c.b.dropped += crate::geometry::sound(&p.positions, false, list, width);
+            }
+        }
+        draws.retain(|(d, _)| !d.is_empty());
+    }
+    // Without normals in the file, the default ones, over every index array's triangles at once, as they share
+    // the vertices; the vertices added keep what the morph targets hold for them.
+    let mut added = Vec::new();
+    if p.normals.len() != n {
+        p.indices = draws.iter().flat_map(|(d, _)| d.triangles.iter().copied()).collect();
+        if !p.indices.is_empty() {
+            added = crate::geometry::default_normals(&mut p, c.b.crease);
+            let mut rest = p.indices.as_slice();
+            for (d, _) in &mut draws {
+                let (mine, others) = rest.split_at(d.triangles.len());
+                d.triangles.copy_from_slice(mine);
+                rest = others;
+            }
+        }
+        p.indices = Vec::new();
+    }
+    let vertices = p.positions.len();
     let mut iter = draws.into_iter();
     let (first, first_material) = iter.next().unwrap_or_default();
     p.indices = first.triangles;
     p.lines = first.lines;
     p.points = first.points;
-    if let Some((s, _)) = &skin {
-        let count = c.skins[*s]["joints"].as_array().map_or(0, Vec::len);
-        c.b.joints = Some((0, count));
-    }
-    let written = c.b.primitives(p);
-    c.b.joints = None;
+    let mut written = c.b.primitives(p);
     // What only a skin or morph targets use is written after what's always written, so a read
     // that skips them makes the same mesh.
-    let skin = skin.map(|(s, ibms)| {
+    let skin = skin.map(|(s, ibms, mut sets)| {
+        sets.follow(&added);
+        let count = c.skins[s]["joints"].as_array().map_or(0, Vec::len);
+        for (key, a) in sets.write(&mut c.b, count) {
+            for w in &mut written {
+                w["attributes"][&key] = json!(a);
+            }
+        }
         c.skins[s]["inverseBindMatrices"] = json!(super::floats(&mut c.b, ibms, "MAT4", false));
         s
     });
@@ -623,7 +691,8 @@ fn build(c: &mut Ctx<'_>, g: u32, need_uv: usize) -> Result<Option<Geom>> {
                 if idx.is_empty() {
                     continue;
                 }
-                let mut j = json!({ "attributes": attributes.clone(), "indices": index_accessor(&mut c.b, idx, n) });
+                let mut j =
+                    json!({ "attributes": attributes.clone(), "indices": index_accessor(&mut c.b, idx, vertices) });
                 if mode != 4 {
                     j["mode"] = json!(mode);
                 }
@@ -670,12 +739,13 @@ fn build(c: &mut Ctx<'_>, g: u32, need_uv: usize) -> Result<Option<Geom>> {
             continue;
         };
         let r = &cache[&from];
-        let dp: Vec<[f32; 3]> = a
+        let mut dp: Vec<[f32; 3]> = a
             .positions
             .iter()
             .zip(&r.positions)
             .map(|(x, y)| [x[0] - y[0], x[1] - y[1], x[2] - y[2]])
             .collect();
+        crate::geometry::follow(&mut dp, n, &added);
         let mut tj = json!({ "POSITION": c.b.positions(dp) });
         if has_normals && a.normals.len() == n && r.normals.len() == n {
             let dn: Vec<f32> = a
@@ -719,22 +789,20 @@ fn build(c: &mut Ctx<'_>, g: u32, need_uv: usize) -> Result<Option<Geom>> {
     }))
 }
 
-/// A mesh's skin as a glTF skin, its bone influences put on `p`: its index, and its inverse
-/// bind matrices for the caller to write. `None` when it has none, or it can't be read
-/// (counted).
-fn skin(c: &mut Ctx<'_>, mesh: u32, n: usize, p: &mut Prim) -> Option<(usize, Vec<f32>)> {
+/// A mesh's skin as a glTF skin: its index, and its inverse bind matrices and its vertices' joints and weights
+/// for the caller to write. `None` when it has none, or it can't be read (counted). `holder` is the node drawing
+/// the mesh, which a vertex no bone moves stays with ([`crate::skin`]).
+fn skin(c: &mut Ctx<'_>, mesh: u32, n: usize, holder: usize) -> Option<(usize, Vec<f32>, Sets)> {
     let t = c.t;
     let s = t.kid(mesh, "Skin")?;
-    let got = read_skin(c, s, n, p);
+    let got = read_skin(c, s, n, holder);
     if got.is_none() {
         c.stats.bad_skins += 1;
-        p.skin_joints = Vec::new();
-        p.skin_weights = Vec::new();
     }
     got
 }
 
-fn read_skin(c: &mut Ctx<'_>, s: u32, n: usize, p: &mut Prim) -> Option<(usize, Vec<f32>)> {
+fn read_skin(c: &mut Ctx<'_>, s: u32, n: usize, holder: usize) -> Option<(usize, Vec<f32>, Sets)> {
     let t = c.t;
     let bind = match t.kid(s, "Transform") {
         Some(k) => {
@@ -782,49 +850,47 @@ fn read_skin(c: &mut Ctx<'_>, s: u32, n: usize, p: &mut Prim) -> Option<(usize, 
     }
     let mut total = 0usize;
     for &k in counts {
-        total = total.checked_add(vertex(k, MAX_INFLUENCES)? as usize)?;
+        total = total.checked_add(vertex(k, MAX_INFLUENCE_TOTAL)? as usize)?;
     }
-    if total > MAX_INFLUENCES || indices.len() != total || weights.len() != total {
+    if total > MAX_INFLUENCE_TOTAL || indices.len() != total || weights.len() != total {
         return None;
     }
-    p.skin_joints = Vec::with_capacity(n);
-    p.skin_weights = Vec::with_capacity(n);
+    // Where each vertex's influences start.
+    let mut starts = Vec::with_capacity(n);
     let mut at = 0;
-    let mut dropped = 0;
     for &k in counts {
+        starts.push(at);
         // Checked above to be a whole number in range.
-        let k = vertex(k, MAX_INFLUENCES).map_or(0, |k| k as usize);
-        // The four strongest influences, strongest first.
-        let mut top = [(0u32, 0.0f64); 4];
-        for i in at..at + k {
-            let w = weights[i];
+        at += vertex(k, MAX_INFLUENCE_TOTAL).map_or(0, |k| k as usize);
+    }
+    let mut dropped = 0;
+    let file_joints = joints.len();
+    let sets = skin::sets(n, file_joints, u32_of(file_joints), |v, list| {
+        let end = starts.get(v + 1).copied().unwrap_or(total);
+        for i in starts[v]..end {
             let Some(b) = vertex(indices[i], bones) else {
                 dropped += 1;
                 continue;
             };
-            if !(w > 0.0 && w.is_finite()) {
-                continue;
-            }
-            let j = slot[b as usize];
-            // Two influences of one joint add up.
-            if let Some(e) = top.iter_mut().find(|e| e.1 > 0.0 && e.0 == j) {
-                e.1 += w;
-            } else if w > top[3].1 {
-                if top[3].1 > 0.0 {
-                    dropped += 1;
-                }
-                top[3] = (j, w);
-            } else {
-                dropped += 1;
-                continue;
-            }
-            top.sort_by(|a, b| b.1.total_cmp(&a.1));
+            list.push((slot[b as usize], f32_of(weights[i])));
         }
-        at += k;
-        p.skin_joints.push(top.map(|e| e.0));
-        p.skin_weights.push(top.map(|e| f32_of(e.1)));
-    }
+        // What the shared writer keeps of a vertex's list, counted here as it leaves the rest out.
+        let mut kept: Vec<u32> = list
+            .iter()
+            .filter(|e| e.1 > 0.0 && e.1.is_finite())
+            .map(|e| e.0)
+            .collect();
+        kept.sort_unstable();
+        kept.dedup();
+        dropped += kept.len().saturating_sub(skin::MAX_INFLUENCES);
+    });
     c.stats.dropped_influences += dropped;
+    // A vertex no bone moves stays with the node that draws the mesh: that node is a joint too, after the
+    // file's, and the vertex keeps its place in the node's own space.
+    if sets.unbound {
+        joints.push(holder);
+        ibms.extend(IDENTITY.map(f32_of));
+    }
     c.skins.push(json!({ "joints": joints }));
-    Some((c.skins.len() - 1, ibms))
+    Some((c.skins.len() - 1, ibms, sets))
 }

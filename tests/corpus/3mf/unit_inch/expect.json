@@ -14,14 +14,15 @@
       0.0
     ]
   },
-  "facts": {
-    "unit": "inch"
-  },
   "tolerance": 1e-05,
   "document": {
     "source": {
       "unit": "inch",
       "metersPerUnit": 0.0254
     }
+  },
+  "json": {
+    "/asset/extras/source/unit": "inch",
+    "/asset/extras/source/unitAsWritten": null
   }
 }
