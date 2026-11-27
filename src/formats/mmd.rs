@@ -10,8 +10,9 @@
 //!
 //! Materials take the diffuse color (as linear) with its alpha, the texture as the color image (cut out at alpha
 //! 0.5 when it is a PNG, TGA or DDS, formats that carry alpha on purpose), double-sided drawing from the flag (in
-//! PMD, for any material that isn't opaque), and a roughness from the specular power. The rest (specular and
-//! ambient colors, edge, sphere map, toon) is kept in `asset.extras.source.materials`. Bones' IK, inherited
+//! PMD, for any material that isn't opaque), and the specular color and power as the highlight (the classic
+//! material every reader reads one way, `legacy_material`). The cutout is decided by the texture's name, whether
+//! or not its file is found. The rest (specular and ambient colors as written, edge, sphere map, toon) is kept in `asset.extras.source.materials`. Bones' IK, inherited
 //! rotation and translation, and fixed and local axes go in their nodes' `extras`. Rigid bodies, joints, soft
 //! bodies and display frames are counted, not converted: glTF has no physics.
 //!
@@ -45,7 +46,8 @@ use crate::assets::Assets;
 use crate::bytes::Bin;
 use crate::document::{Document, Keep};
 use crate::images::Images;
-use crate::mesh::{Material, srgb_to_linear};
+use crate::legacy_material::{Phong, Rgb, Transparency};
+use crate::material::Alpha;
 use crate::num::{f32_of, u32_of};
 use crate::quat;
 use crate::source::{Axis, Fact, Handedness, SourceInfo};
@@ -913,16 +915,9 @@ fn name_of(name: &str, i: usize, what: &str) -> String {
     }
 }
 
-/// Roughness from a Phong specular power, by the usual match of Blinn-Phong to GGX; fully rough without a
-/// highlight.
-fn roughness(power: f32, specular: [f32; 3]) -> f32 {
-    if !power.is_finite() || power <= 0.0 || !specular.iter().any(|&c| c > 0.0) {
-        return 1.0;
-    }
-    (2.0 / (power + 2.0)).powf(0.25).clamp(0.0, 1.0)
-}
-
-/// Whether a texture file is of a format whose alpha is there on purpose.
+/// Whether a texture file is of a format whose alpha is there on purpose: `MikuMikuDance` draws every texture
+/// with its alpha, in material order and without sorting, which a cutout stands in for where blending would
+/// not.
 fn cuts_out(file: &str) -> bool {
     let lower = file.to_ascii_lowercase();
     [".png", ".tga", ".dds"].iter().any(|e| lower.ends_with(e))
@@ -1105,23 +1100,26 @@ fn build(m: Model, input: &Input<'_>, stem: &str, assets: &dyn Assets, keep: Kee
     for (i, mat) in m.materials.iter().enumerate() {
         let unit = |c: f32| if c.is_finite() { c.clamp(0.0, 1.0) } else { 1.0 };
         let d = mat.diffuse;
-        let color = [
-            srgb_to_linear(unit(d[0])),
-            srgb_to_linear(unit(d[1])),
-            srgb_to_linear(unit(d[2])),
-            unit(d[3]),
-        ];
-        let mut out = Material::plain(&name_of(&mat.name, i, "material"), color);
+        // The diffuse color and opacity, and the highlight: its color and "specular power", the exponent.
+        let mut phong = Phong::new(Rgb::Srgb([unit(d[0]), unit(d[1]), unit(d[2])]));
+        phong.opacity = unit(d[3]);
+        phong.specular = Some(Rgb::Srgb(mat.specular));
+        phong.exponent = Some(if mat.power.is_finite() { mat.power } else { 0.0 });
+        let mut out = phong.pbr().material(&name_of(&mat.name, i, "material"));
         out.double_sided = mat.flags & 0x01 != 0;
-        out.roughness = roughness(mat.power, mat.specular);
-        if let Some(t) = &mat.texture
-            && let Some(path) = assets.find(t, dir_)
-        {
-            // Decided by the file alone, so a read without textures cuts out as a full one does.
-            if color[3] >= 1.0 && cuts_out(t) {
-                out.alpha_cutoff = Some(0.5);
+        if let Some(t) = &mat.texture {
+            // Decided by the texture's name alone, so the material is the same whether or not the file is
+            // there, and whether or not textures are kept.
+            let transparency = Transparency {
+                cutout: (out.color[3] >= 1.0 && cuts_out(t)).then_some(0.5),
+                ..Transparency::of(out.color[3])
+            };
+            if let Alpha::Mask(c) = transparency.mode() {
+                out.alpha_cutoff = Some(c);
             }
-            if keep.textures {
+            if keep.textures
+                && let Some(path) = assets.find(t, dir_)
+            {
                 out.color_image = images.file(assets, path, t);
             }
         }

@@ -10,6 +10,8 @@ use crate::{Context as _, ErrorKind, Result};
 use serde_json::{Value, json};
 
 use super::model::{Definition, Face, Id, Instance, Model};
+use crate::legacy_material::{self, Transparency};
+use crate::material::Alpha;
 use crate::polygon::{newell, triangulate_holes};
 use crate::vec3::{cross, dot, sub, unit};
 
@@ -26,9 +28,6 @@ fn max_vertices(triangles: usize) -> usize {
 }
 /// Component nesting deeper than this is skipped rather than recursed into.
 const MAX_NESTING: usize = 64;
-/// `SketchUp`'s default front-face color, for faces nobody painted.
-const DEFAULT_RGB: [u8; 3] = [255, 255, 255];
-
 /// The image type of an embedded texture, from its leading bytes. Anything other than PNG or JPEG is dropped,
 /// since glTF viewers only have to understand those two.
 pub(crate) fn image_mime(bytes: &[u8]) -> Option<&'static str> {
@@ -41,8 +40,8 @@ pub(crate) fn image_mime(bytes: &[u8]) -> Option<&'static str> {
     }
 }
 
-/// Whether a PNG has an alpha channel (grayscale-alpha or RGBA in its header), so cut-out textures like leaves
-/// and fences keep their holes.
+/// Whether a PNG has an alpha channel (grayscale-alpha or RGBA in its header), which `SketchUp` draws as a
+/// cutout: textures like leaves and fences keep their holes.
 fn png_has_alpha(bytes: &[u8]) -> bool {
     bytes.starts_with(b"\x89PNG\r\n\x1a\n") && matches!(bytes.get(25), Some(4 | 6))
 }
@@ -512,36 +511,55 @@ impl<'m> Writer<'m> {
         json!({ "attributes": attributes, "indices": self.accessors.len() - 1, "material": material })
     }
 
-    /// The glTF material for a `SketchUp` material (unpainted faces when `None`), shown on both sides of a face or
-    /// on its front only.
+    /// The glTF material for a `SketchUp` material (the default material for unpainted faces, `None`), shown on
+    /// both sides of a face or on its front only. A `SketchUp` material is a color or a texture and an opacity,
+    /// and says nothing of its highlight.
     fn material(&mut self, key: MaterialKey) -> usize {
         if let Some(&i) = self.material_index.get(&key) {
             return i;
         }
         let (id, double_sided) = key;
         let model = self.model;
-        let (name, rgb, alpha, texture, colorize) = match id.and_then(|m| model.materials.get(&m)) {
-            Some(m) => (m.name.as_str(), m.rgb, m.alpha, m.texture.as_ref(), m.colorize),
-            None => ("Default", DEFAULT_RGB, 1.0, None, false),
+        let Some(sm) = id.and_then(|m| model.materials.get(&m)) else {
+            let d = legacy_material::default_material(false);
+            let pbr =
+                json!({ "baseColorFactor": d.color, "metallicFactor": d.metallic, "roughnessFactor": d.roughness });
+            self.materials
+                .push(json!({ "name": d.name, "pbrMetallicRoughness": pbr, "doubleSided": double_sided }));
+            let i = self.materials.len() - 1;
+            self.material_index.insert(key, i);
+            return i;
         };
+        let (name, rgb, alpha, texture, colorize) =
+            (sm.name.as_str(), sm.rgb, sm.alpha, sm.texture.as_ref(), sm.colorize);
         let alpha = if alpha.is_finite() { alpha.clamp(0.0, 1.0) } else { 1.0 };
-        let mut pbr = json!({ "metallicFactor": 0.0, "roughnessFactor": 0.9 });
-        let mut cutout = false;
+        let mut pbr = json!({ "metallicFactor": 0.0, "roughnessFactor": legacy_material::ROUGHNESS });
+        let mut texture_alpha = false;
         if let Some(tex) = texture {
             let [r, g, b] = if colorize { tint(rgb, tex.average) } else { [1.0; 3] };
             pbr["baseColorFactor"] = json!([r, g, b, alpha]);
             pbr["baseColorTexture"] = json!({ "index": self.texture(&tex.bytes) });
-            cutout = png_has_alpha(&tex.bytes);
+            texture_alpha = png_has_alpha(&tex.bytes);
         } else {
             let [r, g, b] = rgb.map(srgb_to_linear);
             pbr["baseColorFactor"] = json!([r, g, b, alpha]);
         }
         let mut m = json!({ "name": name, "pbrMetallicRoughness": pbr, "doubleSided": double_sided });
-        if alpha < 0.999 {
-            m["alphaMode"] = json!("BLEND");
-        } else if cutout {
-            m["alphaMode"] = json!("MASK");
-            m["alphaCutoff"] = json!(0.5);
+        #[allow(clippy::cast_possible_truncation, reason = "an opacity, 0 to 1")]
+        let transparency = Transparency {
+            texture_alpha,
+            // A texture's alpha cuts out, unless the material itself is see-through.
+            cutout: (texture_alpha && alpha >= 0.999).then_some(0.5),
+            // Within a thousandth of opaque is opaque.
+            ..Transparency::of(if alpha < 0.999 { alpha as f32 } else { 1.0 })
+        };
+        match transparency.mode() {
+            Alpha::Blend => m["alphaMode"] = json!("BLEND"),
+            Alpha::Mask(c) => {
+                m["alphaMode"] = json!("MASK");
+                m["alphaCutoff"] = json!(c);
+            }
+            Alpha::Opaque => {}
         }
         self.materials.push(m);
         let i = self.materials.len() - 1;
@@ -907,7 +925,18 @@ mod tests {
             .iter()
             .map(|m| m["name"].as_str().unwrap())
             .collect();
-        assert!(mats.contains(&"Red") && mats.contains(&"Default"));
+        // Unpainted faces take the default material.
+        assert!(mats.contains(&"Red") && mats.contains(&"default"));
+        let d = json["materials"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["name"] == "default")
+            .unwrap();
+        assert_eq!(
+            d["pbrMetallicRoughness"]["baseColorFactor"],
+            json!([0.72f32, 0.72f32, 0.74f32, 1.0f32])
+        );
     }
 
     #[test]

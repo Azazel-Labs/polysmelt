@@ -172,7 +172,7 @@ case(FMT, "vertex_colors_uchar",
      {"spec": SPEC + ": red green blue as uchar (sRGB)", "source": SRC, "triangles": 1, "colors": True,
       "tolerance": 1e-3,
       "colors_include": [[1, 0, 0, 1], [0, 1, 0, 1], [lin(128 / 255)] * 3 + [1]],
-      "materials": [{"color": [1, 1, 1, 1]}]})
+      "materials": [{"color": [1, 1, 1, 1], "alpha_mode": "OPAQUE"}]})
 
 RGB_I32 = [("int", "red"), ("int", "green"), ("int", "blue")]
 case(FMT, "vertex_colors_int",
@@ -186,8 +186,10 @@ case(FMT, "vertex_colors_float_alpha",
      {"tri.ply": ply("binary_little_endian", [
          ("vertex", XYZ + [("float", "red"), ("float", "green"), ("float", "blue"), ("float", "alpha")],
           [TRI_V[0] + [1, 0, 0, 1], TRI_V[1] + [0, 1, 0, 0.5], TRI_V[2] + [0.5, 0.5, 0.5, 1]]), TRI_F])},
-     {"spec": SPEC + ": float colors with alpha", "source": SRC, "triangles": 1, "colors": True,
-      "tolerance": 1e-3, "colors_include": [[1, 0, 0, 1], [0, 1, 0, 0.5], [lin(0.5)] * 3 + [1]]})
+     {"spec": SPEC + ": float colors with alpha; an alpha below 1 makes the material blend, as glTF multiplies "
+                     "it into the material's", "source": SRC, "triangles": 1, "colors": True,
+      "tolerance": 1e-3, "colors_include": [[1, 0, 0, 1], [0, 1, 0, 0.5], [lin(0.5)] * 3 + [1]],
+      "materials": [{"name": "default", "color": [1, 1, 1, 1]}], "json": {"/materials/0/alphaMode": "BLEND"}})
 
 case(FMT, "vertex_colors_diffuse",
      {"tri.ply": ply("ascii", [

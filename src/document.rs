@@ -1009,23 +1009,42 @@ impl Document {
         if !skinned.is_empty() {
             meshes.push((None, skinned));
         }
-        Self::from_named(meshes, &materials, images, None, facts, &skeleton)
+        // A mesh handed over is written as it is: its materials say whether they blend.
+        Self::from_meshes(meshes, &materials, images, None, facts, &skeleton, true)
     }
 
     /// The document for named meshes sharing `materials` and `images`: a node drawing each, in
     /// order, skipping those that draw nothing; `source` becomes the asset's
     /// `extras.source`. A mesh whose primitives are all skinned is bound to `skeleton`, when
     /// there is one.
+    #[allow(dead_code, reason = "only some readers build their document this way")]
     pub(crate) fn from_named(
-        mut meshes: Vec<(Option<String>, Vec<Prim>)>,
+        meshes: Vec<(Option<String>, Vec<Prim>)>,
         materials: &[Material],
         images: Vec<Source>,
         source: Option<Value>,
         facts: Map<String, Value>,
         skeleton: &[Bone],
     ) -> Document {
+        Self::from_meshes(meshes, materials, images, source, facts, skeleton, false)
+    }
+
+    /// [`Document::from_named`]; with `keep_alpha_modes`, vertex colors that aren't opaque leave their
+    /// material's alpha mode alone.
+    fn from_meshes(
+        mut meshes: Vec<(Option<String>, Vec<Prim>)>,
+        materials: &[Material],
+        images: Vec<Source>,
+        source: Option<Value>,
+        facts: Map<String, Value>,
+        skeleton: &[Bone],
+        keep_alpha_modes: bool,
+    ) -> Document {
         let materials = texcoords(&mut meshes, materials);
-        let mut b = Builder::default();
+        let mut b = Builder {
+            keep_alpha_modes,
+            ..Builder::default()
+        };
         let rig = (!skeleton.is_empty()
             && meshes
                 .iter()
@@ -1277,6 +1296,48 @@ fn skin_attributes(joints: &[[u32; 4]], weights: &[[f32; 4]], offset: u32, count
     (js, ws)
 }
 
+/// Makes the materials of primitives whose `COLOR_0` is one of `translucent` (accessors holding an alpha under
+/// one) blend, as glTF multiplies the vertex color's alpha into the material's: an opaque material would hide
+/// it. One that cuts out already is left to.
+fn blend_vertex_alpha(json: &mut Map<String, Value>, translucent: &[usize]) {
+    if translucent.is_empty() {
+        return;
+    }
+    let mut blend = Vec::new();
+    for p in json
+        .get("meshes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|m| m.get("primitives")?.as_array())
+        .flatten()
+    {
+        let color = p.pointer("/attributes/COLOR_0").and_then(Value::as_u64);
+        let material = p.get("material").and_then(Value::as_u64);
+        if let (Some(c), Some(m)) = (color, material)
+            && usize::try_from(c).is_ok_and(|c| translucent.contains(&c))
+            && !blend.contains(&m)
+        {
+            blend.push(m);
+        }
+    }
+    let Some(materials) = json.get_mut("materials").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for m in blend {
+        let Some(mat) = usize::try_from(m).ok().and_then(|m| materials.get_mut(m)) else {
+            continue;
+        };
+        let vertex = crate::legacy_material::Transparency {
+            vertex_alpha: true,
+            ..crate::legacy_material::Transparency::of(1.0)
+        };
+        if mat.get("alphaMode").is_none() && vertex.mode() == crate::material::Alpha::Blend {
+            mat["alphaMode"] = json!("BLEND");
+        }
+    }
+}
+
 /// Builds a document's one buffer from typed arrays, with a view and an accessor for each.
 #[derive(Default)]
 pub(crate) struct Builder {
@@ -1290,6 +1351,11 @@ pub(crate) struct Builder {
     /// While writing skinned primitives: what's added to a bone's index for its joint, and how
     /// many joints the skin has.
     pub joints: Option<(u32, usize)>,
+    /// The `COLOR_0` accessors holding an alpha below 1: the materials drawn with them blend.
+    pub translucent: Vec<usize>,
+    /// Leaves materials' alpha modes as they are given, whatever the vertex colors hold: for a mesh a caller
+    /// hands over, whose materials are its own, not a reader's.
+    pub keep_alpha_modes: bool,
 }
 
 impl Builder {
@@ -1372,8 +1438,12 @@ impl Builder {
             for c in &mut colors {
                 *c = c.clamp(0.0, 1.0);
             }
+            let translucent = k == 0 && colors.chunks_exact(4).any(|c| c[3] < 1.0);
             let a = self.accessor(Part::f32(colors), 5126, n, "VEC4", Some(34962));
             attributes[format!("COLOR_{k}")] = json!(a);
+            if translucent {
+                self.translucent.push(a);
+            }
         }
         if let Some((offset, count)) = self.joints
             && p.skin_joints.len() == n
@@ -1561,6 +1631,9 @@ impl Builder {
     /// The document: `json` (scenes, nodes, meshes and the rest) with the asset, the accessors,
     /// the views and the one buffer they're on.
     pub(crate) fn finish(self, mut json: Map<String, Value>, facts: Map<String, Value>) -> Document {
+        if !self.keep_alpha_modes {
+            blend_vertex_alpha(&mut json, &self.translucent);
+        }
         let asset = json.entry("asset").or_insert_with(|| json!({}));
         asset["version"] = json!("2.0");
         if asset.get("generator").is_none() {
@@ -1639,6 +1712,38 @@ mod tests {
         let doc = Document::new(json, vec![Blob::Missing(big)], Map::new(), Refs::new());
         assert_eq!(doc.buffer(0).unwrap_err().kind(), ErrorKind::Corrupt);
         assert_eq!(doc.view_shared(0).unwrap_err().kind(), ErrorKind::Corrupt);
+    }
+
+    /// Vertex colors that aren't opaque make a reader's material blend; a mesh a caller hands over keeps the
+    /// alpha modes its materials give.
+    #[test]
+    fn vertex_alpha_blends_a_readers_material_and_leaves_a_callers() {
+        let prim = |alpha: f32, material: usize| Prim {
+            positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            colors: vec![[1.0, 1.0, 1.0, alpha]; 3],
+            indices: vec![0, 1, 2],
+            material,
+            ..Prim::default()
+        };
+        let mut cut = Material::plain("cut", [1.0; 4]);
+        cut.alpha_cutoff = Some(0.5);
+        let materials = vec![
+            Material::plain("sheer", [1.0; 4]),
+            Material::plain("solid", [1.0; 4]),
+            cut,
+        ];
+        let prims = || vec![prim(0.5, 0), prim(1.0, 1), prim(0.5, 2)];
+        let read = Document::from_named(vec![(None, prims())], &materials, Vec::new(), None, Map::new(), &[]);
+        let m = &read.json()["materials"];
+        assert_eq!(m[0]["alphaMode"], "BLEND");
+        assert!(m[1].get("alphaMode").is_none());
+        assert_eq!(m[2]["alphaMode"], "MASK");
+        let handed = Document::from(Mesh {
+            prims: prims(),
+            materials,
+            ..Mesh::default()
+        });
+        assert!(handed.json()["materials"][0].get("alphaMode").is_none());
     }
 
     /// Compressing a document straight from its parts gives the bytes compressing its GLB does.

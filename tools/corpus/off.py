@@ -75,7 +75,15 @@ case(FMT, "concave_face", {"ell.off": text(ELL, [list(range(6))])},
 COLORS = [(255, 0, 0, 255), (0, 255, 0, 255), (0, 0, 255, 255), (255, 255, 0, 255)] * 2
 case(FMT, "coff_vertex_colors", {"cube.off": text([[*v, *c] for v, c in zip(CUBE_V, COLORS)], QUADS, "COFF")},
      {"spec": SPEC + ": COFF, each vertex followed by an RGBA color of 0-255 integers", "source": SRC, **CUBE,
-      "colors": True, "colors_include": [lin(c[:3]) for c in COLORS[:4]]})
+      "colors": True, "colors_include": [lin(c[:3]) for c in COLORS[:4]],
+      "materials": [{"name": "default", "color": [1, 1, 1, 1], "alpha_mode": "OPAQUE"}]})
+
+# The same with a half-transparent vertex: the material blends, as glTF multiplies the alpha into its own.
+SHEER = [(255, 0, 0, 128)] + COLORS[1:]
+case(FMT, "coff_vertex_alpha", {"cube.off": text([[*v, *c] for v, c in zip(CUBE_V, SHEER)], QUADS, "COFF")},
+     {"spec": SPEC + ": COFF vertex colors with an alpha below 255: the material blends", "source": SRC, **CUBE,
+      "colors": True, "colors_include": [lin(SHEER[0][:3], r(128 / 255))],
+      "materials": [{"name": "default", "color": [1, 1, 1, 1]}], "json": {"/materials/0/alphaMode": "BLEND"}})
 
 # Only the first vertex has a color: the others are white, not white in the first one's 0-255 scale.
 case(FMT, "vertex_colors_on_some", {"tri.off": text([(0, 0, 0, 255, 0, 0), (1, 0, 0), (0, 1, 0)], [[0, 1, 2]])},

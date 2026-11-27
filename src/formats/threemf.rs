@@ -442,7 +442,7 @@ pub(crate) fn load(input: super::Input<'_>, keep: Keep) -> Result<Document> {
     for (i, look) in out.order.iter().enumerate() {
         let named = |fallback: String| out.names.get(look).cloned().unwrap_or(fallback);
         let material = match *look {
-            Look::Plain => Material::plain("default", GRAY).into(),
+            Look::Plain => crate::legacy_material::default_material(false).into(),
             Look::Color(c, finish) => {
                 let m = Full::from(Material::plain(&named(format!("color{i}")), linear(c)));
                 match finish {

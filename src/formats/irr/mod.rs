@@ -21,7 +21,8 @@
 //! with their children.
 //!
 //! Materials: the diffuse color (replaced by the vertices' color when they all share one that isn't white, or set
-//! to white when they differ and the colors are kept per vertex), emissive, shininess as roughness, the first
+//! to white when they differ and the colors are kept per vertex), emissive, the specular color and shininess as
+//! the highlight (none at a shininess of 0), the first
 //! texture as the color image with its wrap modes and filters, the second as a normal map (normal map and parallax
 //! types) or a lightmap (lightmap types; written as the occlusion texture, on the second coordinate set when there
 //! is one), lighting off as unlit, no back-face culling as double-sided. Vertex alpha types blend by the vertices'
@@ -118,7 +119,15 @@ impl<'a> Ctx<'a> {
             .map(|s| s.to_string_lossy().into_owned())
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| format!("material{index}"));
-        let (mut out, mut patch) = material::convert(m, &name, &mut self.tex, dir, sets);
+        // A buffer with no material takes the default one, white under its vertices' colors.
+        let (mut out, mut patch) = if m.missing {
+            (
+                crate::legacy_material::default_material(true),
+                material::Patch::default(),
+            )
+        } else {
+            material::convert(m, &name, &mut self.tex, dir, sets)
+        };
         match uniform {
             // Irrlicht lights and draws with the vertices' color in place of the diffuse; all white reads as
             // no color given.
@@ -126,6 +135,7 @@ impl<'a> Ctx<'a> {
                 let l = material::linear(c);
                 out.color[..3].copy_from_slice(&l[..3]);
             }
+            Some(_) if m.missing => out.color = crate::mesh::GRAY,
             Some(_) => {}
             None => out.color[..3].fill(1.0),
         }

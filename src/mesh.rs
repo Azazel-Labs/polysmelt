@@ -552,7 +552,7 @@ pub fn smooth_normals(positions: &[[f32; 3]], indices: &[u32]) -> Vec<[f32; 3]> 
 pub(crate) fn single(p: Prim) -> Mesh {
     Mesh {
         prims: vec![p],
-        materials: vec![Material::plain("default", GRAY)],
+        materials: vec![crate::legacy_material::default_material(false)],
         images: Vec::new(),
         skeleton: Vec::new(),
     }

@@ -9,7 +9,11 @@
 //! glTF reads occlusion, roughness and metalness from one image's red, green and blue, so maps
 //! arranged otherwise are packed into a new PNG that way, when their pixels can be read (PNG, and
 //! the formats re-encoded as PNG). The maps are read for that even when the images' bytes aren't
-//! kept, so the textures are the same either way.
+//! kept, so the textures are the same either way. `Kd`, `Ks`, `Ns`, `d` and `illum` are the classic
+//! material every reader reads one way (`legacy_material`): `Ns` the highlight's exponent, `Ks` its
+//! color, none under `illum` 0 or 1. A file Blender wrote holds a roughness and a specular level
+//! there instead, which are read back as Blender wrote them. Faces with no material, or one no
+//! library has, take the default material.
 //!
 //! Corners without a normal get one made from their faces: smooth within a smoothing group
 //! (`s 1`, the default), across texture seams, and flat for faces after `s off`. Corners with a
@@ -43,6 +47,7 @@ use crate::assets::Assets;
 use crate::document::{Builder, Document, Keep, Part};
 use crate::images::{Images, Source, gray};
 use crate::keep::spawn;
+use crate::legacy_material::{self, Highlight, Phong, Rgb, Transparency};
 use crate::material::{self, Alpha, Clearcoat, Factor, Full, Sheen, Specular, Tex, UvTransform};
 use crate::mesh::{Image, Material, Prim, quad, smooth_normals, srgb_to_linear, triangulate};
 use crate::num::u32_of;
@@ -2964,25 +2969,61 @@ pub(crate) fn obj(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<D
     let mut packs: HashMap<[Channel; 3], Option<usize>> = HashMap::new();
     let mut out_materials = Vec::new();
     let mut looks: Vec<Look> = Vec::new();
+    // Blender writes linear colors, and a roughness and specular level in Phong's fields.
+    let linear = super::linear_colors(input, "obj");
     for (m, &name) in used.iter().enumerate() {
         let name = &names[name];
         let entry = mtl.get(name);
-        // Without a material, vertex colors show as they are; otherwise the usual 0.8 gray.
-        let fallback = if has_colors { [1.0; 3] } else { [0.8; 3] };
-        let d = entry.and_then(|e| e.color).unwrap_or(fallback);
-        let mut mat = Material::plain(
-            if name.is_empty() { "default" } else { name },
-            [d[0], d[1], d[2], entry.and_then(|e| e.alpha).unwrap_or(1.0)],
-        );
+        // Faces with no material, or one no library has: the default, under the name they use.
+        let mut mat = legacy_material::default_material(has_colors);
+        if !name.is_empty() {
+            mat.name.clone_from(name);
+        }
+        // The highlight's `KHR_materials_specular` numbers, when they aren't glTF's own.
+        let mut highlight = None;
         if let Some(e) = entry {
-            mat.emissive = e.emissive.unwrap_or([0.0; 3]);
-            mat.metallic = e.metallic.unwrap_or(0.0);
-            // Blender's reading of the specular exponent when there's no roughness.
-            if let Some(r) = e
-                .roughness
-                .or(e.shininess.map(|ns| 1.0 - (ns.clamp(0.0, 1000.0) / 1000.0).sqrt()))
-            {
-                mat.roughness = r;
+            // Without a `Kd`, vertex colors show as they are; otherwise the usual 0.8 gray.
+            let fallback = if has_colors { [1.0; 3] } else { [0.8; 3] };
+            let mut phong = Phong::new(Rgb::of(e.color.unwrap_or(fallback), linear));
+            phong.opacity = e.alpha.unwrap_or(1.0);
+            phong.emissive = Rgb::of(e.emissive.unwrap_or([0.0; 3]), linear);
+            let pbr = e.roughness.is_some() || e.metallic.is_some();
+            // `Ns` is the specular exponent itself, 0 to 1000 (MTL specification, "Ns exponent"). Blender
+            // writes its roughness there instead, as Ns = 1000 (1 - roughness)^2: read back as the
+            // exponent of that roughness.
+            phong.exponent = e.shininess.map(|ns| {
+                let ns = ns.clamp(0.0, 1000.0);
+                if linear {
+                    #[allow(clippy::cast_possible_truncation, reason = "an exponent, far inside f32")]
+                    let n = legacy_material::exponent_of_roughness(f64::from(1.0 - (ns / 1000.0).sqrt())) as f32;
+                    n
+                } else {
+                    ns
+                }
+            });
+            if !pbr {
+                // `Ks` is the highlight's color. Blender writes its specular level there, where 0.5 is the
+                // 4% a dielectric reflects, glTF's whole highlight.
+                phong.specular = e.specular.map(|ks| {
+                    if linear {
+                        Rgb::Linear(ks.map(|c| c * 2.0))
+                    } else {
+                        Rgb::Srgb(ks)
+                    }
+                });
+                // `illum` 0 and 1 are the models without a highlight (MTL specification, "illum").
+                #[allow(clippy::float_cmp, reason = "illum is a whole number")]
+                {
+                    phong.highlight = !e.illum.is_some_and(|i| i == 0.0 || i == 1.0);
+                }
+            }
+            let out = phong.pbr();
+            out.set(&mut mat);
+            mat.extensions = None;
+            highlight = out.specular.filter(|_| !pbr);
+            if pbr {
+                mat.metallic = e.metallic.unwrap_or(0.0);
+                mat.roughness = e.roughness.unwrap_or(mat.roughness);
             }
         }
         let mut texture = |reference: Option<&MapRef>, make: Make<'_>| -> Option<Tex> {
@@ -3095,14 +3136,22 @@ pub(crate) fn obj(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<D
                 mat.metallic = 1.0;
             }
             look.metal_in_tex = holds[1];
-            // Opacity in the color texture's alpha: cut out there. A separate opacity file
-            // would need its pixels moved into the color texture's alpha.
+            // Opacity in the color texture's alpha (`map_d` naming the `map_Kd` file), the long-standing way
+            // to write cutout foliage: cut out at a half. A separate opacity file would need its pixels moved
+            // into the color texture's alpha.
             if let (Some(a), Some(c)) = (&e.alpha_map, &e.color_map)
                 && a.file == c.file
                 && mat.color_image.is_some()
             {
-                look.alpha = Some(Alpha::Mask(0.5));
-                mat.alpha_cutoff = Some(0.5);
+                let transparency = Transparency {
+                    texture_alpha: true,
+                    cutout: Some(0.5),
+                    ..Transparency::of(mat.color[3])
+                };
+                look.alpha = Some(transparency.mode());
+                if let Some(Alpha::Mask(c)) = look.alpha {
+                    mat.alpha_cutoff = Some(c);
+                }
             }
             // Glass lets light through rather than fading out.
             #[allow(clippy::float_cmp, reason = "illum is a whole number")]
@@ -3113,12 +3162,17 @@ pub(crate) fn obj(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<D
             }
             let pbr = e.roughness.is_some() || e.metallic.is_some();
             let spec_tex = texture(e.specular_map.as_ref(), Make::File);
-            if !pbr && (e.specular.is_some() || spec_tex.is_some()) {
-                // Phong's highlight, where half is glTF's usual.
+            // No highlight has no use for a texture coloring it.
+            let dark = highlight == Some(Highlight::NONE);
+            if !pbr && (highlight.is_some() || spec_tex.is_some()) {
+                let h = highlight.unwrap_or(Highlight {
+                    factor: 1.0,
+                    color: [1.0; 3],
+                });
                 look.specular = Some(Specular {
-                    factor: Factor::of(1.0),
-                    color: e.specular.unwrap_or([0.5; 3]).map(|c| c * 2.0),
-                    color_tex: spec_tex,
+                    factor: Factor::of(h.factor),
+                    color: h.color,
+                    color_tex: spec_tex.filter(|_| !dark),
                 });
             }
             // Every exporter writes Ni, often a placeholder of 1 (which would take the highlight away).
@@ -3149,13 +3203,7 @@ pub(crate) fn obj(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<D
         looks.push(look);
         out_materials.push(mat);
     }
-    let linear = super::linear_colors(input, "obj");
     if !linear {
-        for m in &mut out_materials {
-            for c in m.color[..3].iter_mut().chain(&mut m.emissive) {
-                *c = srgb_to_linear(*c);
-            }
-        }
         for s in looks.iter_mut().filter_map(|l| l.sheen.as_mut()) {
             s.color = s.color.map(srgb_to_linear);
         }
@@ -3898,6 +3946,7 @@ f 1 2 3
         let text = "mtllib t.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 0 1\n\
                     usemtl leaf\nf 1/1 2/2 3/3\nusemtl glass\nf 1/1 3/3 2/2\n";
         let doc = read_in(text.as_bytes(), &assets);
+        // `map_d` naming the color texture: its alpha is the opacity, cut out at a half.
         let leaf = &doc.json()["materials"][0];
         assert_eq!(leaf["alphaMode"], "MASK", "{leaf}");
         assert!(leaf["emissiveTexture"].is_object());

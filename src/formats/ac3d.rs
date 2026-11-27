@@ -5,10 +5,11 @@
 //!
 //! Each object becomes a node, the world's children the scene's roots. A surface's material, the object's texture
 //! (placed by `texrep` and `texoff`) and whether the surface has two sides make a glTF material: the color, with
-//! the texture over it as AC3D modulates it, the emissive color, the transparency as alpha and the shininess as
-//! roughness. Shaded surfaces are smoothed across shared vertices up to the object's crease angle (AC3D's 61°
+//! the texture over it as AC3D modulates it, the emissive color, the transparency as alpha, and the specular color
+//! and shininess as the highlight (the classic material every reader reads one way, `legacy_material`); a surface
+//! naming a material the file doesn't have takes the default one. Shaded surfaces are smoothed across shared vertices up to the object's crease angle (AC3D's 61°
 //! when it gives none); flat ones keep their faces' normals. Polygons are triangulated, lines drawn as lines.
-//! What has no glTF slot (ambient and specular colors, the subdivision level, `data`, `url`, hidden, locked and
+//! What has no glTF slot (the ambient color, the subdivision level, `data`, `url`, hidden, locked and
 //! folded flags, lights) stays in `extras`.
 //!
 //! AC3D works in OpenGL's space, Y up and right-handed, with polygons counterclockwise from the front, as glTF
@@ -25,8 +26,9 @@ use crate::Result;
 use crate::assets::Assets;
 use crate::document::{Builder, Document, Keep};
 use crate::images::Images;
-use crate::material::{Alpha, Full, Tex};
-use crate::mesh::{FastMap, Prim, srgb_to_linear};
+use crate::legacy_material::{self, Phong, Rgb};
+use crate::material::{Full, Tex};
+use crate::mesh::{FastMap, Prim};
 use crate::num::{f32_of, u32_of};
 use crate::source::{Axis, Fact, Handedness, SourceInfo};
 use crate::vec3;
@@ -617,27 +619,27 @@ fn build(o: &Obj, mats: &[usize], textured: bool, mut clip: u64) -> Vec<Prim> {
     prims
 }
 
-/// The glTF material for an AC3D one, with its texture and sides.
-fn material(m: &Mat, tex: Option<Tex>, two_sided: bool, extras: bool) -> Full {
-    let lin = |c: [f32; 3]| c.map(|v| srgb_to_linear(v.clamp(0.0, 1.0)));
-    let rgb = lin(m.rgb);
-    let alpha = (1.0 - m.trans).clamp(0.0, 1.0);
-    // Blinn-Phong's exponent as GGX roughness: alpha = sqrt(2 / (n + 2)), roughness = sqrt(alpha).
-    let roughness = if m.spec.iter().all(|&c| c <= 0.0) {
-        1.0
-    } else {
-        (2.0 / (m.shi.clamp(0.0, 128.0) + 2.0)).powf(0.25)
+/// The glTF material for an AC3D one, with its texture and sides; for surfaces whose material the file doesn't
+/// have (`None`), the default one, white under a texture.
+fn material(m: Option<&Mat>, tex: Option<Tex>, two_sided: bool, extras: bool) -> Full {
+    let Some(m) = m else {
+        return Full {
+            base_color_tex: tex.clone(),
+            double_sided: two_sided,
+            ..legacy_material::default_material(tex.is_some()).into()
+        };
     };
+    // `MATERIAL name rgb r g b amb r g b emis r g b spec r g b shi n trans t`: OpenGL's material, whose
+    // shininess (0 to 128) is the Blinn-Phong exponent.
+    let mut phong = Phong::new(Rgb::Srgb(m.rgb));
+    phong.opacity = 1.0 - m.trans;
+    phong.emissive = Rgb::Srgb(m.emis);
+    phong.specular = Some(Rgb::Srgb(m.spec));
+    phong.exponent = Some(m.shi.clamp(0.0, 128.0));
     let mut full = Full {
-        name: m.name.clone(),
-        base_color: [rgb[0], rgb[1], rgb[2], alpha],
         base_color_tex: tex,
-        metallic: 0.0,
-        roughness,
-        emissive: lin(m.emis),
-        alpha: if alpha < 1.0 { Alpha::Blend } else { Alpha::Opaque },
         double_sided: two_sided,
-        ..Full::default()
+        ..phong.pbr().full(&m.name)
     };
     if extras {
         let mut e = json!({ "ambient": m.amb.map(clean), "specular": m.spec.map(clean), "shininess": clean(m.shi), "transparency": clean(m.trans) });
@@ -671,10 +673,6 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
     let mut dropped_textures = 0usize;
     let mut materials: Vec<Full> = Vec::new();
     let mut material_at: HashMap<MatKey, usize> = HashMap::new();
-    let default = Mat {
-        name: "default".into(),
-        ..Mat::default()
-    };
     let mut b = Builder::default();
     let mut meshes: Vec<Value> = Vec::new();
     let mut mesh_of: Vec<Option<usize>> = vec![None; m.objs.len()];
@@ -711,12 +709,12 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
             let mat = (mat as usize).lt(&m.mats.len()).then_some(mat);
             let two = flags & TWO_SIDED != 0;
             *material_at.entry((mat, image, two)).or_insert_with(|| {
-                let src = mat.map_or(&default, |i| &m.mats[i as usize]);
+                let src = mat.map(|i| &m.mats[i as usize]);
                 materials.push(material(src, image.map(Tex::new), two, keep.extras));
                 materials.len() - 1
             })
         };
-        // Vertices without surfaces are points, in AC3D's default material.
+        // Vertices without surfaces are points, in the default material.
         let mats: Vec<usize> = if o.surfs.is_empty() {
             vec![material_of(u32::MAX, 0)]
         } else {
@@ -913,6 +911,7 @@ mod tests {
     use crate::document::Pose;
     use crate::formats::Input;
     use crate::mesh::Mesh;
+    use crate::mesh::srgb_to_linear;
 
     fn png() -> Vec<u8> {
         let mut png = Vec::new();
@@ -1136,10 +1135,14 @@ mod tests {
         assert!(m.materials[0].double_sided);
         assert!((m.materials[0].color[3] - 0.5).abs() < 1e-6);
         assert_eq!(doc.json()["nodes"][0]["extras"]["ac3d"]["data"], "OBJECT poly\r\nki");
-        // No materials: AC3D's default white.
+        // No materials: the default one, as every reader gives faces without one.
         let bare = format!("AC3Db\n{}", square("s", "0x00", "").replace("mat 0\n", ""));
         let m = flat(&read(&bare, &Memory::new()).unwrap());
-        assert_eq!(m.materials[0].color, [1.0; 4]);
+        let d = &m.materials[0];
+        assert_eq!(
+            (d.name.as_str(), d.color, d.roughness),
+            ("default", crate::mesh::GRAY, 0.85)
+        );
         // A concave polygon is triangulated, not fanned.
         let ell = "AC3Db\nOBJECT poly\nnumvert 6\n0 0 0\n2 0 0\n2 1 0\n1 1 0\n1 2 0\n0 2 0\nnumsurf 1\nSURF 0\nrefs 6\n\
                    1 0 0\n2 0 0\n3 0 0\n4 0 0\n5 0 0\n0 0 0\nkids 0\n";

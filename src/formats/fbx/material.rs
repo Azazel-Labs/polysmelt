@@ -8,6 +8,7 @@ use super::{Objects, Props, Reader, child_attr, num, scalar, string, vec3};
 use crate::assets::Assets;
 use crate::formats::fbx_tree::Attr as A;
 use crate::images::{Images, Location};
+use crate::legacy_material::{self, Phong, Rgb, Transparency};
 use crate::material::{self, Alpha, Clearcoat, Factor, Full, Sheen, Tex, UvTransform};
 use crate::mesh::{GRAY, Material, srgb_to_linear};
 use crate::num::f32_of;
@@ -53,7 +54,7 @@ impl Reader<'_, '_, '_> {
 
     pub(super) fn default_material(&mut self) -> usize {
         *self.default_material.get_or_insert_with(|| {
-            self.materials.push(Material::plain("default", GRAY).into());
+            self.materials.push(legacy_material::default_material(false).into());
             self.materials.len() - 1
         })
     }
@@ -455,26 +456,49 @@ fn read_material(
             if linear { v } else { srgb_to_linear(v) }
         })
     };
-    let d = to_linear(vec3(&p, "DiffuseColor", vec3(&p, "Diffuse", [0.8, 0.8, 0.8])));
+    let rgb = |c: [f64; 3]| Rgb::of(c.map(f32_of), linear);
+    let mut phong = Phong::new(rgb(vec3(&p, "DiffuseColor", vec3(&p, "Diffuse", [0.8, 0.8, 0.8]))));
     // Opacity and reflection are read only where the material sets them: the file's defaults for them are no
     // statement about this one.
-    let alpha = p.own_scalar("Opacity").unwrap_or_else(|| 1.0 - transparency(&p));
-    let mut mat = Full::from(Material::plain(
-        &name,
-        [d[0], d[1], d[2], f32_of(alpha.clamp(0.0, 1.0))],
-    ));
+    phong.opacity = f32_of(p.own_scalar("Opacity").unwrap_or_else(|| 1.0 - transparency(&p)));
+    phong.emissive = rgb(vec3(&p, "EmissiveColor", vec3(&p, "Emissive", [0.0; 3])));
+    let shininess = scalar(&p, "Shininess").or_else(|| scalar(&p, "ShininessExponent"));
+    if linear {
+        // Blender's exporter keeps its roughness in the exponent, as ((1 - roughness) * 10)^2, and writes no
+        // classic highlight: read back as the exponent of that roughness.
+        phong.exponent = shininess.map(|n| {
+            f32_of(legacy_material::exponent_of_roughness(
+                1.0 - n.clamp(0.0, 100.0).sqrt() / 10.0,
+            ))
+        });
+    } else {
+        // `FbxSurfacePhong`: the exponent of the highlight, its color and the factor scaling it;
+        // `FbxSurfaceLambert` (a shading model of "lambert") has no highlight.
+        phong.exponent = shininess.map(|n| f32_of(n.max(0.0)));
+        if p.get("SpecularColor").is_some() || p.get("Specular").is_some() {
+            phong.specular = Some(rgb(vec3(&p, "SpecularColor", vec3(&p, "Specular", [0.2; 3]))));
+            phong.strength = f32_of(scalar(&p, "SpecularFactor").unwrap_or(1.0));
+        }
+        let model = child_attr(node, "ShadingModel")
+            .and_then(string)
+            .or_else(|| p.text("ShadingModel"));
+        phong.highlight = !model.is_some_and(|m| m.split('\0').next().unwrap_or(m).eq_ignore_ascii_case("lambert"));
+    }
+    let mut mat = Full::from(Material::plain(&name, [1.0; 4]));
+    phong.pbr().set_full(&mut mat);
     // The emissive color is a color (sRGB unless Blender's); its factor is a linear intensity.
     let factor = f32_of(scalar(&p, "EmissiveFactor").unwrap_or(1.0).max(0.0));
-    mat.emissive = to_linear(vec3(&p, "EmissiveColor", vec3(&p, "Emissive", [0.0; 3]))).map(|c| c * factor);
-    // A Phong exponent as roughness, 1 - sqrt(n) / 10, the inverse of the common export mapping.
-    if let Some(n) = scalar(&p, "Shininess").or_else(|| scalar(&p, "ShininessExponent")) {
-        mat.roughness = f32_of(1.0 - n.clamp(0.0, 100.0).sqrt() / 10.0);
-    }
+    mat.emissive = mat.emissive.map(|c| c * factor);
     // Blender keeps its metallic in ReflectionFactor; other tools' reflectivity is a mirror blend, not metal.
     if linear && let Some(m) = p.own_scalar("ReflectionFactor") {
         mat.metallic = f32_of(m.clamp(0.0, 1.0));
     }
+    // A PBR shader's own specular takes the classic highlight's place.
+    let classic = mat.specular.take();
     let pbr = read_pbr(&mut mat, &p, &to_linear);
+    if pbr.is_none() {
+        mat.specular = classic;
+    }
     let gltf = read_gltf(&mut mat, &p);
     let mut uv_sets: Vec<(TexField, String)> = Vec::new();
     let mut color_set = None;
@@ -621,7 +645,11 @@ fn read_material(
         && mat.alpha == Alpha::Opaque
         && !gltf
     {
-        mat.alpha = Alpha::Blend;
+        let transparency = Transparency {
+            texture_alpha: true,
+            ..Transparency::of(mat.base_color[3])
+        };
+        mat.alpha = transparency.mode();
     }
     if gltf {
         if let (Some(t), Some(s)) = (&mut mat.normal_tex, p.own_scalar("glTF|normalScale")) {

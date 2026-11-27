@@ -40,7 +40,8 @@ use crate::assets::Assets;
 use crate::bytes::{Le, array_at, f32_at, floats, records, u16_at, u32_at, until_nul};
 use crate::document::{Builder, Document, Keep};
 use crate::images::Images;
-use crate::material::{self, Alpha, Factor, Full, Specular, Tex, UvTransform};
+use crate::legacy_material::{self, Highlight, Phong, Rgb, Transparency};
+use crate::material::{self, Factor, Full, Specular, Tex, UvTransform};
 use crate::mesh::{FastMap, GRAY, Material, Prim, face_normal, srgb_to_linear};
 use crate::num::{u32_of, usize_of};
 use crate::quat;
@@ -235,7 +236,7 @@ struct Mat {
     alpha: f32,
     texture: Option<String>,
     glossiness: Option<f32>,
-    /// The highlight's color, and how strong it is (0 to 1).
+    /// The highlight's color (sRGB, as written), and how strong it is (0 to 1).
     specular: Option<[f32; 3]>,
     shine_strength: Option<f32>,
     self_illum: f32,
@@ -268,7 +269,7 @@ fn material(d: &[u8]) -> Mat {
                 if id == MAT_DIFFUSE {
                     m.color = color(b).unwrap_or(m.color);
                 } else if id == MAT_SPECULAR {
-                    m.specular = color(b);
+                    m.specular = color_chunk(b).map(|(id, b)| rgb(id, b));
                 }
                 let key = match id {
                     MAT_AMBIENT => "ambient",
@@ -493,7 +494,11 @@ impl Look {
                 ..c.clone()
             };
             if self.alpha_source {
-                f.alpha = Alpha::Blend;
+                let transparency = Transparency {
+                    texture_alpha: true,
+                    ..Transparency::of(f.base_color[3])
+                };
+                f.alpha = transparency.mode();
             }
         }
         f.specular.clone_from(&self.specular);
@@ -1449,29 +1454,43 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
                     .zip(m.texture.as_deref())
                     .is_some_and(|(o, t)| o.eq_ignore_ascii_case(t));
                 flat.push(m.raw.get("shading").and_then(Value::as_u64) == Some(1));
+                // A texture shows as painted, not tinted by the color under it.
+                let rgb = if image.is_some() { [1.0; 3] } else { m.color };
+                // The classic material. Its "shininess" percentage is the glossiness of 3ds Max's standard
+                // material, whose Phong shader takes an exponent of 2^(10 g) for a glossiness g of 0 to 1 (the
+                // SDK's standard shaders); its "shininess strength" scales the specular color, the highlight's.
+                let mut phong = Phong::new(Rgb::Linear(rgb));
+                phong.opacity = m.alpha;
+                phong.exponent = m.glossiness.map(|g| (10.0 * g).exp2());
+                if m.specular.is_some() || m.shine_strength.is_some() {
+                    phong.specular = Some(Rgb::Srgb(m.specular.unwrap_or([1.0; 3])));
+                    phong.strength = m.shine_strength.unwrap_or(1.0);
+                }
+                let look = phong.pbr();
+                // No highlight has no use for a texture coloring it.
+                let spec_tex = spec_tex.filter(|_| look.specular != Some(Highlight::NONE));
+                let highlight = look.specular.or(spec_tex.as_ref().map(|_| Highlight {
+                    factor: 1.0,
+                    color: [1.0; 3],
+                }));
                 looks.push(Look {
                     color: image.and(map("texture")).map(|t| map_tex(t, 0)),
-                    // Phong's highlight: its color, scaled by its strength.
-                    specular: (m.specular.is_some() || m.shine_strength.is_some() || spec_tex.is_some()).then(|| {
-                        Specular {
-                            factor: Factor::of(m.shine_strength.unwrap_or(1.0)),
-                            color: m.specular.unwrap_or([1.0; 3]),
-                            color_tex: spec_tex,
-                        }
+                    specular: highlight.map(|h| Specular {
+                        factor: Factor::of(h.factor),
+                        color: h.color,
+                        color_tex: spec_tex,
                     }),
                     emissive,
                     normal: normal.clone(),
                     alpha_source: cut || tiling.is_some_and(|t| t & TILE_ALPHA != 0),
                 });
-                // A texture shows as painted, not tinted by the color under it.
-                let rgb = if image.is_some() { [1.0; 3] } else { m.color };
-                let plain = Material::plain(&m.name, [rgb[0], rgb[1], rgb[2], m.alpha]);
+                let plain = Material::plain(&m.name, look.base_color);
                 by_name.insert(m.name.clone(), materials.len());
                 materials.push(Material {
                     color_image: image,
                     normal_image: normal.map(|t| t.image),
                     emissive: m.color.map(|c| c * m.self_illum),
-                    roughness: m.glossiness.map_or(plain.roughness, |g| 1.0 - g),
+                    roughness: look.roughness,
                     double_sided: m.two_sided,
                     ..plain
                 });
@@ -2081,7 +2100,7 @@ fn add_faces(
         }
         let mat = face_mat[f].unwrap_or_else(|| {
             if materials.last().is_none_or(|m| m.name != "default") {
-                materials.push(Material::plain("default", GRAY));
+                materials.push(legacy_material::default_material(false));
             }
             materials.len() - 1
         });

@@ -19,8 +19,9 @@
 //! Materials map onto glTF's metallic-roughness model: diffuse is the base color, metalness
 //! and roughness theirs, emission emissive, opacity alpha, transparency transmission,
 //! clearcoat, sheen and the index of refraction their extensions, and a material with only a
-//! specular color and power (no roughness or metalness) is read as glossy plastic, its
-//! specular color the specular extension's. Textures keep their coordinate set, addressing
+//! specular color and power (no roughness or metalness) is the classic material every reader
+//! reads one way (`legacy_material`): the power its roughness, the color its highlight's.
+//! Faces no material reference covers take the default material. Textures keep their coordinate set, addressing
 //! and transform. Lights become `KHR_lights_punctual` lights, their attenuation the spot cone
 //! and range; cameras glTF perspective cameras. A camera's `fov` (or `fovx`) is its horizontal
 //! field of view: with a `fovy` the two give the aspect ratio, and without one a 16:9 frame is
@@ -419,6 +420,8 @@ struct Ctx<'a> {
     materials: Vec<Full>,
     /// How many texture coordinate sets each material reads (its highest set and one).
     material_uvs: Vec<usize>,
+    /// The material of faces with none, and the one for those with vertex colors.
+    default_materials: [Option<usize>; 2],
     material_of: FastMap<u32, Option<usize>>,
     meshes: Vec<Value>,
     geoms: FastMap<u32, Option<geometry::Geom>>,
@@ -516,6 +519,7 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         counted: std::collections::HashSet::new(),
         materials: Vec::new(),
         material_uvs: Vec::new(),
+        default_materials: [None; 2],
         material_of: FastMap::default(),
         meshes: Vec::new(),
         geoms: FastMap::default(),
@@ -1012,7 +1016,9 @@ fn finish(mut c: Ctx<'_>) -> Document {
     let mut facts = Map::new();
     facts.insert("triangles".into(), json!(c.triangles));
     facts.insert("nodes".into(), json!(nodes.len()));
-    facts.insert("materials".into(), json!(c.materials.len()));
+    // The file's materials: the default one that faces with none take isn't one of them.
+    let defaults = c.default_materials.iter().flatten().count();
+    facts.insert("materials".into(), json!(c.materials.len() - defaults));
 
     let mut json = Map::new();
     json.insert("asset".into(), json!({ "extras": { "source": source } }));

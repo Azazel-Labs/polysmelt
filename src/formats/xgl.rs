@@ -12,7 +12,9 @@
 //!
 //! An object's `<TRANSFORM>` gives its `<FORWARD>` and `<UP>` directions, `<POSITION>` and uniform `<SCALE>`:
 //! its local +Z points forward, +Y up and +X along up × forward. Materials take the diffuse color, `<ALPHA>`
-//! (blending below one), the emissive color and the shininess (a Phong exponent up to 128) as roughness.
+//! (blending below one), the emissive color, and the specular color and shininess (a Phong exponent up to 128) as
+//! the highlight (the classic material every reader reads one way, `legacy_material`). A face with no material
+//! takes the default one.
 //!
 //! XGL is right-handed with Y up, as glTF is, so nothing is converted; the source info has both assumed, and the
 //! unit's length unknown. Textures (`<TEXTURE>`, `<TEXTURERGB>`, `<TEXTURERGBA>`), object references and line
@@ -27,7 +29,8 @@ use super::xml::{El, Xml};
 use crate::Result;
 use crate::assets::Assets;
 use crate::document::{Document, Keep};
-use crate::mesh::{Material, srgb_to_linear};
+use crate::legacy_material::{Phong, Rgb};
+use crate::mesh::srgb_to_linear;
 use crate::quat;
 use crate::source::{Axis, Fact, Handedness};
 
@@ -239,25 +242,22 @@ impl Reader {
     fn material(&mut self, e: El<'_, '_>) -> usize {
         let index = self.scene.materials.len();
         let name = id(&e).map_or_else(|| format!("material{index}"), |i| format!("material{i}"));
-        let mut m = Material::plain(&name, [1.0; 4]);
-        let mut spec = [0.0f32; 3];
-        let mut shine = 0.0f32;
+        // `<MAT>`: DIFF, EMISS, ALPHA, and the optional SPEC and SHINE, OpenGL's specular color and exponent
+        // (0 to 128); without them there is no highlight.
+        let mut phong = Phong::new(Rgb::Srgb([1.0; 3]));
+        phong.specular = Some(Rgb::BLACK);
+        phong.exponent = Some(0.0);
         for c in e.children() {
             match c.local().to_ascii_lowercase().as_str() {
-                "diff" => m.color[..3].copy_from_slice(&color(vec3(&c.text()))),
-                "emiss" => m.emissive = color(vec3(&c.text())),
-                "spec" => spec = vec3(&c.text()),
-                "shine" => shine = num(&c),
-                "alpha" => m.color[3] = num(&c).clamp(0.0, 1.0),
+                "diff" => phong.diffuse = Rgb::Srgb(vec3(&c.text())),
+                "emiss" => phong.emissive = Rgb::Srgb(vec3(&c.text())),
+                "spec" => phong.specular = Some(Rgb::Srgb(vec3(&c.text()))),
+                "shine" => phong.exponent = Some(num(&c).clamp(0.0, 128.0)),
+                "alpha" => phong.opacity = num(&c),
                 _ => {}
             }
         }
-        // Phong's exponent as GGX roughness: alpha = sqrt(2 / (n + 2)), roughness = sqrt(alpha); a material with
-        // no highlight stays rough.
-        if shine > 0.0 && spec.iter().any(|&s| s > 0.0) {
-            m.roughness = (2.0 / (shine.clamp(0.0, 128.0) + 2.0)).powf(0.25);
-        }
-        self.scene.materials.push(m);
+        self.scene.materials.push(phong.pbr().material(&name));
         if let Some(i) = id(&e) {
             self.mats.insert(i, index);
         }
@@ -266,7 +266,9 @@ impl Reader {
 
     fn default_material(&mut self) -> usize {
         *self.default_material.get_or_insert_with(|| {
-            self.scene.materials.push(Material::plain("default", [1.0; 4]));
+            self.scene
+                .materials
+                .push(crate::legacy_material::default_material(false));
             self.scene.materials.len() - 1
         })
     }

@@ -11,3 +11,5 @@ vt 1 0
 vt 1 1
 vt 0 1
 f 1 2 3
+usemtl dull
+f 1 3 4

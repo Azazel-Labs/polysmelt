@@ -19,6 +19,8 @@ use serde_json::{Map, Value, json};
 use crate::Result;
 use crate::document::{self, Accessor, Builder, Document, Keep, Limits, Part, Sampler, Sparse};
 use crate::images::Source;
+use crate::legacy_material::{self, Transparency};
+use crate::material::{Alpha, Full};
 use crate::mesh::Material;
 use crate::num::{f32_of, u32_of};
 use crate::quat::{self, normalize};
@@ -173,6 +175,8 @@ pub(crate) struct Scene {
     pub nodes: Vec<Node>,
     pub meshes: Vec<SceneMesh>,
     pub materials: Vec<Material>,
+    /// Materials (indices) blended by their color texture's alpha, their own color being opaque.
+    pub blend: Vec<usize>,
     pub images: Vec<Source>,
     pub skins: Vec<Skin>,
     pub animations: Vec<Animation>,
@@ -395,6 +399,31 @@ impl Scene {
         let parents = self.parents();
         let mut b = Builder::default();
         let mut json = Map::new();
+
+        // Faces with no material take the default one (white under vertex colors), and a material drawn with
+        // vertex colors that aren't opaque blends.
+        let mut blend = std::mem::take(&mut self.blend);
+        let mut defaults = [None; 2];
+        for p in self.meshes.iter_mut().flat_map(|m| &mut m.prims) {
+            let colors = p
+                .colors
+                .first()
+                .filter(|c| !c.is_empty() && c.len() == p.positions.len());
+            let faces = !p.points && !p.lines && !p.indices.is_empty();
+            if p.material.is_none() && faces && !p.positions.is_empty() {
+                let k = usize::from(colors.is_some());
+                let materials = &mut self.materials;
+                p.material = Some(*defaults[k].get_or_insert_with(|| {
+                    materials.push(legacy_material::default_material(k == 1));
+                    materials.len() - 1
+                }));
+            }
+            if let Some(m) = p.material
+                && colors.is_some_and(|c| c.iter().any(|c| c[3] < 1.0))
+            {
+                blend.push(m);
+            }
+        }
 
         // Every skin's joints under one root: the tops of their trees gathered under a new node when there are
         // several.
@@ -633,6 +662,17 @@ impl Scene {
                 m.emissive_image = None;
             }
         }
+        let materials = materials.into_iter().enumerate().map(|(i, m)| {
+            let mut full = Full::from(m);
+            if full.alpha == Alpha::Opaque && blend.contains(&i) {
+                let transparency = Transparency {
+                    texture_alpha: true,
+                    ..Transparency::of(full.base_color[3])
+                };
+                full.alpha = transparency.mode();
+            }
+            full
+        });
         b.materials(materials, images, &mut json);
 
         // Animations.
@@ -1444,6 +1484,68 @@ mod tests {
         for k in 0..16 {
             assert!((mm[k] - expect[k]).abs() < 1e-6, "{k}");
         }
+    }
+
+    /// A triangle on `material`, with vertex colors of `alpha` when it's given.
+    fn triangle(material: Option<usize>, alpha: Option<f32>) -> Primitive {
+        Primitive {
+            positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            colors: alpha.map(|a| vec![[1.0, 1.0, 1.0, a]; 3]).into_iter().collect(),
+            indices: vec![0, 1, 2],
+            material,
+            ..Primitive::default()
+        }
+    }
+
+    #[test]
+    fn faces_with_no_material_take_the_default_and_vertex_alpha_blends() {
+        let mut s = Scene::default();
+        s.materials.push(Material::plain("paint", [1.0, 0.0, 0.0, 1.0]));
+        s.materials.push(Material::plain("leaf", [1.0; 4]));
+        s.materials.push(Material::plain("cut", [1.0; 4]));
+        s.materials[2].alpha_cutoff = Some(0.5);
+        // A material blended by its texture's alpha, as its reader says.
+        s.blend.push(1);
+        s.meshes.push(SceneMesh {
+            prims: vec![
+                triangle(Some(0), Some(0.5)),
+                triangle(Some(1), None),
+                triangle(Some(2), Some(0.5)),
+                triangle(None, None),
+                triangle(None, Some(1.0)),
+            ],
+            ..SceneMesh::default()
+        });
+        let mut node = Node::named("n", None);
+        node.mesh = Some(0);
+        s.add(node);
+        let doc = s.finish(Keep::ALL).unwrap();
+        let json = doc.json();
+        let m = json["materials"].as_array().unwrap();
+        let prims = json["meshes"][0]["primitives"].as_array().unwrap();
+        // Vertex alpha blends an opaque material, a texture's alpha does where the reader says so, and a cutout
+        // stays one.
+        assert_eq!(m[0]["alphaMode"], "BLEND");
+        assert_eq!(m[1]["alphaMode"], "BLEND");
+        assert_eq!(m[2]["alphaMode"], "MASK");
+        // The default material: gray, and white under vertex colors.
+        assert_eq!(m.len(), 5);
+        let (gray, white) = (&m[3], &m[4]);
+        assert_eq!(
+            (prims[3]["material"].as_u64(), prims[4]["material"].as_u64()),
+            (Some(3), Some(4))
+        );
+        assert_eq!((&gray["name"], &white["name"]), (&json!("default"), &json!("default")));
+        assert_eq!(
+            gray["pbrMetallicRoughness"]["baseColorFactor"],
+            json!([0.72f32, 0.72f32, 0.74f32, 1.0f32])
+        );
+        assert_eq!(gray["pbrMetallicRoughness"]["roughnessFactor"], json!(0.85f32));
+        assert_eq!(
+            white["pbrMetallicRoughness"]["baseColorFactor"],
+            json!([1.0, 1.0, 1.0, 1.0])
+        );
+        assert!(gray.get("alphaMode").is_none() && white.get("alphaMode").is_none());
     }
 
     #[test]

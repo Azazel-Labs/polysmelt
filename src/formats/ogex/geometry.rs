@@ -112,11 +112,28 @@ pub(super) fn meshes(c: &mut Ctx<'_>) -> Result<()> {
         let Some(Some(geom)) = c.geoms.get(&g) else {
             continue;
         };
-        let materials: Vec<Option<usize>> = geom
+        // Each primitive's material index, whether it draws faces, and whether its vertices have colors.
+        let wants: Vec<(u32, bool, bool)> = geom
             .prims
             .iter()
-            .map(|&(_, m)| mats.iter().find(|&&(i, _)| i == m).map(|&(_, k)| k))
+            .map(|(p, m)| {
+                let faces = p.get("mode").and_then(Value::as_u64).is_none_or(|mode| mode >= 4);
+                (*m, faces, p.pointer("/attributes/COLOR_0").is_some())
+            })
             .collect();
+        // Faces whose index no material reference has take the default material.
+        let materials: Vec<Option<usize>> = wants
+            .into_iter()
+            .map(|(m, faces, colored)| {
+                mats.iter()
+                    .find(|&&(i, _)| i == m)
+                    .map(|&(_, k)| k)
+                    .or_else(|| (c.keep.materials && faces).then(|| super::material::default(c, colored)))
+            })
+            .collect();
+        let Some(Some(geom)) = c.geoms.get(&g) else {
+            continue;
+        };
         let skin = geom.skin;
         c.triangles = c.triangles.saturating_add(geom.triangles);
         let (targets, base, absolute) = (geom.targets.clone(), geom.base, geom.absolute.clone());

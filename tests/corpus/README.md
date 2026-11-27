@@ -32,15 +32,15 @@ cases.
 | STL | 29 | 27 | 2 |
 | PLY | 47 | 42 | 4 |
 | VOX | 31 | 27 | none |
-| OBJ | 64 | 55 | 9 |
-| 3DS | 56 | 49 | none |
-| 3MF | 62 | 54 | none |
+| OBJ | 67 | 58 | 9 |
+| 3DS | 57 | 50 | none |
+| 3MF | 63 | 55 | none |
 | FBX | 136 | 118 | 18 |
 | USD | 141 | 121 | 20 |
 | glTF | 102 | 69 | 15 |
 | SketchUp | 31 | 7 | none |
 | BVH | 42 | 41 | none |
-| COLLADA | 90 | 77 | none |
+| COLLADA | 92 | 79 | none |
 | OFF | 26 | 24 | none |
 | VRM | 7 | 7 | none |
 | X3D | 55 | 55 | none |
@@ -48,15 +48,15 @@ cases.
 | Gaussian splats (`.splat`) | 8 | 8 | none |
 | SPZ | 19 | 19 | none |
 | SOG | 29 | 28 | none |
-| MikuMikuDance (`mmd/`: PMX, PMD, VMD) | 22 | 22 | none |
-| DirectX (`x/`) | 53 | 42 | none |
+| MikuMikuDance (`mmd/`: PMX, PMD, VMD) | 23 | 23 | none |
+| DirectX (`x/`) | 54 | 43 | none |
 | MD2 | 14 | 13 | none |
 | MD3 | 15 | 15 | none |
 | MD5 | 14 | 13 | none |
 | IQM | 16 | 16 | none |
 | SMD | 11 | 9 | none |
 | MilkShape 3D | 15 | 13 | none |
-| Blitz3D | 13 | 12 | none |
+| Blitz3D | 17 | 16 | none |
 | ASF/AMC (`asf/`) | 26 | 26 | none |
 | C3D | 29 | 26 | none |
 | TRC | 19 | 19 | none |
@@ -66,12 +66,12 @@ cases.
 | Text point clouds (`xyz/`) | 21 | 21 | none |
 | E57 | 3 | 1 | none |
 | AMF | 26 | 21 | none |
-| LightWave (`lwo/`) | 32 | 20 | none |
-| AC3D (`ac/`) | 16 | 11 | none |
+| LightWave (`lwo/`) | 34 | 22 | none |
+| AC3D (`ac/`) | 18 | 13 | none |
 | OGRE | 32 | 31 | none |
 | OpenFlight | 21 | 21 | none |
 | OpenGEX | 30 | 24 | none |
-| Irrlicht (`irr/`: IRRMesh and scenes) | 28 | 25 | none |
+| Irrlicht (`irr/`: IRRMesh and scenes) | 30 | 27 | none |
 | XGL (`xgl/`: XGL and ZGL) | 26 | 19 | none |
 | VTK (`vtk/`: legacy and XML) | 86 | 72 | none |
 | 3D Tiles (`tiles/`: b3dm, i3dm, pnts, cmpt, tileset.json) | 81 | 39 | none |
@@ -84,6 +84,11 @@ cases.
   or one variant that real exporters write. The expectations come from what the generator
   wrote, never from reading the file back with Polysmelt, so a case tests the reader against
   the standard rather than against itself.
+- **Classic materials** (Phong, Blinn, Lambert) are expected by one rule, `common.py`'s `phong`:
+  roughness `(2 / (n + 2))^(1/4)` for an exponent `n`, and the specular color as
+  `KHR_materials_specular`. It is worked out there from the rule, apart from the readers. Ten
+  formats each have a `same_phong` case holding the same material (`common.py`'s `SAME_PHONG`),
+  and `tests/materials.rs` checks that all ten read as the same glTF material.
 - **USD** expectations are computed with Pixar's `usd-core` (the `pxr` module). It composes
   the stage and measures it: triangles, bounds, visibility, purpose and transforms. It draws
   neither curves nor points, so their expectations are worked out in `usd.py`.

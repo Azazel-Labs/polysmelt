@@ -4,7 +4,8 @@
 //! length and rate (`ANIM`).
 //!
 //! The nodes become glTF nodes, each triangle list a primitive with its brush as the material (color, alpha,
-//! shininess as roughness, the first texture as the color image, full-bright as unlit, two-sided), and the vertices'
+//! shininess as the highlight, the first texture as the color image, cut out or blended by its alpha as the texture's
+//! flags say, full-bright as unlit, two-sided), a triangle list on no brush taking the default material; the vertices'
 //! normals, colors (when the brush asks for them) and texture coordinate sets are kept. Bones make a skin over the
 //! mesh they weigh (a skinned mesh whose own node is placed hangs from an unnamed child of it, so the node keeps
 //! its transform for the bones under it); keys, at frame numbers divided by the animation's frames per second, an
@@ -24,7 +25,9 @@ use crate::assets::Assets;
 use crate::bytes::Bin;
 use crate::document::{Document, Keep};
 use crate::images::Images;
-use crate::mesh::{Material, srgb_to_linear};
+use crate::legacy_material::{Phong, Rgb, Transparency};
+use crate::material::Alpha;
+use crate::mesh::srgb_to_linear;
 use crate::num::{f32_of, u32_of};
 use crate::quat;
 use crate::source::{Axis, Fact, Handedness};
@@ -37,6 +40,8 @@ const DEFAULT_FPS: f32 = 60.0;
 /// A texture: its file.
 struct Texture {
     file: String,
+    /// `Blitz3D`'s texture flags: 2 is alpha, 4 is masked.
+    flags: i32,
 }
 
 /// A brush: a material.
@@ -114,12 +119,19 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
     for b in &f.brushes {
         let unit = |c: f32| if c.is_finite() { c.clamp(0.0, 1.0) } else { 1.0 };
         let c = b.color.map(unit);
-        let mut m = Material::plain(
-            &b.name,
-            [srgb_to_linear(c[0]), srgb_to_linear(c[1]), srgb_to_linear(c[2]), c[3]],
-        );
-        m.roughness = 1.0 - unit(b.shininess.max(0.0)).sqrt();
+        // A brush's shininess, 0 to 1, is both the highlight's strength and its size: Blitz3D hands
+        // Direct3D a gray specular color of that value and a power of 128 times it. None by default.
+        let shininess = unit(b.shininess.max(0.0));
+        let mut phong = Phong::new(Rgb::Srgb([c[0], c[1], c[2]]));
+        phong.opacity = c[3];
+        phong.specular = Some(Rgb::Srgb([shininess; 3]));
+        phong.exponent = Some(shininess * 128.0);
+        let mut m = phong.pbr().material(&b.name);
         m.unlit = b.fx & 1 != 0;
+        if m.unlit {
+            // Nothing reflects, and nothing needs saying so.
+            m.extensions = None;
+        }
         m.double_sided = b.fx & 0x10 != 0;
         let texture = b
             .textures
@@ -130,6 +142,18 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
             && let Some(t) = texture
         {
             m.color_image = images.find(assets, &[&f.textures[t].file], &[dir]);
+        }
+        // The texture's flags say how its alpha is used: masked (4) is cut out, alpha (2) blended.
+        let flags = texture.map_or(0, |t| f.textures[t].flags);
+        let transparency = Transparency {
+            texture_alpha: flags & 2 != 0,
+            cutout: (flags & 4 != 0).then_some(0.5),
+            ..Transparency::of(c[3])
+        };
+        match transparency.mode() {
+            Alpha::Mask(cutoff) => m.alpha_cutoff = Some(cutoff),
+            Alpha::Blend if c[3] >= 1.0 => scene.blend.push(scene.materials.len()),
+            _ => {}
         }
         scene.materials.push(m);
     }
@@ -456,7 +480,7 @@ fn texs(body: &[u8], f: &mut B3d) -> Result<()> {
     let mut b = Bin::new(body, "B3D");
     while b.left() > 0 {
         let file = cstring(&mut b)?.replace('\\', "/");
-        let _flags = b.i32()?;
+        let flags = b.i32()?;
         let blend = b.i32()?;
         let pos = b.vec2()?;
         let scale = b.vec2()?;
@@ -469,7 +493,7 @@ fn texs(body: &[u8], f: &mut B3d) -> Result<()> {
         if moved || rot.abs() > 1e-6 || !(blend == 1 || blend == 2) {
             f.unsupported += 1;
         }
-        f.textures.push(Texture { file });
+        f.textures.push(Texture { file, flags });
     }
     Ok(())
 }

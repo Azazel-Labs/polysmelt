@@ -100,7 +100,9 @@ impl Writer<'_> {
         let srgb = |c: [f64; 3]| c.map(to_srgb);
         let rgb = [base[0], base[1], base[2]];
         let alpha = base[3].clamp(0.0, 1.0);
-        let shininess = ((1.0 - roughness.clamp(0.0, 1.0)) * 10.0).powi(2);
+        // The Blinn-Phong exponent the FBX reader, like every reader of a classic material, takes this
+        // roughness back from.
+        let shininess = crate::legacy_material::exponent_of_roughness(roughness);
         let mut props = vec![
             // The classic model, for tools that know only it.
             p_vec("DiffuseColor", "Color", "", "A", srgb(rgb)),

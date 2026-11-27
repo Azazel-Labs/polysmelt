@@ -16,7 +16,8 @@
 //! that bind it to the same materials.
 //!
 //! Materials come from `profile_COMMON` (`constant`, `lambert`, `phong`, `blinn`): the diffuse color or texture,
-//! emission, a roughness from the shininess, the specular color (`KHR_materials_specular`) and index of refraction
+//! emission, the shininess and specular color as the highlight (the classic material every reader reads one way,
+//! `legacy_material`; a `lambert` has none) and index of refraction
 //! (`KHR_materials_ior`), transparency in each of its opaque modes, the bump map the common extras name (a height
 //! map is left out), texture placement extras as `KHR_texture_transform`, and two-sidedness from the effect's or the
 //! geometry's extras. `<setparam>` in an `<instance_effect>` overrides the effect's parameters. Textures are found
@@ -54,6 +55,7 @@ use crate::assets::Assets;
 use crate::document::{Builder, Document, Keep, Part};
 use crate::gltf::percent_decode;
 use crate::images::Images;
+use crate::legacy_material;
 use crate::material::Full;
 use crate::num::{f32_of, u32_of};
 use crate::source::{Axis, Fact, Handedness, SourceInfo};
@@ -63,6 +65,8 @@ use xml::Dom;
 
 /// How deeply nodes nest, `instance_node` included.
 const MAX_DEPTH: usize = 128;
+/// The frame a camera is taken to have when the file gives only its horizontal field of view.
+const ASSUMED_ASPECT: f64 = 16.0 / 9.0;
 
 /// The most nodes a document makes: instanced subtrees can multiply.
 const MAX_NODES: usize = 1 << 20;
@@ -165,6 +169,7 @@ pub(super) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
         points_of: HashMap::new(),
         normals_of: HashMap::new(),
         materials: Vec::new(),
+        default_materials: [None; 2],
         material_of: HashMap::new(),
         images: Images::new(!keep.image_bytes, input.dir()),
         image_of: HashMap::new(),
@@ -594,6 +599,8 @@ pub(super) struct Reader<'a> {
     /// Each morphed mesh's primitives' normals (empty for one without), which its targets' normals are taken from.
     normals_of: HashMap<usize, Vec<Vec<[f32; 3]>>>,
     materials: Vec<Full>,
+    /// The material of faces bound to none, and the one for those with vertex colors.
+    default_materials: [Option<usize>; 2],
     material_of: HashMap<MaterialKey, usize>,
     images: Images,
     image_of: HashMap<usize, Option<usize>>,
@@ -921,6 +928,12 @@ impl Reader<'_> {
             } else {
                 None
             };
+            // Faces bound to no material take the default one.
+            let material = if self.keep.materials && material.is_none() && !p.prim.indices.is_empty() {
+                Some(self.default_material(!p.prim.colors.is_empty()))
+            } else {
+                material
+            };
             // A piece draws triangles or lines, never both, so it is one glTF primitive.
             let base = if morphed && p.prim.normals.len() == p.prim.positions.len() {
                 p.prim.normals.clone()
@@ -976,6 +989,13 @@ impl Reader<'_> {
                     .as_deref()
                     .filter(|_| self.keep.materials)
                     .and_then(|s| self.material_for(geometry, s, binds, sets));
+                let faces = prim.get("mode").is_none();
+                let colored = prim.pointer("/attributes/COLOR_0").is_some();
+                let material = if self.keep.materials && material.is_none() && faces {
+                    Some(self.default_material(colored))
+                } else {
+                    material
+                };
                 match (material, prim.as_object_mut()) {
                     (Some(m), Some(o)) => drop(o.insert("material".into(), json!(m))),
                     (None, Some(o)) => drop(o.remove("material")),
@@ -986,6 +1006,17 @@ impl Reader<'_> {
         self.meshes.push(mesh);
         self.mesh_triangles.push(self.mesh_triangles[first]);
         self.meshes.len() - 1
+    }
+
+    /// The material of faces bound to none: [`legacy_material::default_material`], made once.
+    fn default_material(&mut self, colored: bool) -> usize {
+        if let Some(m) = self.default_materials[usize::from(colored)] {
+            return m;
+        }
+        self.materials.push(legacy_material::default_material(colored).into());
+        let m = self.materials.len() - 1;
+        self.default_materials[usize::from(colored)] = Some(m);
+        m
     }
 
     /// The material bound to `symbol`, its textures reading the primitive's coordinate sets (`sets`, in the
@@ -1458,7 +1489,10 @@ impl Reader<'_> {
                 (_, Some(y), Some(a)) => (y.to_radians(), Some(a)),
                 (Some(x), Some(y), None) => (y.to_radians(), Some(half(x) / half(y))),
                 (Some(x), None, Some(a)) => (2.0 * (half(x) / a).atan(), Some(a)),
-                (Some(x), None, None) => (x.to_radians(), None),
+                // The horizontal angle alone: glTF wants the vertical, which needs the aspect ratio the file
+                // leaves to the viewer. A 16:9 frame is assumed and written with it, so the two together
+                // are the file's angle across.
+                (Some(x), None, None) => (2.0 * (half(x) / ASSUMED_ASPECT).atan(), Some(ASSUMED_ASPECT)),
                 (None, Some(y), None) => (y.to_radians(), None),
                 (None, None, a) => (std::f64::consts::FRAC_PI_4, a),
             };
@@ -1552,6 +1586,8 @@ impl Reader<'_> {
         } else {
             (color, 1.0)
         };
+        // A display color, like the materials': glTF's is linear.
+        let color = color.map(crate::mesh::srgb_to_linear);
         let mut light = json!({ "type": ty, "color": color, "intensity": intensity });
         if ty == "spot" {
             let falloff = dom

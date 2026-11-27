@@ -121,6 +121,7 @@ pub mod gltf;
 pub mod images;
 mod json;
 mod keep;
+mod legacy_material;
 mod material;
 pub mod mesh;
 pub mod meshopt;

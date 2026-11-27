@@ -25,7 +25,7 @@ use super::Input;
 use super::stream;
 use crate::bytes::Bin;
 use crate::document::Document;
-use crate::mesh::{FastMap, GRAY, Material, Prim, smooth_normals, srgb_to_linear, triangulate};
+use crate::mesh::{FastMap, GRAY, Prim, smooth_normals, srgb_to_linear, triangulate};
 use crate::num::u32_of;
 use crate::source::SourceInfo;
 use crate::{Context as _, ErrorKind, Result};
@@ -104,7 +104,7 @@ pub(crate) fn load(input: Input<'_>) -> Result<Document> {
     info.write(&mut source);
     let colored = !m.colors.is_empty() || !m.face_colors.is_empty();
     let prim = build(m);
-    let material = Material::plain("default", if colored { [1.0; 4] } else { GRAY });
+    let material = crate::legacy_material::default_material(colored);
     let mut facts = Map::new();
     facts.insert("triangles".into(), json!(triangles));
     Ok(Document::from_named(

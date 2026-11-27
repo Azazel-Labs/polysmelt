@@ -382,7 +382,7 @@ fn decl_values() {
 #[test]
 fn materials_and_their_list() {
     let doc = read(&format!(
-        "xof 0303txt 0032\nMaterial Red {{ 1;0;0;1;; 250; 0;0;0;; 0.5;0;0;; }}\nFrame Box {{ Mesh {{ {CUBE}\n \
+        "xof 0303txt 0032\nMaterial Red {{ 1;0;0;1;; 250; 0.5;0.5;0.5;; 0.5;0;0;; }}\nFrame Box {{ Mesh {{ {CUBE}\n \
          MeshMaterialList {{ 2; 3; 0,1,1;; Material {{ 0.5;0.5;0.5;1;; 0; 0;0;0;; 0;0;0;; }} {{ Red }} }} }} }}"
     ));
     let m = mesh(&doc);
@@ -394,12 +394,29 @@ fn materials_and_their_list() {
         .iter()
         .find(|m| m["name"] == "Red")
         .unwrap();
+    // A power of 250 is a roughness of (2 / 252)^(1/4), and a 0.5 gray specular color its linear value of
+    // glTF's highlight.
     let rough = red["pbrMetallicRoughness"]["roughnessFactor"].as_f64().unwrap();
-    assert!((rough - 0.5).abs() < 1e-3, "{rough}");
+    assert!((rough - 0.298_475).abs() < 1e-4, "{rough}");
+    let level = red["extensions"]["KHR_materials_specular"]["specularFactor"]
+        .as_f64()
+        .unwrap();
+    assert!((level - 0.214_041).abs() < 1e-4, "{level}");
+    // The other has a black specular color: no highlight.
+    let gray = &doc.json()["materials"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["name"] != "Red")
+        .unwrap();
+    assert_eq!(gray["pbrMetallicRoughness"]["roughnessFactor"], 1.0);
+    assert_eq!(gray["extensions"]["KHR_materials_specular"]["specularFactor"], 0.0);
     assert!(red["emissiveFactor"][0].as_f64().unwrap() > 0.2);
-    // A reference to a material that isn't there leaves the faces without one, and nothing breaks.
+    // A reference to a material that isn't there leaves the faces the default one, and nothing breaks.
     let doc = read(&cube_file("MeshMaterialList { 1; 6; 0,0,0,0,0,0;; { Nowhere } }"));
     assert_eq!(mesh(&doc).triangles(), 12);
+    assert_eq!(doc.json()["materials"][0]["name"], "default");
+    assert_eq!(doc.json()["meshes"][0]["primitives"][0]["material"], 0);
 }
 
 #[test]

@@ -298,7 +298,18 @@ case(FMT, "color_gradient",
          rgb + obj(1, mesh(TRI, [(0, 1, 2)], lambda i: ' pid="2" p1="0" p2="1" p3="2"')), item(1))})},
      {"spec": MAT + ": different colors at a triangle's corners blend across it (vertex colors)",
       "source": SRC, "triangles": 1, "colors": True,
-      "colors_include": [[1, 0, 0, 1], [0, 1, 0, 1], [0, 0, 1, 1]], "materials": [{"color": [1, 1, 1, 1]}]})
+      "colors_include": [[1, 0, 0, 1], [0, 1, 0, 1], [0, 0, 1, 1]],
+      "materials": [{"color": [1, 1, 1, 1], "alpha_mode": "OPAQUE"}]})
+
+# The same with a half-transparent corner: the material blends, as glTF multiplies the alpha into its own.
+rgba = rgb.replace("#FF0000", "#FF000080")
+case(FMT, "color_gradient_alpha",
+     {"tri.3mf": package({"3D/3dmodel.model": model(
+         rgba + obj(1, mesh(TRI, [(0, 1, 2)], lambda i: ' pid="2" p1="0" p2="1" p3="2"')), item(1))})},
+     {"spec": MAT + ": vertex colors with an alpha below 255: the material blends",
+      "source": SRC, "triangles": 1, "colors": True,
+      "colors_include": [[1, 0, 0, r(128 / 255)], [0, 1, 0, 1], [0, 0, 1, 1]],
+      "materials": [{"color": [1, 1, 1, 1]}], "json": {"/materials/0/alphaMode": "BLEND"}})
 
 case(FMT, "color_p1_only",
      {"tri.3mf": package({"3D/3dmodel.model": model(

@@ -12,7 +12,9 @@
 //!   `KHR_node_visibility`, when the triangle budget leaves room for them.
 //! - Normals are averaged across smooth edges and split at hard ones. A face painted differently on
 //!   its back gets single-sided front and back faces; otherwise it is one double-sided face.
-//! - BMP and TGA textures are re-encoded as PNG; GIF and TIFF textures are dropped.
+//! - BMP and TGA textures are re-encoded as PNG; GIF and TIFF textures are dropped. A texture with
+//!   an alpha channel is cut out at a half, as `SketchUp` draws it.
+//! - Unpainted faces take the default material every reader gives faces with none.
 //! - Lengths are turned from inches to meters, and Z up to glTF's Y up.
 //!
 //! The asset's `extras.source` records the header's version, `SketchUp` and its version as the

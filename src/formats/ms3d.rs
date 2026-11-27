@@ -2,7 +2,8 @@
 //! corner, groups of triangles sharing a material, and a skeleton of joints with keyframes.
 //!
 //! The groups become the primitives of one mesh (their names kept in its `extras.groups`), the materials glTF
-//! materials (diffuse color with the transparency as alpha, emissive color, shininess as roughness, the texture as
+//! materials (diffuse color with the transparency as alpha, emissive color, specular color and shininess as the
+//! highlight, the texture as
 //! the color image), and the joints nodes posed by Euler angles in radians applied X, then Y, then Z. Each vertex
 //! moves with its joint, or with up to four joints by the weights the format's later versions add. Keyframes, in
 //! seconds, turn and move a joint from where it stands at rest, in its rest frame (a move is turned by the rest
@@ -20,7 +21,8 @@ use crate::assets::Assets;
 use crate::bytes::Bin;
 use crate::document::{Document, Keep};
 use crate::images::Images;
-use crate::mesh::{Material, srgb_to_linear};
+use crate::legacy_material::{Phong, Rgb, Transparency};
+use crate::material::Alpha;
 use crate::num::{f32_of, u32_of};
 use crate::quat;
 use crate::source::{Axis, Fact, Handedness};
@@ -64,6 +66,7 @@ struct Joint {
 struct Mat {
     name: String,
     diffuse: [f32; 4],
+    specular: [f32; 4],
     emissive: [f32; 4],
     shininess: f32,
     transparency: f32,
@@ -108,11 +111,19 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
     for mat in &m.materials {
         // Colors as the file has them are display values; glTF's are linear.
         let unit = |c: f32, default: f32| if c.is_finite() { c.clamp(0.0, 1.0) } else { default };
-        let alpha = unit(mat.transparency, 1.0);
-        let d = mat.diffuse.map(|c| srgb_to_linear(unit(c, 1.0)));
-        let mut out = Material::plain(&mat.name, [d[0], d[1], d[2], alpha]);
-        out.emissive = std::array::from_fn(|k| srgb_to_linear(unit(mat.emissive[k], 0.0)));
-        out.roughness = 1.0 - (unit(mat.shininess / 128.0, 0.0)).sqrt();
+        let rgb =
+            |c: [f32; 4], default: f32| Rgb::Srgb([unit(c[0], default), unit(c[1], default), unit(c[2], default)]);
+        // OpenGL's material: `shininess`, 0 to 128, is the Blinn-Phong exponent and `specular` its color.
+        let mut phong = Phong::new(rgb(mat.diffuse, 1.0));
+        phong.opacity = unit(mat.transparency, 1.0);
+        phong.emissive = rgb(mat.emissive, 0.0);
+        phong.specular = Some(rgb(mat.specular, 0.0));
+        phong.exponent = Some(if mat.shininess.is_finite() {
+            mat.shininess.clamp(0.0, 128.0)
+        } else {
+            0.0
+        });
+        let mut out = phong.pbr().material(&mat.name);
         if keep.textures && !mat.texture.is_empty() {
             out.color_image = images.find(assets, &[&mat.texture], &[dir]);
             // The texture tints the glow as it does the rest of the lighting.
@@ -122,8 +133,12 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         }
         // Cut out where the texture's alpha falls below the model's alpha reference.
         let textured = !mat.texture.is_empty() || !mat.alphamap.is_empty();
-        if textured && m.transparency_mode == 1 && m.alpha_ref.is_finite() {
-            out.alpha_cutoff = Some(m.alpha_ref.clamp(0.0, 1.0));
+        let transparency = Transparency {
+            cutout: (textured && m.transparency_mode == 1 && m.alpha_ref.is_finite()).then_some(m.alpha_ref),
+            ..Transparency::of(out.color[3])
+        };
+        if let Alpha::Mask(cutoff) = transparency.mode() {
+            out.alpha_cutoff = Some(cutoff);
         }
         scene.materials.push(out);
     }
@@ -442,7 +457,7 @@ fn parse(data: &[u8]) -> Result<Ms3d> {
         let name = field(&mut b, 32)?;
         let _ambient = b.vec4()?;
         let diffuse = b.vec4()?;
-        let _specular = b.vec4()?;
+        let specular = b.vec4()?;
         let emissive = b.vec4()?;
         let shininess = b.f32()?;
         let transparency = b.f32()?;
@@ -452,6 +467,7 @@ fn parse(data: &[u8]) -> Result<Ms3d> {
         m.materials.push(Mat {
             name,
             diffuse,
+            specular,
             emissive,
             shininess,
             transparency,

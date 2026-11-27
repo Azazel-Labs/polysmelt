@@ -1,3 +1,9 @@
 # Blender 4.2.0 MTL File: 'None'
 newmtl paint
 Kd 0.5 0.25 1.0
+Ks 0.5 0.5 0.5
+Ns 250
+newmtl dull
+Kd 0.5 0.25 1.0
+Ks 0.25 0.25 0.25
+Ns 250

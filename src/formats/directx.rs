@@ -20,8 +20,8 @@
 //!   coordinate sets in `FVFData`. Tangents and binormals in `DeclData` are dropped: glTF computes its own.
 //! - `MeshMaterialList` gives each face a material, by an index into the materials it holds or refers to; a list
 //!   shorter than the faces repeats its last index. `Material` is its face color (sRGB, made linear, alpha as
-//!   opacity), its emissive color, and its specular power as roughness (`1 - sqrt(power / 1000)`, as for OBJ); the
-//!   specular color is dropped. `TextureFilename` is the base color texture and `NormalmapFilename` the normal map.
+//!   opacity), its emissive color, and its specular power and color as the highlight (the classic material every
+//!   reader reads one way, `legacy_material`). Faces with no material take the default one. `TextureFilename` is the base color texture and `NormalmapFilename` the normal map.
 //! - `SkinWeights` names a bone (a frame), the vertices it moves with their weights, and the offset matrix from the
 //!   mesh into the bone, which is the joint's inverse bind matrix. A skinned mesh hangs from a root node of its own,
 //!   since a skin places it. A bone no frame is named for becomes a root node where its offset puts it, and
@@ -57,7 +57,8 @@ use crate::assets::Assets;
 use crate::bytes::Bin;
 use crate::document::{Document, Keep};
 use crate::images::Images;
-use crate::mesh::{Material, srgb_to_linear};
+use crate::legacy_material::{Phong, Rgb};
+use crate::mesh::srgb_to_linear;
 use crate::num::{f32_of, u32_of};
 use crate::source::{Axis, Fact, Handedness};
 use crate::{Context, ErrorKind, Result};
@@ -1087,16 +1088,14 @@ impl<'a> Build<'a> {
             return i;
         }
         let v = |k: usize, d: f32| o.nums.get(k).map_or(d, |&x| f32_of(x));
-        let lin = |k: usize| srgb_to_linear(v(k, 1.0).clamp(0.0, 1.0));
-        let mut mat = Material::plain(&o.name, [lin(0), lin(1), lin(2), v(3, 1.0).clamp(0.0, 1.0)]);
-        let power = v(4, 0.0);
-        let power = if power.is_finite() {
-            power.clamp(0.0, 1000.0)
-        } else {
-            0.0
-        };
-        mat.roughness = 1.0 - (power / 1000.0).sqrt();
-        mat.emissive = [8, 9, 10].map(|k| srgb_to_linear(v(k, 0.0).clamp(0.0, 1.0)));
+        // The `Material` template: face color (RGBA), power, specular color and emissive color. The power is
+        // Direct3D's `D3DMATERIAL9.Power`, the exponent of its Blinn-Phong highlight.
+        let mut phong = Phong::new(Rgb::Srgb([v(0, 1.0), v(1, 1.0), v(2, 1.0)]));
+        phong.opacity = v(3, 1.0);
+        phong.exponent = Some(v(4, 0.0));
+        phong.specular = Some(Rgb::Srgb([5, 6, 7].map(|k| v(k, 0.0))));
+        phong.emissive = Rgb::Srgb([8, 9, 10].map(|k| v(k, 0.0)));
+        let mut mat = phong.pbr().material(&o.name);
         if self.keep.textures && self.keep.materials {
             if let Some(f) = o.kid("TextureFilename").and_then(|t| t.strs.first()) {
                 mat.color_image = self.texture(f);

@@ -10,7 +10,8 @@
 //!
 //! The technique used is the first in the default scheme at level of detail 0. Its first pass gives the colors
 //! and render state: `diffuse` the base color (its alpha only when the pass blends), `emissive`, `specular`'s
-//! shininess a roughness, `scene_blend` alpha blending, `alpha_rejection` a cutoff, `cull_hardware none` both
+//! color and shininess the highlight (the classic material every reader reads one way, `legacy_material`),
+//! `scene_blend` alpha blending, `alpha_rejection` a cutoff, `cull_hardware none` both
 //! sides, `lighting off` unlit (whose color is then white, as unlit passes ignore `diffuse`). The first texture
 //! unit of any pass holding a plain image becomes the color texture, with its coordinate set, address mode,
 //! filtering and `scale`, `scroll` and `rotate` as a texture transform; a unit whose name or file says it's a
@@ -21,8 +22,9 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value, json};
 
+use crate::legacy_material::{Phong, Rgb};
 use crate::material::{CLAMP, LINEAR, LINEAR_MIPMAP_LINEAR, MIRROR, REPEAT, UvTransform};
-use crate::mesh::{Material, Sampling, srgb_to_linear};
+use crate::mesh::{Material, Sampling};
 
 /// The deepest objects nest; deeper ones are skipped.
 const MAX_DEPTH: usize = 32;
@@ -645,6 +647,11 @@ pub(super) fn map(lib: &Library, name: &str, aliases: &[(String, String)]) -> Op
         }
     }
     let mut mat = Material::plain(name, [1.0; 4]);
+    // A pass's colors as the manual gives their defaults: white diffuse, no emission, and a black specular
+    // color with a shininess of 0, which is no highlight.
+    let mut phong = Phong::new(Rgb::Srgb([1.0; 3]));
+    phong.specular = Some(Rgb::BLACK);
+    phong.exponent = Some(0.0);
     let mut blend = false;
     let mut alpha = 1.0;
     let mut units = Vec::new();
@@ -699,20 +706,19 @@ pub(super) fn map(lib: &Library, name: &str, aliases: &[(String, String)]) -> Op
                 match key {
                     "set" => {}
                     "diffuse" if n.len() >= 3 => {
-                        mat.color = [srgb_to_linear(n[0]), srgb_to_linear(n[1]), srgb_to_linear(n[2]), 1.0];
+                        phong.diffuse = Rgb::Srgb([n[0], n[1], n[2]]);
                         alpha = n.get(3).copied().unwrap_or(1.0);
                         if alpha < 1.0 {
                             props.insert(key.to_owned(), rest(&w));
                         }
                     }
-                    "emissive" if n.len() >= 3 => {
-                        mat.emissive = [srgb_to_linear(n[0]), srgb_to_linear(n[1]), srgb_to_linear(n[2])];
-                    }
+                    "emissive" if n.len() >= 3 => phong.emissive = Rgb::Srgb([n[0], n[1], n[2]]),
                     "specular" => {
-                        // `r g b shininess` or `r g b a shininess`: Phong's exponent as a roughness.
-                        if n.len() >= 4 && n[..3].iter().any(|&c| c > 0.0) {
-                            let s = n[n.len() - 1].max(0.0);
-                            mat.roughness = (2.0 / (s + 2.0)).sqrt().clamp(0.0, 1.0);
+                        // `r g b shininess` or `r g b a shininess` (the manual's "specular"): the highlight's
+                        // color and, last, its exponent.
+                        if n.len() >= 4 {
+                            phong.specular = Some(Rgb::Srgb([n[0], n[1], n[2]]));
+                            phong.exponent = Some(n[n.len() - 1]);
                         }
                         props.insert(key.to_owned(), rest(&w));
                     }
@@ -754,9 +760,12 @@ pub(super) fn map(lib: &Library, name: &str, aliases: &[(String, String)]) -> Op
         }
         scopes.leave();
     }
+    phong.pbr().set(&mut mat);
     if mat.unlit {
-        // Without lighting a pass draws its texture and vertex colors, not its diffuse color.
+        // Without lighting a pass draws its texture and vertex colors, not its diffuse color, and nothing
+        // reflects.
         mat.color = [1.0; 4];
+        mat.extensions = None;
         props.remove("diffuse");
     }
     if blend {
@@ -887,7 +896,9 @@ mod tests {
         assert!(m.blend);
         assert!((m.material.color[3] - 0.5).abs() < 1e-6);
         assert!(m.material.double_sided);
-        assert!((m.material.roughness - (2.0f32 / 52.0).sqrt()).abs() < 1e-6);
+        // A shininess of 50 is a roughness of (2 / 52)^(1/4); a white specular color is glTF's own highlight.
+        assert!((m.material.roughness - 0.442_850).abs() < 1e-5);
+        assert!(m.material.extensions.is_none());
         let c = m.color.unwrap();
         assert_eq!(c.file, "rock.png");
         assert_eq!(c.sampling.wrap, [CLAMP, MIRROR]);

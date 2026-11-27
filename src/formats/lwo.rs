@@ -7,7 +7,8 @@
 //! lines and one-point polygons points. Curves, bones and metaballs have no glTF form and are counted.
 //!
 //! A surface is a material: its color times its diffuse level, its luminosity as emission, its transparency as
-//! alpha (with its refractive index then), its glossiness as roughness (fully rough without specularity), and two
+//! alpha (with its refractive index then), its specular level and glossiness as the highlight (none without
+//! specularity; the classic material every reader reads one way, `legacy_material`), and two
 //! sides when it says so. Polygons are smoothed across shared points up to the surface's smoothing angle, within a
 //! smoothing group, unless vertex normal maps give the normals; a surface without the angle is flat. A vertex color
 //! map blends into the color by its intensity. The surface's top image layer on the color channel is the base
@@ -35,7 +36,8 @@ use crate::Result;
 use crate::assets::Assets;
 use crate::document::{Builder, Document, Keep};
 use crate::images::Images;
-use crate::material::{Alpha, CLAMP, Clearcoat, Factor, Full, MIRROR, REPEAT, Tex};
+use crate::legacy_material::{self, Phong, Rgb, Transparency};
+use crate::material::{CLAMP, Clearcoat, Factor, Full, MIRROR, REPEAT, Specular, Tex};
 use crate::mesh::{FastMap, Prim, srgb_to_linear};
 use crate::num::u32_of;
 use crate::source::{Axis, Fact, Handedness, SourceInfo};
@@ -1226,11 +1228,10 @@ struct Look {
     color: [f32; 4],
 }
 
-/// Phong's highlight size as roughness: glossiness `g` is an exponent of 2^(10g + 2), Blinn-Phong's match for a
-/// GGX alpha of sqrt(2 / (n + 2)), which is roughness squared.
-fn gloss_roughness(g: f32) -> f32 {
-    let n = (10.0 * g.clamp(0.0, 1.0) + 2.0).exp2();
-    (2.0 / (n + 2.0)).sqrt().sqrt()
+/// The highlight's exponent for a glossiness `g`: 2^(10g + 2), as LightWave's renderer takes it (the LWO2
+/// specification's GLOS: 4 at no glossiness, 4096 at all of it).
+fn gloss_exponent(g: f32) -> f32 {
+    (10.0 * g.clamp(0.0, 1.0) + 2.0).exp2()
 }
 
 /// The glTF material for a surface, its color texture `tex` and whether vertex colors carry its color, with the
@@ -1252,23 +1253,25 @@ fn material(s: &Surf, tex: Option<Tex>, vcol: bool) -> (Full, [f32; 4]) {
     };
     let tran = num("Transparency").or(s.tran).unwrap_or(0.0).clamp(0.0, 1.0);
     let alpha = 1.0 - tran;
-    let (emissive, metallic, roughness) = if let Some(n) = principled {
+    let (emissive, metallic, roughness, specular) = if let Some(n) = principled {
         let c = n.rgb("Luminous Color").unwrap_or([1.0; 3]);
         let k = n.num("Luminous").unwrap_or(0.0).max(0.0);
         (
             c.map(|v| v.max(0.0) * k),
             n.num("Metallic").unwrap_or(0.0).clamp(0.0, 1.0),
             n.num("Roughness").unwrap_or(0.5).clamp(0.0, 1.0),
+            None,
         )
     } else {
         let k = num("Luminosity").or(s.lumi).unwrap_or(0.0).max(0.0);
-        let spec = num("Specular").or(s.spec).unwrap_or(0.0);
-        let glos = num("Glossiness").or(s.glos).unwrap_or(0.4);
-        (
-            color.map(|v| v * k),
-            0.0,
-            if spec > 0.0 { gloss_roughness(glos) } else { 1.0 },
-        )
+        // The classic surface: a white highlight of strength SPEC (none by default) and glossiness GLOS
+        // (0.4 by default).
+        let mut phong = Phong::new(Rgb::WHITE);
+        phong.specular = Some(Rgb::Srgb([1.0; 3]));
+        phong.strength = num("Specular").or(s.spec).unwrap_or(0.0);
+        phong.exponent = Some(gloss_exponent(num("Glossiness").or(s.glos).unwrap_or(0.4)));
+        let look = phong.pbr();
+        (color.map(|v| v * k), 0.0, look.roughness, look.specular)
     };
     let rind = num("Refraction Index").or(s.rind).filter(|&r| r >= 1.0 && tran > 0.0);
     let clearcoat = principled.and_then(|n| {
@@ -1280,8 +1283,23 @@ fn material(s: &Surf, tex: Option<Tex>, vcol: bool) -> (Full, [f32; 4]) {
             normal: None,
         })
     });
-    let tint = if tex.is_some() || vcol { [1.0; 3] } else { color };
-    let base = tint.map(|c| (c * diff).clamp(0.0, 1.0));
+    // The diffuse level scales the color in the values the file stores, as the specular level does the
+    // highlight: display values for a classic surface's color, linear ones for a node's.
+    let stored = node.and_then(|n| n.rgb("Color")).is_none();
+    let leveled = |white: bool| -> [f32; 3] {
+        if stored {
+            let c = if white {
+                [1.0; 3]
+            } else {
+                s.color.unwrap_or([DEFAULT_COLOR; 3])
+            };
+            c.map(|c| srgb_to_linear((c.max(0.0) * diff).clamp(0.0, 1.0)))
+        } else {
+            let c = if white { [1.0; 3] } else { color };
+            c.map(|c| (c * diff).clamp(0.0, 1.0))
+        }
+    };
+    let base = leveled(tex.is_some() || vcol);
     let full = Full {
         name: s.name.clone(),
         base_color: [base[0], base[1], base[2], alpha],
@@ -1289,13 +1307,18 @@ fn material(s: &Surf, tex: Option<Tex>, vcol: bool) -> (Full, [f32; 4]) {
         metallic,
         roughness,
         emissive,
-        alpha: if alpha < 1.0 { Alpha::Blend } else { Alpha::Opaque },
+        alpha: Transparency::of(alpha).mode(),
         double_sided: s.sides == Some(3),
         ior: rind,
         clearcoat,
+        specular: specular.map(|h| Specular {
+            factor: Factor::of(h.factor),
+            color: h.color,
+            color_tex: None,
+        }),
         ..Full::default()
     };
-    let lit = color.map(|c| (c * diff).clamp(0.0, 1.0));
+    let lit = leveled(false);
     (full, [lit[0], lit[1], lit[2], alpha])
 }
 
@@ -1945,16 +1968,20 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
     }
     let mut look_by_tag: HashMap<u32, usize> = HashMap::new();
     let mut default_look = |tag: u32, looks: &mut Vec<Look>, materials: &mut Vec<Full>| -> usize {
-        let name = m.tags.get(tag as usize).map_or("Default", String::as_str);
+        // Polygons whose tag names no surface take the default material, under the tag's name when it has one.
+        let name = m
+            .tags
+            .get(tag as usize)
+            .map_or(legacy_material::DEFAULT_NAME, String::as_str);
         if let Some(&s) = surf_by_name.get(name) {
             return s;
         }
         *look_by_tag.entry(tag).or_insert_with(|| {
-            let s = Surf {
+            let full = Full {
                 name: name.to_owned(),
-                ..Surf::default()
+                ..legacy_material::default_material(false).into()
             };
-            let (full, color) = material(&s, None, false);
+            let color = full.base_color;
             looks.push(Look {
                 material: materials.len(),
                 cos: None,
@@ -2414,7 +2441,13 @@ mod tests {
         // The textured surface: white under the image, which repeats across and mirrors down.
         let mat = &m.materials[0];
         assert_eq!(mat.name, "Skin");
-        assert_eq!(mat.color, [0.8, 0.8, 0.8, 1.0]);
+        // Its diffuse level of 0.8 scales that white as stored: sRGB 0.8, 0.603827 linear.
+        assert!(
+            mat.color[..3].iter().all(|c| (c - 0.603_827).abs() < 1e-5),
+            "{:?}",
+            mat.color
+        );
+        assert_eq!(mat.color[3], 1.0);
         assert_eq!(m.images.len(), 1);
         assert_eq!(doc.json()["samplers"][0]["wrapS"], REPEAT);
         assert_eq!(doc.json()["samplers"][0]["wrapT"], MIRROR);
@@ -2441,7 +2474,8 @@ mod tests {
         let doc = read(&cube(0.5), &Memory::new()).unwrap();
         assert_eq!(doc.json()["asset"]["extras"]["source"]["droppedTextures"], 1);
         let m = flat(&doc);
-        let red = srgb_to_linear(1.0) * 0.8;
+        // Red at a diffuse level of 0.8, scaled as stored: sRGB 0.8.
+        let red = srgb_to_linear(0.8);
         assert_eq!(m.materials[0].color, [red, 0.0, 0.0, 1.0]);
         assert_eq!(m.images.len(), 0);
     }
@@ -2582,7 +2616,9 @@ mod tests {
         let (area, vol) = measure(&m);
         assert!((area - 6.0).abs() < 1e-5 && (vol - 1.0).abs() < 1e-5, "{area} {vol}");
         assert_eq!(m.materials[0].name, "Red");
-        assert_eq!(m.materials[0].color, [0.75, 0.0, 0.0, 1.0]);
+        // Red at a diffuse level of 0.75 is sRGB 0.75: 0.522522 linear.
+        let c = m.materials[0].color;
+        assert!((c[0] - 0.522_522).abs() < 1e-5 && c[1..] == [0.0, 0.0, 1.0], "{c:?}");
         assert_eq!(doc.json()["asset"]["extras"]["source"]["version"], "LWOB");
     }
 
@@ -2607,8 +2643,9 @@ mod tests {
         assert_eq!(m.triangles(), 12);
         let gold = m.materials.iter().find(|x| x.name == "Gold").unwrap();
         assert_eq!(gold.color, [1.0, 1.0, 0.0, 1.0]);
-        // Untagged polygons get LightWave's default surface.
-        assert!(m.materials.iter().any(|x| x.name == "Default"));
+        // Untagged polygons get the default material.
+        let d = m.materials.iter().find(|x| x.name == "default").unwrap();
+        assert_eq!((d.color, d.roughness), (crate::mesh::GRAY, 0.85));
         assert_eq!(doc.json()["asset"]["extras"]["source"]["version"], "LWO3");
     }
 

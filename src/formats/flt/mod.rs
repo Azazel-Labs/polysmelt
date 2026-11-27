@@ -7,7 +7,7 @@
 //!
 //! Each node of the tree becomes a glTF node, its faces one mesh, a primitive for each
 //! material. A face's material is its material palette entry (diffuse as the base color,
-//! emissive, shininess as roughness, alpha), its texture, whether it has two sides (its draw
+//! emissive, specular color and shininess as the highlight, alpha), its texture, whether it has two sides (its draw
 //! type), its transparency and whether it's lit (its light mode); the face's color, or its
 //! vertices' colors, go in `COLOR_0`, which glTF multiplies with the base color as `OpenFlight`
 //! does. Wireframe faces are drawn as lines, light points as points. Texture layers have
@@ -46,6 +46,7 @@ use crate::Result;
 use crate::assets::Assets;
 use crate::document::{Animation, Builder, Channel, Document, Keep, Limits, Part, Sampler};
 use crate::images::{Images, Location};
+use crate::legacy_material::{self, Phong, Rgb, Transparency};
 use crate::material::{Alpha, Full, Tex};
 use crate::mesh::{FastMap, Image, Prim, linear_u8, srgb_to_linear};
 use crate::num::{f32_of, u32_of};
@@ -901,31 +902,46 @@ fn material_of(c: &mut Ctx<'_>, key: MatKey, image: Option<usize>) -> usize {
     if let Some(&m) = c.material_at.get(&key) {
         return m;
     }
-    let src = key
+    let palette = key
         .material
         .and_then(|(f, i)| c.files[f as usize].db.materials.get(&i32::from(i)))
-        .cloned()
-        .unwrap_or_default();
-    let lin = |v: [f32; 3]| v.map(|x| srgb_to_linear(x.clamp(0.0, 1.0)));
-    let alpha = src.alpha.clamp(0.0, 1.0);
-    let (base, emissive) = if key.unlit {
-        ([1.0; 3], [0.0; 3])
-    } else {
-        (lin(src.diffuse), lin(src.emissive))
+        .cloned();
+    let src = palette.clone().unwrap_or_default();
+    // A face with no material is drawn in its own color (white when it gives none), which the vertex colors
+    // hold: the default material, white under them. A palette material is OpenGL's, its shininess (0 to 128)
+    // the Blinn-Phong exponent.
+    let look = match &palette {
+        Some(m) => {
+            let mut phong = Phong::new(Rgb::Srgb(m.diffuse));
+            phong.opacity = m.alpha;
+            phong.emissive = Rgb::Srgb(m.emissive);
+            phong.specular = Some(Rgb::Srgb(m.specular));
+            phong.exponent = Some(m.shininess.clamp(0.0, 128.0));
+            phong.pbr().full("")
+        }
+        None => legacy_material::default_material(true).into(),
     };
-    let roughness = if src.specular.iter().all(|&v| v <= 0.0) {
-        1.0
+    let alpha = look.base_color[3];
+    let (base, emissive, specular) = if key.unlit {
+        ([1.0; 3], [0.0; 3], None)
     } else {
-        (2.0 / (src.shininess.clamp(0.0, 128.0) + 2.0)).powf(0.25)
+        (
+            [look.base_color[0], look.base_color[1], look.base_color[2]],
+            look.emissive,
+            look.specular,
+        )
     };
+    let roughness = look.roughness;
     let tex_name = |c: &Ctx<'_>, f: u32, i: i16| c.files[f as usize].db.textures.get(&i32::from(i)).cloned();
     let texture = key.texture.and_then(|(f, i)| tex_name(c, f, i));
     let name = if !src.name.is_empty() {
         src.name.clone()
     } else if let Some(t) = &texture {
         t.rsplit(['/', '\\']).next().unwrap_or(t).to_owned()
+    } else if let Some((_, i)) = key.material {
+        format!("material{i}")
     } else {
-        format!("material{}", key.material.map_or(-1, |(_, i)| i32::from(i)))
+        legacy_material::DEFAULT_NAME.to_owned()
     };
     // Layer coordinates follow the base set, in layer order.
     let texcoord = |l: usize| 1 + (key.layer_mask & ((1u8 << l) - 1)).count_ones();
@@ -957,6 +973,7 @@ fn material_of(c: &mut Ctx<'_>, key: MatKey, image: Option<usize>) -> usize {
         roughness,
         normal_tex,
         emissive,
+        specular,
         alpha: if key.blend { Alpha::Blend } else { Alpha::Opaque },
         double_sided: key.double_sided,
         unlit: key.unlit,
@@ -1099,11 +1116,18 @@ fn build_mesh(c: &mut Ctx<'_>, file: u32, node: u32, pal: Pal) -> Result<MeshOf>
             },
             layer_mask: if f.layers == u32::MAX { 0 } else { f.layer_mask },
             double_sided: f.draw == 1 && !points && !lines,
-            blend: alpha < 1.0
-                || mat_alpha < 1.0
-                || f.template == 1
-                || (textured && matches!(f.template, 2 | 4))
-                || image.is_some_and(|(_, a)| a),
+            // The face's own transparency is in its vertices' colors; template 1 is fixed alpha blending,
+            // and 2 and 4 billboards with it.
+            blend: Transparency {
+                opacity: mat_alpha,
+                vertex_alpha: alpha < 1.0,
+                texture_alpha: f.template == 1
+                    || (textured && matches!(f.template, 2 | 4))
+                    || image.is_some_and(|(_, a)| a),
+                cutout: None,
+            }
+            .mode()
+                == Alpha::Blend,
             unlit: f.light_mode <= 1 || points || lines,
         };
         let pi = *part_of.entry(key).or_insert_with(|| {

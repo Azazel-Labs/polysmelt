@@ -8,7 +8,9 @@
 //!   the CAD nodes, `Switch` by its choice, `LOD` by its finest level) become nodes, a
 //!   transform's center folded into its translation;
 //! - a `Shape` becomes a mesh, its `Appearance` a material: `Material`'s diffuse and emissive
-//!   colors and transparency, `PhysicalMaterial` and `UnlitMaterial` as they are, an
+//!   colors and transparency, and its specular color and shininess as the highlight (the
+//!   classic material every reader reads one way, `legacy_material`), `PhysicalMaterial` and
+//!   `UnlitMaterial` as they are, a shape with no appearance in the default material, an
 //!   `ImageTexture` by its relative URL (clamped where it doesn't repeat), a `TextureTransform`
 //!   baked into the texture coordinates;
 //! - the geometry: `IndexedFaceSet` (polygons of any size, separate normal, color and texture
@@ -60,6 +62,7 @@ use crate::Result;
 use crate::assets::Assets;
 use crate::document::{Builder, Document, Keep};
 use crate::images::Images;
+use crate::legacy_material::{self, Phong, Rgb};
 use crate::material::{Alpha, CLAMP, Full, REPEAT, Tex};
 use crate::mesh::{GRAY, Material, srgb_to_linear};
 use crate::num::f32_of;
@@ -703,10 +706,11 @@ impl Convert<'_> {
         let mut m = Full::from(&Material::plain("", GRAY));
         m.double_sided = double;
         let Some(a) = app else {
-            if colored {
-                m.base_color = [1.0; 4];
-            }
-            return m;
+            // No appearance: the default material, white under the shape's own colors.
+            return Full {
+                double_sided: double,
+                ..legacy_material::default_material(colored).into()
+            };
         };
         let lin = |c: [f64; 3]| c.map(|x| srgb_to_linear(f32_of(x).clamp(0.0, 1.0)));
         let mat = graph.node(a, "material");
@@ -715,15 +719,20 @@ impl Convert<'_> {
         let replaced = tex.is_some() || colored;
         match mat.map(|k| (k, graph.kind(k))) {
             Some((k, "Material" | "TwoSidedMaterial")) => {
-                let [r, gr, b] = if replaced {
-                    [1.0; 3]
+                let srgb = |name: &str, default: f64| Rgb::Srgb(graph.vec(k, name, [default; 3]).map(f32_of));
+                // The Material node (X3D 19775-1, 12.4.4 and the lighting equations of 17.2.2): the
+                // highlight is specularColor (black by default) to the power of shininess (0.2 by default)
+                // times 128.
+                let mut phong = Phong::new(if replaced {
+                    Rgb::WHITE
                 } else {
-                    lin(graph.vec(k, "diffuseColor", [0.8; 3]))
-                };
-                m.base_color = [r, gr, b, opacity(k)];
-                m.emissive = lin(graph.vec(k, "emissiveColor", [0.0; 3]));
-                m.metallic = 0.0;
-                m.roughness = (1.0 - f32_of(graph.num(k, "shininess", 0.2))).clamp(0.0, 1.0);
+                    srgb("diffuseColor", 0.8)
+                });
+                phong.opacity = opacity(k);
+                phong.emissive = srgb("emissiveColor", 0.0);
+                phong.specular = Some(srgb("specularColor", 0.0));
+                phong.exponent = Some(f32_of(graph.num(k, "shininess", 0.2)).clamp(0.0, 1.0) * 128.0);
+                phong.pbr().set_full(&mut m);
             }
             Some((k, "PhysicalMaterial")) => {
                 let [r, gr, b] = lin(graph.vec(k, "baseColor", [1.0; 3]));

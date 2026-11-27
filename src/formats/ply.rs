@@ -1625,8 +1625,8 @@ fn build(
     }
 
     let mut mesh = Mesh::default();
-    // Vertex colors show as they are; otherwise the usual gray.
-    let base = if has_col { [1.0; 4] } else { crate::mesh::GRAY };
+    // The default material: vertex colors show as they are; otherwise the usual gray.
+    let base = crate::legacy_material::default_material(has_col);
     let dir = path.parent().unwrap_or(Path::new(""));
     for k in 0..slots {
         // One texture: the last the file names, as before there were several.
@@ -1634,9 +1634,9 @@ fn build(
         let name = if slots > 1 {
             texture.map_or_else(|| format!("texture{k}"), Clone::clone)
         } else {
-            "default".to_owned()
+            base.name.clone()
         };
-        let mut mat = Material::plain(&name, base);
+        let mut mat = Material { name, ..base.clone() };
         if has_uv
             && let Some(t) = texture
             && let Some(i) = images.find(assets, &[t], &[dir])

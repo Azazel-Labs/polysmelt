@@ -12,8 +12,10 @@
 //!   take a leading underscore. A node's several meshes become one mesh of all their primitives,
 //!   and its `skeletons` and the skin's `jointNames` become the skin's joints.
 //! - Materials: `KHR_materials_common`, or a technique's values (its parameters' defaults
-//!   under the material's own): diffuse as the base color, emission, shininess as roughness,
-//!   transparency, double-sidedness and blending; `CONSTANT` is unlit. Colors are taken as sRGB.
+//!   under the material's own): diffuse as the base color, emission, shininess and specular as
+//!   roughness and `KHR_materials_specular` (the classic material every reader reads one way),
+//!   transparency, double-sidedness and blending; `CONSTANT` is unlit. Colors are taken as sRGB,
+//!   the lights' too.
 //!   `KHR_materials_common` lights become `KHR_lights_punctual` ones.
 //! - What 2.0 has no place for (techniques, programs, shaders, texture formats, the material's
 //!   own values, joint names) is kept in `extras.source`, beside the normalized source keys:
@@ -25,6 +27,7 @@ use std::collections::HashMap;
 use serde_json::{Map, Value, json};
 
 use crate::document::Document;
+use crate::legacy_material::{Phong, Rgb};
 use crate::mesh::srgb_to_linear;
 use crate::num::{f32_of, usize_of};
 use crate::source::{Axis, Fact, Handedness, SourceInfo};
@@ -594,21 +597,25 @@ pub(crate) fn upgrade(mut v1: Map<String, Value>) -> Result<(Map<String, Value>,
             .collect(),
     );
 
-    let mut unlit = false;
+    let (mut unlit, mut specular) = (false, false);
     out.insert(
         "materials".into(),
         materials
             .list
             .iter()
             .map(|(id, m)| {
-                let (o, is_unlit) = material(id, m, &techniques, &textures);
+                let (o, is_unlit, has_specular) = material(id, m, &techniques, &textures);
                 unlit |= is_unlit;
+                specular |= has_specular;
                 o
             })
             .collect(),
     );
     if unlit {
         used.push("KHR_materials_unlit");
+    }
+    if specular {
+        used.push("KHR_materials_specular");
     }
 
     let mut out_animations = Vec::new();
@@ -746,8 +753,8 @@ fn matrix(v: Option<&Value>) -> Option<[f32; 16]> {
     (a.len() == 16).then_some(m)
 }
 
-/// A material's 2.0 form, and whether it's unlit.
-fn material(id: &str, m: &Value, techniques: &Kind, textures: &Kind) -> (Value, bool) {
+/// A material's 2.0 form, whether it's unlit, and whether it has `KHR_materials_specular`.
+fn material(id: &str, m: &Value, techniques: &Kind, textures: &Kind) -> (Value, bool, bool) {
     let common = m.get("extensions").and_then(|e| e.get("KHR_materials_common"));
     let technique = techniques.index(m.get("technique")).map(|t| &techniques.list[t].1);
     // The values: KHR_materials_common's, or the technique's defaults under the material's.
@@ -823,12 +830,41 @@ fn material(id: &str, m: &Value, techniques: &Kind, textures: &Kind) -> (Value, 
     let shininess = values
         .get("shininess")
         .and_then(|s| s.as_f64().or_else(|| s.get(0)?.as_f64()));
-    let roughness = match (kind.as_str(), shininess) {
-        ("LAMBERT", _) | (_, None) => 1.0,
-        (_, Some(n)) => (1.0 - f32_of(n.max(0.0)).sqrt() / 10.0).clamp(0.0, 1.0),
-    };
-    pbr.insert("roughnessFactor".into(), json!(roughness));
+    // The highlight: `shininess` is the Blinn-Phong exponent and `specular` its color; KHR_materials_common
+    // gives them defaults of 0 and black for its BLINN and PHONG techniques, and LAMBERT has no highlight. A
+    // technique of the file's own says only what its values do.
+    let specular = values.get("specular").and_then(Value::as_array).and_then(|a| {
+        let c: Vec<f32> = a.iter().take(3).filter_map(Value::as_f64).map(f32_of).collect();
+        (c.len() == 3).then(|| Rgb::Srgb([c[0], c[1], c[2]]))
+    });
+    let mut phong = Phong::new(Rgb::Linear([base[0], base[1], base[2]]));
+    match kind.as_str() {
+        "LAMBERT" | "CONSTANT" => phong.highlight = false,
+        "BLINN" | "PHONG" => {
+            // A specular texture has no place here: the highlight is then glTF's own.
+            let textured = values.get("specular").is_some_and(Value::is_string);
+            phong.specular = specular.or((!textured).then_some(Rgb::BLACK));
+            phong.exponent = Some(shininess.map_or(0.0, f32_of));
+        }
+        _ => {
+            phong.specular = specular;
+            phong.exponent = shininess.map(f32_of);
+        }
+    }
+    let look = phong.pbr();
+    pbr.insert("roughnessFactor".into(), json!(look.roughness));
     o.insert("pbrMetallicRoughness".into(), Value::Object(pbr));
+    let highlight = look.specular.filter(|_| !unlit);
+    if let Some(h) = highlight {
+        let mut s = Map::new();
+        if h.factor < 1.0 {
+            s.insert("specularFactor".into(), json!(h.factor));
+        }
+        if h.color.iter().any(|&c| c < 1.0) {
+            s.insert("specularColorFactor".into(), json!(h.color));
+        }
+        o.insert("extensions".into(), json!({ "KHR_materials_specular": s }));
+    }
     if unlit {
         o.insert("extensions".into(), json!({ "KHR_materials_unlit": {} }));
     } else if let Some(e) = values.get("emission") {
@@ -847,7 +883,7 @@ fn material(id: &str, m: &Value, techniques: &Kind, textures: &Kind) -> (Value, 
     if double_sided {
         o.insert("doubleSided".into(), json!(true));
     }
-    (Value::Object(o), unlit)
+    (Value::Object(o), unlit, highlight.is_some())
 }
 
 /// A `KHR_materials_common` light as a punctual one; ambient light has none.
@@ -858,7 +894,15 @@ fn light(id: &str, l: &Value) -> Option<Value> {
         .and_then(|b| b.get("color"))
         .and_then(Value::as_array)
         .filter(|c| c.len() >= 3)
-        .map_or(json!([1.0, 1.0, 1.0]), |c| json!(c[..3]));
+        // A display color, like the materials': glTF 2.0's is linear.
+        .map_or(json!([1.0, 1.0, 1.0]), |c| {
+            // One brighter than 1 is already an intensity, and is left alone.
+            let linear = |v: &Value| {
+                let v = f32_of(v.as_f64().unwrap_or(0.0)).max(0.0);
+                if v <= 1.0 { srgb_to_linear(v) } else { v }
+            };
+            json!([linear(&c[0]), linear(&c[1]), linear(&c[2])])
+        });
     let mut o = json!({ "name": l.get("name").cloned().unwrap_or_else(|| json!(id)), "color": color });
     match kind {
         "directional" => o["type"] = json!("directional"),

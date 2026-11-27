@@ -283,6 +283,26 @@ fn morph_targets_are_deltas() {
     assert!(m.prims[0].positions.iter().all(|p| (p[2] - 0.5).abs() < 1e-6));
 }
 
+/// A camera with only its horizontal angle: a 16:9 frame is assumed and written, with the vertical angle that
+/// gives the file's angle across it.
+#[test]
+fn a_camera_with_only_xfov_assumes_a_frame() {
+    let lib = r#"<library_cameras><camera id="cam"><optics><technique_common><perspective>
+        <xfov>90</xfov><znear>1</znear></perspective></technique_common></optics></camera></library_cameras>"#;
+    let scene = r##"<node><instance_camera url="#cam"/></node>"##;
+    let d = read(&doc("", lib, scene));
+    let cam = &d.json()["cameras"][0]["perspective"];
+    // tan(45 degrees) is 1, so the vertical half angle is atan(9 / 16).
+    assert!(
+        (cam["aspectRatio"].as_f64().unwrap() - 16.0 / 9.0).abs() < 1e-9,
+        "{cam}"
+    );
+    assert!(
+        (cam["yfov"].as_f64().unwrap() - 2.0 * (9.0f64 / 16.0).atan()).abs() < 1e-9,
+        "{cam}"
+    );
+}
+
 #[test]
 fn materials_from_common_profile() {
     let lib = r##"<library_images><image id="img"><init_from>tex%20ture.png</init_from></image></library_images>
@@ -314,7 +334,8 @@ fn materials_from_common_profile() {
     assert_eq!(m["doubleSided"], true);
     assert!(m["pbrMetallicRoughness"]["baseColorTexture"].is_object(), "{m}");
     assert!(m["normalTexture"].is_object(), "{m}");
-    assert!((m["pbrMetallicRoughness"]["roughnessFactor"].as_f64().unwrap() - 0.316_227_77).abs() < 1e-4);
+    // A shininess of 18 is a roughness of (2 / 20)^(1/4).
+    assert!((m["pbrMetallicRoughness"]["roughnessFactor"].as_f64().unwrap() - 0.562_341_3).abs() < 1e-4);
     assert_eq!(d.json()["samplers"][0]["wrapS"], json!(crate::material::CLAMP));
     assert!(m["emissiveFactor"][0].as_f64().unwrap() > 0.2);
 }

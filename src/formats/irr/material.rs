@@ -9,6 +9,8 @@ use crate::assets::Assets;
 use crate::document::Keep;
 use crate::formats::xml::El;
 use crate::images::Images;
+use crate::legacy_material::{Phong, Rgb, Transparency};
+use crate::material::Alpha;
 use crate::mesh::{CLAMP, MIRROR, Material, REPEAT, srgb_to_linear};
 
 /// glTF's filter numbers.
@@ -105,6 +107,10 @@ pub(super) fn linear(c: u32) -> [f32; 4] {
 
 /// A material as Irrlicht keeps it.
 #[derive(Debug, Clone)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "Irrlicht's own flags, and whether the file has the material"
+)]
 pub(super) struct IrrMaterial {
     /// Its type: `solid`, `trans_vertex_alpha`, `lightmap_m4`...
     pub kind: String,
@@ -121,6 +127,8 @@ pub(super) struct IrrMaterial {
     pub lighting: bool,
     pub backface_culling: bool,
     pub wireframe: bool,
+    /// The buffer has no `<material>`: this is Irrlicht's own default, standing in.
+    pub missing: bool,
 }
 
 impl Default for IrrMaterial {
@@ -137,6 +145,7 @@ impl Default for IrrMaterial {
             lighting: true,
             backface_culling: true,
             wireframe: false,
+            missing: false,
         }
     }
 }
@@ -254,18 +263,23 @@ pub(super) fn convert(
     dir: &Path,
     sets: usize,
 ) -> (Material, Patch) {
-    let diffuse = linear(m.diffuse);
-    let mut out = Material::plain(name, [diffuse[0], diffuse[1], diffuse[2], 1.0]);
-    let e = linear(m.emissive);
-    out.emissive = [e[0], e[1], e[2]];
-    // Blinn-Phong's exponent as GGX roughness: alpha = sqrt(2 / (n + 2)), roughness = sqrt(alpha). No shininess
-    // or no specular color is no highlight.
-    out.roughness = if m.shininess <= 0.0 || m.specular.trailing_zeros() >= 24 {
-        1.0
-    } else {
-        (2.0 / (m.shininess.clamp(0.0, 128.0) + 2.0)).powf(0.25)
+    let srgb = |c: u32| {
+        let [_, r, g, b] = c.to_be_bytes().map(|x| f32::from(x) / 255.0);
+        Rgb::Srgb([r, g, b])
     };
+    // `SMaterial`: Shininess is the highlight's exponent (0.5 to 128), and at 0 there is no highlight at all,
+    // whatever the specular color.
+    let mut phong = Phong::new(srgb(m.diffuse));
+    phong.emissive = srgb(m.emissive);
+    phong.specular = Some(srgb(m.specular));
+    phong.exponent = Some(m.shininess.clamp(0.0, 128.0));
+    phong.highlight = m.shininess > 0.0;
+    let mut out = phong.pbr().material(name);
     out.unlit = !m.lighting;
+    if out.unlit {
+        // Nothing reflects, and nothing needs saying so.
+        out.extensions = None;
+    }
     out.double_sided = !m.backface_culling;
     let sampling = |s: usize| {
         let [bi, tri] = m.filter[s];
@@ -292,9 +306,19 @@ pub(super) fn convert(
         out.sampling.occlusion = sampling(1);
         patch.second_set = sets > 1 && out.occlusion_image.is_some();
     }
+    // `trans_alphach_ref` tests the texture's alpha against a half; `trans_alphach` blends by it.
+    let transparency = Transparency {
+        texture_alpha: m.kind == "trans_alphach",
+        cutout: (m.kind == "trans_alphach_ref").then_some(0.5),
+        ..Transparency::of(1.0)
+    };
+    match transparency.mode() {
+        Alpha::Mask(c) => out.alpha_cutoff = Some(c),
+        Alpha::Blend => patch.blend = true,
+        Alpha::Opaque => {}
+    }
     match m.kind.as_str() {
-        "trans_alphach_ref" => out.alpha_cutoff = Some(0.5),
-        "trans_alphach" => patch.blend = true,
+        "trans_alphach_ref" | "trans_alphach" => {}
         k if m.vertex_alpha() || k.is_empty() => {}
         "solid" | "lightmap" | "lightmap_m2" | "lightmap_m4" | "lightmap_light" | "lightmap_light_m2"
         | "lightmap_light_m4" | "normalmap_solid" | "parallaxmap_solid" => {}

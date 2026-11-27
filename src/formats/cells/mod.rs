@@ -17,7 +17,7 @@ use serde_json::{Map, Value, json};
 use super::stream;
 use crate::Result;
 use crate::document::{Builder, Document, Part};
-use crate::mesh::{FastMap, GRAY, Material, Prim, srgb_to_linear};
+use crate::mesh::{FastMap, Prim, srgb_to_linear};
 use crate::num::{f32_of, u32_of};
 use crate::source::SourceInfo;
 #[cfg(any(feature = "msh", feature = "medit"))]
@@ -576,7 +576,7 @@ pub(super) fn build(model: Model, format: &'static str, limit: usize) -> Result<
     }
     info.format = Some(format.into());
     info.write(&mut source);
-    let mut material = Material::plain("default", if colored { [1.0; 4] } else { GRAY });
+    let mut material = crate::legacy_material::default_material(colored);
     material.double_sided = true;
     let mut facts = Map::new();
     facts.insert("triangles".into(), json!(totals.triangles));

@@ -74,10 +74,13 @@ fn layout(kind: &str) -> (usize, usize) {
 }
 
 fn read_buffer(b: El<'_, '_>, dropped: &mut usize) -> Buffer {
-    let material = b
-        .children()
-        .find(|c| c.is("material"))
-        .map_or_else(IrrMaterial::default, |m| IrrMaterial::parse(&Attrs::of(m)));
+    let material = b.children().find(|c| c.is("material")).map_or_else(
+        || IrrMaterial {
+            missing: true,
+            ..IrrMaterial::default()
+        },
+        |m| IrrMaterial::parse(&Attrs::of(m)),
+    );
     let mut prim = Primitive::default();
     let mut colors: Vec<u32> = Vec::new();
     let mut sets = 1;

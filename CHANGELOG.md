@@ -4,6 +4,71 @@ Breaking changes are allowed in minor releases until 1.0.
 
 ## Unreleased
 
+- Classic materials (Phong, Blinn, Lambert) are read one way by every reader, so the same
+  material is the same glTF material whatever format held it. Before, ten formulas turned a
+  highlight's exponent into roughness: an exponent of 20 was 0.30 from COLLADA and OGRE,
+  0.55 from FBX and AC3D, 0.86 from OBJ and DirectX. Now, for OBJ, COLLADA, 3DS, FBX's
+  classic materials, DirectX, X3D and VRML97, glTF 1.0, LightWave, AC3D, OpenFlight,
+  OpenGEX, Irrlicht, XGL, OGRE, MikuMikuDance, MilkShape 3D and Blitz3D:
+  - Roughness is `(2 / (n + 2))^(1/4)` for a Blinn-Phong exponent `n` (a lobe of exponent
+    `n` is nearest a GGX lobe of alpha squared `2 / (n + 2)`, and roughness is the root of
+    alpha): 0.549 at 20. Each reader brings its own scale to the exponent: `Ns` as it is in
+    MTL, `2^(10 g)` for a 3DS shininess percentage, `2^(10 g + 2)` for a LightWave
+    glossiness, shininess times 128 in X3D and Blitz3D, the value itself elsewhere.
+    Metalness is 0.
+  - The specular color, scaled by its strength and made linear, is written as
+    `KHR_materials_specular`: its largest channel is `specularFactor` and the color over
+    it `specularColorFactor`. A full white specular is glTF's own highlight and writes no
+    extension; 0.5 gray leaves 0.214 of it. FBX's classic materials, DirectX, LightWave,
+    OpenFlight, Irrlicht, AC3D, XGL, X3D, MikuMikuDance, MilkShape 3D, Blitz3D, OGRE and
+    glTF 1.0 dropped the color before. OBJ's `Ks` is now made linear, and no longer doubled
+    (a file Blender wrote still has its specular level there, where 0.5 is the whole
+    highlight); COLLADA's is no longer doubled either.
+  - No highlight (a Lambert material, a black specular color, a strength of zero, MTL's
+    `illum` 0 or 1, an Irrlicht shininess of 0) is a roughness of 1 and a `specularFactor`
+    of 0. It was 1 in some readers and 0.85 in others. A format's own default counts: an
+    X3D `Material`, an OGRE pass and a `KHR_materials_common` material have a black
+    specular color unless they say otherwise, so they have no highlight.
+  - A material that says nothing of its highlight keeps a roughness of 0.85 (SketchUp's
+    were 0.9).
+  - OBJ and FBX files Blender wrote hold a roughness in the exponent's place, and are read
+    back as Blender wrote them, to the same roughness as before.
+- Faces with no material take one default material in every reader but glTF's: named
+  `default`, gray (0.72, 0.72, 0.74), not metallic, roughness 0.85, and white under vertex
+  colors or a texture, which show as they are. COLLADA, OpenGEX, DirectX, Blitz3D, MilkShape
+  3D and MikuMikuDance left such faces with no material; OBJ gave them a 0.604 gray, XGL
+  and AC3D white, SketchUp a white `Default`, LightWave a 0.78 gray `Default`, OpenFlight
+  `material-1`, X3D an unnamed gray, Irrlicht a white `material N`. A material that is
+  named but not defined (an OBJ library that isn't there, a LightWave tag with no surface,
+  a COLLADA material with no effect) has the default's look under its own name. OpenGEX's
+  `materials` fact still counts the file's materials.
+- One rule decides how a material's transparency is drawn. It is cut out (`MASK`) where the
+  format asks for an alpha test, blended (`BLEND`) where the material, its color texture's
+  alpha or its vertices' colors are less than opaque, and opaque otherwise.
+  - Vertex colors with an alpha below 1 make their material blend in every reader. 3MF,
+    VTK, PLY, OFF and the others left it opaque, which hid the alpha; AMF blended already.
+    A `Mesh` turned into a document (`Document::from`, `Mesh::to_glb`) keeps the alpha
+    modes its own materials give.
+  - Blitz3D: a texture's flags are honored. Masked (4) cuts out at 0.5, alpha (2) blends;
+    they were read and dropped.
+  - MikuMikuDance: whether a material is cut out is decided by its texture's name alone.
+    It used to need the file found, so the same model read differently with and without
+    its textures beside it.
+  - OBJ (a `map_d` naming the `map_Kd` file) and SketchUp (a PNG texture with an alpha
+    channel) still cut out at 0.5, as before: the cutout is a hint each reader hands the
+    rule, as MikuMikuDance's is.
+- LightWave: a surface's diffuse level scales its color in the values the file stores, as
+  its specular level scales the highlight: a 0.5 gray at a level of 0.8 is sRGB 0.4 (0.133
+  linear), where it was 0.8 of 0.5's linear value (0.171). A node's linear color is scaled
+  as it was.
+- COLLADA: a camera with only `<xfov>` (no `<yfov>` or `<aspect_ratio>`) wrote its
+  horizontal angle as glTF's vertical `yfov`. A 16:9 frame is now assumed and written as
+  `aspectRatio` with the `yfov` that gives the file's angle across, as for OpenGEX.
+- COLLADA and glTF 1.0 light colors are made linear, as the materials' colors are: a
+  light of (1, 0.5, 0) is (1, 0.214, 0).
+- `Document::to_fbx` writes `Shininess` as the exponent this rule reads back,
+  `2 / roughness^4 - 2`, where it wrote `((1 - roughness) * 10)^2`. The `glTF|roughness`
+  property that holds the roughness itself is unchanged.
 - OFF: in a text file whose colors are 0 to 255, a vertex with no color is white. It was
   scaled as if its white were one of those colors, to near black with an alpha of 0.004.
 - PLY: a color channel of a 32-bit whole-number type (`int`, `uint`) holds 0 to 255, as the
