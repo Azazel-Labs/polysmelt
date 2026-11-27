@@ -26,8 +26,9 @@ use crate::num::{f32_of, u32_of};
 use crate::quat;
 use crate::source::{Axis, Fact, Handedness};
 
-/// Frames a second: the compilers' default (studiomdl plays a `$sequence` at 30 unless its `fps` option says
-/// otherwise), which is the readers' shared assumption too.
+/// Frames a second, assumed: the SMD has no rate, as the `$sequence` that compiles it gives one. Without an `fps`
+/// option it's 30 (`Cmd_Sequence` in `utils/studiomdl/studiomdl.c` of Valve's Half-Life SDK,
+/// <https://github.com/ValveSoftware/halflife>), which is the readers' shared assumption too.
 const FPS: f64 = super::keys::ASSUMED_FRAME_RATE;
 
 /// The most morph target values (targets times points) a `.vta` file may make, against a file whose frames and

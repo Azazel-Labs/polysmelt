@@ -27,7 +27,8 @@ use crate::quat::normalize;
 pub(crate) const TIME_OFFSET: &str = "timeOffset";
 
 /// The frame rate a reader assumes when neither the file nor its format gives one: frames, keys or ticks a
-/// second. A format whose own tools document another default keeps theirs, and says so where it does.
+/// second. A format with a convention of its own keeps it (MD2, MD5, Blitz3D, DirectX, ASF/AMC, USD), and its
+/// reader cites where the convention comes from.
 pub(crate) const ASSUMED_FRAME_RATE: f64 = 30.0;
 
 /// The name of the one animation a motion file holds, where the file itself gives it none: the file's own name

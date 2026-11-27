@@ -26,7 +26,7 @@
 //! the next 16-bit number of the frame times its scale. Each animation is a range of frames with a name and a frame
 //! rate (an assumed 30 when it isn't a positive number; one with no name has none): a linear animation with translation, rotation and scale channels for
 //! each joint, leaving out those that hold the joint's rest value in every frame. Looping animations say so in their
-//! extras (`loop`). The source info's `frameRate` is the first animation's rate that is a positive number (assumed 24
+//! extras (`loop`). The source info's `frameRate` is the first animation's rate that is a positive number (assumed 30
 //! when none is); when the animations' rates differ, each gives its own in its extras (`frameRate`).
 //!
 //! The format is Z up and right-handed, so the scene stays as the file has it under the document's `RootNode`, which turns it for glTF's Y up (the source info's
@@ -55,8 +55,10 @@ use crate::num::{f32_of, u32_of};
 use crate::quat;
 use crate::source::{Axis, Fact, Handedness};
 
-/// The frame rate taken when an animation gives none that's usable: the readers' shared assumption, as the
-/// format documents no default.
+/// The frame rate taken when an animation's `framerate` (`iqmanim` in the specification, `iqm.txt` at
+/// <https://github.com/lsalzman/iqm>) is not above 0: the readers' shared assumption. The format documents no
+/// default, and 0 is common: the reference exporter (`iqm.cpp`) writes 0 for an animation whose source gives no rate
+/// unless `--fps` is passed.
 #[allow(clippy::cast_possible_truncation, reason = "a small whole number")]
 const DEFAULT_RATE: f32 = super::keys::ASSUMED_FRAME_RATE as f32;
 
@@ -847,6 +849,23 @@ mod tests {
         assert_eq!(info.up_axis, Fact::Declared(Axis::PosZ));
         assert_eq!(info.meters_per_unit, Fact::Unknown);
         assert!(info.converted.up_axis);
+
+        // With every animation's `framerate` 0, frames are at the shared 30 a second, assumed.
+        let get = |b: &[u8], field: usize| u32::from_le_bytes(b[16 + 4 * field..20 + 4 * field].try_into().unwrap());
+        let (count, at) = (get(&bytes, 17) as usize, get(&bytes, 18) as usize);
+        for a in 0..count {
+            let rate = at + 20 * a + 12;
+            bytes[rate..rate + 4].copy_from_slice(&0f32.to_le_bytes());
+        }
+        let doc = load(
+            Input::memory(&bytes, "rig.iqm"),
+            &crate::assets::Memory::new(),
+            Keep::ALL,
+        )
+        .unwrap();
+        assert_eq!(doc.source_info().frame_rate, Fact::Assumed(30.0));
+        let a = &doc.rig().unwrap().animations[0];
+        assert!((a.channels[0].times[1] - 1.0 / 30.0).abs() < 1e-6, "{:?}", a.channels[0].times);
     }
 
     #[test]

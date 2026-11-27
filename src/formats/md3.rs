@@ -54,8 +54,10 @@ use crate::num::{f32_of, u32_of};
 use crate::quat;
 use crate::source::{Axis, Fact, Handedness};
 
-/// Frames a second, as the format stores none (the game gives each animation its rate in an `animation.cfg`
-/// beside the model): the readers' shared assumption.
+/// Frames a second: the readers' shared assumption. The header has no rate (`md3Header_t` in `code/qcommon/qfiles.h`
+/// of id Software's released Quake III Arena source, <https://github.com/id-Software/Quake-III-Arena>), and the
+/// game has no single one: each player animation's rate is in the `animation.cfg` beside the model
+/// (`CG_ParseAnimationFile` in `code/cgame/cg_players.c`).
 #[allow(clippy::cast_possible_truncation, reason = "a small whole number")]
 const RATE: f32 = super::keys::ASSUMED_FRAME_RATE as f32;
 

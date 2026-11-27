@@ -1339,7 +1339,10 @@ fn animation(sequences: &[(parse::Sequence, Vec<usize>)]) -> (Vec<Track>, bool) 
         let frame = if seq.loop_duration > 0.0 {
             seq.loop_duration / count
         } else {
-            // No duration given: the readers' shared assumed frame rate.
+            // No duration: a file before 15.8, which has none, or a loop duration of 0, which "indicates that
+            // the loop is to play as fast as possible" (OGC 16-009r4, OpenFlight in CDB, Group Record,
+            // <https://docs.ogc.org/bp/16-009r4/16-009r4.html>), a rate the display sets. Either way the
+            // readers' shared assumed frame rate.
             assumed = true;
             f32_of(1.0 / keys::ASSUMED_FRAME_RATE)
         };

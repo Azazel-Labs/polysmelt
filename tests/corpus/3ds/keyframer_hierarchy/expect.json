@@ -37,6 +37,12 @@
       }
     }
   },
+  "json": {
+    "/asset/extras/source/frameRate": 30,
+    "/asset/extras/source/assumed": [
+      "frameRate"
+    ]
+  },
   "poses": [
     {
       "animation": 0,

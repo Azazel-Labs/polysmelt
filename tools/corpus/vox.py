@@ -236,6 +236,8 @@ anim = (size(1, 1, 1) + xyzi([(0, 0, 0, 1)]) + ntrn(0, 1) + ngrp(1, [2])
 case(FMT, "scene_animation", {"scene.vox": vox(anim)},
      {"spec": EXT + ": nTRN frames with _f numbers become a step animation; the first frame is the rest pose",
       "source": SRC, "area": 6, "bounds": bounds([0, 0, 0], [1, 1, 1]),
+      # A .vox has no frame rate: the readers' shared 30, assumed.
+      "json": {"/asset/extras/source/frameRate": 30, "/asset/extras/source/assumed": ["frameRate"]},
       "document": {"animations": 1, "channels": 2}})
 
 # Nested groups: translations add up through the hierarchy.

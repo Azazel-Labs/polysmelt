@@ -62,9 +62,10 @@ use crate::num::{f32_of, u32_of};
 use crate::quat;
 use crate::source::{Axis, Fact, Handedness};
 
-/// The frame rate taken when a file gives none that's usable: the engine's, whose `idMD5Anim` starts at a
-/// `frameRate` of 24 before it reads the file's (id Software's released Doom 3 source). So that, not the readers'
-/// shared assumption.
+/// The frame rate taken when a file's `frameRate` is missing or not above 0. Every `.md5anim` should give one: the
+/// engine requires the line (`idMD5Anim::LoadAnim` in `neo/d3xp/anim/Anim.cpp` of id Software's released Doom 3
+/// source, <https://github.com/id-Software/DOOM-3>). The engine's own value before it reads the file is 24
+/// (`idMD5Anim::idMD5Anim` and `idMD5Anim::Free`, same file), so 24 stands in, assumed, not the readers' shared 30.
 const DEFAULT_RATE: f32 = 24.0;
 
 /// Reads an `.md5mesh` or `.md5anim` model.

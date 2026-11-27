@@ -31,7 +31,9 @@ use crate::document::{Document, Keep};
 use crate::num::f32_of;
 use crate::source::{Axis, Fact, meters_in};
 
-/// Frames per second when the header doesn't give one.
+/// Frames per second when the header's `DataRate` (the rate of the rows in the file, in Hz: OpenSim's "Marker (.trc)
+/// Files", <https://opensimconfluence.atlassian.net/wiki/spaces/OpenSim/pages/53089972>) is missing or not above 0:
+/// the readers' shared assumption, as the format has no default. It times only rows with no `Time` cell.
 const DEFAULT_RATE: f64 = super::keys::ASSUMED_FRAME_RATE;
 
 /// Up to 40 characters of `s`, for an error message.

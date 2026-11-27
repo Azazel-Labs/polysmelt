@@ -591,6 +591,21 @@ case(FMT, "animation", {"anim.x": scene(anim_scene)},
               {"node": "Mover", "animation": 1, "time": 2.0, "translation": [0, 3, 1],
                "rotation": [r(c) for c in Q90Z], "scale": [1, 1, 1]}]})
 
+# No AnimTicksPerSecond: Microsoft documents no default, and 4800 a second is the convention (3ds Max's tick,
+# what the DirectX SDK's own tiny.x is keyed in), so a key at tick 4800 is a second in, the rate assumed.
+slide = Obj("AnimationSet", "Slide", [], [Obj("Animation", "", [], [
+    ref("Slider"),
+    Obj("AnimationKey", "", [("i", [2, 2]), ("vf", [[0, 3, 0.0, 0.0, 0.0],
+                                                  [4800, 3, *[float(c) for c in lh((1, 0, 2))]]])]),
+])])
+case(FMT, "animation_default_ticks", {"anim.x": scene([frame("Slider", [cube()]), slide])},
+     {"spec": SPEC + ": an animation with no AnimTicksPerSecond, at the conventional 4800 ticks a second",
+      "source": SRC, "triangles": 12,
+      "json": {"/asset/extras/source/frameRate": 4800, "/asset/extras/source/assumed": ["upAxis", "frameRate"]},
+      "document": {"animations": 1, "channels": 1},
+      "rig": [{"node": "Slider", "keys": {"translation": [0, 1]}},
+              {"node": "Slider", "time": 1.0, "translation": [1, 0, 2]}]})
+
 bind = Obj("AnimationSet", "Bind", [], [Obj("Animation", "", [], [
     ref("Spinner"),
     Obj("AnimationKey", "", [("i", [0, 1]), ("vf", [[0, 4, *[float(c) for c in rotation_key(ROTS[1])]]])])])])

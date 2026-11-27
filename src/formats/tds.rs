@@ -138,9 +138,11 @@ const SCL_TRACK: u16 = 0xB022;
 const ROLL_TRACK: u16 = 0xB024;
 const NODE_ID: u16 = 0xB030;
 
-/// The keyframer counts frames; 3D Studio and 3ds Max play them at 30 a second unless told otherwise, which the file
-/// doesn't record.
-const FRAMES_PER_SECOND: f32 = 30.0;
+/// Frames a second: the readers' shared assumption. The keyframer counts frames and no chunk gives their rate (the
+/// keyframer header is a revision, a name and a frame count, `KFSEG` a range and `KFCURTIME` a frame:
+/// `kfdata_read` in lib3ds's `lib3ds_file.c`); it's 3ds Max's scene setting, not the file's.
+#[allow(clippy::cast_possible_truncation, reason = "a small whole number")]
+const FRAMES_PER_SECOND: f32 = keys::ASSUMED_FRAME_RATE as f32;
 
 /// The chunks in `data`, as (id, body). A chunk claiming more than is left (a wrong length, a cut-off file) gets
 /// what is left; the readers below take only whole records from it.

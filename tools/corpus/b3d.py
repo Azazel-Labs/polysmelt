@@ -344,6 +344,29 @@ case(FMT, "skinned_keys", {
     ],
 })
 
+# The same keys with no ANIM chunk, or one whose fps is 0: the specification's ANIM chunk gives
+# "float fps ;default=60" (b3dfile_specs.txt), so frame 10 is a sixth of a second in, at 60 assumed.
+for name, extra in (("keys_without_anim", ()), ("keys_anim_zero_fps", (anim(10, 0.0),))):
+    case(FMT, name, {
+        name + ".b3d": b3d(
+            node("body", (0, 0, 0), (1, 1, 1), (1, 0, 0, 0),
+                 mesh(-1, vrts(SK_V), tris(-1, SK_F)),
+                 *extra,
+                 node("arm", ARM_T, (1, 1, 1), (1, 0, 0, 0), bone(SK_W), keys(1 | 4, ARM_KEYS))),
+        ),
+    }, {
+        "spec": f"{SPEC}: keys with " + ("no ANIM chunk" if not extra else "an ANIM chunk whose fps is 0")
+                + ": the specification's default of 60 frames a second",
+        "source": SRC,
+        "triangles": 2,
+        "document": {"nodes": 3, "skins": 1, "joints": 2, "animations": 1, "channels": 2},
+        "json": {"/asset/extras/source/frameRate": 60.0, "/asset/extras/source/assumed": ["upAxis", "frameRate"]},
+        "rig": [
+            {"node": "arm", "keys": {"translation": [0, 1 / 6], "rotation": [0, 1 / 6], "scale": None}},
+            {"node": "arm", "time": 1 / 6, "translation": mirror((0, 2, 0)), "rotation": gltf_quat(about_y(90))},
+        ],
+    })
+
 # The same skin on a body that is moved: the vertices are in the body's space, and the arm is under it, so
 # both stand where the body puts them.
 BODY_T = (10, 20, 30)

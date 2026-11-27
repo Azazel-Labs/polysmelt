@@ -66,7 +66,12 @@ The document is in glTF's frame: +Y up, right-handed, meters.
   the short way, and the file's curve is kept wherever glTF can hold it (step, linear, cubic
   spline). Curves glTF can't hold are sampled into linear keys.
 - **One frame-rate default.** A format that stores frames without saying how fast to play them
-  is played at 30 frames a second, reported as an assumed `frameRate`.
+  is played at 30 frames a second, reported as an assumed `frameRate`. A rate the file gives
+  always wins, declared. Where a format has a convention of its own, that stands in instead,
+  still assumed, and its reader cites where it comes from: MD2 10 (Quake II's game tick), MD5
+  24 (Doom 3's starting value), Blitz3D 60 (its specification), DirectX 4800 ticks (a
+  convention: Microsoft documents no default), AMC 120 (the CMU database's capture rate) and
+  USD 24 time codes (its specification).
 - **Names are the file's.** An animation keeps the name the file gives it. A one-clip file
   (BVH, AMC, C3D, TRC, HTR, VMD, `.md5anim`, SMD) is named after the file. Nothing gets a
   made-up name like `motion`.

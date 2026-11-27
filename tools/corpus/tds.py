@@ -557,6 +557,8 @@ case(FMT, "keyframer_hierarchy",
                    "node_names": ["Base", "Arm", "RootNode"],
                    "source": {"keyframer": {"name": "MAXSCENE", "revision": 5, "length": 30,
                                             "segment": [0, 30]}}},
+      # No chunk gives the frames' rate: the readers' shared 30, assumed, so frame 30 is a second in.
+      "json": {"/asset/extras/source/frameRate": 30, "/asset/extras/source/assumed": ["frameRate"]},
       "poses": [{"animation": 0, "time": 1.0,
                  "bounds": bounds(moved(base_v, (0, 0, 2)) + moved(arm_v, (0, 0, 2)))}]})
 

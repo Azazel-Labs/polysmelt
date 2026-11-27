@@ -4,7 +4,7 @@
 //! prototypes under a node per instance. The stage stays in its own up axis and units under the document's one top-level node,
 //! `RootNode`, which is always there and carries the turn to glTF's Y up and the scale to meters (no transform when
 //! the stage needs none); skinned meshes are under it with everything else. The up axis and units are recorded in `asset.extras.source` (see [`crate::source`]; USD's 0.01 meters and Y up are
-//! assumed when the stage doesn't say), with its frame rate (`framesPerSecond`, else `timeCodesPerSecond`), its `doc`
+//! assumed when the stage doesn't say), with its frame rate (`framesPerSecond`, else `timeCodesPerSecond`, USD's 24 assumed when it authors neither), its `doc`
 //! as the description and its `comment`. `startTimeCode`, `endTimeCode`, `defaultPrim` and `customLayerData` are
 //! kept as the stage gives them, and `timeCodesPerSecond` when the frame rate is `framesPerSecond`.
 //!
@@ -188,9 +188,8 @@ fn load_capped(input: Input<'_>, assets: &dyn Assets, keep: Keep, max_nodes: usi
     } else {
         usd::TimeCode::EARLIEST
     };
-    let tcps = Some(stage.time_codes_per_second())
-        .filter(|t| t.is_finite() && *t > 0.0)
-        .unwrap_or(24.0);
+    let tcps_fact = time_codes_per_second(&stage);
+    let tcps = tcps_fact.value().copied().unwrap_or(DEFAULT_TIME_CODES_PER_SECOND);
     let prims: Vec<usd::Prim> = paths.iter().filter_map(|p| stage.prim(p.clone()).ok()).collect();
     let mut r = Reader {
         stage: &stage,
@@ -268,7 +267,7 @@ fn load_capped(input: Input<'_>, assets: &dyn Assets, keep: Keep, max_nodes: usi
         // The frame rate is the frames', and time codes count at their own rate.
         source.insert("timeCodesPerSecond".into(), json!(tcps));
     }
-    stage_info(&stage, z_up, meters, tcps).write(&mut source);
+    stage_info(&stage, z_up, meters, tcps_fact).write(&mut source);
     if let Some(Value::Object(data)) = stage_metadata_json(&stage, "customLayerData") {
         source.insert("customLayerData".into(), Value::Object(data));
     }
@@ -321,10 +320,26 @@ fn stage_metadata_json(stage: &usd::Stage, field: &str) -> Option<Value> {
     json_of(&value)
 }
 
+/// Time codes a second when the stage authors neither `timeCodesPerSecond` nor `framesPerSecond`: USD's own
+/// fallback, 24 (`UsdStage::GetTimeCodesPerSecond`, <https://openusd.org/release/api/class_usd_stage.html>).
+const DEFAULT_TIME_CODES_PER_SECOND: f64 = 24.0;
+
+/// The stage's time codes a second, by USD's rule (`UsdStage::GetTimeCodesPerSecond`,
+/// <https://openusd.org/release/api/class_usd_stage.html>): `timeCodesPerSecond`, else `framesPerSecond`, else
+/// [`DEFAULT_TIME_CODES_PER_SECOND`]. Declared when the stage authors the one taken; a value that isn't above 0
+/// can time nothing and is passed over.
+fn time_codes_per_second(stage: &usd::Stage) -> Fact<f64> {
+    let usable = |field: &str, v: f64| (authored(stage, field) && v.is_finite() && v > 0.0).then_some(v);
+    // With `timeCodesPerSecond` authored, the stage's value is it; without, it's `framesPerSecond`'s.
+    usable("timeCodesPerSecond", stage.time_codes_per_second())
+        .or_else(|| usable("framesPerSecond", stage.frames_per_second()))
+        .map_or(Fact::Assumed(DEFAULT_TIME_CODES_PER_SECOND), Fact::Declared)
+}
+
 /// What the stage says of itself: its up axis (USD's Y when it doesn't say), its `metersPerUnit` (0.01 when it
-/// doesn't), its frame rate (`framesPerSecond`, else `timeCodesPerSecond`, else USD's 24), its `doc` as the
-/// description and its `comment`.
-fn stage_info(stage: &usd::Stage, z_up: bool, meters: f64, tcps: f64) -> SourceInfo {
+/// doesn't), its frame rate (`framesPerSecond`, else the time codes a second, see [`time_codes_per_second`]), its
+/// `doc` as the description and its `comment`.
+fn stage_info(stage: &usd::Stage, z_up: bool, meters: f64, tcps: Fact<f64>) -> SourceInfo {
     let fact = |field: &str, v: f64| {
         if authored(stage, field) {
             Fact::Declared(v)
@@ -352,7 +367,7 @@ fn stage_info(stage: &usd::Stage, z_up: bool, meters: f64, tcps: f64) -> SourceI
         handedness: Fact::Declared(Handedness::Right),
         frame_rate: match fps {
             Some(f) if authored(stage, "framesPerSecond") => Fact::Declared(f),
-            _ => fact("timeCodesPerSecond", tcps),
+            _ => tcps,
         },
         description: text("documentation").or_else(|| text("doc")),
         comments: text("comment").into_iter().collect(),
@@ -3816,6 +3831,58 @@ def Material \"Planks\"
         assert_eq!(info.frame_rate, Fact::Assumed(24.0));
         assert!(info.converted.units && !info.converted.up_axis);
         assert_eq!(info.description, None);
+    }
+
+    #[test]
+    fn time_codes_count_at_the_rate_the_stage_gives() {
+        use crate::source::Fact;
+        // A translate keyed at time codes 0 and 48, under stage metadata `meta`.
+        let moving = |meta: &str| {
+            format!(
+                "#usda 1.0
+(
+    {meta}
+)
+
+def Xform \"Moving\"
+{{
+    double3 xformOp:translate.timeSamples = {{
+        0: (0, 0, 0),
+        48: (1, 0, 0),
+    }}
+    uniform token[] xformOpOrder = [\"xformOp:translate\"]
+
+    def Mesh \"Tri\"
+    {{
+        point3f[] points = [(0, 0, 0), (1, 0, 0), (1, 1, 0)]
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+    }}
+}}
+"
+            )
+        };
+        let last_key = |d: &Document| {
+            let j = d.json();
+            let input = j["animations"][0]["samplers"][0]["input"].as_u64().unwrap();
+            j["accessors"][usize::try_from(input).unwrap()]["max"][0].as_f64().unwrap()
+        };
+        for (meta, seconds, rate) in [
+            // The time codes' own rate, authored.
+            ("timeCodesPerSecond = 48", 1.0, Fact::Declared(48.0)),
+            // Only `framesPerSecond`: USD counts time codes at it.
+            ("framesPerSecond = 12", 4.0, Fact::Declared(12.0)),
+            // Neither: USD's 24, assumed.
+            ("doc = \"nothing about time\"", 2.0, Fact::Assumed(24.0)),
+            // A rate of 0 times nothing and is passed over, for `framesPerSecond` or for USD's 24.
+            ("timeCodesPerSecond = 0", 2.0, Fact::Assumed(24.0)),
+            ("timeCodesPerSecond = 0
+    framesPerSecond = 16", 3.0, Fact::Declared(16.0)),
+        ] {
+            let d = doc(&moving(meta), &[]);
+            assert!((last_key(&d) - seconds).abs() < 1e-6, "{meta}: last key at {}", last_key(&d));
+            assert_eq!(d.source_info().frame_rate, rate, "{meta}");
+        }
     }
 
     fn close<const N: usize>(a: [f32; N], b: [f32; N]) -> bool {

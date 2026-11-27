@@ -176,7 +176,9 @@ case(FMT, "surfaces_tag_and_skin", {
         "/asset/extras/source/format": "MD3",
         "/asset/extras/source/version": "15",
         "/asset/extras/source/upAxis": "+Z",
+        # The header has no rate: the readers' shared 30, assumed.
         "/asset/extras/source/frameRate": 30,
+        "/asset/extras/source/assumed": ["frameRate"],
         "/asset/extras/source/name": "models/thing/thing.md3",
     },
     "uvs_include": QUAD_ST,

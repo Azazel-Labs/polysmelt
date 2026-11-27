@@ -31,6 +31,10 @@ Breaking changes are allowed in minor releases until 1.0.
     many textures use it. Only that report changes: the document's images and textures are as before.
   - An Irrlicht scene that refers to a mesh file that isn't there kept the textures its materials
     didn't find out of `missingFiles`; they're listed, and each missing file once.
+- USD: a `timeCodesPerSecond` that isn't above 0 is passed over for the stage's
+  `framesPerSecond`, as USD does when it isn't authored, then for USD's 24, which is now
+  reported as assumed. It was reported as a declared 24, and a `framesPerSecond` beside it was
+  ignored for timing keys.
 
 ## 0.21.0
 
