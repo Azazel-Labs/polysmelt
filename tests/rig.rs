@@ -298,6 +298,8 @@ fn bind_pose_keeps_stored_vertices() {
     }
     assert_eq!(rest.prims[0].skin_joints, bind.prims[0].skin_joints);
     assert_eq!(rest.prims[0].skin_weights, bind.prims[0].skin_weights);
+    // Two joints a vertex: one set of four, and no more.
+    assert!(bind.prims[0].skin_joint_sets.is_empty() && bind.prims[0].skin_weight_sets.is_empty());
     let again = flat(&bind.to_glb().unwrap(), Pose::Bind);
     assert_eq!(again.prims[0].positions, p.positions);
     for (got, want) in again.skeleton.iter().zip(&skeleton) {

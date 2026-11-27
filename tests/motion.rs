@@ -399,15 +399,14 @@ fn weights(doc: &Document) -> Vec<Weighted> {
     for p in &mesh.prims {
         assert!(p.is_skinned());
         for (v, pos) in p.positions.iter().enumerate() {
-            let mut w: Vec<(String, i32)> = (0..4)
-                .filter(|&k| p.skin_weights[v][k] > 0.0)
-                .map(|k| {
-                    let bone = &mesh.skeleton[p.skin_joints[v][k] as usize];
+            let mut w: Vec<(String, i32)> = p
+                .skin_sets()
+                .flat_map(|(joints, weights)| joints[v].into_iter().zip(weights[v]))
+                .filter(|&(_, w)| w > 0.0)
+                .map(|(j, w)| {
+                    let bone = &mesh.skeleton[j as usize];
                     #[allow(clippy::cast_possible_truncation, reason = "a weight in thousandths")]
-                    (
-                        bone.name.clone().unwrap_or_default(),
-                        (p.skin_weights[v][k] * 1000.0).round() as i32,
-                    )
+                    (bone.name.clone().unwrap_or_default(), (w * 1000.0).round() as i32)
                 })
                 .collect();
             w.sort();
@@ -599,6 +598,111 @@ fn a_vertex_no_joint_moves_stays_with_its_mesh_and_not_with_the_first_joint() {
         }
         // The bottom right corner, root's, has turned a quarter about the origin.
         assert!(all.iter().any(|p| near(*p, [0.0, 1.0, 0.0])), "{name}: {all:?}");
+    }
+}
+
+// --- Many influences ---------------------------------------------------------------------------------------
+
+/// Twenty bones under a root, `b0` to `b19`, and one triangle whose vertices are weighted to the first 6, the
+/// first 16 and all 20 of them, bone `j` with weight `j + 1`.
+fn smd_many() -> String {
+    use std::fmt::Write as _;
+    let (mut nodes, mut pose) = (String::new(), String::new());
+    for j in 0..20 {
+        let parent = if j == 0 { -1 } else { 0 };
+        writeln!(nodes, "{j} \"b{j}\" {parent}").unwrap();
+        writeln!(pose, "{j} 0 0 0 0 0 0").unwrap();
+    }
+    let vertex = |[x, z]: [u8; 2], bones: u8| {
+        let links: Vec<String> = (0..bones).map(|j| format!("{j} {}", j + 1)).collect();
+        format!("0 {x} 0 {z} 0 -1 0 0 0 {bones} {}\n", links.join(" "))
+    };
+    format!(
+        "version 1\nnodes\n{nodes}end\nskeleton\ntime 0\n{pose}end\ntriangles\nskin\n{}{}{}end\n",
+        vertex([0, 0], 6),
+        vertex([1, 0], 16),
+        vertex([0, 1], 20)
+    )
+}
+
+/// Each vertex of a flat mesh's one primitive: its bones' names and weights, in the order the sets hold them.
+fn influences(mesh: &polysmelt::mesh::Mesh) -> Vec<Vec<(String, f32)>> {
+    let p = &mesh.prims[0];
+    assert!(p.is_skinned());
+    (0..p.positions.len())
+        .map(|v| {
+            p.skin_sets()
+                .flat_map(|(joints, weights)| joints[v].into_iter().zip(weights[v]))
+                .filter(|&(_, w)| w > 0.0)
+                .map(|(j, w)| (mesh.skeleton[j as usize].name.clone().unwrap_or_default(), w))
+                .collect()
+        })
+        .collect()
+}
+
+#[test]
+fn a_flat_mesh_keeps_up_to_sixteen_influences_a_vertex() {
+    let doc = read(smd_many().as_bytes(), "many.smd");
+    for pose in [Pose::Rest, Pose::Bind] {
+        let mesh = doc.flatten(pose).unwrap().expect("a mesh");
+        let p = &mesh.prims[0];
+        // Influences 5 to 8, 9 to 12 and 13 to 16 in sets 1 to 3, slot 0 left to `skin_joints`.
+        assert_eq!(p.skin_joint_sets.len(), 4);
+        assert_eq!(p.skin_weight_sets.len(), 4);
+        assert!(p.skin_joint_sets[0].is_empty() && p.skin_weight_sets[0].is_empty());
+        assert_eq!(p.skin_sets().count(), 4);
+        let mut seen = Vec::new();
+        for (v, list) in influences(&mesh).iter().enumerate() {
+            // The bones the file weights the vertex to, strongest first: the 16 strongest of 20.
+            let (first, count) = match list.len() {
+                6 => (0, 6),
+                16 if list.iter().any(|(b, _)| b == "b0") => (0, 16),
+                16 => (4, 16),
+                n => panic!("vertex {v} has {n} influences: {list:?}"),
+            };
+            seen.push((first, count));
+            let want: Vec<String> = (first..first + count).rev().map(|j| format!("b{j}")).collect();
+            let got: Vec<String> = list.iter().map(|(b, _)| b.clone()).collect();
+            assert_eq!(got, want, "vertex {v}");
+            // Weighted as the file has them, over every one kept.
+            let sum: f32 = list.iter().map(|e| e.1).sum();
+            assert!((sum - 1.0).abs() < 1e-5, "vertex {v}: {sum}");
+            let total: usize = (first + 1..=first + count).sum();
+            for (k, (_, w)) in list.iter().enumerate() {
+                #[allow(clippy::cast_precision_loss, reason = "small whole numbers")]
+                let want = (first + count - k) as f32 / total as f32;
+                assert!((w - want).abs() < 1e-6, "vertex {v} influence {k}: {w} vs {want}");
+            }
+            // For a renderer that blends four: the four strongest, in proportion, summing to 1.
+            let four = p.renormalized_skin_weights()[v];
+            assert!((four.iter().sum::<f32>() - 1.0).abs() < 1e-6);
+            let top: f32 = list[..4].iter().map(|e| e.1).sum();
+            for k in 0..4 {
+                assert!((four[k] - list[k].1 / top).abs() < 1e-6);
+            }
+        }
+        seen.sort_unstable();
+        assert_eq!(seen, [(0, 6), (0, 16), (4, 16)], "{pose:?}");
+    }
+
+    // The bind pose written out keeps every set, and reads back the same.
+    let bind = doc.flatten(Pose::Bind).unwrap().expect("a mesh");
+    let glb = bind.to_glb().unwrap();
+    let back = read(&glb, "many.glb");
+    let attributes = &back.json()["meshes"][0]["primitives"][0]["attributes"];
+    for k in 0..4 {
+        assert!(attributes.get(format!("JOINTS_{k}")).is_some(), "{attributes}");
+        assert!(attributes.get(format!("WEIGHTS_{k}")).is_some(), "{attributes}");
+    }
+    assert!(attributes.get("JOINTS_4").is_none(), "{attributes}");
+    let again = back.flatten(Pose::Bind).unwrap().expect("a mesh");
+    assert_eq!(again.prims[0].positions, bind.prims[0].positions);
+    for (v, (a, b)) in influences(&again).iter().zip(influences(&bind)).enumerate() {
+        assert_eq!(a.len(), b.len(), "vertex {v}");
+        for ((na, wa), (nb, wb)) in a.iter().zip(&b) {
+            assert_eq!(na, nb, "vertex {v}");
+            assert!((wa - wb).abs() < 1e-6, "vertex {v}: {wa} vs {wb}");
+        }
     }
 }
 

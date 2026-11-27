@@ -104,6 +104,8 @@ fn place(scene: &mut Mesh, mut part: Mesh, spin: f32, height: f32, x: f32) -> f3
         }
         p.skin_joints.clear();
         p.skin_weights.clear();
+        p.skin_joint_sets.clear();
+        p.skin_weight_sets.clear();
     }
     let Some((lo, hi)) = bounds(&part) else {
         return x;

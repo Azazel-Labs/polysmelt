@@ -397,7 +397,8 @@ impl Model {
 }
 
 /// Whether skinning on the GPU poses the model as flattening it would: every primitive drawn is skinned, nothing
-/// sets morph weights, and nothing is drawn as lines or points (which the GPU path doesn't skin).
+/// sets morph weights, and nothing is drawn as lines or points (which the GPU path doesn't skin). The shaders blend
+/// each vertex's four strongest joints, so a vertex weighted to more is posed without its weakest.
 fn gpu_skinnable(doc: &Document, rig: &Rig, rest: Option<&Mesh>) -> bool {
     let Some(rest) = rest else {
         return false;
@@ -484,9 +485,10 @@ mod tests {
             let flat = model.flatten(Some((0, t))).unwrap().unwrap();
             for (pb, pf) in bind.prims.iter().zip(&flat.prims) {
                 assert_eq!(pb.positions.len(), pf.positions.len());
+                let weights = pb.renormalized_skin_weights();
                 for (v, (p, want)) in pb.positions.iter().zip(&pf.positions).enumerate() {
                     let mut got = Vec3::ZERO;
-                    for (j, w) in pb.skin_joints[v].iter().zip(pb.skin_weights[v]) {
+                    for (j, w) in pb.skin_joints[v].iter().zip(weights[v]) {
                         got += bones[*j as usize].transform_point3(Vec3::from(*p)) * w;
                     }
                     let want = Vec3::from(*want);

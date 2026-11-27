@@ -1280,12 +1280,18 @@ impl<'s> Rigging<'s> {
     }
 }
 
-/// A skinned primitive's joints and weights as every reader's are written ([`crate::skin::sets`]): each bone
-/// index moved up by `offset` (past the root a skin may have first), weights summing to 1, and a vertex no bone
-/// moves bound to the root, joint 0. A slot with no weight names joint 0, as glTF's validator wants.
-fn skin_attributes(joints: &[[u32; 4]], weights: &[[f32; 4]], offset: u32, count: usize) -> crate::skin::Sets {
-    crate::skin::sets(joints.len().min(weights.len()), count, 0, |v, list| {
-        list.extend((0..4).map(|k| (joints[v][k].saturating_add(offset), weights[v][k])));
+/// One set of four joints and their weights, a vertex at a time: glTF's `JOINTS_n` and `WEIGHTS_n`.
+type SkinSet<'a> = (&'a [[u32; 4]], &'a [[f32; 4]]);
+
+/// A skinned primitive's joints and weights as every reader's are written ([`crate::skin::sets`]), from every set
+/// of four it has (each with a joint and a weight for each of its `n` vertices): each bone index moved up by
+/// `offset` (past the root a skin may have first), weights summing to 1, and a vertex no bone moves bound to the
+/// root, joint 0. A slot with no weight names joint 0, as glTF's validator wants.
+fn skin_attributes(sets: &[SkinSet<'_>], n: usize, offset: u32, count: usize) -> crate::skin::Sets {
+    crate::skin::sets(n, count, 0, |v, list| {
+        for (joints, weights) in sets {
+            list.extend((0..4).map(|k| (joints[v][k].saturating_add(offset), weights[v][k])));
+        }
     })
 }
 
@@ -1503,7 +1509,13 @@ impl Builder {
             && p.skin_joints.len() == n
             && p.skin_weights.len() == n
         {
-            let sets = skin_attributes(&p.skin_joints, &p.skin_weights, offset, count);
+            // Every set of four with both halves for every vertex: `JOINTS_0` first, as `Prim::skin_sets` has them.
+            let extra = p.skin_joint_sets.iter().zip(&p.skin_weight_sets).skip(1);
+            let sets: Vec<SkinSet<'_>> = std::iter::once((&p.skin_joints[..], &p.skin_weights[..]))
+                .chain(extra.map(|(j, w)| (&j[..], &w[..])))
+                .filter(|(j, w)| j.len() == n && w.len() == n)
+                .collect();
+            let sets = skin_attributes(&sets, n, offset, count);
             for (key, a) in sets.write(self, count) {
                 attributes[key] = json!(a);
             }

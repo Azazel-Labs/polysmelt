@@ -2,6 +2,20 @@
 
 Breaking changes are allowed in minor releases until 1.0.
 
+## Unreleased
+
+- A flattened `mesh::Prim` keeps up to 16 joints and weights a vertex, as documents do, instead
+  of only the 4 strongest: so `Pose::Bind` meshes skinned on the GPU, and meshes written back out
+  with `mesh::to_glb`, keep every influence a file gives. `skin_joints` and `skin_weights` are
+  still the strongest four (`JOINTS_0`/`WEIGHTS_0`); the new `skin_joint_sets` and
+  `skin_weight_sets` hold influences 5 to 16 four at a time (`JOINTS_n`/`WEIGHTS_n`, slot 0 left
+  empty, as `uv_sets` and `color_sets` do). Weights now sum to 1 over every set, as glTF's do, so
+  `skin_weights` alone sums to less where a vertex has more than four; the new
+  `Prim::renormalized_skin_weights()` gives the four scaled to sum to 1, for a renderer that
+  blends four, and `Prim::skin_sets()` walks every set. `mesh::to_glb` writes each set, and
+  `mesh::MAX_INFLUENCES` is public. Breaking: a `Prim` built with a struct literal needs the two
+  new fields (or `..Prim::default()`).
+
 ## 0.21.0
 
 - Every reader brings a file's axes and units to glTF's (+Y up, right-handed, meters) the

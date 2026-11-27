@@ -40,13 +40,10 @@ pub const TRIANGLE_CEILING: usize = 1 << 30;
 /// clouds: [`Keep::max_points`](crate::document::Keep::max_points) raises or lowers it.
 pub const MAX_POINTS: usize = 16_000_000;
 
-/// The most joints that move one vertex, whichever reader merges a vertex's influences: four sets of glTF's four
-/// `JOINTS_n` and `WEIGHTS_n`, past what models are rigged with. The strongest are kept.
-#[cfg_attr(
-    not(feature = "dae"),
-    allow(dead_code, reason = "COLLADA and the scene readers use it")
-)]
-pub(crate) const MAX_INFLUENCES: usize = 16;
+/// The most joints that move one vertex, whichever reader merges a vertex's influences, and in a flattened
+/// [`Prim`]: four sets of glTF's four `JOINTS_n` and `WEIGHTS_n`, past what models are rigged with. The strongest
+/// are kept.
+pub const MAX_INFLUENCES: usize = 16;
 
 /// One material's worth of triangles, and of the lines and points drawn on the same vertices.
 ///
@@ -91,11 +88,22 @@ pub struct Prim {
     /// `u32::MAX` for a vertex no joint moves.
     pub joints: Vec<u32>,
     /// Each vertex's four strongest joints, as indices into [`Mesh::skeleton`], strongest first, when the
-    /// primitive is skinned; empty otherwise. A file may weight a vertex to more than four joints: they're all
-    /// used to pose it, and the four strongest kept here.
+    /// primitive is skinned (glTF's `JOINTS_0`); empty otherwise. A vertex weighted to more than four joints has
+    /// the rest, up to [`MAX_INFLUENCES`] in all, in [`Prim::skin_joint_sets`]. A slot no joint fills names
+    /// bone 0 with weight 0.
     pub skin_joints: Vec<[u32; 4]>,
-    /// The weights of `skin_joints`, summing to 1, or all 0 for a vertex no joint moves.
+    /// The weights of `skin_joints` (glTF's `WEIGHTS_0`), strongest first. Every weight a vertex has, in this
+    /// set and the others, sums to 1, or all are 0 for a vertex no joint moves: so these four sum to 1 alone
+    /// only where the vertex has no more. A renderer that blends just four takes
+    /// [`Prim::renormalized_skin_weights`].
     pub skin_weights: Vec<[f32; 4]>,
+    /// Every further set of four joints, by number (glTF's `JOINTS_n`): influences 5 to 8 at 1, 9 to 12 at 2 and
+    /// 13 to 16 at 3, strongest first, as indices into [`Mesh::skeleton`]. Slot 0, which `skin_joints` holds, is
+    /// left empty; empty when no vertex has more than four joints.
+    pub skin_joint_sets: Vec<Vec<[u32; 4]>>,
+    /// The weights of `skin_joint_sets`, set for set (glTF's `WEIGHTS_n`). Slot 0, which `skin_weights` holds,
+    /// is left empty.
+    pub skin_weight_sets: Vec<Vec<[f32; 4]>>,
 }
 
 impl Prim {
@@ -111,6 +119,44 @@ impl Prim {
         !self.positions.is_empty()
             && self.skin_joints.len() == self.positions.len()
             && self.skin_weights.len() == self.positions.len()
+    }
+
+    /// Each set of four joints and their weights a skinned primitive has (glTF's `JOINTS_n` and `WEIGHTS_n`):
+    /// `skin_joints` and `skin_weights` first, then each of `skin_joint_sets` and `skin_weight_sets` that has
+    /// both halves for every vertex. Nothing when the primitive isn't skinned. Blending every set gives each
+    /// vertex every influence it has.
+    pub fn skin_sets(&self) -> impl Iterator<Item = (&[[u32; 4]], &[[f32; 4]])> {
+        let n = self.positions.len();
+        let first = self
+            .is_skinned()
+            .then_some((&self.skin_joints[..], &self.skin_weights[..]));
+        let rest = self
+            .skin_joint_sets
+            .iter()
+            .zip(&self.skin_weight_sets)
+            .skip(1)
+            .filter(move |(j, w)| first.is_some() && j.len() == n && w.len() == n)
+            .map(|(j, w)| (&j[..], &w[..]));
+        first.into_iter().chain(rest)
+    }
+
+    /// `skin_weights` scaled so that each vertex's four sum to 1, for a renderer that blends only `skin_joints`:
+    /// the four strongest influences in the same proportions, the weaker ones a vertex may have in
+    /// `skin_weight_sets` left out. The same as `skin_weights` where no vertex has more than four; all 0 still for
+    /// a vertex no joint moves.
+    #[must_use]
+    pub fn renormalized_skin_weights(&self) -> Vec<[f32; 4]> {
+        self.skin_weights
+            .iter()
+            .map(|w| {
+                let sum: f32 = w.iter().sum();
+                if sum > 0.0 && sum.is_finite() {
+                    w.map(|x| x / sum)
+                } else {
+                    *w
+                }
+            })
+            .collect()
     }
 }
 

@@ -82,7 +82,11 @@ and morph targets applied, ready to draw.
   and points over one set of vertices. Vertices carry positions, normals, tangents, the UVs the
   color texture reads (with `KHR_texture_transform` applied), every other UV set
   (`Prim::uv_sets`, for lightmaps, masks and decals), vertex colors and their other sets, and for
-  skinned meshes each vertex's four strongest joints and weights.
+  skinned meshes each vertex's joints and weights: up to 16, as every reader keeps them, strongest
+  first and summing to 1. The four strongest are `Prim::skin_joints` and `skin_weights` (glTF's
+  `JOINTS_0` and `WEIGHTS_0`), the rest four at a time in `skin_joint_sets` and
+  `skin_weight_sets`; `Prim::skin_sets()` walks them all. A renderer that blends four takes
+  `Prim::renormalized_skin_weights()`: the four strongest scaled to sum to 1.
 - A `mesh::Material` has the full glTF metallic-roughness model (base color, metallic-roughness,
   normal, occlusion and emissive textures and factors), alpha mode, double-sidedness, `unlit`,
   and the other `KHR_materials_*` extensions (ior, specular, transmission, clearcoat, sheen,

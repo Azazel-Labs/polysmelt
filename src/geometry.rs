@@ -246,6 +246,12 @@ pub(crate) fn default_normals(p: &mut crate::mesh::Prim, degrees: f32) -> Vec<u3
     follow(&mut p.colors, n, &added);
     follow(&mut p.skin_joints, n, &added);
     follow(&mut p.skin_weights, n, &added);
+    for set in &mut p.skin_joint_sets {
+        follow(set, n, &added);
+    }
+    for set in &mut p.skin_weight_sets {
+        follow(set, n, &added);
+    }
     for set in &mut p.uv_sets {
         follow(set, n, &added);
     }
