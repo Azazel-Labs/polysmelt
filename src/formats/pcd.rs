@@ -7,12 +7,8 @@
 //! attribute per value (`_NAME_0`, `_NAME_1`, ...), up to [`COLUMNS`] of them. `_` fields are
 //! padding. Points whose position isn't a number (the holes in an organized cloud) are left out.
 //!
-//! The format says nothing of units or axes. The source info leaves the units unknown, and Z up is
-//! assumed, as it is for the scanners' text formats (`.xyz`, `.pts`, `.ptx`, `.asc`) and as robotics and
-//! surveying tools write their clouds: positions and normals are turned to glTF's Y up in the data, `(x, y, z)`
-//! to `(x, z, -y)`, so the same scan lands the same way whichever of these formats it is saved in. `VIEWPOINT`
-//! is the sensor's pose in the cloud's own frame, not a statement of which way is up: it is kept as the file
-//! gives it, with the cloud's width and height and the fields, in the
+//! The format says nothing of units or axes: positions are kept as they are stored, and the
+//! source info leaves units and up axis unknown. The sensor's viewpoint, the cloud's width and height and the fields are in the
 //! asset's extras. Double-precision positions far from the origin are measured from a point near
 //! the first one, which the node's translation carries back.
 
@@ -23,7 +19,7 @@ use super::points::{self, Cloud, Column};
 use super::stream::{f32_from, f64_from, space};
 use crate::document::{Document, Keep};
 use crate::num::f32_of;
-use crate::source::{Axis, Fact, SourceInfo};
+use crate::source::SourceInfo;
 use crate::{Context as _, ErrorKind, Result};
 
 /// The most custom attributes made from the fields that aren't position, normal or color.
@@ -721,11 +717,9 @@ fn channel_scale(kind: Kind, size: usize, max: f32) -> f32 {
 
 fn cloud(d: Decoded, h: &Header, lay: &Layout, origin: [f64; 3]) -> Document {
     let n = d.pos.len();
-    // Z up, as the text scanner formats are taken to be: turned to glTF's Y up in the data.
-    let turn = |[x, y, z]: [f32; 3]| [x, z, -y];
     let mut cloud = Cloud {
-        positions: d.pos.into_iter().map(turn).collect(),
-        origin: points::z_up(origin),
+        positions: d.pos,
+        origin,
         ..Cloud::default()
     };
     if lay.packed && d.packed.len() == n {
@@ -748,7 +742,7 @@ fn cloud(d: Decoded, h: &Header, lay: &Layout, origin: [f64; 3]) -> Document {
     if let [Some(x), Some(y), Some(z)] = [0, 1, 2].map(|a| find(Use::Normal(a))) {
         let (x, y, z) = (values[x].take(), values[y].take(), values[z].take());
         if let (Some(x), Some(y), Some(z)) = (x, y, z) {
-            cloud.normals = x.iter().zip(&y).zip(&z).map(|((&x, &y), &z)| turn([x, y, z])).collect();
+            cloud.normals = x.iter().zip(&y).zip(&z).map(|((&x, &y), &z)| [x, y, z]).collect();
         }
     }
     if cloud.colors.is_empty()
@@ -811,14 +805,12 @@ fn cloud(d: Decoded, h: &Header, lay: &Layout, origin: [f64; 3]) -> Document {
     if n as u64 != h.points {
         facts.insert("declared_points".into(), json!(h.points));
     }
-    // The format says nothing of units or axes: Z up is assumed, as for the scanners' text formats.
-    let mut info = SourceInfo {
+    // The format says nothing of units or axes.
+    let info = SourceInfo {
         format: Some("PCD".into()),
         version: Some(h.version.clone()).filter(|v| !v.is_empty()),
-        up_axis: Fact::Assumed(Axis::PosZ),
         ..SourceInfo::default()
     };
-    info.converted.up_axis = true;
     let Value::Object(source) = source else { unreachable!() };
     cloud.document(&info, source, facts)
 }
@@ -895,18 +887,11 @@ nan nan nan 0 0
         let info = doc.source_info();
         assert_eq!(info.format.as_deref(), Some("PCD"));
         assert_eq!(info.version.as_deref(), Some("0.7"));
-        // Z up is assumed, as for a scanner's text formats, and turned in the data; a cloud has no root node.
-        assert_eq!(
-            (info.meters_per_unit, info.up_axis),
-            (Fact::Unknown, Fact::Assumed(Axis::PosZ))
-        );
-        assert!(!info.converted.units && info.converted.up_axis);
-        assert_eq!(doc.json()["nodes"].as_array().unwrap().len(), 1);
-        assert!(doc.json()["nodes"][0].get("rotation").is_none());
+        assert_eq!((info.meters_per_unit, info.up_axis), (Fact::Unknown, Fact::Unknown));
+        assert!(!info.converted.units && !info.converted.up_axis);
         assert_eq!(attrs(&doc), ["COLOR_0", "POSITION", "_INTENSITY"]);
         let p = values(&doc, "POSITION");
-        // (0.5, 1, -2) and (1, 2, 3) with Z up.
-        assert_eq!(&p[..6], &[0.5, -2.0, -1.0, 1.0, 3.0, -2.0]);
+        assert_eq!(&p[..6], &[0.5, 1.0, -2.0, 1.0, 2.0, 3.0]);
         let c = values(&doc, "COLOR_0");
         // 0xFF0000FF: blue, with an alpha byte that rgb ignores.
         assert_eq!(&c[..4], &[0.0, 0.0, 1.0, 1.0]);
@@ -999,9 +984,8 @@ nan nan nan 0 0
             assert_eq!(doc.facts["points"], 50, "{data}");
             assert_eq!(attrs(&doc), ["NORMAL", "POSITION", "_LABEL"], "{data}");
             let p = values(&doc, "POSITION");
-            // (0.25, -1, 3.5) with Z up is (0.25, 3.5, 1) with Y up; a normal's z is its y.
-            assert_eq!(&p[3..6], &[0.25, 3.5, 1.0]);
-            let nz: Vec<f32> = values(&doc, "NORMAL").chunks(3).map(|c| c[1]).collect();
+            assert_eq!(&p[3..6], &[0.25, -1.0, 3.5]);
+            let nz: Vec<f32> = values(&doc, "NORMAL").chunks(3).map(|c| c[2]).collect();
             assert_eq!(&nz[..2], &[1.0, -1.0]);
             assert_eq!(values(&doc, "_LABEL")[7], 21.0);
             let constant = &doc.json()["meshes"][0]["extras"]["constant"];
@@ -1034,10 +1018,10 @@ nan nan nan 0 0
         }
         let doc = load(&out).unwrap();
         let t = &doc.json()["nodes"][0]["translation"];
-        assert_eq!(t, &json!([637_012.0, 0.0, -849_028.0]));
+        assert_eq!(t, &json!([637_012.0, 849_028.0, 0.0]));
         let p = values(&doc, "POSITION");
         assert!((p[3] - p[0] - 0.01).abs() < 1e-5, "{p:?}");
-        assert!((f64::from(p[2]) + 0.31).abs() < 1e-5);
+        assert!((f64::from(p[1]) - 0.31).abs() < 1e-5);
     }
 
     #[test]

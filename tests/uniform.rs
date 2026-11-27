@@ -663,23 +663,49 @@ fn one_box_is_the_same_document_in_every_format() {
 
 #[test]
 fn sampled_data_is_converted_in_place_and_gltf_is_kept_as_it_is() {
-    // A scanner's cloud is Z up, in `.xyz` and in `.pcd` alike: the same points land the same way, with no
-    // root node, and say what was assumed.
-    let xyz = read(b"1 2 3\n4 5 6\n", "a.xyz");
+    // A scanner's text cloud is Z up: turned in its data, with no root node, and saying what was assumed.
+    let xyz = read(
+        b"1 2 3
+4 5 6
+",
+        "a.xyz",
+    );
+    // A PCD cloud has no convention (PCL's own samples are Y up, robotics clouds Z up, camera clouds Y down), so
+    // it is kept as stored, as point cloud tools show it, and nothing is assumed.
     let pcd = read(
-        b"VERSION .7\nFIELDS x y z\nSIZE 4 4 4\nTYPE F F F\nCOUNT 1 1 1\nWIDTH 2\nHEIGHT 1\nPOINTS 2\nDATA ascii\n1 2 3\n4 5 6\n",
+        b"VERSION .7
+FIELDS x y z
+SIZE 4 4 4
+TYPE F F F
+COUNT 1 1 1
+WIDTH 2
+HEIGHT 1
+POINTS 2
+DATA ascii
+1 2 3
+4 5 6
+",
         "a.pcd",
     );
-    for (name, doc) in [("xyz", &xyz), ("pcd", &pcd)] {
+    for (name, doc, up, turned, at) in [
+        (
+            "xyz",
+            &xyz,
+            Fact::Assumed(Axis::PosZ),
+            true,
+            [[1.0, 3.0, -2.0], [4.0, 6.0, -5.0]],
+        ),
+        ("pcd", &pcd, Fact::Unknown, false, [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]),
+    ] {
         let j = doc.json();
         assert_eq!(j["nodes"].as_array().unwrap().len(), 1, "{name}: no root node");
         assert!(j["nodes"][0].get("name").is_none() && j["nodes"][0].get("rotation").is_none());
         let info = doc.source_info();
-        assert_eq!(info.up_axis, Fact::Assumed(Axis::PosZ), "{name}");
+        assert_eq!(info.up_axis, up, "{name}");
         assert_eq!(info.meters_per_unit, Fact::Unknown, "{name}");
-        assert!(info.converted.up_axis && !info.converted.units, "{name}");
+        assert!(info.converted.up_axis == turned && !info.converted.units, "{name}");
         let mesh = doc.flatten(polysmelt::document::Pose::Rest).unwrap().unwrap();
-        assert_eq!(mesh.prims[0].positions, [[1.0, 3.0, -2.0], [4.0, 6.0, -5.0]], "{name}");
+        assert_eq!(mesh.prims[0].positions, at, "{name}");
     }
     // A PLY, OFF or VTK mesh says nothing of its axes and has no convention: nothing is assumed or converted,
     // and it is a scene like any other mesh.

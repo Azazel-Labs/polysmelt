@@ -6,40 +6,40 @@
   "bounds": {
     "min": [
       -0.5,
-      0.0,
-      -1.0
+      -1.0,
+      0.0
     ],
     "max": [
       1.0,
-      2.0,
-      1.0
+      1.0,
+      2.0
     ]
   },
   "positions_include": [
     [
       0.0,
       0.0,
-      -0.0
+      0.0
     ],
     [
       1.0,
-      0.0,
-      -0.5
+      0.5,
+      0.0
     ],
     [
       1.0,
-      2.0,
-      -1.0
+      1.0,
+      2.0
     ],
     [
       -0.5,
-      1.5,
-      -0.25
+      0.25,
+      1.5
     ],
     [
       0.125,
-      0.75,
-      1.0
+      -1.0,
+      0.75
     ]
   ],
   "colors": false,
@@ -47,21 +47,5 @@
     "attributes": [
       "POSITION"
     ]
-  },
-  "json": {
-    "/asset/extras/source/upAxis": "+Z",
-    "/asset/extras/source/assumed": [
-      "upAxis"
-    ],
-    "/asset/extras/source/converted": [
-      "upAxis"
-    ],
-    "/asset/extras/source/metersPerUnit": null,
-    "/scenes/0/nodes": [
-      0
-    ],
-    "/nodes/0/name": null,
-    "/nodes/0/rotation": null,
-    "/nodes/1": null
   }
 }

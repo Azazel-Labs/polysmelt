@@ -27,9 +27,9 @@ Breaking changes are allowed in minor releases until 1.0.
     targets, node transforms, bind matrices and keys, triangles wound the other way) as
     every other left-handed format is; it was left as a negative scale on the root.
   - Point clouds, gaussian splats and voxel grids are converted in their data, as before, and
-    have no `RootNode`. A PCD cloud is now taken to be Z up and turned, as `.xyz`, `.pts`,
-    `.ptx` and `.asc` are, so one scan lands the same way in each (it was a quarter turn
-    apart); its `upAxis` is `+Z`, assumed.
+    have no `RootNode`. A PCD cloud is kept as stored, with no up axis assumed: PCD has no
+    convention (PCL's own samples are Y up, robotics clouds Z up, camera clouds Y down), and
+    point cloud tools show it as stored.
   - 3DS: the master scale is applied. It is the file's "master scale factor for all
     geometry coordinates", so the root scales by it, and camera clip planes and light
     ranges with it. A file whose master scale is 1, as nearly all are, is the size it was.

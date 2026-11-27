@@ -149,7 +149,7 @@ pub(crate) fn origin(min: [f64; 3], max: [f64; 3]) -> [f64; 3] {
 
 /// A Z-up right-handed position (east, north, up) in glTF's Y-up axes.
 #[cfg_attr(
-    not(any(feature = "las", feature = "xyz", feature = "e57", feature = "pcd")),
+    not(any(feature = "las", feature = "xyz", feature = "e57")),
     allow(dead_code, reason = "not every reader uses it")
 )]
 #[inline]
