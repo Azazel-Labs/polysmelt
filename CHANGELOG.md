@@ -2,7 +2,7 @@
 
 Breaking changes are allowed in minor releases until 1.0.
 
-## 0.20.0
+## Unreleased
 
 - OFF: in a text file whose colors are 0 to 255, a vertex with no color is white. It was
   scaled as if its white were one of those colors, to near black with an alpha of 0.004.
@@ -53,6 +53,9 @@ Breaking changes are allowed in minor releases until 1.0.
   rotation before it is added to the rest position, as MilkShape plays it.
 - VOX: glass is `KHR_materials_transmission` alone, opaque to alpha. It was also blended by
   an opacity from the same transparency, so a renderer with both thinned it twice.
+
+## 0.20.0
+
 - `Document::flatten` scales a `KHR_materials_volume` thickness by the transform it bakes
   into the vertices, as the extension has a node scale it: a thickness of 2.27 under a node
   scaled by 0.25 is 0.5675 in the flat mesh, where it used to stay 2.27. The scale is the
