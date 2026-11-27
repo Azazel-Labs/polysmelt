@@ -41,15 +41,29 @@ fn measure(run: Run, path: &Path) -> Result<Sample, String> {
     let time = start.elapsed();
     let (peak, kept) = (PEAK.load(Relaxed) - base, CURRENT.load(Relaxed).saturating_sub(base));
     drop(std::hint::black_box(result));
-    Ok(Sample { time, peak, kept, units })
+    Ok(Sample {
+        time,
+        peak,
+        kept,
+        units,
+    })
 }
 
 fn loaders_for(path: &Path) -> Vec<Loader> {
-    let ext = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
-    let mut out = vec![Loader { name: "polysmelt", run: loaders::polysmelt }];
+    let ext = path
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    let mut out = vec![Loader {
+        name: "polysmelt",
+        run: loaders::polysmelt,
+    }];
     // Only the OBJ reader splits its work over threads; elsewhere both settings run the same code.
     if ext == "obj" {
-        out.push(Loader { name: "polysmelt (threads: 0, all cores)", run: loaders::polysmelt_all_cores });
+        out.push(Loader {
+            name: "polysmelt (threads: 0, all cores)",
+            run: loaders::polysmelt_all_cores,
+        });
     }
     out.extend(loaders::competitors(&ext));
     out
@@ -113,7 +127,9 @@ fn main() {
         )
         .unwrap();
         let mine = times[0].clone();
-        let my_median = if mine.is_empty() { None } else {
+        let my_median = if mine.is_empty() {
+            None
+        } else {
             let mut t = mine;
             t.sort();
             Some(t[t.len() / 2])

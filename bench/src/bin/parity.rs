@@ -170,7 +170,11 @@ fn gltf_stats(doc: &gltf::Document, buffers: &[gltf::buffer::Data]) -> (Stats, u
             mesh_tris[mesh.index()] += t;
             for (k, (pos, nor, tan)) in r.read_morph_targets().enumerate() {
                 s.morph_targets += 1;
-                let _ = (pos.map(Iterator::count), nor.map(Iterator::count), tan.map(Iterator::count));
+                let _ = (
+                    pos.map(Iterator::count),
+                    nor.map(Iterator::count),
+                    tan.map(Iterator::count),
+                );
                 let _ = k;
             }
         }
@@ -267,7 +271,11 @@ fn idx(v: &Value, key: &str) -> Option<usize> {
 /// Counts from a glTF JSON alone: what it declares.
 fn declared(json: &Map<String, Value>) -> Stats {
     let accessors = list(json, "accessors");
-    let count = |a: Option<usize>| a.and_then(|a| accessors.get(a)).and_then(|a| idx(a, "count")).unwrap_or(0);
+    let count = |a: Option<usize>| {
+        a.and_then(|a| accessors.get(a))
+            .and_then(|a| idx(a, "count"))
+            .unwrap_or(0)
+    };
     let mut s = Stats {
         meshes: list(json, "meshes").len(),
         skins: list(json, "skins").len(),
@@ -294,7 +302,12 @@ fn declared(json: &Map<String, Value>) -> Stats {
             for k in attrs.into_iter().flat_map(|a| a.keys()) {
                 *s.attrs.entry(k.clone()).or_default() += 1;
             }
-            let verts = count(attrs.and_then(|a| a.get("POSITION")).and_then(Value::as_u64).map(|i| i as usize));
+            let verts = count(
+                attrs
+                    .and_then(|a| a.get("POSITION"))
+                    .and_then(Value::as_u64)
+                    .map(|i| i as usize),
+            );
             s.vertices += verts;
             let n = match idx(p, "indices") {
                 Some(i) => {
@@ -333,7 +346,13 @@ fn polysmelt_stats(doc: &polysmelt::document::Document) -> Stats {
     s.idx_sum = 0.0;
     let mut tris = 0;
     for (mi, m) in list(json, "meshes").iter().enumerate() {
-        for (pi, p) in m.get("primitives").and_then(Value::as_array).into_iter().flatten().enumerate() {
+        for (pi, p) in m
+            .get("primitives")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .enumerate()
+        {
             let at = format!("mesh {mi} prim {pi}");
             let mut v = 0;
             for (k, a) in p.get("attributes").and_then(Value::as_object).into_iter().flatten() {
@@ -367,7 +386,13 @@ fn polysmelt_stats(doc: &polysmelt::document::Document) -> Stats {
                 None => v,
             };
             tris += tri_count(p.get("mode").and_then(Value::as_u64).unwrap_or(4), n);
-            for (ti, t) in p.get("targets").and_then(Value::as_array).into_iter().flatten().enumerate() {
+            for (ti, t) in p
+                .get("targets")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .enumerate()
+            {
                 for (k, a) in t.as_object().into_iter().flatten() {
                     if let Some(a) = a.as_u64()
                         && let Err(e) = doc.read_floats(a as usize)
@@ -392,7 +417,9 @@ fn polysmelt_stats(doc: &polysmelt::document::Document) -> Stats {
     for (ai, a) in list(json, "animations").iter().enumerate() {
         let samplers = a.get("samplers").and_then(Value::as_array);
         for ch in a.get("channels").and_then(Value::as_array).into_iter().flatten() {
-            let Some(sm) = idx(ch, "sampler").and_then(|i| samplers.and_then(|ss| ss.get(i))) else { continue };
+            let Some(sm) = idx(ch, "sampler").and_then(|i| samplers.and_then(|ss| ss.get(i))) else {
+                continue;
+            };
             if let Some(i) = idx(sm, "input") {
                 match doc.read_floats(i) {
                     Ok((_, v)) => keys += v.len(),
@@ -490,9 +517,15 @@ fn run_polysmelt(path: &Path, out: Option<&Path>) -> Value {
             r.insert("rig_error".into(), json!(e));
         }
     }
-    let embedded = list(doc.json(), "images").iter().filter(|i| i.get("bufferView").is_some()).count();
+    let embedded = list(doc.json(), "images")
+        .iter()
+        .filter(|i| i.get("bufferView").is_some())
+        .count();
     r.insert("images_embedded".into(), json!(embedded));
-    let undecoded = list(doc.json(), "accessors").iter().filter(|a| a.get("bufferView").is_none() && a.get("sparse").is_none()).count();
+    let undecoded = list(doc.json(), "accessors")
+        .iter()
+        .filter(|a| a.get("bufferView").is_none() && a.get("sparse").is_none())
+        .count();
     if let Err(e) = step(|| doc.decode()) {
         r.insert("decode_error".into(), json!(e));
     }
@@ -532,7 +565,10 @@ fn files(dir: &Path, out: &mut Vec<PathBuf>) {
         if p.is_dir() {
             files(&p, out);
         } else if matches!(
-            p.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref(),
+            p.extension()
+                .and_then(|e| e.to_str())
+                .map(str::to_ascii_lowercase)
+                .as_deref(),
             Some("gltf" | "glb")
         ) {
             out.push(p);
@@ -542,8 +578,16 @@ fn files(dir: &Path, out: &mut Vec<PathBuf>) {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let arg = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
-    let root = PathBuf::from(args.first().expect("usage: parity <models-folder> [--out dir] [--json file] [--only substring]"));
+    let arg = |name: &str| {
+        args.iter()
+            .position(|a| a == name)
+            .and_then(|i| args.get(i + 1))
+            .cloned()
+    };
+    let root = PathBuf::from(
+        args.first()
+            .expect("usage: parity <models-folder> [--out dir] [--json file] [--only substring]"),
+    );
     let out = arg("--out").map(PathBuf::from);
     let only = arg("--only");
     let mut paths = Vec::new();

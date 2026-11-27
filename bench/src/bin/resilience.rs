@@ -39,7 +39,9 @@ static ALLOC: counting::Counting = counting::Counting;
 const POLYSMELT: &str = "polysmelt";
 
 fn ext_of(p: &Path) -> String {
-    p.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default()
+    p.extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default()
 }
 
 /// The loaders a file goes through: Polysmelt's whole conversion, and its format's competitor.
@@ -47,7 +49,12 @@ fn loaders_for(path: &Path) -> Vec<(&'static str, Run)> {
     let mut out: Vec<(&'static str, Run)> = vec![(POLYSMELT, loaders::polysmelt_convert)];
     // `gltf (import)` does all the no-image variant does, and decodes images too. The VOX face
     // mesher is this harness's own code, there for a like-for-like speed figure, not a library.
-    out.extend(loaders::competitors(&ext_of(path)).into_iter().filter(|l| l.name != "gltf (no image decode)" && l.name != "dot_vox + face mesher").map(|l| (l.name, l.run)));
+    out.extend(
+        loaders::competitors(&ext_of(path))
+            .into_iter()
+            .filter(|l| l.name != "gltf (no image decode)" && l.name != "dot_vox + face mesher")
+            .map(|l| (l.name, l.run)),
+    );
     out
 }
 
@@ -66,16 +73,25 @@ impl Rng {
 }
 
 fn fnv(s: &str) -> u64 {
-    s.bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| (h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3))
+    s.bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| {
+        (h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3)
+    })
 }
 
 /// The damaged files made from one of `len` bytes named `name`.
 fn mutations(name: &str, len: usize, flips: usize) -> Vec<String> {
-    let mut cuts: Vec<usize> = [0, 1, 2, 3, 4, 8, 12, 16, 20, 24, 32, 48, 64, 80, 84, 100, 128, 256, 512, 1024, 4096]
-        .into_iter()
-        .collect();
+    let mut cuts: Vec<usize> = [
+        0, 1, 2, 3, 4, 8, 12, 16, 20, 24, 32, 48, 64, 80, 84, 100, 128, 256, 512, 1024, 4096,
+    ]
+    .into_iter()
+    .collect();
     cuts.extend((1..32).map(|k| len * k / 32));
-    cuts.extend([len.saturating_sub(1), len.saturating_sub(2), len.saturating_sub(4), len.saturating_sub(16)]);
+    cuts.extend([
+        len.saturating_sub(1),
+        len.saturating_sub(2),
+        len.saturating_sub(4),
+        len.saturating_sub(16),
+    ]);
     cuts.retain(|&c| c < len);
     cuts.sort_unstable();
     cuts.dedup();
@@ -86,7 +102,10 @@ fn mutations(name: &str, len: usize, flips: usize) -> Vec<String> {
         let count = [1, 1, 2, 4, 8, 32][k % 6];
         // A third of them within the first KiB, where headers and lengths are.
         let region = if k % 3 == 0 { len.min(1024) } else { len };
-        out.push(format!("flip:{:x}:{count}:{region}", seed ^ (k as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1));
+        out.push(format!(
+            "flip:{:x}:{count}:{region}",
+            seed ^ (k as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1
+        ));
     }
     out
 }
@@ -146,7 +165,10 @@ fn worker(limit: usize) {
     #[cfg(target_os = "linux")]
     unsafe {
         let cap = (limit + (1 << 30)) as libc::rlim_t;
-        let r = libc::rlimit { rlim_cur: cap, rlim_max: cap };
+        let r = libc::rlimit {
+            rlim_cur: cap,
+            rlim_max: cap,
+        };
         libc::setrlimit(libc::RLIMIT_AS, &raw const r);
     }
     std::panic::set_hook(Box::new(|info| {
@@ -163,7 +185,11 @@ fn worker(limit: usize) {
             cache = Some((path.clone(), std::fs::read(&path).unwrap()));
         }
         let bytes = mutate(&cache.as_ref().unwrap().1, spec);
-        let run = loaders_for(&path).into_iter().find(|(n, _)| *n == loader).expect("loader").1;
+        let run = loaders_for(&path)
+            .into_iter()
+            .find(|(n, _)| *n == loader)
+            .expect("loader")
+            .1;
         let (status, detail) = run_case(run, &path, bytes);
         let detail: String = detail.replace(['\t', '\n', '\r'], " ").chars().take(300).collect();
         writeln!(stdout, "{id}\t{status}\t{detail}").unwrap();
@@ -213,7 +239,12 @@ impl Worker {
                 }
             }
         });
-        Worker { child, stdin, replies, stderr }
+        Worker {
+            child,
+            stdin,
+            replies,
+            stderr,
+        }
     }
 }
 
@@ -228,9 +259,17 @@ fn main() {
                 opts.insert("worker".into(), String::new());
             }
             "--case" => {
-                let (l, f, m) = (it.next().unwrap(), PathBuf::from(it.next().unwrap()), it.next().unwrap());
+                let (l, f, m) = (
+                    it.next().unwrap(),
+                    PathBuf::from(it.next().unwrap()),
+                    it.next().unwrap(),
+                );
                 let bytes = mutate(&std::fs::read(&f).unwrap(), m);
-                let run = loaders_for(&f).into_iter().find(|(n, _)| n == l).expect("no such loader for this file").1;
+                let run = loaders_for(&f)
+                    .into_iter()
+                    .find(|(n, _)| n == l)
+                    .expect("no such loader for this file")
+                    .1;
                 match run(&Src::Bytes(&bytes, &f)) {
                     Ok(l) => println!("ok: {}", l.units),
                     Err(e) => println!("error: {e}"),
@@ -296,21 +335,41 @@ fn main() {
                             let code = w.child.wait().ok().and_then(|s| s.code());
                             std::thread::sleep(Duration::from_millis(50));
                             let err = w.stderr.lock().unwrap().join(" | ");
-                            let status = if err.contains("memory allocation of") { "abort-alloc" } else { "crash" };
-                            let detail = format!("exit {code:?}: {}", err.chars().rev().take(300).collect::<String>().chars().rev().collect::<String>());
+                            let status = if err.contains("memory allocation of") {
+                                "abort-alloc"
+                            } else {
+                                "crash"
+                            };
+                            let detail = format!(
+                                "exit {code:?}: {}",
+                                err.chars()
+                                    .rev()
+                                    .take(300)
+                                    .collect::<String>()
+                                    .chars()
+                                    .rev()
+                                    .collect::<String>()
+                            );
                             w = Worker::spawn(limit_mb);
                             break (status.into(), detail);
                         }
                     }
                 };
                 // A file that doesn't load undamaged says nothing about resilience: note it.
-                let status = if spec == "orig" && status != "ok" { format!("orig-{status}") } else { status };
+                let status = if spec == "orig" && status != "ok" {
+                    format!("orig-{status}")
+                } else {
+                    status
+                };
                 *counts.entry(status.clone()).or_default() += 1;
                 if !matches!(status.as_str(), "ok" | "err") {
                     eprintln!("  {loader} {name} {spec}: {status} {detail}");
                     let mut repro_path = None;
                     if let Some(dir) = &repro {
-                        let safe: String = loader.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
+                        let safe: String = loader
+                            .chars()
+                            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+                            .collect();
                         // The last folders and the file name: short enough for Windows paths.
                         let parts: Vec<&str> = name.split('/').collect();
                         let stem = parts[parts.len().saturating_sub(3)..].join("__");
@@ -327,7 +386,11 @@ fn main() {
             }
             eprintln!("{name} [{loader}] {:?} in {:.1}s", counts, t.elapsed().as_secs_f64());
             for (s, n) in &counts {
-                *table.entry((format.clone(), loader.to_owned())).or_default().entry(s.clone()).or_default() += n;
+                *table
+                    .entry((format.clone(), loader.to_owned()))
+                    .or_default()
+                    .entry(s.clone())
+                    .or_default() += n;
             }
             per_file.push(json!({ "file": name, "loader": loader, "cases": specs.len(), "counts": counts }));
         }
@@ -353,7 +416,10 @@ fn main() {
     println!("{md}");
     eprintln!("{} cases in {:.0}s", id, started.elapsed().as_secs_f64());
     if let Some(p) = opts.get("json") {
-        let table: Vec<_> = table.iter().map(|((f, l), c)| json!({ "format": f, "loader": l, "counts": c })).collect();
+        let table: Vec<_> = table
+            .iter()
+            .map(|((f, l), c)| json!({ "format": f, "loader": l, "counts": c }))
+            .collect();
         let doc = json!({ "table": table, "files": per_file, "notable": notable, "flips": flips,
             "timeout_s": timeout.as_secs_f64(), "limit_mb": limit_mb });
         std::fs::write(p, serde_json::to_string_pretty(&doc).unwrap()).unwrap();

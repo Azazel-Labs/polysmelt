@@ -52,7 +52,9 @@ fn args_of(args: &[String]) -> (Vec<String>, BTreeMap<String, Vec<String>>) {
     let mut it = args.iter();
     while let Some(a) = it.next() {
         if let Some(k) = a.strip_prefix("--") {
-            opts.entry(k.to_owned()).or_default().push(it.next().cloned().unwrap_or_default());
+            opts.entry(k.to_owned())
+                .or_default()
+                .push(it.next().cloned().unwrap_or_default());
         } else {
             pos.push(a.clone());
         }
@@ -112,7 +114,10 @@ fn main() {
 fn proc_status() -> Option<(u64, u64, u64)> {
     let s = std::fs::read_to_string("/proc/self/status").ok()?;
     let f = |k: &str| {
-        s.lines().find(|l| l.starts_with(k)).and_then(|l| l.split_whitespace().nth(1)).and_then(|v| v.parse().ok())
+        s.lines()
+            .find(|l| l.starts_with(k))
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|v| v.parse().ok())
     };
     Some((f("VmRSS:")?, f("VmHWM:")?, f("Threads:")?))
 }
@@ -129,7 +134,10 @@ fn set_limits(limit_mb: usize) {
         // Room above the Rust heap's ceiling for code, stacks and allocator slack; C++ heaps
         // (assimp) meet this one alone.
         let cap = ((limit_mb + 1024) << 20) as libc::rlim_t;
-        let r = libc::rlimit { rlim_cur: cap, rlim_max: cap };
+        let r = libc::rlimit {
+            rlim_cur: cap,
+            rlim_max: cap,
+        };
         libc::setrlimit(libc::RLIMIT_AS, &raw const r);
     }
 }
@@ -145,7 +153,10 @@ fn one(pos: &[String], opts: &BTreeMap<String, Vec<String>>) {
     set_limits(limit_mb);
     std::panic::set_hook(Box::new(|info| {
         let msg = info.to_string().replace('\n', " ");
-        println!("{}", json!({ "status": "panic", "error": msg.chars().take(500).collect::<String>() }));
+        println!(
+            "{}",
+            json!({ "status": "panic", "error": msg.chars().take(500).collect::<String>() })
+        );
         let _ = std::io::stdout().flush();
     }));
     let ext = loaders::ext_of(&file);
@@ -201,7 +212,9 @@ fn one(pos: &[String], opts: &BTreeMap<String, Vec<String>>) {
 /// timing: a conversion's whole job).
 fn run_one(loader: &Loader, file: &Path, glb_out: Option<&Path>) -> Result<(loaders::Loaded, Option<u64>), String> {
     let src = Src::File(file);
-    let Some(out) = glb_out else { return (loader.run)(&src).map(|l| (l, None)) };
+    let Some(out) = glb_out else {
+        return (loader.run)(&src).map(|l| (l, None));
+    };
     if let Some(dir) = out.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
@@ -219,13 +232,23 @@ fn run_one(loader: &Loader, file: &Path, glb_out: Option<&Path>) -> Result<(load
             let s = loaders::assimp::read(&src)?;
             let k = loaders::assimp::export(&s, Some(out))?;
             // Textures it leaves outside the GLB resolve from the source's folder.
-            let _ = std::fs::write(out.with_extension("glb.src"), file.parent().unwrap_or(Path::new(".")).to_string_lossy().as_bytes());
+            let _ = std::fs::write(
+                out.with_extension("glb.src"),
+                file.parent().unwrap_or(Path::new(".")).to_string_lossy().as_bytes(),
+            );
             let stats = loaders::assimp::scene_stats(&s);
             fn from_map(r: &dyn std::any::Any) -> loaders::Stats {
                 r.downcast_ref::<loaders::Stats>().cloned().unwrap_or_default()
             }
             drop(s);
-            Ok((loaders::Loaded { result: Box::new(stats), units: k as usize, stats: from_map }, Some(k as u64)))
+            Ok((
+                loaders::Loaded {
+                    result: Box::new(stats),
+                    units: k as usize,
+                    stats: from_map,
+                },
+                Some(k as u64),
+            ))
         }
         _ => (loader.run)(&src).map(|l| (l, None)),
     }
@@ -272,7 +295,15 @@ fn loaders_for(ext: &str) -> Vec<&'static str> {
 }
 
 fn slug(s: &str) -> String {
-    s.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '_' }).collect::<String>()
+    s.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>()
 }
 
 fn sweep(opts: &BTreeMap<String, Vec<String>>) {
@@ -300,7 +331,11 @@ fn sweep(opts: &BTreeMap<String, Vec<String>>) {
             if ls.is_empty() {
                 continue;
             }
-            let rel = path.strip_prefix(&dir).unwrap_or(&path).to_string_lossy().replace('\\', "/");
+            let rel = path
+                .strip_prefix(&dir)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
             let bytes = std::fs::metadata(&path).map_or(0, |m| m.len());
             if !loaders::polysmelt_reads(&ext) {
                 unsupported.push(json!({ "corpus": name, "file": rel, "ext": ext, "bytes": bytes,
@@ -310,17 +345,32 @@ fn sweep(opts: &BTreeMap<String, Vec<String>>) {
                 if only.as_ref().is_some_and(|o| !o.iter().any(|x| x == l)) {
                     continue;
                 }
-                tasks.push(Task { corpus: name.to_owned(), rel: rel.clone(), path: path.clone(), ext: ext.clone(), bytes, loader: l });
+                tasks.push(Task {
+                    corpus: name.to_owned(),
+                    rel: rel.clone(),
+                    path: path.clone(),
+                    ext: ext.clone(),
+                    bytes,
+                    loader: l,
+                });
             }
         }
     }
     // The biggest files first, a few at a time, so two giants rarely share the machine's memory;
     // then the rest in parallel.
     tasks.sort_by(|a, b| b.bytes.cmp(&a.bytes).then(a.rel.cmp(&b.rel)));
-    let big: VecDeque<Task> = tasks.iter().take_while(|t| t.bytes >= 48 << 20).map(clone_task).collect();
+    let big: VecDeque<Task> = tasks
+        .iter()
+        .take_while(|t| t.bytes >= 48 << 20)
+        .map(clone_task)
+        .collect();
     let rest: VecDeque<Task> = tasks.into_iter().skip(big.len()).collect();
     let total = big.len() + rest.len();
-    eprintln!("{total} runs ({} of files over 48 MB), {} files Polysmelt doesn't read", big.len(), unsupported.len());
+    eprintln!(
+        "{total} runs ({} of files over 48 MB), {} files Polysmelt doesn't read",
+        big.len(),
+        unsupported.len()
+    );
 
     let out = Arc::new(Mutex::new(std::fs::File::create(&out_path).unwrap()));
     for u in &unsupported {
@@ -332,12 +382,17 @@ fn sweep(opts: &BTreeMap<String, Vec<String>>) {
         let queue = Arc::new(Mutex::new(queue));
         let handles: Vec<_> = (0..workers)
             .map(|_| {
-                let (queue, out, done, exe, glb_dir) = (queue.clone(), out.clone(), done.clone(), exe.clone(), glb_dir.clone());
+                let (queue, out, done, exe, glb_dir) =
+                    (queue.clone(), out.clone(), done.clone(), exe.clone(), glb_dir.clone());
                 std::thread::spawn(move || {
                     loop {
-                        let Some(t) = queue.lock().unwrap().pop_front() else { break };
+                        let Some(t) = queue.lock().unwrap().pop_front() else {
+                            break;
+                        };
                         let glb = glb_dir.as_ref().filter(|_| t.loader.contains("GLB")).map(|d| {
-                            d.join(slug(t.loader.split(' ').next().unwrap())).join(&t.corpus).join(format!("{}.glb", t.rel))
+                            d.join(slug(t.loader.split(' ').next().unwrap()))
+                                .join(&t.corpus)
+                                .join(format!("{}.glb", t.rel))
                         });
                         let mut r = run_child(&exe, &t, glb.as_deref(), timeout, limit_mb);
                         r["corpus"] = json!(t.corpus);
@@ -376,16 +431,32 @@ fn sweep(opts: &BTreeMap<String, Vec<String>>) {
 }
 
 fn clone_task(t: &Task) -> Task {
-    Task { corpus: t.corpus.clone(), rel: t.rel.clone(), path: t.path.clone(), ext: t.ext.clone(), bytes: t.bytes, loader: t.loader }
+    Task {
+        corpus: t.corpus.clone(),
+        rel: t.rel.clone(),
+        path: t.path.clone(),
+        ext: t.ext.clone(),
+        bytes: t.bytes,
+        loader: t.loader,
+    }
 }
 
 fn run_child(exe: &Path, t: &Task, glb: Option<&Path>, timeout: Duration, limit_mb: usize) -> Value {
     let mut cmd = Command::new(exe);
-    cmd.arg("one").arg(t.loader).arg(&t.path).arg("--limit-mb").arg(limit_mb.to_string());
+    cmd.arg("one")
+        .arg(t.loader)
+        .arg(&t.path)
+        .arg("--limit-mb")
+        .arg(limit_mb.to_string());
     if let Some(g) = glb {
         cmd.arg("--glb-out").arg(g);
     }
-    let mut child = match cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
+    let mut child = match cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
         Ok(c) => c,
         Err(e) => return json!({ "status": "crash", "error": format!("spawn: {e}") }),
     };
@@ -424,7 +495,11 @@ fn run_child(exe: &Path, t: &Task, glb: Option<&Path>, timeout: Duration, limit_
     let Some(status) = status else {
         return json!({ "status": "timeout", "error": format!("no result in {:.0}s", timeout.as_secs_f64()), "ms": start.elapsed().as_secs_f64() * 1e3 });
     };
-    let mut v: Value = stdout.lines().rev().find_map(|l| serde_json::from_str(l).ok()).unwrap_or(Value::Null);
+    let mut v: Value = stdout
+        .lines()
+        .rev()
+        .find_map(|l| serde_json::from_str(l).ok())
+        .unwrap_or(Value::Null);
     if v.get("status").and_then(Value::as_str) == Some("panic") {
         return v;
     }
@@ -451,7 +526,10 @@ fn run_child(exe: &Path, t: &Task, glb: Option<&Path>, timeout: Duration, limit_
         v = json!({});
     }
     v["status"] = json!(kind);
-    v["error"] = json!(format!("{} {tail}", signal.map_or(format!("exit {:?}", status.code()), |s| format!("signal {s}"))));
+    v["error"] = json!(format!(
+        "{} {tail}",
+        signal.map_or(format!("exit {:?}", status.code()), |s| format!("signal {s}"))
+    ));
     v
 }
 
@@ -473,9 +551,13 @@ fn time(opts: &BTreeMap<String, Vec<String>>) {
     // (corpus, file) -> loaders that read it cleanly.
     let mut ok: BTreeMap<(String, String), (u64, Vec<String>)> = BTreeMap::new();
     for line in sweep.lines() {
-        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
         let s = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or_default().to_owned();
-        let e = ok.entry((s("corpus"), s("file"))).or_insert((v["bytes"].as_u64().unwrap_or(0), Vec::new()));
+        let e = ok
+            .entry((s("corpus"), s("file")))
+            .or_insert((v["bytes"].as_u64().unwrap_or(0), Vec::new()));
         if s("status") == "ok" {
             e.1.push(s("loader"));
         }
@@ -512,7 +594,10 @@ fn time(opts: &BTreeMap<String, Vec<String>>) {
         };
         let ls: Vec<Loader> = wanted
             .iter()
-            .filter(|w| good.iter().any(|g| g == *w) || (w.starts_with("polysmelt (") && good.iter().any(|g| g == loaders::POLYSMELT)))
+            .filter(|w| {
+                good.iter().any(|g| g == *w)
+                    || (w.starts_with("polysmelt (") && good.iter().any(|g| g == loaders::POLYSMELT))
+            })
             .filter_map(|w| loaders::by_name(w, &ext))
             .collect();
         if ls.len() < 2 {
@@ -526,7 +611,14 @@ fn time(opts: &BTreeMap<String, Vec<String>>) {
             let out = Command::new(std::env::current_exe().unwrap())
                 .arg("time-file")
                 .arg(&path)
-                .args(["--ext", &ext, "--loaders", &names.join(","), "--budget", &budget.as_secs_f64().to_string()])
+                .args([
+                    "--ext",
+                    &ext,
+                    "--loaders",
+                    &names.join(","),
+                    "--budget",
+                    &budget.as_secs_f64().to_string(),
+                ])
                 .stderr(Stdio::inherit())
                 .output()
                 .map_err(|e| format!("timing process didn't start: {e}"))?;
@@ -571,7 +663,11 @@ fn time(opts: &BTreeMap<String, Vec<String>>) {
         "cpus_allowed": allowed_cpus(),
         "files": results,
     });
-    eprintln!("timed {} files in {:.0}s", doc["files"].as_array().unwrap().len(), started.elapsed().as_secs_f64());
+    eprintln!(
+        "timed {} files in {:.0}s",
+        doc["files"].as_array().unwrap().len(),
+        started.elapsed().as_secs_f64()
+    );
     if let Some(p) = opt(opts, "json") {
         std::fs::write(p, serde_json::to_string(&doc).unwrap()).unwrap();
     }
@@ -579,7 +675,9 @@ fn time(opts: &BTreeMap<String, Vec<String>>) {
 
 fn allowed_cpus() -> Option<String> {
     let s = std::fs::read_to_string("/proc/self/status").ok()?;
-    s.lines().find(|l| l.starts_with("Cpus_allowed_list:")).map(|l| l.split_whitespace().nth(1).unwrap_or("").to_owned())
+    s.lines()
+        .find(|l| l.starts_with("Cpus_allowed_list:"))
+        .map(|l| l.split_whitespace().nth(1).unwrap_or("").to_owned())
 }
 
 /// `time-file <file> --ext <ext> --loaders a,b --budget <s>`: one file's timings, as JSON on stdout.
@@ -587,8 +685,11 @@ fn time_one(pos: &[String], opts: &BTreeMap<String, Vec<String>>) {
     let path = Path::new(pos.first().expect("file"));
     let ext = opt(opts, "ext").map_or_else(|| loaders::ext_of(path), str::to_owned);
     let budget = Duration::from_secs_f64(opt(opts, "budget").map_or(0.25, |v| v.parse().unwrap()));
-    let ls: Vec<Loader> =
-        list_opt(opts, "loaders").unwrap_or_default().iter().filter_map(|w| loaders::by_name(w, &ext)).collect();
+    let ls: Vec<Loader> = list_opt(opts, "loaders")
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|w| loaders::by_name(w, &ext))
+        .collect();
     let r = time_file(path, &ls, budget);
     let threads = proc_status().map_or(0, |s| s.2);
     println!("{}", json!({ "loaders": r, "threads": threads }));
@@ -653,4 +754,3 @@ fn time_file(path: &Path, ls: &[Loader], budget: Duration) -> Vec<Value> {
         })
         .collect()
 }
-

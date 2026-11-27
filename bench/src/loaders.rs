@@ -46,7 +46,9 @@ impl Src<'_> {
 }
 
 pub fn ext_of(p: &Path) -> String {
-    p.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default()
+    p.extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default()
 }
 
 /// What a result holds, by name: `meshes`, `vertices`, `triangles`, `materials`, `nodes`,
@@ -73,7 +75,11 @@ fn e(x: impl std::fmt::Display) -> String {
 }
 
 fn loaded<T: Any>(result: T, units: usize, stats: fn(&dyn Any) -> Stats) -> Out {
-    Ok(Loaded { result: Box::new(result), units, stats })
+    Ok(Loaded {
+        result: Box::new(result),
+        units,
+        stats,
+    })
 }
 
 fn no_stats(_: &dyn Any) -> Stats {
@@ -100,7 +106,10 @@ pub fn first_frame_only(ext: &str) -> bool {
 /// Every extension Polysmelt reads, whether or not this build has the format's feature: each
 /// [`polysmelt::Format`]'s, and `xml` (an OGRE mesh or skeleton, told by its root element).
 pub fn polysmelt_extensions() -> Vec<&'static str> {
-    let mut exts: Vec<&str> = polysmelt::Format::all().flat_map(polysmelt::Format::extensions).copied().collect();
+    let mut exts: Vec<&str> = polysmelt::Format::all()
+        .flat_map(polysmelt::Format::extensions)
+        .copied()
+        .collect();
     exts.push("xml");
     exts
 }
@@ -143,7 +152,11 @@ fn tri_count(mode: u64, n: usize) -> usize {
 /// whatever number of nodes draw it, as the other libraries count.
 pub fn json_stats(json: &Map<String, Value>) -> Stats {
     let accessors = list(json, "accessors");
-    let count = |a: Option<usize>| a.and_then(|a| accessors.get(a)).and_then(|a| idx(a, "count")).unwrap_or(0);
+    let count = |a: Option<usize>| {
+        a.and_then(|a| accessors.get(a))
+            .and_then(|a| idx(a, "count"))
+            .unwrap_or(0)
+    };
     let (mut prims, mut verts, mut tris, mut lines, mut points) = (0, 0, 0, 0, 0);
     for m in list(json, "meshes") {
         for p in m.get("primitives").and_then(Value::as_array).into_iter().flatten() {
@@ -266,7 +279,11 @@ pub fn polysmelt_first_frame(src: &Src) -> Out {
     use polysmelt::document::Keep;
     polysmelt_keep(
         src,
-        Keep::ALL.with_threads(1).with_morph_targets(false).with_animations(false).with_image_bytes(false),
+        Keep::ALL
+            .with_threads(1)
+            .with_morph_targets(false)
+            .with_animations(false)
+            .with_image_bytes(false),
     )
 }
 
@@ -336,7 +353,10 @@ fn gltf_read(doc: &gltf::Document, buffers: &[gltf::buffer::Data]) -> (Box<dyn A
                 positions: r.read_positions().map(Iterator::collect).unwrap_or_default(),
                 normals: r.read_normals().map(Iterator::collect).unwrap_or_default(),
                 tangents: r.read_tangents().map(Iterator::collect).unwrap_or_default(),
-                colors: r.read_colors(0).map(|c| c.into_rgba_f32().collect()).unwrap_or_default(),
+                colors: r
+                    .read_colors(0)
+                    .map(|c| c.into_rgba_f32().collect())
+                    .unwrap_or_default(),
                 indices: r.read_indices().map(|i| i.into_u32().collect()).unwrap_or_default(),
                 joints: r.read_joints(0).map(|j| j.into_u16().collect()).unwrap_or_default(),
                 weights: r.read_weights(0).map(|w| w.into_f32().collect()).unwrap_or_default(),
@@ -348,16 +368,26 @@ fn gltf_read(doc: &gltf::Document, buffers: &[gltf::buffer::Data]) -> (Box<dyn A
                 k += 1;
             }
             for (pos, nor, tan) in r.read_morph_targets() {
-                out.targets += pos.map_or(0, Iterator::count) + nor.map_or(0, Iterator::count) + tan.map_or(0, Iterator::count);
+                out.targets +=
+                    pos.map_or(0, Iterator::count) + nor.map_or(0, Iterator::count) + tan.map_or(0, Iterator::count);
             }
-            let k = if p.indices().is_some() { out.indices.len() } else { out.positions.len() };
+            let k = if p.indices().is_some() {
+                out.indices.len()
+            } else {
+                out.positions.len()
+            };
             tris += tri_count(u64::from(p.mode().as_gl_enum()), k);
             prims.push(out);
         }
     }
     let ibms: Vec<Vec<[[f32; 4]; 4]>> = doc
         .skins()
-        .map(|s| s.reader(get).read_inverse_bind_matrices().map(Iterator::collect).unwrap_or_default())
+        .map(|s| {
+            s.reader(get)
+                .read_inverse_bind_matrices()
+                .map(Iterator::collect)
+                .unwrap_or_default()
+        })
         .collect();
     let keys: Vec<(Vec<f32>, usize)> = doc
         .animations()
@@ -388,11 +418,18 @@ fn gltf_doc_stats(doc: &gltf::Document, buffers: &[gltf::buffer::Data]) -> Stats
             let r = p.reader(get);
             let v = r.read_positions().map_or(0, Iterator::count);
             verts += v;
-            let k = if p.indices().is_some() { r.read_indices().map_or(0, |i| i.into_u32().count()) } else { v };
+            let k = if p.indices().is_some() {
+                r.read_indices().map_or(0, |i| i.into_u32().count())
+            } else {
+                v
+            };
             tris += tri_count(u64::from(p.mode().as_gl_enum()), k);
         }
     }
-    let joints: BTreeSet<usize> = doc.skins().flat_map(|s| s.joints().map(|j| j.index()).collect::<Vec<_>>()).collect();
+    let joints: BTreeSet<usize> = doc
+        .skins()
+        .flat_map(|s| s.joints().map(|j| j.index()).collect::<Vec<_>>())
+        .collect();
     Stats::from([
         ("meshes", n(doc.meshes().count())),
         ("primitives", n(prims)),
@@ -410,7 +447,12 @@ fn gltf_doc_stats(doc: &gltf::Document, buffers: &[gltf::buffer::Data]) -> Stats
     ])
 }
 
-type GltfImport = (gltf::Document, Vec<gltf::buffer::Data>, Vec<gltf::image::Data>, Box<dyn Any>);
+type GltfImport = (
+    gltf::Document,
+    Vec<gltf::buffer::Data>,
+    Vec<gltf::image::Data>,
+    Box<dyn Any>,
+);
 type GltfNoImages = (gltf::Document, Vec<gltf::buffer::Data>, Box<dyn Any>);
 
 fn gltf_stats(r: &dyn Any) -> Stats {
@@ -455,7 +497,9 @@ pub fn gltf_no_images(src: &Src) -> Out {
 type Tobj = (Vec<tobj::Model>, Option<Vec<tobj::Material>>);
 
 fn tobj_stats(r: &dyn Any) -> Stats {
-    let Some((models, mats)) = r.downcast_ref::<Tobj>() else { return Stats::new() };
+    let Some((models, mats)) = r.downcast_ref::<Tobj>() else {
+        return Stats::new();
+    };
     Stats::from([
         ("meshes", n(models.len())),
         ("vertices", n(models.iter().map(|m| m.mesh.positions.len() / 3).sum())),
@@ -470,8 +514,10 @@ pub fn tobj(src: &Src) -> Out {
         Src::File(p) => tobj::load_obj(p, &tobj::GPU_LOAD_OPTIONS).map_err(e)?,
         Src::Bytes(b, p) => {
             let dir = p.parent().unwrap_or(Path::new(".")).to_path_buf();
-            tobj::load_obj_buf(&mut Cursor::new(b), &tobj::GPU_LOAD_OPTIONS, |m| tobj::load_mtl(dir.join(m)))
-                .map_err(e)?
+            tobj::load_obj_buf(&mut Cursor::new(b), &tobj::GPU_LOAD_OPTIONS, |m| {
+                tobj::load_mtl(dir.join(m))
+            })
+            .map_err(e)?
         }
     };
     let k = models.iter().map(|m| m.mesh.indices.len() / 3).sum();
@@ -480,8 +526,14 @@ pub fn tobj(src: &Src) -> Out {
 }
 
 fn stl_stats(r: &dyn Any) -> Stats {
-    let Some(m) = r.downcast_ref::<stl_io::IndexedMesh>() else { return Stats::new() };
-    Stats::from([("meshes", 1), ("vertices", n(m.vertices.len())), ("triangles", n(m.faces.len()))])
+    let Some(m) = r.downcast_ref::<stl_io::IndexedMesh>() else {
+        return Stats::new();
+    };
+    Stats::from([
+        ("meshes", 1),
+        ("vertices", n(m.vertices.len())),
+        ("triangles", n(m.faces.len())),
+    ])
 }
 
 pub fn stl_io(src: &Src) -> Out {
@@ -517,7 +569,9 @@ fn ply_faces(ply: &Ply) -> usize {
 }
 
 fn ply_stats(r: &dyn Any) -> Stats {
-    let Some(ply) = r.downcast_ref::<Ply>() else { return Stats::new() };
+    let Some(ply) = r.downcast_ref::<Ply>() else {
+        return Stats::new();
+    };
     Stats::from([
         ("meshes", 1),
         ("vertices", n(ply.payload.get("vertex").map_or(0, Vec::len))),
@@ -531,7 +585,9 @@ pub fn ply_rs(src: &Src) -> Out {
     use ply_rs::ply::DefaultElement;
     let p = Parser::<DefaultElement>::new();
     let ply = match src {
-        Src::File(path) => p.read_ply(&mut BufReader::new(File::open(path).map_err(e)?)).map_err(e)?,
+        Src::File(path) => p
+            .read_ply(&mut BufReader::new(File::open(path).map_err(e)?))
+            .map_err(e)?,
         Src::Bytes(b, _) => p.read_ply(&mut Cursor::new(b)).map_err(e)?,
     };
     let k = ply_faces(&ply);
@@ -545,7 +601,9 @@ type Fbx = (fbxcel_dom::v7400::Document, Vec<Vec<[f64; 3]>>);
 
 #[cfg(feature = "evidence")]
 fn fbx_stats(r: &dyn Any) -> Stats {
-    let Some((doc, meshes)) = r.downcast_ref::<Fbx>() else { return Stats::new() };
+    let Some((doc, meshes)) = r.downcast_ref::<Fbx>() else {
+        return Stats::new();
+    };
     let (mut materials, mut models, mut stacks, mut limbs) = (0, 0, 0, 0);
     for o in doc.objects() {
         match o.class() {
@@ -582,7 +640,9 @@ pub fn fbxcel_dom(src: &Src) -> Out {
         Src::File(p) => AnyDocument::from_seekable_reader(BufReader::new(File::open(p).map_err(e)?)).map_err(e)?,
         Src::Bytes(b, _) => AnyDocument::from_seekable_reader(Cursor::new(b)).map_err(e)?,
     };
-    let AnyDocument::V7400(_, doc) = doc else { return Err("unsupported FBX version".into()) };
+    let AnyDocument::V7400(_, doc) = doc else {
+        return Err("unsupported FBX version".into());
+    };
     let fan = |_: &PolygonVertices<'_>, poly: &[PolygonVertexIndex], out: &mut Vec<[PolygonVertexIndex; 3]>| {
         for i in 1..poly.len().saturating_sub(1) {
             out.push([poly[0], poly[i], poly[i + 1]]);
@@ -596,7 +656,9 @@ pub fn fbxcel_dom(src: &Src) -> Out {
             let tris = pv.triangulate_each(fan).map_err(e)?;
             let mut pos = Vec::with_capacity(tris.len());
             for tvi in tris.triangle_vertex_indices() {
-                let p = tris.control_point(tvi).ok_or("triangle vertex without a control point")?;
+                let p = tris
+                    .control_point(tvi)
+                    .ok_or("triangle vertex without a control point")?;
                 pos.push([p.x, p.y, p.z]);
             }
             meshes.push(pos);
@@ -609,9 +671,14 @@ pub fn fbxcel_dom(src: &Src) -> Out {
 
 #[cfg(feature = "evidence")]
 fn threemf_stats(r: &dyn Any) -> Stats {
-    let Some(models) = r.downcast_ref::<Vec<threemf::model::Model>>() else { return Stats::new() };
-    let meshes: Vec<&threemf::model::Mesh> =
-        models.iter().flat_map(|m| &m.resources.object).filter_map(|o| o.mesh.as_ref()).collect();
+    let Some(models) = r.downcast_ref::<Vec<threemf::model::Model>>() else {
+        return Stats::new();
+    };
+    let meshes: Vec<&threemf::model::Mesh> = models
+        .iter()
+        .flat_map(|m| &m.resources.object)
+        .filter_map(|o| o.mesh.as_ref())
+        .collect();
     Stats::from([
         ("meshes", n(meshes.len())),
         ("vertices", n(meshes.iter().map(|m| m.vertices.vertex.len()).sum())),
@@ -636,8 +703,13 @@ pub fn threemf(src: &Src) -> Out {
 
 #[cfg(feature = "evidence")]
 fn vox_stats(r: &dyn Any) -> Stats {
-    let Some(d) = r.downcast_ref::<dot_vox::DotVoxData>() else { return Stats::new() };
-    Stats::from([("meshes", n(d.models.len())), ("voxels", n(d.models.iter().map(|m| m.voxels.len()).sum()))])
+    let Some(d) = r.downcast_ref::<dot_vox::DotVoxData>() else {
+        return Stats::new();
+    };
+    Stats::from([
+        ("meshes", n(d.models.len())),
+        ("voxels", n(d.models.iter().map(|m| m.voxels.len()).sum())),
+    ])
 }
 
 #[cfg(feature = "evidence")]
@@ -668,7 +740,11 @@ pub fn dot_vox_meshed(src: &Src) -> Out {
     for m in &data.models {
         // Voxel coordinates are bytes, so no cell lies past 256 on an axis, whatever size a
         // (damaged) file declares.
-        let (sx, sy, sz) = (m.size.x.min(256) as i32, m.size.y.min(256) as i32, m.size.z.min(256) as i32);
+        let (sx, sy, sz) = (
+            m.size.x.min(256) as i32,
+            m.size.y.min(256) as i32,
+            m.size.z.min(256) as i32,
+        );
         let at = |x: i32, y: i32, z: i32| (x + sx * (y + sy * z)) as usize;
         let mut grid = vec![0u8; (sx * sy * sz) as usize];
         for v in &m.voxels {
@@ -676,9 +752,8 @@ pub fn dot_vox_meshed(src: &Src) -> Out {
                 grid[at(v.x.into(), v.y.into(), v.z.into())] = 1;
             }
         }
-        let filled = |x: i32, y: i32, z: i32| {
-            x >= 0 && y >= 0 && z >= 0 && x < sx && y < sy && z < sz && grid[at(x, y, z)] != 0
-        };
+        let filled =
+            |x: i32, y: i32, z: i32| x >= 0 && y >= 0 && z >= 0 && x < sx && y < sy && z < sz && grid[at(x, y, z)] != 0;
         let (mut pos, mut col, mut idx) = (Vec::<[f32; 3]>::new(), Vec::<u8>::new(), Vec::<u32>::new());
         for v in &m.voxels {
             let (x, y, z) = (i32::from(v.x), i32::from(v.y), i32::from(v.z));
@@ -702,7 +777,9 @@ pub fn dot_vox_meshed(src: &Src) -> Out {
 
 #[cfg(feature = "evidence")]
 fn vox_meshed_stats(r: &dyn Any) -> Stats {
-    let Some(ms) = r.downcast_ref::<Vec<(Vec<[f32; 3]>, Vec<u8>, Vec<u32>)>>() else { return Stats::new() };
+    let Some(ms) = r.downcast_ref::<Vec<(Vec<[f32; 3]>, Vec<u8>, Vec<u32>)>>() else {
+        return Stats::new();
+    };
     Stats::from([
         ("meshes", n(ms.len())),
         ("vertices", n(ms.iter().map(|m| m.0.len()).sum())),
@@ -727,9 +804,11 @@ fn collada_tris(objs: Option<&collada::ObjSet>) -> usize {
             .flat_map(|g| &g.mesh)
             .map(|m| match m {
                 collada::PrimitiveElement::Triangles(t) => t.vertices.len(),
-                collada::PrimitiveElement::Polylist(p) => {
-                    p.shapes.iter().filter(|s| matches!(s, collada::Shape::Triangle(..))).count()
-                }
+                collada::PrimitiveElement::Polylist(p) => p
+                    .shapes
+                    .iter()
+                    .filter(|s| matches!(s, collada::Shape::Triangle(..)))
+                    .count(),
             })
             .sum()
     })
@@ -738,13 +817,28 @@ fn collada_tris(objs: Option<&collada::ObjSet>) -> usize {
 
 #[cfg(feature = "evidence")]
 fn collada_stats(r: &dyn Any) -> Stats {
-    let Some((objs, anims, skels, _)) = r.downcast_ref::<Collada>() else { return Stats::new() };
+    let Some((objs, anims, skels, _)) = r.downcast_ref::<Collada>() else {
+        return Stats::new();
+    };
     Stats::from([
         ("meshes", n(objs.as_ref().map_or(0, |s| s.objects.len()))),
-        ("vertices", n(objs.as_ref().map_or(0, |s| s.objects.iter().map(|o| o.vertices.len()).sum()))),
+        (
+            "vertices",
+            n(objs
+                .as_ref()
+                .map_or(0, |s| s.objects.iter().map(|o| o.vertices.len()).sum())),
+        ),
         ("triangles", n(collada_tris(objs.as_ref()))),
-        ("materials", n(objs.as_ref().map_or(0, |s| s.material_library.as_ref().map_or(0, |_| 1)))),
-        ("joints", n(skels.as_ref().map_or(0, |s| s.iter().map(|k| k.joints.len()).sum()))),
+        (
+            "materials",
+            n(objs
+                .as_ref()
+                .map_or(0, |s| s.material_library.as_ref().map_or(0, |_| 1))),
+        ),
+        (
+            "joints",
+            n(skels.as_ref().map_or(0, |s| s.iter().map(|k| k.joints.len()).sum())),
+        ),
         ("channels", n(anims.as_ref().map_or(0, Vec::len))),
     ])
 }
@@ -767,7 +861,9 @@ pub fn collada(src: &Src) -> Out {
 
 #[cfg(feature = "evidence")]
 fn bvh_stats(r: &dyn Any) -> Stats {
-    let Some(b) = r.downcast_ref::<bvh_anim::Bvh>() else { return Stats::new() };
+    let Some(b) = r.downcast_ref::<bvh_anim::Bvh>() else {
+        return Stats::new();
+    };
     let channels: usize = b.joints().map(|j| j.data().channels().len()).sum();
     Stats::from([
         ("joints", n(b.joints().count())),
@@ -821,7 +917,14 @@ pub mod assimp {
     }
 
     unsafe extern "C" {
-        fn shim_read(path: *const c_char, data: *const u8, len: usize, flags: u32, err: *mut c_char, errlen: usize) -> *mut c_void;
+        fn shim_read(
+            path: *const c_char,
+            data: *const u8,
+            len: usize,
+            flags: u32,
+            err: *mut c_char,
+            errlen: usize,
+        ) -> *mut c_void;
         fn shim_stats(h: *mut c_void, out: *mut ShimStats) -> i32;
         fn shim_free(h: *mut c_void);
         fn shim_export_glb(h: *mut c_void, out: *const c_char, err: *mut c_char, errlen: usize) -> i64;
@@ -850,7 +953,11 @@ pub mod assimp {
     fn from_err(buf: &[u8]) -> String {
         let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
         let s = String::from_utf8_lossy(&buf[..end]).trim().to_owned();
-        if s.is_empty() { "assimp failed without a message".into() } else { s }
+        if s.is_empty() {
+            "assimp failed without a message".into()
+        } else {
+            s
+        }
     }
 
     pub fn read(src: &Src) -> Result<Scene, String> {
@@ -903,7 +1010,12 @@ pub mod assimp {
         let out = out.map(cpath).transpose()?;
         let mut err = vec![0u8; 1024];
         let k = unsafe {
-            shim_export_glb(s.0, out.as_ref().map_or(std::ptr::null(), |p| p.as_ptr()), err.as_mut_ptr().cast(), err.len())
+            shim_export_glb(
+                s.0,
+                out.as_ref().map_or(std::ptr::null(), |p| p.as_ptr()),
+                err.as_mut_ptr().cast(),
+                err.len(),
+            )
         };
         if k < 0 { Err(from_err(&err)) } else { Ok(k) }
     }
@@ -911,23 +1023,40 @@ pub mod assimp {
     pub fn load(src: &Src) -> Out {
         let s = read(src)?;
         let mut st = ShimStats::default();
-        let k = if unsafe { shim_stats(s.0, &raw mut st) } == 0 { st.triangles as usize } else { 0 };
-        Ok(Loaded { result: Box::new(s), units: k, stats })
+        let k = if unsafe { shim_stats(s.0, &raw mut st) } == 0 {
+            st.triangles as usize
+        } else {
+            0
+        };
+        Ok(Loaded {
+            result: Box::new(s),
+            units: k,
+            stats,
+        })
     }
 
     /// A conversion: read, and write the scene as a GLB in memory (`glb2`, as `assimp export x.glb`).
     pub fn load_glb(src: &Src) -> Out {
         let s = read(src)?;
         let k = export(&s, None)?;
-        Ok(Loaded { result: Box::new((s, k)), units: k as usize, stats })
+        Ok(Loaded {
+            result: Box::new((s, k)),
+            units: k as usize,
+            stats,
+        })
     }
 
     /// Every extension assimp reads, lowercase.
     pub fn extensions() -> &'static [String] {
         static EXTS: OnceLock<Vec<String>> = OnceLock::new();
         EXTS.get_or_init(|| {
-            let s = unsafe { CStr::from_ptr(shim_extensions()) }.to_string_lossy().into_owned();
-            s.split(';').map(|e| e.trim().trim_start_matches("*.").to_ascii_lowercase()).filter(|e| !e.is_empty()).collect()
+            let s = unsafe { CStr::from_ptr(shim_extensions()) }
+                .to_string_lossy()
+                .into_owned();
+            s.split(';')
+                .map(|e| e.trim().trim_start_matches("*.").to_ascii_lowercase())
+                .filter(|e| !e.is_empty())
+                .collect()
         })
     }
 
@@ -965,7 +1094,10 @@ pub fn competitors(ext: &str) -> Vec<Loader> {
     let l = |name, run| Loader { name, run };
     #[cfg_attr(not(feature = "assimp"), allow(unused_mut))]
     let mut out: Vec<Loader> = match ext {
-        "gltf" | "glb" => vec![l("gltf (import)", gltf_import as Run), l("gltf (no image decode)", gltf_no_images)],
+        "gltf" | "glb" => vec![
+            l("gltf (import)", gltf_import as Run),
+            l("gltf (no image decode)", gltf_no_images),
+        ],
         "obj" => vec![l("tobj", tobj)],
         "stl" => vec![l("stl_io", stl_io)],
         "ply" => vec![l("ply-rs", ply_rs)],
@@ -992,7 +1124,10 @@ pub fn competitors(ext: &str) -> Vec<Loader> {
 pub fn assimp_glb(ext: &str) -> Option<Loader> {
     #[cfg(feature = "assimp")]
     if assimp_reads(ext) {
-        return Some(Loader { name: ASSIMP_GLB, run: assimp::load_glb });
+        return Some(Loader {
+            name: ASSIMP_GLB,
+            run: assimp::load_glb,
+        });
     }
     let _ = ext;
     None
@@ -1008,6 +1143,9 @@ pub fn by_name(name: &str, ext: &str) -> Option<Loader> {
         POLYSMELT_NO_IMAGES => l(POLYSMELT_NO_IMAGES, polysmelt_no_image_bytes),
         POLYSMELT_FIRST_FRAME => l(POLYSMELT_FIRST_FRAME, polysmelt_first_frame),
         "polysmelt (convert)" => l("polysmelt (convert)", polysmelt_convert),
-        _ => competitors(ext).into_iter().chain(assimp_glb(ext)).find(|c| c.name == name),
+        _ => competitors(ext)
+            .into_iter()
+            .chain(assimp_glb(ext))
+            .find(|c| c.name == name),
     }
 }
