@@ -16,9 +16,42 @@
   },
   "area": 6.0,
   "winding_matches_normals": true,
-  "vertices": 8,
+  "vertices": 24,
+  "normals_in": [
+    [
+      1,
+      0,
+      0
+    ],
+    [
+      -1,
+      0,
+      0
+    ],
+    [
+      0,
+      1,
+      0
+    ],
+    [
+      0,
+      -1,
+      0
+    ],
+    [
+      0,
+      0,
+      1
+    ],
+    [
+      0,
+      0,
+      -1
+    ]
+  ],
+  "default_normals": true,
   "facts": {
     "triangles": 12,
-    "vertices": 8
+    "vertices": 24
   }
 }

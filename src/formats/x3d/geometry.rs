@@ -6,6 +6,7 @@ use std::f32::consts::{PI, TAU};
 
 use super::{Graph, NONE, idx, quat, rotate};
 use crate::Result;
+use crate::formats::crease::corner_normals;
 use crate::mesh::{FastMap, Prim, face_normal, smooth_normals, triangulate};
 use crate::num::{f32_of, u32_of};
 use crate::vec3::{self, cross, dot, length, sub};
@@ -15,7 +16,7 @@ use crate::vec3::{self, cross, dot, length, sub};
 enum Shading {
     /// From the file's normals.
     Given,
-    /// None stored: glTF clients shade flat.
+    /// Each face's own normal at its corners.
     Flat,
     /// Averaged over every face at a point.
     Smooth,
@@ -113,7 +114,13 @@ impl Lookup<'_> {
 /// The primitive for geometry node `id`, its texture coordinates in X3D's convention, and
 /// whether it's seen from both sides; `None` for a kind not drawn. `textured` asks for
 /// default texture coordinates where the node has none.
-pub(super) fn geometry(g: &Graph, id: usize, textured: bool, limit: usize) -> Result<Option<(Prim, bool)>> {
+pub(super) fn geometry(
+    g: &Graph,
+    id: usize,
+    textured: bool,
+    limit: usize,
+    dropped: &mut usize,
+) -> Result<Option<(Prim, bool)>> {
     let solid = g.flag(id, "solid", true);
     let points = || g.node(id, "coord").map(|c| g.vec3s(c, "point")).unwrap_or_default();
     let polys = match g.kind(id) {
@@ -165,7 +172,7 @@ pub(super) fn geometry(g: &Graph, id: usize, textured: bool, limit: usize) -> Re
             polygons(g, id, &mut p, tris.chunks_exact(3));
             p
         }
-        "IndexedLineSet" | "LineSet" | "PointSet" => return Ok(Some((line_set(g, id), false))),
+        "IndexedLineSet" | "LineSet" | "PointSet" => return Ok(Some((line_set(g, id, dropped), false))),
         "ElevationGrid" => match elevation_grid(g, id) {
             Some(p) => p,
             None => return Ok(None),
@@ -205,7 +212,7 @@ pub(super) fn geometry(g: &Graph, id: usize, textured: bool, limit: usize) -> Re
         }
         _ => return Ok(None),
     };
-    let prim = to_prim(&polys, textured, limit)?;
+    let prim = to_prim(&polys, textured, limit, dropped)?;
     Ok(Some((prim, !solid)))
 }
 
@@ -244,7 +251,7 @@ impl Loose {
 /// points the same way, or a `PointSet`'s points; colors per vertex, or per polyline where
 /// `colorPerVertex` is false. Each vertex is read from the file, so none costs more than the
 /// file does.
-fn line_set(g: &Graph, id: usize) -> Prim {
+fn line_set(g: &Graph, id: usize, dropped: &mut usize) -> Prim {
     let points = g.node(id, "coord").map(|c| g.vec3s(c, "point")).unwrap_or_default();
     let colors = g.node(id, "color").map(|c| g.colors(c)).unwrap_or_default();
     let n = u32_of(points.len());
@@ -272,6 +279,7 @@ fn line_set(g: &Graph, id: usize) -> Prim {
                 let v = idx(ci);
                 // A bad index breaks the polyline there.
                 let at = l.vertex(v, color.at(k, v, line));
+                *dropped += usize::from(at.is_none());
                 if let (Some(a), Some(b)) = (last, at)
                     && a != b
                 {
@@ -288,6 +296,7 @@ fn line_set(g: &Graph, id: usize) -> Prim {
                 // A run of fewer than two points draws nothing.
                 for v in (start..start + count).filter(|_| count >= 2) {
                     let at = l.vertex(v, v);
+                    *dropped += usize::from(at.is_none());
                     if let (Some(a), Some(b)) = (last, at) {
                         l.prim.lines.extend_from_slice(&[a, b]);
                     }
@@ -298,8 +307,9 @@ fn line_set(g: &Graph, id: usize) -> Prim {
         }
         _ => {
             for v in 0..n {
-                if let Some(at) = l.vertex(v, v) {
-                    l.prim.points.push(at);
+                match l.vertex(v, v) {
+                    Some(at) => l.prim.points.push(at),
+                    None => *dropped += 1,
                 }
             }
         }
@@ -377,17 +387,20 @@ fn polygons<'i>(g: &Graph, id: usize, p: &mut Polys, faces: impl Iterator<Item =
 }
 
 /// Triangles from strips or fans of position indices, each strip's alternate triangles turned
-/// to keep one winding.
+/// to keep one winding. A triangle on one index twice restarts the strip, and draws nothing.
 fn strips(runs: &[Vec<u32>], fan: bool) -> Vec<u32> {
     let mut out = Vec::new();
     for r in runs {
         for k in 2..r.len() {
-            if fan {
-                out.extend([r[0], r[k - 1], r[k]]);
+            let t = if fan {
+                [r[0], r[k - 1], r[k]]
             } else if k % 2 == 0 {
-                out.extend([r[k - 2], r[k - 1], r[k]]);
+                [r[k - 2], r[k - 1], r[k]]
             } else {
-                out.extend([r[k - 1], r[k - 2], r[k]]);
+                [r[k - 1], r[k - 2], r[k]]
+            };
+            if crate::geometry::distinct(t) {
+                out.extend(t);
             }
         }
     }
@@ -858,28 +871,36 @@ fn count(n: usize) -> f32 {
 }
 
 /// The primitive for polygons: each triangulated in its plane, the corners made vertices (one
-/// per distinct set of indices), with normals as the shading says.
-fn to_prim(p: &Polys, textured: bool, limit: usize) -> Result<Prim> {
+/// per distinct set of indices), with normals as the shading says. A face with a corner that
+/// names no point, or one that isn't finite, is left out and counted in `dropped`.
+fn to_prim(p: &Polys, textured: bool, limit: usize, dropped: &mut usize) -> Result<Prim> {
     let n_points = p.points.len();
     let finite: Vec<bool> = p.points.iter().map(|q| q.iter().all(|x| x.is_finite())).collect();
-    // Triangles as corner numbers, and each one's face.
+    // Triangles as corner numbers.
     let mut tris: Vec<[u32; 3]> = Vec::new();
-    let mut tri_face: Vec<u32> = Vec::new();
     let mut pts: Vec<[f32; 3]> = Vec::new();
     let mut local: Vec<[u32; 3]> = Vec::new();
+    // The faces drawn, as spans of corners, and each one's normal: what flat and creased shading go by.
+    let mut spans: Vec<(usize, usize)> = Vec::new();
     let mut face_normals: Vec<[f32; 3]> = Vec::new();
-    let need_faces = matches!(p.shading, Shading::Crease(_));
-    for (f, w) in p.starts.windows(2).enumerate() {
+    // The cosine of the crease angle, or none for flat faces; `None` when the normals aren't each corner's own.
+    let cos = match p.shading {
+        Shading::Crease(cos) => Some(Some(cos)),
+        Shading::Flat => Some(None),
+        _ => None,
+    };
+    let need_faces = cos.is_some();
+    for w in p.starts.windows(2) {
         let (a, b) = (w[0] as usize, w[1] as usize);
         let face = &p.corners[a..b];
-        if face.len() < 3 || !face.iter().all(|c| (c[0] as usize) < n_points && finite[c[0] as usize]) {
-            if need_faces {
-                face_normals.push([0.0, 1.0, 0.0]);
-            }
+        if face.len() < 3 {
+            continue;
+        }
+        if !face.iter().all(|c| (c[0] as usize) < n_points && finite[c[0] as usize]) {
+            *dropped += 1;
             continue;
         }
         let before = tris.len();
-        let f32_index = u32_of(f);
         if face.len() == 3 {
             tris.push([0, 1, 2].map(|k| u32_of(a + k)));
         } else {
@@ -895,11 +916,11 @@ fn to_prim(p: &Polys, textured: bool, limit: usize) -> Result<Prim> {
             }
         }
         if need_faces {
-            tri_face.resize(tris.len(), f32_index);
             let mut nrm = newell(face.iter().map(|c| p.points[c[0] as usize]));
             if !p.ccw {
                 nrm = nrm.map(|x| -x);
             }
+            spans.push((a, face.len()));
             face_normals.push(nrm);
         }
         ensure!(
@@ -915,10 +936,13 @@ fn to_prim(p: &Polys, textured: bool, limit: usize) -> Result<Prim> {
     } else {
         Vec::new()
     };
-    // Crease normals: each corner's, from the faces at its point near enough its own face.
-    let crease = match p.shading {
-        Shading::Crease(cos) => crease_normals(p, &tris, &tri_face, &face_normals, cos),
-        _ => Vec::new(),
+    // Each corner's own normal: its face's, or the faces' at its point near enough its own face.
+    let crease = match cos {
+        Some(cos) => {
+            let at: Vec<u32> = p.corners.iter().map(|c| c[0]).collect();
+            corner_normals(n_points, &spans, &at, &face_normals, |_| cos, |_, _| true)
+        }
+        None => Vec::new(),
     };
     let default_uvs = if textured && p.uvs.is_empty() {
         box_mapping(&p.points)
@@ -926,20 +950,20 @@ fn to_prim(p: &Polys, textured: bool, limit: usize) -> Result<Prim> {
         Vec::new()
     };
     let mut out = Prim::default();
-    let has_normals = p.shading != Shading::Flat;
     let has_colors = !p.colors.is_empty();
     let has_uvs = !p.uvs.is_empty() || !default_uvs.is_empty();
     let push = |out: &mut Prim, c: [u32; 4], crease_n: Option<[f32; 3]>| {
         let v = c[0] as usize;
         out.positions.push(p.points[v]);
-        if has_normals {
-            let n = match p.shading {
-                Shading::Given => p.normals.get(c[1] as usize).map_or(smooth[v], |&n| unit(n)),
-                Shading::Crease(_) => crease_n.unwrap_or([0.0, 1.0, 0.0]),
-                _ => smooth[v],
-            };
-            out.normals.push(n);
-        }
+        out.normals.push(match p.shading {
+            // One with no length stays zero, and takes its faces' as the primitive is written.
+            Shading::Given => p
+                .normals
+                .get(c[1] as usize)
+                .map_or(smooth[v], |&n| vec3::unit_above(n, 0.0).unwrap_or([0.0; 3])),
+            Shading::Crease(_) | Shading::Flat => crease_n.unwrap_or(crate::geometry::UP),
+            Shading::Smooth => smooth[v],
+        });
         if has_colors {
             out.colors
                 .push(p.colors.get(c[2] as usize).copied().unwrap_or([1.0; 4]));
@@ -967,9 +991,9 @@ fn to_prim(p: &Polys, textured: bool, limit: usize) -> Result<Prim> {
         }
     } else {
         let mut seen: FastMap<[u32; 6], u32> = FastMap::default();
-        for (k, &c) in tris.iter().flatten().enumerate() {
+        for &c in tris.iter().flatten() {
             let corner = p.corners[c as usize];
-            let n = crease.get(k).copied();
+            let n = crease.get(c as usize).copied();
             let bits = n.map_or([0; 3], |n| n.map(f32::to_bits));
             // A crease normal stands in for the normal index.
             let key = if n.is_some() {
@@ -988,60 +1012,6 @@ fn to_prim(p: &Polys, textured: bool, limit: usize) -> Result<Prim> {
         }
     }
     Ok(out)
-}
-
-/// Each triangle corner's normal (in the order of `tris`, flattened): the faces at its point
-/// within the crease angle of its own face, averaged.
-fn crease_normals(
-    p: &Polys,
-    tris: &[[u32; 3]],
-    tri_face: &[u32],
-    face_normals: &[[f32; 3]],
-    cos: f32,
-) -> Vec<[f32; 3]> {
-    let n_points = p.points.len();
-    // The faces at each point, once each.
-    let mut count = vec![0u32; n_points + 1];
-    let mut pairs: Vec<(u32, u32)> = Vec::with_capacity(tris.len() * 3);
-    for (t, tri) in tris.iter().enumerate() {
-        for &c in tri {
-            pairs.push((p.corners[c as usize][0], tri_face[t]));
-        }
-    }
-    pairs.sort_unstable();
-    pairs.dedup();
-    for &(v, _) in &pairs {
-        count[v as usize + 1] += 1;
-    }
-    for i in 0..n_points {
-        count[i + 1] += count[i];
-    }
-    let faces_at = |v: u32| &pairs[count[v as usize] as usize..count[v as usize + 1] as usize];
-    let mut out = Vec::with_capacity(tris.len() * 3);
-    for (t, tri) in tris.iter().enumerate() {
-        let own = face_normals[tri_face[t] as usize];
-        for &c in tri {
-            let around = faces_at(p.corners[c as usize][0]);
-            let mut sum = [0f32; 3];
-            // Past a few hundred faces at one point, all of them (a fan's hub).
-            let all = around.len() > 256;
-            for &(_, f) in around {
-                let n = face_normals[f as usize];
-                if all || own[0] * n[0] + own[1] * n[1] + own[2] * n[2] >= cos {
-                    for k in 0..3 {
-                        sum[k] += n[k];
-                    }
-                }
-            }
-            let s = unit(sum);
-            out.push(if sum.iter().all(|c| c.abs() < f32::MIN_POSITIVE) {
-                own
-            } else {
-                s
-            });
-        }
-    }
-    out
 }
 
 /// A polygon's unit normal by Newell's method.

@@ -110,8 +110,9 @@ def lin(c, n=4):
 
 for fmt, name in (("ascii", "ascii"), ("binary_little_endian", "binary_le"), ("binary_big_endian", "binary_be")):
     case(FMT, f"{name}_cube", {"cube.ply": ply(fmt, [CUBE_VERTS, CUBE_FACES])},
-         {"spec": f"{SPEC}: {fmt}, quads, no normals", "source": SRC, **CUBE, "vertices": 8,
-          "facts": {"triangles": 12, "vertices": 8}})
+         # Eight vertices in the file; the default normals split each at the cube's hard edges, four to a face.
+         {"spec": f"{SPEC}: {fmt}, quads, no normals", "source": SRC, **CUBE, "vertices": 24,
+          "normals_in": AXES, "default_normals": True, "facts": {"triangles": 12, "vertices": 24}})
 
 case(FMT, "header_crlf_comments",
      {"cube.ply": ply("ascii", [CUBE_VERTS, CUBE_FACES], ["comment made by hand", "obj_info a note"], nl="\r\n")},

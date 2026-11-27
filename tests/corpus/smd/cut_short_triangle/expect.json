@@ -5,7 +5,9 @@
   "facts": {
     "bones": 2,
     "frames": 1,
-    "triangles": 1,
-    "dropped_triangles": 1
+    "triangles": 1
+  },
+  "json": {
+    "/asset/extras/source/droppedGeometry": 1
   }
 }

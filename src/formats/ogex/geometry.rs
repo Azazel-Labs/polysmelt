@@ -326,10 +326,10 @@ fn vec3(p: &[f64], fill: f64) -> [f32; 3] {
     [0, 1, 2].map(|k| f32_of(p.get(k).copied().unwrap_or(fill)))
 }
 
-/// A normal at unit length; +Z when it has none.
+/// A normal at unit length; zero when it has none, which takes its faces' as the primitive is written.
 fn unit_normal(p: &[f64]) -> [f32; 3] {
     let v = [0, 1, 2].map(|k| p.get(k).copied().unwrap_or(0.0));
-    unit(v).map_or([0.0, 0.0, 1.0], |u| u.map(f32_of))
+    unit(v).map_or([0.0; 3], |u| u.map(f32_of))
 }
 
 /// What one index array draws: triangles, line segments or points.
@@ -346,17 +346,19 @@ impl Draws {
     }
 }
 
-/// Assembles the primitives of kind `primitive` from indices `idx` (on `n` vertices); bad
-/// indices are counted and what they'd be in dropped.
+/// Assembles the primitives of kind `primitive` from indices `idx` (on the vertices at
+/// `positions`); bad indices are counted and what they'd be in dropped.
 fn assemble(
     primitive: &str,
     idx: impl Iterator<Item = f64>,
-    n: usize,
+    positions: &[[f32; 3]],
     restart: Option<f64>,
     cw: bool,
     bad: &mut usize,
 ) -> Draws {
+    let n = positions.len();
     let mut d = Draws::default();
+    let mut cut: Vec<[u32; 3]> = Vec::new();
     let mut v = |x: f64| {
         let i = vertex(x, n);
         if i.is_none() {
@@ -389,12 +391,16 @@ fn assemble(
                         2 => d.lines.extend_from_slice(&buf[..2]),
                         3 if cw => d.triangles.extend_from_slice(&[buf[0], buf[2], buf[1]]),
                         3 => d.triangles.extend_from_slice(&buf[..3]),
-                        _ if cw => d
-                            .triangles
-                            .extend_from_slice(&[buf[0], buf[2], buf[1], buf[0], buf[3], buf[2]]),
-                        _ => d
-                            .triangles
-                            .extend_from_slice(&[buf[0], buf[1], buf[2], buf[0], buf[2], buf[3]]),
+                        // A quad is cut in its plane, as every format's polygons are, so one that isn't
+                        // convex keeps its outline.
+                        _ => {
+                            cut.clear();
+                            crate::mesh::triangulate(&buf.map(|i| positions[i as usize]), &mut cut);
+                            for t in &cut {
+                                let [a, b, c] = t.map(|k| buf[k as usize]);
+                                d.triangles.extend(if cw { [a, c, b] } else { [a, b, c] });
+                            }
+                        }
                     }
                 }
                 at = 0;
@@ -425,7 +431,8 @@ fn assemble(
                 if let (Some(p), Some(q)) = (a, b) {
                     // Every other triangle of a strip is wound the other way.
                     let (p0, p1) = if parity == cw { (p, q) } else { (q, p) };
-                    if p != q && q != i && p != i {
+                    // A strip's triangle on one vertex twice restarts the strip, and draws nothing.
+                    if crate::geometry::distinct([p, q, i]) {
                         d.triangles.extend_from_slice(&[p0, p1, i]);
                     }
                     parity = !parity;
@@ -592,7 +599,7 @@ fn build(c: &mut Ctx<'_>, g: u32, need_uv: usize) -> Result<Option<Geom>> {
     if index_arrays.is_empty() {
         #[allow(clippy::cast_precision_loss, reason = "vertex counts are far below 2^52")]
         let all = (0..n).map(|i| i as f64);
-        draws.push((assemble(primitive, all, n, None, false, &mut bad), 0));
+        draws.push((assemble(primitive, all, &p.positions, None, false, &mut bad), 0));
     }
     for &k in &index_arrays {
         let material = t.prop_num(k, "material").map_or(0, index_of);
@@ -600,7 +607,7 @@ fn build(c: &mut Ctx<'_>, g: u32, need_uv: usize) -> Result<Option<Geom>> {
         let cw = t.prop_str(k, "front") == Some("cw");
         let (v, _) = t.values(k);
         draws.push((
-            assemble(primitive, v.iter().copied(), n, restart, cw, &mut bad),
+            assemble(primitive, v.iter().copied(), &p.positions, restart, cw, &mut bad),
             material,
         ));
     }
@@ -626,6 +633,33 @@ fn build(c: &mut Ctx<'_>, g: u32, need_uv: usize) -> Result<Option<Geom>> {
     let has_normals = !p.normals.is_empty();
     // The primitives: the first index array's written with the vertex arrays, the others on
     // the same arrays with their own indices.
+    // What the other index arrays draw on a vertex that isn't a finite point goes as the first's does when it
+    // is written.
+    if !crate::geometry::finite(&p.positions) {
+        for (d, _) in draws.iter_mut().skip(1) {
+            for (list, width) in [(&mut d.triangles, 3), (&mut d.lines, 2), (&mut d.points, 1)] {
+                c.b.dropped += crate::geometry::sound(&p.positions, false, list, width);
+            }
+        }
+        draws.retain(|(d, _)| !d.is_empty());
+    }
+    // Without normals in the file, the default ones, over every index array's triangles at once, as they share
+    // the vertices; the vertices added keep what the morph targets hold for them.
+    let mut added = Vec::new();
+    if p.normals.len() != n {
+        p.indices = draws.iter().flat_map(|(d, _)| d.triangles.iter().copied()).collect();
+        if !p.indices.is_empty() {
+            added = crate::geometry::default_normals(&mut p, c.b.crease);
+            let mut rest = p.indices.as_slice();
+            for (d, _) in &mut draws {
+                let (mine, others) = rest.split_at(d.triangles.len());
+                d.triangles.copy_from_slice(mine);
+                rest = others;
+            }
+        }
+        p.indices = Vec::new();
+    }
+    let vertices = p.positions.len();
     let mut iter = draws.into_iter();
     let (first, first_material) = iter.next().unwrap_or_default();
     p.indices = first.triangles;
@@ -654,7 +688,8 @@ fn build(c: &mut Ctx<'_>, g: u32, need_uv: usize) -> Result<Option<Geom>> {
                 if idx.is_empty() {
                     continue;
                 }
-                let mut j = json!({ "attributes": attributes.clone(), "indices": index_accessor(&mut c.b, idx, n) });
+                let mut j =
+                    json!({ "attributes": attributes.clone(), "indices": index_accessor(&mut c.b, idx, vertices) });
                 if mode != 4 {
                     j["mode"] = json!(mode);
                 }
@@ -701,12 +736,13 @@ fn build(c: &mut Ctx<'_>, g: u32, need_uv: usize) -> Result<Option<Geom>> {
             continue;
         };
         let r = &cache[&from];
-        let dp: Vec<[f32; 3]> = a
+        let mut dp: Vec<[f32; 3]> = a
             .positions
             .iter()
             .zip(&r.positions)
             .map(|(x, y)| [x[0] - y[0], x[1] - y[1], x[2] - y[2]])
             .collect();
+        crate::geometry::follow(&mut dp, n, &added);
         let mut tj = json!({ "POSITION": c.b.positions(dp) });
         if has_normals && a.normals.len() == n && r.normals.len() == n {
             let dn: Vec<f32> = a

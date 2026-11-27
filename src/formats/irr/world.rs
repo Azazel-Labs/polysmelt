@@ -121,6 +121,7 @@ pub(super) fn load(text: &str, dir: &Path, limit: usize, assets: &dyn Assets, ke
         ..
     } = w;
     let scene = &mut ctx.scene;
+    scene.dropped = dropped;
     scene.info.format = Some("Irrlicht scene".into());
     if let Some(a) = ambient.filter(|a| a[..3].iter().any(|&c| c != 0.0)) {
         scene.source.insert("ambientLight".into(), json!(a));
@@ -199,9 +200,7 @@ pub(super) fn load(text: &str, dir: &Path, limit: usize, assets: &dyn Assets, ke
     if hidden > 0 {
         facts.insert("hidden_nodes".into(), json!(hidden));
     }
-    if dropped > 0 {
-        facts.insert("dropped_triangles".into(), json!(dropped));
-    }
+
     if !unsupported_nodes.is_empty() {
         facts.insert("unsupported_nodes".into(), json!(unsupported_nodes));
     }

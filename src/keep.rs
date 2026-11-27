@@ -92,6 +92,8 @@ pub struct Keep {
     /// either way. Where threads can't be had (WebAssembly without shared memory, or a
     /// platform that refuses to start one), it reads on the calling thread.
     pub threads: usize,
+    /// [`Keep::crease_angle`], in hundredths of a degree.
+    crease: u16,
 }
 
 impl Default for Keep {
@@ -116,6 +118,7 @@ impl Keep {
         lines_and_points: true,
         max_points: MAX_POINTS,
         threads: 1,
+        crease: 3000,
     };
 
     /// The meshes and what shapes or shades them (skins, morph targets, materials, textures,
@@ -223,6 +226,51 @@ impl Keep {
     pub const fn with_threads(mut self, threads: usize) -> Self {
         self.threads = threads;
         self
+    }
+
+    /// With [`Keep::crease_angle`] set to `degrees`: from 0 to 180, and anything past either end is that end.
+    /// A value that isn't a number leaves the default, 30.
+    ///
+    /// ```
+    /// use polysmelt::Keep;
+    /// // Every face flat, as a file without normals is drawn where nothing smooths it.
+    /// const FACETED: Keep = Keep::ALL.with_crease_angle(0.0);
+    /// // Smooth across every shared vertex, whatever the edge.
+    /// let smooth = Keep::ALL.with_crease_angle(180.0);
+    /// assert_eq!((FACETED.crease_angle(), smooth.crease_angle()), (0.0, 180.0));
+    /// assert_eq!(Keep::ALL.crease_angle(), 30.0);
+    /// ```
+    #[must_use]
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "between 0 and 18000 once clamped"
+    )]
+    pub const fn with_crease_angle(mut self, degrees: f32) -> Self {
+        self.crease = if degrees.is_nan() {
+            3000
+        } else if degrees <= 0.0 {
+            0
+        } else if degrees >= 180.0 {
+            18000
+        } else {
+            (degrees * 100.0 + 0.5) as u16
+        };
+        self
+    }
+
+    /// The crease angle, in degrees, of the normals a reader makes for a file that has none and says nothing of
+    /// its own about smoothing: two faces that meet at a vertex share a normal there when they turn less than
+    /// this from each other, and the vertex is split where they turn more. 30 by default, so a box keeps its
+    /// hard edges and a finely cut curved surface is smooth; 0 makes every face flat, with normals of its own,
+    /// and 180 smooths across every vertex the file's faces share.
+    ///
+    /// A file's own normals and smoothing data always win: this is only for what has neither (an STL, a 3MF, an
+    /// OBJ with no `vn` and no `s`). A glTF file is read as it is, without normals if it has none. Set with
+    /// [`Keep::with_crease_angle`].
+    #[must_use]
+    pub const fn crease_angle(&self) -> f32 {
+        self.crease as f32 / 100.0
     }
 
     /// [`Keep::max_triangles`], clamped to [`TRIANGLE_CEILING`].

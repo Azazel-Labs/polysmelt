@@ -6,6 +6,7 @@
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::rc::Rc;
 
 use serde_json::{Map, Value, json};
 
@@ -24,10 +25,11 @@ impl Document {
     /// Puts right what the glTF 2.0 specification forbids and can be fixed without changing
     /// what the document draws or how it moves:
     ///
-    /// - indices naming no vertex dropped with the triangle, line or point using them (strips,
-    ///   loops and fans becoming lists), and primitives left with none removed;
+    /// - indices naming no vertex, or one whose position isn't finite, dropped with the
+    ///   triangle, line or point using them (strips, loops and fans becoming lists), and
+    ///   primitives left with none removed;
     /// - non-finite floats in vertex attributes, animation keys and inverse bind matrices set
-    ///   to 0;
+    ///   to 0 (a position that isn't finite is by then one nothing draws);
     /// - normals, tangents and rotation keys made unit length (a zero normal takes its faces'
     ///   normal), tangents' handedness made ±1, and each vertex's skin weights scaled to sum
     ///   to 1;
@@ -626,6 +628,25 @@ impl Fix<'_, '_> {
         }
     }
 
+    /// Adds a `SCALAR` accessor with no elements yet, for [`Fix::rewrite`] to point at some;
+    /// returns its index.
+    fn push_scalar(&mut self) -> usize {
+        if let Some(t) = self.tables {
+            let accessors = &mut t.to_mut().accessors;
+            accessors.push(Accessor {
+                component_type: 5125,
+                kind: "SCALAR",
+                ..Accessor::default()
+            });
+            return accessors.len() - 1;
+        }
+        push(
+            self.json,
+            "accessors",
+            json!({ "componentType": 5125, "count": 0, "type": "SCALAR" }),
+        )
+    }
+
     /// Adds an accessor of `count` VEC2 zeros, in buffer view `view` or none; returns its
     /// index.
     fn push_zeros(&mut self, count: u64, view: Option<usize>) -> usize {
@@ -788,14 +809,19 @@ impl Fix<'_, '_> {
         }
     }
 
-    /// Indices naming no vertex, dropped with what uses them. Returns the primitives left with
-    /// nothing to draw.
+    /// Indices naming no vertex, or one whose position isn't finite, dropped with what uses
+    /// them: what every reader does to a file's geometry (see `crate::geometry`). Returns the
+    /// primitives left with nothing to draw.
     fn indices(&mut self, r: &mut Reader<'_>) -> BTreeSet<(usize, usize)> {
+        // (indices, vertices, mode, positions that aren't all finite) → the new indices and
+        // mode, `None` for none left.
+        type Key = (Option<usize>, usize, u64, Option<usize>);
         let doc = self.doc;
         let tabs = self.tabs;
         let mut drop = BTreeSet::new();
-        // (indices, vertices, mode) → the new indices and mode, `None` for none left.
-        let mut made: HashMap<(usize, usize, u64), Option<(usize, u64)>> = HashMap::new();
+        let mut made: HashMap<Key, Option<(usize, u64)>> = HashMap::new();
+        // Each POSITION accessor's vertices that aren't finite points: `None` when all are.
+        let mut masks: HashMap<usize, Option<Rc<Vec<bool>>>> = HashMap::new();
         let vertex_count = |prim: &Value| {
             let attrs = prim.get("attributes").and_then(Value::as_object);
             attrs
@@ -804,13 +830,24 @@ impl Fix<'_, '_> {
                 .filter_map(|a| tabs.accessor_count(usize_of(a.as_u64()?)))
                 .min()
         };
-        // Each indexed primitive's (mesh, primitive, indices, vertices).
+        // Each primitive's (mesh, primitive, indices, vertices).
         let indexed: Vec<_> = prims(&doc.base)
             .into_iter()
-            .filter_map(|(m, p, prim)| Some((m, p, index(prim, "indices")?, vertex_count(prim)?, prim)))
+            .filter_map(|(m, p, prim)| Some((m, p, index(prim, "indices"), vertex_count(prim)?, prim)))
             .collect();
+        for (_, _, _, _, prim) in &indexed {
+            let Some(pa) = prim.get("attributes").and_then(|a| index(a, "POSITION")) else {
+                continue;
+            };
+            masks.entry(pa).or_insert_with(|| {
+                let acc = r.acc(pa).ok().filter(|a| a.ctype == 5126 && a.n == 3)?;
+                let bytes = raw(r, &acc).filter(|b| !all_finite(b))?;
+                let bad = bytes.chunks_exact(12).map(|v| !all_finite(v)).collect();
+                Some(Rc::new(bad))
+            });
+        }
         // Which (indices, vertices) are fine (or unreadable), found together first: most are.
-        let checks: BTreeSet<(usize, u64)> = indexed.iter().map(|x| (x.2, x.3)).collect();
+        let checks: BTreeSet<(usize, u64)> = indexed.iter().filter_map(|x| Some((x.2?, x.3))).collect();
         let checks: Vec<(usize, u64)> = checks.into_iter().collect();
         let fits: Vec<_> = checks
             .iter()
@@ -829,15 +866,17 @@ impl Fix<'_, '_> {
             }
         }
         for (m, p, ia, vcount, prim) in indexed {
-            if fine.contains(&(ia, vcount)) {
+            let pa = prim.get("attributes").and_then(|a| index(a, "POSITION"));
+            let bad = pa.and_then(|pa| masks.get(&pa).cloned().flatten());
+            if bad.is_none() && ia.is_none_or(|ia| fine.contains(&(ia, vcount))) {
                 continue;
             }
             let mode = super::mesh::mode(prim);
-            let key = (ia, usize_of(vcount), mode);
+            let key = (ia, usize_of(vcount), mode, pa.filter(|_| bad.is_some()));
             let result = if let Some(&r) = made.get(&key) {
                 r
             } else {
-                let Some(r) = self.filter(r, ia, vcount, mode) else {
+                let Some(r) = self.filter(r, ia, vcount, mode, bad.as_deref().map(Vec::as_slice)) else {
                     continue;
                 };
                 made.insert(key, r);
@@ -862,27 +901,45 @@ impl Fix<'_, '_> {
         drop
     }
 
-    /// Indices accessor `ia` for `vcount` vertices and `mode`, without those naming no vertex:
+    /// Indices accessor `ia` (every vertex in order without one) for `vcount` vertices and
+    /// `mode`, without those naming no vertex or one of `bad`, whose positions aren't finite:
     /// `None` when they're all fine (or unreadable), else the new accessor and mode, or no
     /// accessor when nothing is left.
     #[allow(clippy::option_option, reason = "unchanged, and changed to nothing, differ")]
-    fn filter(&mut self, r: &mut Reader<'_>, ia: usize, vcount: u64, mode: u64) -> Option<Option<(usize, u64)>> {
-        let acc = r.acc(ia).ok()?;
-        if !matches!(acc.ctype, 5121 | 5123 | 5125) || acc.n != 1 {
+    fn filter(
+        &mut self,
+        r: &mut Reader<'_>,
+        ia: Option<usize>,
+        vcount: u64,
+        mode: u64,
+        bad: Option<&[bool]>,
+    ) -> Option<Option<(usize, u64)>> {
+        let (idx, was): (Vec<u32>, u64) = match ia {
+            Some(ia) => {
+                let acc = r.acc(ia).ok()?;
+                if !matches!(acc.ctype, 5121 | 5123 | 5125) || acc.n != 1 {
+                    return None;
+                }
+                let bytes = raw(r, &acc)?;
+                if bad.is_none() && indices_fit(&bytes, acc.ctype, vcount) {
+                    return None;
+                }
+                let cs = csize(acc.ctype);
+                #[allow(
+                    clippy::cast_possible_truncation,
+                    clippy::cast_sign_loss,
+                    reason = "indices are whole"
+                )]
+                let idx = bytes.chunks_exact(cs).map(|b| number(acc.ctype, b) as u32).collect();
+                (idx, acc.ctype)
+            }
+            None => ((0..u32::try_from(vcount).ok()?).collect(), 5125),
+        };
+        let ok = |i: u32| u64::from(i) < vcount && bad.is_none_or(|b| b.get(i as usize) != Some(&true));
+        // Only a vertex nothing draws isn't a finite point: nothing to drop.
+        if ia.is_none_or(|_| bad.is_some()) && idx.iter().all(|&i| ok(i)) {
             return None;
         }
-        let bytes = raw(r, &acc)?;
-        if indices_fit(&bytes, acc.ctype, vcount) {
-            return None;
-        }
-        let cs = csize(acc.ctype);
-        #[allow(
-            clippy::cast_possible_truncation,
-            clippy::cast_sign_loss,
-            reason = "indices are whole"
-        )]
-        let idx: Vec<u32> = bytes.chunks_exact(cs).map(|b| number(acc.ctype, b) as u32).collect();
-        let ok = |i: u32| u64::from(i) < vcount;
         let (mut idx, mode) = match mode {
             0 => {
                 let mut idx = idx;
@@ -905,7 +962,7 @@ impl Fix<'_, '_> {
             return Some(None);
         }
         let top = idx.iter().copied().max().unwrap_or(0);
-        let ctype = match acc.ctype {
+        let ctype = match was {
             5121 if top < 0xFF => 5121,
             5121 | 5123 if top < 0xFFFF => 5123,
             _ => 5125,
@@ -919,7 +976,10 @@ impl Fix<'_, '_> {
                 _ => out.extend_from_slice(&i.to_le_bytes()),
             }
         }
-        let a = self.push_copy(ia)?;
+        let a = match ia {
+            Some(ia) => self.push_copy(ia)?,
+            None => self.push_scalar(),
+        };
         let count = out.len() / csize(ctype);
         self.rewrite(a, &out, ctype, 1, count, Some(34963), false);
         Some(Some((a, mode)))
@@ -1827,6 +1887,32 @@ mod tests {
         assert_eq!(prims.len(), 1);
         let i = usize_of(prims[0]["indices"].as_u64().unwrap());
         assert_eq!(d.json()["accessors"][i]["count"], 3);
+    }
+
+    #[test]
+    fn what_is_drawn_on_a_position_that_isnt_finite_goes_with_it() {
+        let mut b = Build::default();
+        let p = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, f32::NAN, 0.0, 0.0];
+        let p = b.floats(&p, "VEC3", &json!({ "min": [0.0, 0.0, 0.0], "max": [1.0, 1.0, 0.0] }));
+        let some = b.indices(&[0, 1, 2, 0, 1, 3]);
+        let none = b.indices(&[1, 2, 3]);
+        let d = repaired_doc(b.doc(json!({
+            "meshes": [{ "primitives": [
+                { "attributes": { "POSITION": p }, "indices": some },
+                { "attributes": { "POSITION": p }, "indices": none },
+                // Without indices, every vertex in order: the first three are drawn, as points.
+                { "attributes": { "POSITION": p }, "mode": 0 },
+            ] }],
+        })));
+        let prims = d.json()["meshes"][0]["primitives"].as_array().unwrap();
+        assert_eq!(prims.len(), 2);
+        let count = |k: usize| d.json()["accessors"][usize_of(prims[k]["indices"].as_u64().unwrap())]["count"].clone();
+        assert_eq!((count(0), count(1)), (json!(3), json!(3)));
+        // The vertex nothing draws any more reads as the origin.
+        assert_eq!(
+            values(&d, usize_of(prims[0]["attributes"]["POSITION"].as_u64().unwrap()))[9..],
+            [0.0; 3]
+        );
     }
 
     #[test]

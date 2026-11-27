@@ -26,9 +26,11 @@
 //! through it, across their range. Cell data is kept the same way: a vertex is split where the cells around
 //! it differ in any value, so each cell's values sit on its own corners.
 //!
-//! No normals are made: without them glTF shades flat, which is what VTK draws. The material is double-sided,
+//! Triangles without normals in the file take the default ones, made with a crease angle, as in every format:
+//! a point is copied where an edge is hard, after the file's own points. The material is double-sided,
 //! as VTK lights both sides. Values that aren't finite are zero in custom attributes, and a cell at a point that
-//! isn't finite is dropped. Dataset field data of a few values goes to the source notes with the title, the
+//! isn't finite, or naming one that isn't there, is dropped and counted (`droppedGeometry` in the source
+//! extras). Dataset field data of a few values goes to the source notes with the title, the
 //! version, the encoding and the cell counts by type. VTK names no units and no up axis, so both are unknown,
 //! and geometry is kept as written.
 
@@ -161,7 +163,7 @@ fn check_dims(dims: [u32; 3]) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn load(input: Input<'_>) -> Result<Document> {
+pub(crate) fn load(input: Input<'_>, keep: crate::Keep) -> Result<Document> {
     let data = input.read()?;
     let data = data.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&data);
     let start = data.iter().position(|&b| !stream::space(b)).unwrap_or(data.len());
@@ -172,7 +174,7 @@ pub(crate) fn load(input: Input<'_>) -> Result<Document> {
         Some(_) => bail!(UnknownFormat, "not a VTK file"),
         None => bail!(Empty, "VTK file is empty"),
     };
-    cells::build(model, "VTK", input.limit)
+    cells::build(model, "VTK", input.limit, keep.crease_angle())
 }
 
 /// A few values of dataset field data for the source notes; `None` for more than a few.

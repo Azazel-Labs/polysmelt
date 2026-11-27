@@ -46,7 +46,9 @@ import urllib.request
 
 import numpy as np
 
-from common import ROOT
+# The shared modules are beside this script, which `python -I` leaves off the path.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from common import ROOT  # noqa: E402
 
 CACHE = os.environ.get("POLYSMELT_THIRDPARTY") or os.path.normpath(
     os.path.join(ROOT, "..", "..", "target", "thirdparty"))
@@ -237,17 +239,14 @@ def rounded(v, digits=6):
     return [round(float(x), digits) + 0.0 for x in v]
 
 
-def geometry(expect, files, tris, lines, points, axes, scale, skip=(), twice=False, flat=True):
+def geometry(expect, files, tris, lines, points, axes, scale, skip=(), twice=False):
     """The drawn geometry's facts, in glTF space, but those named in `skip`.
 
-    `flat` false leaves out triangles with two corners in one place, which draw nothing: some
-    readers drop them (COLLADA's and DXF's here) and assimp keeps them. `twice` halves the
-    triangles and their area: assimp draws a two-sided surface twice, facing each way, where
-    glTF has a material flag."""
+    Triangles with two corners in one place, which draw nothing, are counted as the reference
+    counts them: a reader keeps the triangles a file lists. `twice` halves the triangles and
+    their area: assimp draws a two-sided surface twice, facing each way, where glTF has a
+    material flag."""
     m = np.array(axes, dtype=np.float64) * scale
-    if not flat:
-        a, b, c = tris[:, 0], tris[:, 1], tris[:, 2]
-        tris = tris[~((a == b).all(1) | (b == c).all(1) | (a == c).all(1))]
     sides = 2 if twice else 1
     tris, lines, points = (a @ m.T for a in (tris, lines, points))
     every = np.concatenate([tris.reshape(-1, 3), lines.reshape(-1, 3), points.reshape(-1, 3)])
@@ -300,7 +299,7 @@ def measure_assimp(c, path, expect, files):
         expect["poses"] = [{"animation": 0, "time": round(first / rate, 6),
                             "bounds": bounds_of([tris, lines, points], axes, scale)}]
     else:
-        geometry(expect, files, *a.drawn(), axes, scale, c.get("skip", ()), c.get("twice", False), c.get("flat", True))
+        geometry(expect, files, *a.drawn(), axes, scale, c.get("skip", ()), c.get("twice", False))
     document = {}
     names = c.get("node_names")
     if names == "all":
@@ -599,9 +598,9 @@ CASES = [
 
     assimp("b3d", "wuson", "B3D/WusonBlitz.b3d", "a creature of 3732 triangles"),
 
-    assimp("dxf", "pink_egg", "DXF/PinkEggFromLW.dxf", "3DFACE entities LightWave exported", flat=False),
+    assimp("dxf", "pink_egg", "DXF/PinkEggFromLW.dxf", "3DFACE entities LightWave exported"),
     # $INSUNITS is 1, inches, which assimp doesn't read.
-    assimp("dxf", "issue_2229", "DXF/issue_2229.dxf", "polyface meshes in inches", scale=0.0254, flat=False),
+    assimp("dxf", "issue_2229", "DXF/issue_2229.dxf", "polyface meshes in inches", scale=0.0254),
 
     assimp("dxf", "line_test", "DXF/lineTest.dxf", "two 3DFACE entities and a LINE", tool="ezdxf"),
     assimp("dxf", "points", "DXF/points.dxf", "two POINT entities and nothing else", tool="ezdxf"),
@@ -614,7 +613,7 @@ CASES = [
     assimp("dae", "concave_polygon", "Collada/ConcavePolygon.dae", "a concave polygon of 66 corners"),
     assimp("dae", "regr01", "Collada/regr01.dae", "six meshes sharing seven materials", tolerance=1e-6),
     assimp("dae", "sphere", "Collada/sphere.dae", "a sphere of polygons", tolerance=1e-6),
-    assimp("dae", "teapot_instance_nodes", "Collada/teapot_instancenodes.DAE", "teapots placed by <instance_node>", flat=False),
+    assimp("dae", "teapot_instance_nodes", "Collada/teapot_instancenodes.DAE", "teapots placed by <instance_node>"),
     assimp("dae", "cinema4d", "Collada/Cinema4D.dae", "three objects Cinema 4D exported"),
     assimp("dae", "box_nested_animation", "Collada/box_nested_animation.dae", "a skinned box with animations nested in one another",
            bones="all", posed="all", pose_bounds=True),

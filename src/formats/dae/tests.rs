@@ -602,9 +602,9 @@ fn bindings_of_one_geometry_share_its_accessors() {
 }
 
 #[test]
-fn a_triangle_with_two_corners_at_one_position_is_dropped() {
+fn a_triangle_with_two_corners_at_one_position_is_kept() {
     // The second triangle's first and last corners name one position with different texture
-    // coordinates: it draws nothing.
+    // coordinates: it has no area, and is kept as the file has it.
     let lib = QUAD
         .replace(
             "<vcount>4</vcount><p>0 0 0 1 0 1 2 0 2 3 0 3</p>",
@@ -612,7 +612,7 @@ fn a_triangle_with_two_corners_at_one_position_is_dropped() {
         )
         .replace(r#"<polylist count="1""#, r#"<polylist count="2""#);
     let d = read(&doc("", &lib, r##"<node><instance_geometry url="#quad"/></node>"##));
-    assert_eq!(flat(&d).triangles(), 1);
+    assert_eq!(flat(&d).triangles(), 2);
 }
 
 #[test]

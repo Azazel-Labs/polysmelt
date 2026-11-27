@@ -186,6 +186,9 @@ pub(crate) struct Scene {
     /// [`Scene::scale`], [`Scene::rotate_roots`] and [`Scene::mirror_z`] convert is marked converted.
     pub info: SourceInfo,
     pub facts: Map<String, Value>,
+    /// The triangles the reader left out for naming a vertex that isn't there, counted with those dropped as
+    /// the scene is written (see [`crate::geometry`]).
+    pub dropped: usize,
 }
 
 /// 4×4 matrices, column-major.
@@ -397,7 +400,8 @@ impl Scene {
             "too many triangles to convert (more than {limit})"
         );
         let parents = self.parents();
-        let mut b = Builder::default();
+        let mut b = Builder::new(keep.crease_angle());
+        b.dropped = self.dropped;
         let mut json = Map::new();
 
         // Faces with no material take the default one (white under vertex colors), and a material drawn with
@@ -497,6 +501,7 @@ impl Scene {
             let morphs = keep.morph_targets && targets > 0 && m.prims.iter().all(|p| p.targets.len() == targets);
             let mut prims = Vec::new();
             for mut p in m.prims {
+                make_sound(&mut b, &mut p);
                 let targets = if morphs {
                     std::mem::take(&mut p.targets)
                 } else {
@@ -898,6 +903,55 @@ impl Skinning {
     }
 }
 
+/// Holds a primitive to what every reader's geometry is (see [`crate::geometry`]): what can't be drawn is
+/// dropped and counted, and triangles have unit normals, the file's own or the default ones, whose added
+/// vertices every list of the primitive's follows.
+fn make_sound(b: &mut Builder, p: &mut Primitive) {
+    use crate::geometry::{crease, follow, normals};
+    let (mut none, mut none_too) = (Vec::new(), Vec::new());
+    let lists = if p.points {
+        [&mut none, &mut none_too, &mut p.indices]
+    } else if p.lines {
+        [&mut none, &mut p.indices, &mut none_too]
+    } else {
+        [&mut p.indices, &mut none, &mut none_too]
+    };
+    b.sound(&mut p.positions, lists);
+    let n = p.positions.len();
+    if p.points || p.lines || p.indices.is_empty() || n == 0 {
+        return;
+    }
+    if p.normals.len() == n {
+        normals(&p.positions, &p.indices, &mut p.normals, 0.0);
+        return;
+    }
+    let (made, added) = crease(&p.positions, &mut p.indices, b.crease);
+    p.normals = made;
+    // Tangents mean nothing without the normals they were made beside.
+    p.tangents = Vec::new();
+    follow(&mut p.positions, n, &added);
+    for set in &mut p.uvs {
+        follow(set, n, &added);
+    }
+    for set in &mut p.colors {
+        follow(set, n, &added);
+    }
+    let k = p.influences;
+    if k > 0 && p.joints.len() == n * k && p.weights.len() == n * k {
+        for &s in &added {
+            let at = s as usize * k;
+            p.joints.extend_from_within(at..at + k);
+            p.weights.extend_from_within(at..at + k);
+        }
+    }
+    for t in &mut p.targets {
+        // A target shorter than the vertices leaves the rest where they are.
+        t.positions.resize(n, [0.0; 3]);
+        follow(&mut t.positions, n, &added);
+        follow(&mut t.normals, n, &added);
+    }
+}
+
 /// Writes a primitive's attributes and indices, and gives its joints and weights to write later (the caller
 /// writes its targets); `None` when it draws nothing.
 fn write_prim(
@@ -910,34 +964,8 @@ fn write_prim(
     if n == 0 || p.indices.is_empty() {
         return None;
     }
-    if p.indices.iter().any(|&i| i as usize >= n) {
-        let width = if p.points {
-            1
-        } else if p.lines {
-            2
-        } else {
-            3
-        };
-        let idx: Vec<u32> = p
-            .indices
-            .chunks_exact(width)
-            .filter(|t| t.iter().all(|&i| (i as usize) < n))
-            .flatten()
-            .copied()
-            .collect();
-        p.indices = idx;
-        if p.indices.is_empty() {
-            return None;
-        }
-    }
-    for v in &mut p.positions {
-        if v.iter().any(|c| !c.is_finite()) {
-            *v = [0.0; 3];
-        }
-    }
     let mut attributes = Map::new();
-    if p.normals.len() == n && !p.points && !p.lines {
-        fix_normals(&mut p.normals, &p.positions, &p.indices);
+    if !p.points && !p.lines {
         let a = b.accessor(
             Part::f32(std::mem::take(&mut p.normals).into_flattened()),
             5126,
@@ -1236,48 +1264,6 @@ fn skin_sets(p: &Primitive, count: usize) -> (Vec<u32>, Vec<f32>, usize) {
         }
     }
     (js, ws, sets)
-}
-
-/// Normalizes `normals`, replacing any that is zero or not finite by the normal of the faces around it (or +Y).
-fn fix_normals(normals: &mut [[f32; 3]], positions: &[[f32; 3]], indices: &[u32]) {
-    let mut bad = Vec::new();
-    for (i, v) in normals.iter_mut().enumerate() {
-        let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
-        if l > 0.0 && l.is_finite() {
-            *v = v.map(|c| c / l);
-        } else {
-            bad.push(i);
-        }
-    }
-    if bad.is_empty() {
-        return;
-    }
-    let mut sum = vec![[0.0f32; 3]; normals.len()];
-    for t in indices.chunks_exact(3) {
-        let [a, b, c] = [t[0], t[1], t[2]].map(|i| positions[i as usize]);
-        let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
-        let w = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
-        let f = [
-            u[1] * w[2] - u[2] * w[1],
-            u[2] * w[0] - u[0] * w[2],
-            u[0] * w[1] - u[1] * w[0],
-        ];
-        for &i in t {
-            let s = &mut sum[i as usize];
-            for k in 0..3 {
-                s[k] += f[k];
-            }
-        }
-    }
-    for i in bad {
-        let s = sum[i];
-        let l = (s[0] * s[0] + s[1] * s[1] + s[2] * s[2]).sqrt();
-        normals[i] = if l > 0.0 && l.is_finite() {
-            s.map(|c| c / l)
-        } else {
-            [0.0, 1.0, 0.0]
-        };
-    }
 }
 
 // Math, in double precision.

@@ -232,8 +232,10 @@ fn values_that_are_not_finite_keep_their_place() {
         ));
         let m = mesh(&doc);
         assert_eq!(m.triangles(), 12, "{bad}");
+        // Eight vertices in the file, each a corner of three faces once the default normals keep the cube's
+        // edges hard.
         let uvs = &m.prims[0].uvs;
-        assert_eq!(uvs.len(), 8, "{bad}");
+        assert_eq!(uvs.len(), 24, "{bad}");
         assert!(uvs.contains(&[0.0, 0.25]), "{bad}: {uvs:?}");
         assert!(uvs.contains(&[0.5, 0.75]), "{bad}: {uvs:?}");
     }
@@ -606,4 +608,45 @@ fn corrupted_bytes_read_or_fail() {
             survives(&bad);
         }
     }
+}
+
+/// The area a mesh's triangles cover.
+fn area(m: &Mesh) -> f32 {
+    let mut sum = 0.0;
+    for p in &m.prims {
+        for t in p.indices.chunks(3) {
+            let [a, b, c] = [0, 1, 2].map(|k| p.positions[t[k] as usize]);
+            let (u, v) = ([0, 1, 2].map(|k| b[k] - a[k]), [0, 1, 2].map(|k| c[k] - a[k]));
+            let n = [
+                u[1] * v[2] - u[2] * v[1],
+                u[2] * v[0] - u[0] * v[2],
+                u[0] * v[1] - u[1] * v[0],
+            ];
+            sum += 0.5 * (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+        }
+    }
+    sum
+}
+
+#[test]
+fn a_face_that_isnt_convex_keeps_its_outline() {
+    // An arrowhead, its notch at the second corner: a fan from the first would cover three times its area.
+    let text = "xof 0303txt 0032\nMesh m {\n4;\n2;0;0;,\n0.5;0.5;0;,\n0;2;0;,\n0;0;0;;\n1;\n4;0,1,2,3;;\n}\n";
+    let m = mesh(&read(text));
+    assert_eq!(m.triangles(), 2);
+    assert!((area(&m) - 1.0).abs() < 1e-5, "{}", area(&m));
+}
+
+#[test]
+fn a_face_naming_a_missing_vertex_is_dropped_and_counted() {
+    let text = "xof 0303txt 0032\nMesh m {\n3;\n0;0;0;,\n1;0;0;,\n0;1;0;;\n2;\n3;0,1,2;,\n3;0,1,7;;\n}\n";
+    let doc = read(text);
+    assert_eq!(mesh(&doc).triangles(), 1);
+    assert_eq!(doc.json()["asset"]["extras"]["source"]["droppedGeometry"], 1);
+    // Without normals in the file, the default ones.
+    assert!(
+        doc.json()["meshes"][0]["primitives"][0]["attributes"]
+            .get("NORMAL")
+            .is_some()
+    );
 }

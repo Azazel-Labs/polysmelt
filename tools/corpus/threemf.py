@@ -122,8 +122,10 @@ def box(lo, hi, unit=1e-3):
     return {"min": [r(c * unit, 9) for c in a], "max": [r(c * unit, 9) for c in b]}
 
 
+# 3MF has no normals and nothing to say how a mesh is shaded, so it takes the default ones (`default_normals`):
+# a cube's edges, at 90 degrees, are past the crease angle, and its faces come out flat.
 CUBE = {"triangles": 12, "bounds": box((0, 0, 0), (SIZE,) * 3), "area": r(6 * (SIZE * 1e-3) ** 2, 12),
-        "normals_in": AXES, "faces_outward": True, "winding_matches_normals": True}
+        "normals_in": AXES, "default_normals": True, "faces_outward": True, "winding_matches_normals": True}
 
 
 def lin(rgb, a=255):
@@ -216,7 +218,7 @@ case(FMT, "item_transform",
      {"cube.3mf": package({"3D/3dmodel.model": model(obj(1, CUBE_MESH), item(1, "0 1 0 -1 0 0 0 0 1 20 0 0"))})},
      {"spec": CORE + ": a build item turned 90 degrees about Z and moved (row-vector 4x3 matrix)",
       "source": SRC, "triangles": 12, "bounds": box((10, 0, 0), (20, 10, 10)), "faces_outward": True,
-      "normals_in": AXES})
+      "normals_in": AXES, "default_normals": True})
 
 case(FMT, "item_mirrored",
      {"cube.3mf": package({"3D/3dmodel.model": model(obj(1, CUBE_MESH), item(1, "-1 0 0 0 1 0 0 0 1 0 0 0"))})},
@@ -235,7 +237,7 @@ comp = obj(2, '<components><component objectid="1"/>'
 case(FMT, "components",
      {"two.3mf": package({"3D/3dmodel.model": model(obj(1, CUBE_MESH) + comp, item(2))})},
      {"spec": CORE + ": an object made of components, each with its transform", "source": SRC,
-      "triangles": 24, "bounds": box((0, 0, 0), (30, 10, 10)), "normals_in": AXES})
+      "triangles": 24, "bounds": box((0, 0, 0), (30, 10, 10)), "normals_in": AXES, "default_normals": True})
 
 nest = obj(3, '<components><component objectid="2" transform="1 0 0 0 1 0 0 0 1 0 0 10"/></components>')
 case(FMT, "components_nested",

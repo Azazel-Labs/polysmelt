@@ -197,7 +197,7 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
             name,
         }],
         by_path: FastMap::default(),
-        b: Builder::default(),
+        b: Builder::new(keep.crease_angle()),
         images: Images::new(!keep.image_bytes, &dir),
         image_of: FastMap::default(),
         materials: Vec::new(),
@@ -1139,7 +1139,9 @@ fn build_mesh(c: &mut Ctx<'_>, file: u32, node: u32, pal: Pal) -> Result<MeshOf>
         let corners = &db.corners[f.start as usize..(f.start + f.len) as usize];
         let fcolor = face_color(colors, &f).map(|v| c.lut[usize::from(v)]);
         let vertex_colors = matches!(f.light_mode, 1 | 3);
-        let normal = face_normal(db, corners).unwrap_or([0.0, 0.0, 1.0]).map(f32_of);
+        // A face with no normal of its own, or a vertex whose normal has no length, is left zero, and takes its
+        // faces' normal as the primitive is written.
+        let normal = face_normal(db, corners).unwrap_or([0.0; 3]).map(f32_of);
         let part = &mut parts[pi].2;
         part.uvs |= textured;
         let per_corner = f.layers != u32::MAX || f.morph != u32::MAX;
@@ -1167,7 +1169,7 @@ fn build_mesh(c: &mut Ctx<'_>, file: u32, node: u32, pal: Pal) -> Result<MeshOf>
                     if l > 1e-6 && l.is_finite() {
                         n.map(|x| x / l)
                     } else {
-                        normal
+                        [0.0; 3]
                     }
                 } else {
                     normal
@@ -1516,7 +1518,7 @@ fn finish(mut c: Ctx<'_>, mut s: Scene) -> Document {
     let counts = c.files.iter().fold(parse::Counts::default(), |mut a, f| {
         let n = &f.db.counts;
         a.unknown_records += n.unknown_records;
-        a.bad_corners += n.bad_corners;
+        a.dropped += n.dropped;
         a.extensions += n.extensions;
         a.subfaces += n.subfaces;
         a.billboards += n.billboards;
@@ -1535,7 +1537,7 @@ fn finish(mut c: Ctx<'_>, mut s: Scene) -> Document {
         ("switchedOff", st.switched_off),
         ("disabledLights", st.disabled_lights),
         ("unknownRecords", counts.unknown_records),
-        ("droppedCorners", counts.bad_corners),
+        (crate::geometry::DROPPED, counts.dropped),
         ("extensions", counts.extensions),
         ("subfaces", counts.subfaces),
         ("billboards", counts.billboards),

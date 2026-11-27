@@ -673,7 +673,7 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
     let mut dropped_textures = 0usize;
     let mut materials: Vec<Full> = Vec::new();
     let mut material_at: HashMap<MatKey, usize> = HashMap::new();
-    let mut b = Builder::default();
+    let mut b = Builder::new(keep.crease_angle());
     let mut meshes: Vec<Value> = Vec::new();
     let mut mesh_of: Vec<Option<usize>> = vec![None; m.objs.len()];
     let bad_surfs: usize = m.objs.iter().map(|o| o.bad_surfs).sum();
@@ -874,7 +874,7 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
     let lights = m.objs.iter().filter(|o| o.kind == "light").count();
     let subdivided = m.objs.iter().filter(|o| o.subdiv.is_some_and(|s| s > 0)).count();
     for (key, n) in [
-        ("droppedSurfaces", bad_surfs),
+        (crate::geometry::DROPPED, bad_surfs),
         ("droppedTextures", dropped_textures),
         ("lights", lights),
         ("subdividedObjects", subdivided),
@@ -1172,7 +1172,7 @@ mod tests {
         let bad = "AC3Db\nOBJECT poly\nnumvert 3\n0 0 0\n1 0 0\n0 1 0\nnumsurf 2\nSURF 0\nrefs 3\n0 0 0\n1 0 0\n9 0 0\n\
                    SURF 0\nrefs 3\n0 0 0\n1 0 0\n2 0 0\nkids 0\n";
         let doc = read(bad, &assets).unwrap();
-        assert_eq!(doc.json()["asset"]["extras"]["source"]["droppedSurfaces"], 1);
+        assert_eq!(doc.json()["asset"]["extras"]["source"][crate::geometry::DROPPED], 1);
         assert_eq!(flat(&doc).triangles(), 1);
         // Deep nesting doesn't recurse.
         let deep = format!(

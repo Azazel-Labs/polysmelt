@@ -391,8 +391,8 @@ case(FMT, "normals_per_vertex",
                      for x, y, z in CUBE_V]})
 
 case(FMT, "no_normals", {"cube.x": scene([frame("Box", [mesh("Cube", CUBE_V, QUADS)])])},
-     {"spec": SPEC + ": a mesh without normals: glTF's are computed, facing out", "source": SRC, **CUBE,
-      "normals_in": AXES, "winding_matches_normals": True})
+     {"spec": SPEC + ": a mesh without normals takes the default ones: a cube's faces flat, facing out",
+      "source": SRC, **CUBE, "normals_in": AXES, "default_normals": True, "winding_matches_normals": True})
 
 bad_faces = mesh("Cube", CUBE_V, QUADS + [[0, 1], [0, 1, 99]], [cube_normals()])
 bad_faces.kids[0] = normals(QUAD_NORMALS, [[i] * 4 for i in range(6)] + [[0, 0], [0, 0, 0]])

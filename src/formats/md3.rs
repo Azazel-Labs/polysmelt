@@ -31,8 +31,9 @@
 //! one frame the assumed frame rate is recorded. The header's name (the model's path in the game's folders) is kept
 //! as `name`.
 //!
-//! A file cut short, an offset past its end, a negative count, a surface that doesn't start with `IDP3` or has no
-//! frames, or a triangle naming a vertex past its surface's is an error. Counts are checked against the file's size
+//! A file cut short, an offset past its end, a negative count, or a surface that doesn't start with `IDP3` or has
+//! no frames is an error. A triangle naming a vertex past its surface's is dropped and counted
+//! (`droppedGeometry` in the source extras), as in every format. Counts are checked against the file's size
 //! before anything is allocated for them, and a file whose frames would make more morph data than a model of the
 //! engine can hold is refused.
 
@@ -87,6 +88,7 @@ pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
     let n_frames = file.frame_names.len();
     let target_names = target_names(&file.frame_names);
     for s in file.surfaces {
+        scene.dropped += s.dropped;
         let texture = if s.shader.is_empty() {
             skin.get(&s.name.to_ascii_lowercase()).cloned().unwrap_or_default()
         } else {
@@ -279,6 +281,8 @@ struct Surface {
     prim: Primitive,
     /// Each kept frame's target; `None` for the first frame and any frame that doesn't move from it.
     frames: Vec<Option<usize>>,
+    /// The triangles left out for naming a vertex that isn't there.
+    dropped: usize,
 }
 
 /// A header count or offset, which can't be negative.
@@ -425,14 +429,14 @@ fn surface(data: &[u8], start: usize, s: usize, keep: usize, budget: &mut usize)
     }
     b.seek(ofs_tris)?;
     let mut indices = Vec::with_capacity(b.count(n_tris as u64, 12)?.saturating_mul(3));
-    for t in 0..n_tris {
+    let mut dropped = 0;
+    for _ in 0..n_tris {
         let v = [b.i32()?, b.i32()?, b.i32()?];
         let v = v.map(|i| usize::try_from(i).ok().filter(|&i| i < n_verts));
+        // A triangle naming a vertex that isn't there is dropped, as in every format.
         let [Some(a), Some(c1), Some(c2)] = v else {
-            bail!(
-                Corrupt,
-                "MD3 surface {s}'s triangle {t} names a vertex past its {n_verts}"
-            );
+            dropped += 1;
+            continue;
         };
         // Clockwise front faces in the file; glTF's are counterclockwise.
         indices.extend([a, c2, c1].map(u32_of));
@@ -480,6 +484,7 @@ fn surface(data: &[u8], start: usize, s: usize, keep: usize, budget: &mut usize)
             shader,
             prim,
             frames,
+            dropped,
         }),
         end,
     ))

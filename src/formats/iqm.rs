@@ -33,10 +33,11 @@
 //! `upAxis` is a declared `+Z`, converted); units are kept unscaled, and their length unknown.
 //!
 //! A file cut short, a list past its end, a name outside the text block, an unknown number format, vertex arrays
-//! that don't all hold every vertex, a triangle naming a vertex outside its mesh, a weighted influence naming a
+//! that don't all hold every vertex, a weighted influence naming a
 //! joint there isn't, a joint whose parent isn't earlier in the list, poses that aren't one per joint, frames
-//! that don't hold the channels the poses say, or an animation past the frames is an error. Counts are checked
-//! against the file's size before anything is allocated for them.
+//! that don't hold the channels the poses say, or an animation past the frames is an error. A triangle naming a
+//! vertex outside its mesh is dropped and counted (`droppedGeometry` in the source extras), as in every
+//! format. Counts are checked against the file's size before anything is allocated for them.
 
 use std::collections::HashMap;
 
@@ -552,10 +553,12 @@ fn build(f: &File, stem: &str, input: &Input<'_>, assets: &dyn Assets, keep: Kee
             continue;
         }
         let mut indices = Vec::with_capacity(tris.len() * 3);
-        for (ti, t) in f.triangles[tris].iter().enumerate() {
+        for t in &f.triangles[tris] {
             let local = t.map(|v| usize_of(v).checked_sub(verts.start).filter(|&v| v < verts.len()));
+            // A triangle naming a vertex outside the mesh is dropped, as in every format.
             let [Some(a), Some(b), Some(c)] = local else {
-                bail!(Corrupt, "IQM mesh {mi}'s triangle {ti} names a vertex outside the mesh");
+                scene.dropped += 1;
+                continue;
             };
             // Clockwise front faces in the file; glTF's are counterclockwise.
             indices.extend([a, c, b].map(u32_of));

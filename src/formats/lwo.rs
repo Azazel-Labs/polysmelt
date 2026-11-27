@@ -1708,7 +1708,6 @@ fn build(l: &Layer, looks: &[Look], look_of: &[usize], budget: &mut Budget) -> R
             .vcol
             .as_ref()
             .and_then(|(i, n)| Some((*i, color_maps.get(n.as_str())?)));
-        let normals_on = look.cos.is_some() || norms.is_some();
         let mut prim = Prim {
             material: look.material,
             ..Prim::default()
@@ -1755,15 +1754,12 @@ fn build(l: &Layer, looks: &[Look], look_of: &[usize], budget: &mut Budget) -> R
             // LightWave's corners run clockwise; turned around, they run counter-clockwise in glTF's space.
             for j in (0..cs.len()).rev() {
                 let c = cs[j];
-                let normal = if normals_on {
-                    let given = norms
-                        .as_ref()
-                        .and_then(|n| n.get(pu, c))
-                        .and_then(|v| vec3::unit([v[0], v[1], -v[2]]));
-                    given.unwrap_or_else(|| if look.cos.is_some() { smooth[s + j] } else { face[p] })
-                } else {
-                    [0.0; 3]
-                };
+                // A surface without a smoothing angle is flat: its polygons' corners carry their own normals.
+                let given = norms
+                    .as_ref()
+                    .and_then(|n| n.get(pu, c))
+                    .and_then(|v| vec3::unit([v[0], v[1], -v[2]]));
+                let normal = given.unwrap_or_else(|| if look.cos.is_some() { smooth[s + j] } else { face[p] });
                 let uv = if has_uv { uvs[j] } else { [0.0; 2] };
                 let color = colors.map(|(i, lk)| match lk.get(pu, c) {
                     Some(v) => {
@@ -1780,9 +1776,7 @@ fn build(l: &Layer, looks: &[Look], look_of: &[usize], budget: &mut Budget) -> R
                 );
                 let v = *index.entry(key).or_insert_with(|| {
                     prim.positions.push(out(l.points[c as usize]));
-                    if normals_on {
-                        prim.normals.push(normal);
-                    }
+                    prim.normals.push(normal);
                     if has_uv {
                         prim.uvs.push(uv);
                     }
@@ -1999,7 +1993,7 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         triangles: 0,
         limit: input.limit,
     };
-    let mut b = Builder::default();
+    let mut b = Builder::new(keep.crease_angle());
     let mut meshes: Vec<Value> = Vec::new();
     let mut mesh_of: Vec<Option<usize>> = Vec::with_capacity(m.layers.len());
     let mut lines_or_points = false;
@@ -2166,7 +2160,8 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         ("droppedCurves", m.curves),
         ("droppedBones", m.bones),
         ("droppedMetaballs", m.metaballs),
-        ("droppedPolygons", m.bad_polys + m.other_polys),
+        (crate::geometry::DROPPED, m.bad_polys),
+        ("droppedPolygons", m.other_polys),
         ("droppedEnvelopes", m.envelopes),
         ("droppedTextures", dropped_textures),
     ] {

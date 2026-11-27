@@ -249,7 +249,7 @@ impl Splats {
         mut facts: Map<String, Value>,
         mut custom: Vec<(String, Vec<f32>)>,
     ) -> Document {
-        let mut b = Builder::default();
+        let mut b = Builder::plain();
         let degree = degree_of(self.sh.len());
         info.write(&mut source);
         let all = self.len();
@@ -511,7 +511,7 @@ mod tests {
             dc: vec![[f32::NAN, 1.0, 2.0]; 3],
             sh: vec![vec![[1.0; 3]; 3]; 4],
         };
-        let mut b = Builder::default();
+        let mut b = Builder::plain();
         let p = splats.primitive(&mut b).unwrap();
         let a = &p["attributes"];
         assert_eq!(b.accessors[a["POSITION"].as_u64().unwrap() as usize].count, 2);

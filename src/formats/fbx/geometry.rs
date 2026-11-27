@@ -9,7 +9,7 @@ use super::deform::{Channel, Target, split_weight};
 use super::{Reader, child_attr, floats, ints, name_of, num, string};
 use crate::document::Part;
 use crate::formats::fbx_tree::{Attr as A, NodeHandle};
-use crate::mesh::{FastMap, Prim, smooth_normals, srgb_to_linear, triangulate};
+use crate::mesh::{FastMap, Prim, srgb_to_linear, triangulate};
 use crate::num::f32_of;
 use crate::vec3;
 use crate::{Context as _, ErrorKind, Result};
@@ -142,7 +142,8 @@ impl Reader<'_, '_, '_> {
             .filter_map(|(slot, m)| Some((slot, self.color_uv.get(m)?.as_str())))
             .collect();
         let named = !color_uv.is_empty() || mats.iter().any(|m| self.material_uvs.contains_key(m));
-        let (prims, uv_names) = geometry(geom, self.limit, &color_uv, named)?;
+        let (prims, uv_names, dropped) = geometry(geom, self.limit, &color_uv, named, self.b.crease)?;
+        self.b.dropped += dropped;
         // Skin weights per control point: (joint, weight), heaviest first.
         let (clusters, influences) = if self.keep.skins {
             self.influences(g)
@@ -285,13 +286,15 @@ type Prims = Vec<(usize, Prim, Vec<usize>, usize)>;
 /// A geometry's triangles in its own space, a primitive per material slot (sorted), each vertex's control point
 /// alongside so skins and blend shapes can find it; more than `limit` triangles is refused. A slot whose color
 /// texture reads a UV layer by name (`color_uv`) takes that layer as its texture coordinates, and the first layer
-/// in its place among the other sets. With `named`, the UV layers' names come back too, by number.
+/// in its place among the other sets. With `named`, the UV layers' names come back too, by number. Last, how
+/// many polygons were left out for naming a control point that isn't there or isn't a finite point.
 fn geometry(
     geom: NodeHandle<'_>,
     limit: usize,
     color_uv: &HashMap<usize, &str>,
     named: bool,
-) -> Result<(Prims, Vec<String>)> {
+    crease: f32,
+) -> Result<(Prims, Vec<String>, usize)> {
     let verts = floats(child_attr(geom, "Vertices").context(ErrorKind::Corrupt, "mesh has no vertices")?)
         .context(ErrorKind::Corrupt, "bad vertices")?;
     let poly_index = ints(child_attr(geom, "PolygonVertexIndex").context(ErrorKind::Corrupt, "mesh has no polygons")?)
@@ -332,16 +335,20 @@ fn geometry(
     // A polygon naming a control point that isn't there or whose position isn't a number, too few to make a
     // triangle, or a hole, is left out.
     let holes = holes(geom);
-    let usable = |poly: usize, range: &std::ops::Range<usize>| {
+    let whole = |poly: usize, range: &std::ops::Range<usize>| {
         range.len() >= 3
             && holes
                 .as_ref()
                 .is_none_or(|h| h.get(if h.len() == 1 { 0 } else { poly }) != Some(&true))
-            && range.clone().all(|pv| {
-                let cp = corner_cp(poly_index[pv]);
-                cp < verts.len() / 3 && verts[cp * 3..cp * 3 + 3].iter().all(|c| c.is_finite())
-            })
     };
+    let sound = |range: &std::ops::Range<usize>| {
+        range.clone().all(|pv| {
+            let cp = corner_cp(poly_index[pv]);
+            cp < verts.len() / 3 && verts[cp * 3..cp * 3 + 3].iter().all(|c| c.is_finite())
+        })
+    };
+    let usable = |poly: usize, range: &std::ops::Range<usize>| whole(poly, range) && sound(range);
+    let mut dropped = 0;
     // Without normals of its own, a geometry with smoothing has them made from it.
     let smooth = if normals.is_none() {
         smoothing(geom, &verts, &poly_index, &usable)
@@ -393,6 +400,7 @@ fn geometry(
     let mut total = 0;
     for (poly, range) in polygons(&poly_index) {
         if !usable(poly, &range) {
+            dropped += usize::from(whole(poly, &range));
             poly_slot.push(usize::MAX);
             continue;
         }
@@ -498,7 +506,8 @@ fn geometry(
                 prim.positions.push(p);
                 cps.push(cp);
                 if let Some((_, nv)) = n {
-                    let nv = vec3::unit_or([nv[0], nv[1], nv[2]], [0.0, 1.0, 0.0]);
+                    // One with no length stays zero, and takes its faces' as the primitive is written.
+                    let nv = vec3::unit_or([nv[0], nv[1], nv[2]], [0.0; 3]);
                     prim.normals.push(nv.map(f32_of));
                     if let Some((_, tv)) = tg {
                         prim.tangents.push(tangent(nv, [tv[0], tv[1], tv[2]], bn.map(|b| b.1)));
@@ -571,12 +580,14 @@ fn geometry(
         .into_iter()
         .filter(|s| !s.prim.indices.is_empty())
         .map(|s| {
-            let (slot, mut prim, cps) = (s.slot, s.prim, s.cps);
-            let n = prim.positions.len();
+            let (slot, mut prim, mut cps) = (s.slot, s.prim, s.cps);
+            let mut n = prim.positions.len();
             if prim.normals.len() != n {
-                prim.normals = smooth_normals(&prim.positions, &prim.indices);
-                // Made up here, they wouldn't match the file's tangents.
-                prim.tangents.clear();
+                // Neither normals nor smoothing: the default ones, whose added vertices keep their control
+                // points. Made up here, they wouldn't match the file's tangents, which go.
+                let added = crate::geometry::default_normals(&mut prim, crease);
+                crate::geometry::follow(&mut cps, n, &added);
+                n = prim.positions.len();
             }
             if prim.tangents.len() != n {
                 prim.tangents.clear();
@@ -625,7 +636,7 @@ fn geometry(
         LimitExceeded,
         "too many triangles to convert (more than {limit})"
     );
-    Ok((out, uv_names))
+    Ok((out, uv_names, dropped))
 }
 
 /// The control point a `PolygonVertexIndex` entry names (a polygon's last is stored as `!index`).

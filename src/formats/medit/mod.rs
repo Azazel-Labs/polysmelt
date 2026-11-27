@@ -156,7 +156,7 @@ impl Mesh {
     }
 }
 
-pub(crate) fn load(input: Input<'_>) -> Result<Document> {
+pub(crate) fn load(input: Input<'_>, keep: crate::Keep) -> Result<Document> {
     let data = input.read()?;
     let mut mesh = Mesh {
         version: 1,
@@ -222,7 +222,7 @@ pub(crate) fn load(input: Input<'_>) -> Result<Document> {
     };
     model.info.version = Some(mesh.version.to_string());
     model.pieces = mesh.el.pieces();
-    cells::build(model, "Medit", input.limit)
+    cells::build(model, "Medit", input.limit, keep.crease_angle())
 }
 
 /// The vector each of `np` vertices has: `values[at[k][1]]` for vertex `at[k][0]`, both from 1, or with no

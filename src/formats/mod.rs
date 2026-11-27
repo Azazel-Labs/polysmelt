@@ -48,8 +48,7 @@ mod c3d;
     allow(dead_code, reason = "VTK's structured grids, lookup tables and cell kinds")
 )]
 mod cells;
-#[cfg(any(feature = "lwo", feature = "ac3d"))]
-mod crease;
+pub(crate) mod crease;
 #[cfg(feature = "dae")]
 mod dae;
 #[cfg(any(feature = "dxf", feature = "las", feature = "e57"))]
@@ -777,7 +776,7 @@ fn convert(input: Input<'_>, ext: &str, assets: &dyn Assets, keep: Keep) -> Resu
     let _ = (input, assets, keep);
     match ext {
         #[cfg(feature = "stl")]
-        "stl" => stl::stl(input),
+        "stl" => stl::stl(input, keep),
         #[cfg(feature = "ply")]
         "ply" => ply::ply(input, assets, keep),
         #[cfg(feature = "vox")]
@@ -801,7 +800,7 @@ fn convert(input: Input<'_>, ext: &str, assets: &dyn Assets, keep: Keep) -> Resu
         #[cfg(feature = "dae")]
         "dae" | "zae" | "kmz" => dae::load(input, assets, keep),
         #[cfg(feature = "off")]
-        "off" => off::load(input),
+        "off" => off::load(input, keep),
         #[cfg(feature = "gltf")]
         "vrm" | "vrma" => vrm::load(input, assets, keep),
         #[cfg(feature = "x3d")]
@@ -813,7 +812,7 @@ fn convert(input: Input<'_>, ext: &str, assets: &dyn Assets, keep: Keep) -> Resu
         #[cfg(feature = "sog")]
         "sog" => sog::load(input, assets, keep),
         #[cfg(feature = "dxf")]
-        "dxf" => dxf::load(input),
+        "dxf" => dxf::load(input, keep),
         #[cfg(feature = "mmd")]
         "pmx" | "pmd" | "vmd" => mmd::load(input, ext, assets, keep),
         #[cfg(feature = "directx")]
@@ -849,7 +848,7 @@ fn convert(input: Input<'_>, ext: &str, assets: &dyn Assets, keep: Keep) -> Resu
         #[cfg(feature = "e57")]
         "e57" => e57::load(input, keep),
         #[cfg(feature = "amf")]
-        "amf" => amf::load(input),
+        "amf" => amf::load(input, keep),
         #[cfg(feature = "lwo")]
         "lwo" => lwo::load(input, assets, keep),
         #[cfg(feature = "ac3d")]
@@ -865,13 +864,13 @@ fn convert(input: Input<'_>, ext: &str, assets: &dyn Assets, keep: Keep) -> Resu
         #[cfg(feature = "xgl")]
         "xgl" | "zgl" => xgl::load(input, ext, assets, keep),
         #[cfg(feature = "vtk")]
-        "vtk" | "vtp" | "vtu" => vtk::load(input),
+        "vtk" | "vtp" | "vtu" => vtk::load(input, keep),
         #[cfg(feature = "tiles")]
         "b3dm" | "i3dm" | "pnts" | "cmpt" => tiles::load(input, assets, keep),
         #[cfg(feature = "msh")]
-        "msh" => msh::load(input),
+        "msh" => msh::load(input, keep),
         #[cfg(feature = "medit")]
-        "meshb" => medit::load(input),
+        "meshb" => medit::load(input, keep),
         e if EXTENSIONS.contains(&e) => bail!(FeatureDisabled, "built without the `{}` feature", feature_for(e)),
         _ => bail!(UnknownFormat, "not a model format handled here: .{ext}"),
     }

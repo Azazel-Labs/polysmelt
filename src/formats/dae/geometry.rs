@@ -170,6 +170,8 @@ pub(super) struct Piece {
     /// Each vertex's index into the mesh's `<vertices>`, which skins and morph targets index.
     pub points: Vec<u32>,
     pub triangles: usize,
+    /// The triangles, polygons and segments left out for a corner that names no position.
+    pub dropped: usize,
 }
 
 /// Source values by element, read once.
@@ -178,7 +180,7 @@ pub(super) type Sources = HashMap<usize, Rc<Acc<f32>>>;
 pub(super) fn source(dom: &Dom<'_>, sources: &mut Sources, el: usize, fallback: usize) -> Rc<Acc<f32>> {
     sources
         .entry(el)
-        .or_insert_with(|| Rc::new(read(dom, el, fallback, xml::floats32)))
+        .or_insert_with(|| Rc::new(read(dom, el, fallback, xml::floats32_raw)))
         .clone()
 }
 
@@ -194,7 +196,13 @@ pub(super) fn positions(dom: &Dom<'_>, sources: &mut Sources, mesh: usize) -> Op
 
 /// The primitives of a `<mesh>` (or `<convex_mesh>`), drawing at most `budget` triangles; `Err` with the
 /// number drawn when they'd draw more.
-pub(super) fn mesh(dom: &Dom<'_>, sources: &mut Sources, mesh: usize, budget: usize) -> Result<Vec<Piece>, usize> {
+pub(super) fn mesh(
+    dom: &Dom<'_>,
+    sources: &mut Sources,
+    mesh: usize,
+    budget: usize,
+    crease: f32,
+) -> Result<Vec<Piece>, usize> {
     let mut out = Vec::new();
     let mut drawn = 0usize;
     for el in dom.children(mesh) {
@@ -208,7 +216,7 @@ pub(super) fn mesh(dom: &Dom<'_>, sources: &mut Sources, mesh: usize, budget: us
             b"linestrips" => Kind::Linestrips,
             _ => continue,
         };
-        let piece = primitive(dom, sources, el, kind, budget - drawn).map_err(|n| drawn + n)?;
+        let piece = primitive(dom, sources, el, kind, budget - drawn, crease).map_err(|n| drawn + n)?;
         if let Some(p) = piece {
             drawn += p.triangles;
             out.push(p);
@@ -299,6 +307,7 @@ fn primitive(
     el: usize,
     kind: Kind,
     budget: usize,
+    crease: f32,
 ) -> Result<Option<Piece>, usize> {
     let (streams, vertex_offset, stride) = inputs(dom, sources, el);
     let Some(pos) = streams.iter().position(|s| s.sem == Sem::Position) else {
@@ -311,7 +320,7 @@ fn primitive(
             for p in dom.kids(el, "p") {
                 let idx = xml::indices(dom.text(p));
                 for tri in idx.chunks_exact(stride * 3) {
-                    c.triangle(&tri[..stride], &tri[stride..2 * stride], &tri[2 * stride..]);
+                    c.triangle(&tri[..stride], &tri[stride..2 * stride], &tri[2 * stride..], false);
                     if c.over {
                         break;
                     }
@@ -372,7 +381,7 @@ fn primitive(
                     } else {
                         (corners[k - 1], corners[k - 2], corners[k])
                     };
-                    c.triangle(a, b, d);
+                    c.triangle(a, b, d, true);
                     if c.over {
                         break;
                     }
@@ -402,7 +411,7 @@ fn primitive(
     if c.over {
         return Err(c.triangles);
     }
-    Ok(c.finish(symbol))
+    Ok(c.finish(symbol, crease))
 }
 
 /// The empty slot of the corner table.
@@ -436,6 +445,8 @@ struct Corners {
     indices: Vec<u32>,
     /// Line segments, a pair of vertices each.
     lines: Vec<u32>,
+    /// What was left out for a corner that names no position.
+    dropped: usize,
     /// Which output each stream fills: its set's number among the inputs of its kind.
     slot: Vec<usize>,
     sets: Vec<u32>,
@@ -527,6 +538,7 @@ impl Corners {
             poly: Vec::new(),
             outline: Vec::new(),
             tris: Vec::new(),
+            dropped: 0,
         }
     }
 
@@ -594,10 +606,14 @@ impl Corners {
             let v = corner.get(s.offset).and_then(|&i| s.acc.get(i)).unwrap_or(&[]);
             let at = |k: usize| v.get(k).copied().filter(|x| x.is_finite()).unwrap_or(0.0);
             match s.sem {
-                Sem::Position => self.positions.push([at(0), at(1), at(2)]),
-                Sem::Normal => self
-                    .normals
-                    .push(vec3::unit([at(0), at(1), at(2)]).unwrap_or([0.0, 0.0, 1.0])),
+                // A position that isn't finite stays as it is: what's drawn on it is dropped as the primitive
+                // is written.
+                Sem::Position => {
+                    let raw = |k: usize| v.get(k).copied().unwrap_or(0.0);
+                    self.positions.push([raw(0), raw(1), raw(2)]);
+                }
+                // A normal with no length stays zero, and takes its faces' as the primitive is written.
+                Sem::Normal => self.normals.push(vec3::unit([at(0), at(1), at(2)]).unwrap_or([0.0; 3])),
                 Sem::Tangent => self.tangents.push([at(0), at(1), at(2)]),
                 Sem::Binormal => self.binormals.push([at(0), at(1), at(2)]),
                 Sem::Texcoord => self.uvs[slot].push([at(0), 1.0 - at(1)]),
@@ -609,13 +625,9 @@ impl Corners {
         }
     }
 
+    /// A triangle, as the file has it: one with no area, or with a corner twice, is kept.
     #[inline]
     fn push(&mut self, a: u32, b: u32, c: u32) {
-        // Two corners at one position (whatever their normals or texture coordinates) make no area.
-        let p = |v: u32| self.points.get(v as usize);
-        if a == b || b == c || a == c || p(a) == p(b) || p(b) == p(c) || p(a) == p(c) {
-            return;
-        }
         self.triangles += 1;
         if self.triangles > self.budget {
             self.over = true;
@@ -624,16 +636,23 @@ impl Corners {
         self.indices.extend_from_slice(&[a, b, c]);
     }
 
-    fn triangle(&mut self, a: &[u32], b: &[u32], c: &[u32]) {
+    /// A triangle of three corners. One unrolled from a strip or a fan (`strip`) that names a vertex twice
+    /// restarts the strip, and draws nothing.
+    fn triangle(&mut self, a: &[u32], b: &[u32], c: &[u32], strip: bool) {
         let (Some(a), Some(b), Some(c)) = (self.vertex(a), self.vertex(b), self.vertex(c)) else {
+            self.dropped += 1;
             return;
         };
+        if strip && !crate::geometry::distinct([a, b, c]) {
+            return;
+        }
         self.push(a, b, c);
     }
 
     /// A line segment; one that starts and ends at the same vertex draws nothing.
     fn segment(&mut self, a: &[u32], b: &[u32]) {
         let (Some(a), Some(b)) = (self.vertex(a), self.vertex(b)) else {
+            self.dropped += 1;
             return;
         };
         if a != b {
@@ -641,19 +660,19 @@ impl Corners {
         }
     }
 
-    /// The vertices of a polygon's corners; `false` when one names no position.
-    fn outline(&mut self, idx: &[u32], out: &mut Vec<u32>) -> bool {
+    /// The vertices of a polygon's corners; `false` when one names no position. `tidy` leaves out a corner
+    /// repeated in place and one that closes the outline, which an outline cut around holes can't have.
+    fn outline(&mut self, idx: &[u32], out: &mut Vec<u32>, tidy: bool) -> bool {
         out.clear();
         for corner in idx.chunks_exact(self.stride) {
             let Some(v) = self.vertex(corner) else {
                 return false;
             };
-            // A corner repeated in place adds nothing.
-            if out.last() != Some(&v) {
+            if !tidy || out.last() != Some(&v) {
                 out.push(v);
             }
         }
-        while out.len() > 1 && out.first() == out.last() {
+        while tidy && out.len() > 1 && out.first() == out.last() {
             out.pop();
         }
         true
@@ -663,14 +682,16 @@ impl Corners {
         let n = idx.len() / self.stride;
         if n == 3 {
             let s = self.stride;
-            self.triangle(&idx[..s], &idx[s..2 * s], &idx[2 * s..3 * s]);
+            self.triangle(&idx[..s], &idx[s..2 * s], &idx[2 * s..3 * s], false);
             return;
         }
         if n < 3 {
             return;
         }
         let mut poly = std::mem::take(&mut self.poly);
-        if self.outline(idx, &mut poly) && poly.len() >= 3 {
+        if !self.outline(idx, &mut poly, false) {
+            self.dropped += 1;
+        } else if poly.len() >= 3 {
             if poly.len() == 3 {
                 self.push(poly[0], poly[1], poly[2]);
             } else {
@@ -691,13 +712,17 @@ impl Corners {
     fn polygon_with_holes(&mut self, outer: &[u32], holes: &[Vec<u32>]) {
         let stride = self.stride;
         let mut ring = Vec::new();
-        if !self.outline(&outer[..outer.len() / stride * stride], &mut ring) || ring.len() < 3 {
+        if !self.outline(&outer[..outer.len() / stride * stride], &mut ring, true) {
+            self.dropped += 1;
+            return;
+        }
+        if ring.len() < 3 {
             return;
         }
         let mut hole_rings = Vec::new();
         for h in holes {
             let mut r = Vec::new();
-            if self.outline(&h[..h.len() / stride * stride], &mut r) && r.len() >= 3 {
+            if self.outline(&h[..h.len() / stride * stride], &mut r, true) && r.len() >= 3 {
                 hole_rings.push(r);
             }
         }
@@ -717,7 +742,7 @@ impl Corners {
         }
     }
 
-    fn finish(self, symbol: Option<String>) -> Option<Piece> {
+    fn finish(self, symbol: Option<String>, crease: f32) -> Option<Piece> {
         if self.indices.is_empty() && self.lines.is_empty() {
             return None;
         }
@@ -761,23 +786,32 @@ impl Corners {
             std::iter::once(Vec::new()).chain(rest).collect()
         };
         let triangles = self.indices.len() / 3;
+        let mut prim = Prim {
+            positions: self.positions,
+            normals: self.normals,
+            tangents,
+            uvs: first_uv,
+            uv_sets,
+            colors: first_color,
+            color_sets,
+            indices: self.indices,
+            lines: self.lines,
+            ..Prim::default()
+        };
+        // Without normals in the file, the default ones; the vertices they add keep their points, which skins
+        // and morph targets go by.
+        let mut points = self.points;
+        if prim.normals.len() != n && !prim.indices.is_empty() {
+            let added = crate::geometry::default_normals(&mut prim, crease);
+            crate::geometry::follow(&mut points, n, &added);
+        }
         Some(Piece {
-            prim: Prim {
-                positions: self.positions,
-                normals: self.normals,
-                tangents,
-                uvs: first_uv,
-                uv_sets,
-                colors: first_color,
-                color_sets,
-                indices: self.indices,
-                lines: self.lines,
-                ..Prim::default()
-            },
+            prim,
             symbol,
             sets: self.sets,
-            points: self.points,
+            points,
             triangles,
+            dropped: self.dropped,
         })
     }
 }

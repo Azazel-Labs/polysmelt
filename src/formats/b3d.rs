@@ -334,9 +334,7 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
             scene.nodes[holder].skin = Some(scene.skins.len() - 1);
         }
     }
-    if dropped > 0 {
-        facts.insert("dropped_triangles".into(), json!(dropped));
-    }
+    scene.dropped = dropped;
     if stray > 0 {
         facts.insert("dropped_weights".into(), json!(stray));
     }
@@ -858,7 +856,7 @@ mod tests {
         let at = v.windows(4).position(|w| w == b"TRIS").unwrap();
         v[at + 20..at + 24].copy_from_slice(&7i32.to_le_bytes());
         let doc = read(&v);
-        assert!(doc.is_err() || doc.unwrap().facts["dropped_triangles"] == json!(1));
+        assert!(doc.is_err() || doc.unwrap().json()["asset"]["extras"]["source"]["droppedGeometry"] == json!(1));
     }
 
     #[test]

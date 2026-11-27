@@ -14,7 +14,7 @@
 //! Polygons are triangulated in their plane. Faces with a corner out of range or at a point
 //! that isn't finite are dropped, as are points and lines (faces of one or two corners). Face
 //! colors become vertex colors, a vertex split where faces of different colors meet; without
-//! normals in the file, smooth ones are made. Colors are taken as sRGB. A file that ends early
+//! normals in the file, the default ones are made, with a crease angle. Colors are taken as sRGB. A file that ends early
 //! draws what it has.
 //!
 //! OFF names no units and no up axis, so both are unknown; geometry is kept as written.
@@ -25,7 +25,7 @@ use super::Input;
 use super::stream;
 use crate::bytes::Bin;
 use crate::document::Document;
-use crate::mesh::{FastMap, GRAY, Prim, smooth_normals, srgb_to_linear, triangulate};
+use crate::mesh::{FastMap, GRAY, Prim, srgb_to_linear, triangulate};
 use crate::num::u32_of;
 use crate::source::SourceInfo;
 use crate::{Context as _, ErrorKind, Result};
@@ -75,7 +75,7 @@ const NONE: u32 = u32::MAX;
 /// The most coordinates a position may have (`nOFF`'s dimension).
 const MAX_VALUES: usize = 32;
 
-pub(crate) fn load(input: Input<'_>) -> Result<Document> {
+pub(crate) fn load(input: Input<'_>, keep: crate::Keep) -> Result<Document> {
     let data = input.read()?;
     let data = data.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&data);
     let mut c = Cursor { d: data, at: 0 };
@@ -95,7 +95,7 @@ pub(crate) fn load(input: Input<'_>) -> Result<Document> {
         source.insert("truncated".into(), json!(true));
     }
     if m.dropped > 0 {
-        source.insert("droppedFaces".into(), json!(m.dropped));
+        source.insert(crate::geometry::DROPPED.into(), json!(m.dropped));
     }
     let info = SourceInfo {
         format: Some("OFF".into()),
@@ -114,6 +114,7 @@ pub(crate) fn load(input: Input<'_>) -> Result<Document> {
         Some(Value::Object(source)),
         facts,
         &[],
+        keep.crease_angle(),
     ))
 }
 
@@ -521,27 +522,17 @@ fn build(m: Model) -> Prim {
     } = m;
     let n = positions.len();
     let flat: Vec<u32> = tris.into_flattened();
-    let normals = if normals.len() == n {
-        normals
-            .into_iter()
-            .map(|v| {
-                let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
-                if len > 0.0 && len.is_finite() {
-                    v.map(|x| x / len)
-                } else {
-                    [0.0, 1.0, 0.0]
-                }
-            })
-            .collect()
-    } else {
-        smooth_normals(&positions, &flat)
-    };
+    // The file's normals as they are, made unit as the primitive is written; without any, it takes the default
+    // ones then.
+    let has_normals = normals.len() == n;
     let colored = colors.len() == n || !face_colors.is_empty();
     let textured = uvs.len() == n;
     let mut p = Prim::default();
     let push = |p: &mut Prim, v: usize, face: u32| {
         p.positions.push(positions[v]);
-        p.normals.push(normals[v]);
+        if has_normals {
+            p.normals.push(normals[v]);
+        }
         if textured {
             p.uvs.push(uvs[v]);
         }
@@ -684,8 +675,9 @@ mod tests {
         let doc = read_with(CUBE.as_bytes(), usize::MAX).unwrap();
         assert_eq!(doc.facts["triangles"], 12);
         let m = doc.flatten(Pose::Rest).unwrap().unwrap();
-        assert_eq!(m.prims[0].positions.len(), 8);
-        assert_eq!(m.prims[0].normals.len(), 8);
+        // Without normals in the file, the default ones: the cube's edges are hard, four corners to a face.
+        assert_eq!(m.prims[0].positions.len(), 24);
+        assert_eq!(m.prims[0].normals.len(), 24);
         assert_eq!(m.materials[0].color.map(f32::to_bits), GRAY.map(f32::to_bits));
         // Every triangle faces outward.
         let p = &m.prims[0];
@@ -778,7 +770,7 @@ mod tests {
         let text = "OFF\n4 4 0\n0 0 0\n1 0 0\n0 1 0\nnan 0 0\n3 0 1 2\n3 0 1 9\n3 0 1 3\n2 0 1\n";
         let doc = read_with(text.as_bytes(), usize::MAX).unwrap();
         assert_eq!(doc.facts["triangles"], 1);
-        assert_eq!(doc.json()["asset"]["extras"]["source"]["droppedFaces"], 3);
+        assert_eq!(doc.json()["asset"]["extras"]["source"]["droppedGeometry"], 3);
         let short = &CUBE[..CUBE.len() - 11];
         let doc = read_with(short.as_bytes(), usize::MAX).unwrap();
         assert_eq!(doc.facts["triangles"], 10);

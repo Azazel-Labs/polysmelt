@@ -4,6 +4,75 @@ Breaking changes are allowed in minor releases until 1.0.
 
 ## Unreleased
 
+- Every reader now treats geometry that can't be drawn the same way. A triangle, line segment
+  or point that names a vertex that isn't there, or one whose position isn't finite, is
+  dropped: never moved to the origin, and never an error for the whole file. Each is counted
+  under one key, `asset.extras.source.droppedGeometry`, which replaces `droppedFaces` (OFF),
+  `droppedCells` (VTK, Gmsh, Medit), `droppedSurfaces` (AC3D), `badPrimitives` (OpenGEX), `droppedCorners`
+  (OpenFlight), the bad polygons in LightWave's `droppedPolygons` (which keeps the polygon
+  kinds that aren't drawn), and the facts `dropped_triangles` (MilkShape 3D, Blitz3D,
+  MikuMikuDance, SMD, Irrlicht) and `dropped_primitives` (XGL). OBJ, PLY, 3MF, DXF, 3DS,
+  DirectX, OGRE, USD, FBX, COLLADA, X3D and STL, which dropped such faces without a word, count
+  them there too. What changes in the documents:
+  - A position that isn't finite no longer stays in `POSITION` (OBJ, PLY, 3MF, 3DS, LightWave,
+    OpenGEX, USD) and is no longer drawn at the origin (COLLADA, AMF, XGL, OpenFlight, and the
+    game and character formats): what was drawn on it is dropped. No document read from these
+    formats holds a position that is NaN or infinite, or an index past its vertices.
+  - MD2, MD3, MD5 and IQM: a triangle naming a vertex past its list (MD2: or a texture
+    coordinate) is dropped and counted, where the file was refused as corrupt.
+  - OpenFlight: a face with a corner that names no vertex is dropped whole, where it was drawn
+    with the corners left; a mesh strip's or fan's triangle on such a corner is dropped alone.
+  - DXF: a polyface mesh's face naming a vertex past the list is dropped, where it was drawn
+    without that corner.
+  - ASCII FBX: `1.#INF`, `1.#QNAN` and `-1.#IND` are the infinity or NaN they stand for, as a
+    binary file holds them, so a polygon on such a point is dropped in both; it read as 0.
+  - `Document::to_glb`, `Document::repair` and `Document::flatten` follow the same rule for a
+    glTF file, which is read as it is: what is drawn on a position that isn't finite is
+    dropped (also from a primitive without indices), where `repair` moved the vertex to the
+    origin and `flatten` kept the NaN. The three now agree.
+- Triangles with no area, or with a corner twice, are kept as the file has them, in every
+  format: they hold a mesh's topology together, and other tools count them. COLLADA no longer
+  drops a triangle with two corners at one position, and a polygon keeps a corner it repeats.
+  DXF keeps a face with a repeated corner (four corners whose last repeats the third are still
+  the triangle DXF means by that), and one whose corners are all in a line. The one exception
+  is a triangle a reader makes itself by unrolling a strip or a fan: one that names a vertex
+  twice restarts the strip and draws nothing. That was so in AC3D, OpenGEX and OGRE strips, and
+  is now so in OGRE fans and in PLY, VTK, X3D, COLLADA and OpenFlight strips and fans.
+- Every triangle primitive read from a file has unit normals (`NORMAL`); points and lines get
+  none, and a glTF file without normals keeps none, as glTF defines flat shading for it. A
+  file's own normals are used, made unit length (AMF's were passed on as written). One that
+  is zero or not finite takes the area-weighted normal of the triangles around its vertex, and
+  `[0, 1, 0]` when those have no area: one rule, where readers put `[0, 1, 0]`, `[0, 0, 1]` or
+  a face's normal. Where a file has no normals, what its format says about smoothing is
+  followed: smoothing groups (OBJ's `s`, 3DS, FBX), X3D's `creaseAngle` (0 by default, so a
+  face set without normals is flat, as the standard has it, where it had none), LightWave's
+  smoothing angle (none is flat), MD5's rule, SketchUp's soft edges.
+- A file with neither normals nor smoothing data gets the same normals whatever its format:
+  made with a crease angle of 30 degrees. Each corner takes the normals of the triangles
+  around its point that turn less than that from its own, weighted by their areas, and a
+  vertex is split where its corners' normals differ. So a cube comes out hard-edged, with 24
+  vertices, and a finely cut curved surface smooth, with its vertices shared, from STL, OBJ
+  (with no `vn` and no `s`), PLY, OFF, 3MF, AMF, VTK, COLLADA, DXF, DirectX, Blitz3D, IQM,
+  OpenGEX, XGL, Gmsh, Medit and FBX alike. The triangles around a point are those of the primitive with a
+  corner at that position, so a vertex split for its texture coordinates shows no seam. Before,
+  STL, COLLADA, AMF, 3MF, DXF, VTK, DirectX, Blitz3D, IQM, OpenGEX and XGL had no normals, and
+  OBJ, PLY, OFF and FBX smoothed across every shared vertex, hard edges too. The vertices added
+  come after the file's own, each with everything its original holds (skin weights, morph
+  targets, other attributes).
+- `Keep::with_crease_angle` sets that angle, in degrees, and `Keep::crease_angle` reads it:
+  30 by default, 0 for every face flat with normals of its own, 180 for smooth across every
+  point the faces share. Values past either end are that end, and one that isn't a number
+  leaves the default. A file's own normals and smoothing data always win, and glTF input is
+  untouched.
+- `mesh::smooth_normals` weights each triangle's normal by its area; it averaged the faces
+  unweighted.
+- X3D's crease angle is now worked out by the code LightWave and AC3D use, and a point with
+  very many faces around it (the tip of a cone, the middle of a fan) is smoothed like any
+  other: past 256 faces X3D averaged them all, whatever the angle, and past 512 LightWave and
+  AC3D left the point flat.
+- DirectX and OpenGEX: a face of four or more corners (OpenGEX: a quad) that isn't convex is
+  cut into triangles inside its outline, as every other reader cuts one; it was fanned from
+  its first corner.
 - Classic materials (Phong, Blinn, Lambert) are read one way by every reader, so the same
   material is the same glTF material whatever format held it. Before, ten formulas turned a
   highlight's exponent into roughness: an exponent of 20 was 0.30 from COLLADA and OGRE,

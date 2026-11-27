@@ -373,8 +373,8 @@ case(FMT, "indices_out_of_range", {
     "source": SRC,
     "triangles": 2,
     "materials": [DEFAULT_MATERIAL],
-    "json": {"/meshes/0/primitives/0/material": 0},
-    "facts": {"triangles": 2, "joints": 0, "groups": 1, "dropped_triangles": 2},
+    "json": {"/meshes/0/primitives/0/material": 0, "/asset/extras/source/droppedGeometry": 2},
+    "facts": {"triangles": 2, "joints": 0, "groups": 1},
 })
 
 # Broken files.

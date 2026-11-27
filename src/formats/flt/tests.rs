@@ -752,3 +752,17 @@ fn the_header_says_when_and_where() {
     assert_eq!(g["utmZone"], 10);
     assert!(doc.json()["asset"]["extras"]["source"].get("date").is_none());
 }
+
+#[test]
+fn a_face_with_a_corner_that_isnt_there_is_dropped_whole() {
+    let mut w = W::new(1640, 0);
+    let v = w.vertices(&SQUARE);
+    w.push().group("g1").push().object("o1", 0).push();
+    w.face("good", &v, |_| {});
+    // Its last corner names no vertex of the palette: not drawn as a triangle of the other three.
+    w.face("bad", &[v[0], v[1], v[2], 9999], |_| {});
+    w.pop().pop().pop();
+    let doc = read(&w.bytes(), &Memory::new()).unwrap();
+    assert_eq!(flat(&doc).triangles(), 2);
+    assert_eq!(doc.json()["asset"]["extras"]["source"]["droppedGeometry"], 1);
+}

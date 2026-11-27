@@ -26,8 +26,9 @@
 //! (the source info's `upAxis` is a declared `+Z`, converted, and its `handedness` a declared `right`); game units are kept unscaled, and their length unknown. The assumed
 //! frame rate is recorded when there are frames to animate.
 //!
-//! A file cut short, an offset past its end, a negative count, or a triangle naming a position or texture
-//! coordinate past its list is an error. Counts are checked against the file's size before anything is allocated
+//! A file cut short, an offset past its end or a negative count is an error. A triangle naming a position or
+//! texture coordinate past its list is dropped and counted (`droppedGeometry` in the source extras), as in
+//! every format. Counts are checked against the file's size before anything is allocated
 //! for them, and a file whose frames would make more morph data than a model of the engine can hold is refused.
 
 use std::collections::HashMap;
@@ -124,7 +125,10 @@ pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
         .file_stem()
         .map_or_else(|| "md2".to_owned(), |s| s.to_string_lossy().into_owned());
 
-    let mut scene = Scene::default();
+    let mut scene = Scene {
+        dropped: model.dropped,
+        ..Scene::default()
+    };
     let mut images = Images::new(!keep.image_bytes, input.dir());
     let textured = !model.prim.uvs.is_empty();
     let skin = model.skins.first().filter(|s| !s.is_empty());
@@ -208,6 +212,8 @@ struct Model {
     prim: Primitive,
     /// Each kept frame's target; `None` for the first frame and any frame that doesn't move from it.
     frames: Vec<Option<usize>>,
+    /// The triangles left out for naming a vertex or a texture coordinate that isn't there.
+    dropped: usize,
 }
 
 /// A header count or offset, which can't be negative.
@@ -276,20 +282,16 @@ fn parse(data: &[u8], morphs: bool) -> Result<Model> {
     ensure!(n_tris > 0, Empty, "MD2 file has no triangles");
     b.seek(size(ofs_tris, "triangle offset")?)?;
     let mut tris = Vec::with_capacity(b.count(n_tris as u64, 12)?);
-    for t in 0..n_tris {
+    let mut dropped = 0;
+    for _ in 0..n_tris {
         let v = [b.u16()?, b.u16()?, b.u16()?];
         let s = [b.u16()?, b.u16()?, b.u16()?];
-        ensure!(
-            v.iter().all(|&i| usize::from(i) < n_xyz),
-            Corrupt,
-            "MD2 triangle {t} names a vertex past the {n_xyz} each frame holds"
-        );
-        // With no texture coordinates at all, their indices mean nothing.
-        ensure!(
-            n_st == 0 || s.iter().all(|&i| usize::from(i) < n_st),
-            Corrupt,
-            "MD2 triangle {t} names a texture coordinate past the {n_st} there are"
-        );
+        // A triangle naming a vertex that isn't there is dropped, as in every format, and so is one naming a
+        // texture coordinate that isn't. With no texture coordinates at all, their indices mean nothing.
+        if v.iter().any(|&i| usize::from(i) >= n_xyz) || (n_st > 0 && s.iter().any(|&i| usize::from(i) >= n_st)) {
+            dropped += 1;
+            continue;
+        }
         tris.push((v, if n_st == 0 { [0; 3] } else { s }));
     }
 
@@ -379,6 +381,7 @@ fn parse(data: &[u8], morphs: bool) -> Result<Model> {
         names,
         prim,
         frames,
+        dropped,
     })
 }
 

@@ -25,6 +25,7 @@ use std::sync::OnceLock;
 use serde_json::{Map, Value, json};
 
 use crate::Bytes;
+use crate::geometry;
 use crate::gltf as container;
 use crate::images::{Refs, Source};
 use crate::material::{Full, Writer};
@@ -1009,14 +1010,17 @@ impl Document {
         if !skinned.is_empty() {
             meshes.push((None, skinned));
         }
-        // A mesh handed over is written as it is: its materials say whether they blend.
-        Self::from_meshes(meshes, &materials, images, None, facts, &skeleton, true)
+        // A mesh handed over is written as it is: its materials say whether they blend, and its triangles
+        // without normals stay without.
+        Self::from_meshes(meshes, &materials, images, None, facts, &skeleton, true, None)
     }
 
     /// The document for named meshes sharing `materials` and `images`: a node drawing each, in
     /// order, skipping those that draw nothing; `source` becomes the asset's
     /// `extras.source`. A mesh whose primitives are all skinned is bound to `skeleton`, when
     /// there is one.
+    /// These are a reader's meshes: what can't be drawn is dropped and counted, and triangles without normals
+    /// get the default ones, at a crease angle of `crease` degrees (see [`crate::geometry`]).
     #[allow(dead_code, reason = "only some readers build their document this way")]
     pub(crate) fn from_named(
         meshes: Vec<(Option<String>, Vec<Prim>)>,
@@ -1025,12 +1029,15 @@ impl Document {
         source: Option<Value>,
         facts: Map<String, Value>,
         skeleton: &[Bone],
+        crease: f32,
     ) -> Document {
-        Self::from_meshes(meshes, materials, images, source, facts, skeleton, false)
+        Self::from_meshes(meshes, materials, images, source, facts, skeleton, false, Some(crease))
     }
 
     /// [`Document::from_named`]; with `keep_alpha_modes`, vertex colors that aren't opaque leave their
-    /// material's alpha mode alone.
+    /// material's alpha mode alone. `crease` is the crease angle of a reader's meshes' default normals; with
+    /// none the meshes are a caller's own, whose triangles without normals stay without.
+    #[allow(clippy::too_many_arguments, reason = "what a document of meshes is made from")]
     fn from_meshes(
         mut meshes: Vec<(Option<String>, Vec<Prim>)>,
         materials: &[Material],
@@ -1039,12 +1046,11 @@ impl Document {
         facts: Map<String, Value>,
         skeleton: &[Bone],
         keep_alpha_modes: bool,
+        crease: Option<f32>,
     ) -> Document {
         let materials = texcoords(&mut meshes, materials);
-        let mut b = Builder {
-            keep_alpha_modes,
-            ..Builder::default()
-        };
+        let mut b = crease.map_or_else(Builder::plain, Builder::new);
+        b.keep_alpha_modes = keep_alpha_modes;
         let rig = (!skeleton.is_empty()
             && meshes
                 .iter()
@@ -1339,7 +1345,6 @@ fn blend_vertex_alpha(json: &mut Map<String, Value>, translucent: &[usize]) {
 }
 
 /// Builds a document's one buffer from typed arrays, with a view and an accessor for each.
-#[derive(Default)]
 pub(crate) struct Builder {
     pub parts: Parts,
     pub views: Vec<View>,
@@ -1356,9 +1361,49 @@ pub(crate) struct Builder {
     /// Leaves materials' alpha modes as they are given, whatever the vertex colors hold: for a mesh a caller
     /// hands over, whose materials are its own, not a reader's.
     pub keep_alpha_modes: bool,
+    /// A caller's own mesh rather than a file's: triangles without normals stay without, which glTF shades
+    /// flat. A reader's get the default normals (see [`crate::geometry`]).
+    pub plain: bool,
+    /// What the reader left out for naming a missing vertex or a position that isn't finite, counted as
+    /// triangles; [`Builder::finish`] reports it with what was dropped here.
+    pub dropped: usize,
+    /// The triangles, line segments and points dropped as their primitives were written.
+    pub(crate) cut: [usize; 3],
+    /// The crease angle of the normals made for triangles whose file has none, in degrees: the caller's
+    /// ([`Keep::crease_angle`](crate::Keep::crease_angle)).
+    pub crease: f32,
 }
 
 impl Builder {
+    /// A builder for what a reader read, making the normals of triangles that have none at a crease angle of
+    /// `crease` degrees: the `Keep`'s the reader was given. There is no builder without one, so no reader can
+    /// leave the caller's angle out.
+    pub(crate) fn new(crease: f32) -> Self {
+        Self {
+            parts: Parts::default(),
+            views: Vec::new(),
+            accessors: Vec::new(),
+            animations: Vec::new(),
+            refs: Refs::new(),
+            joints: None,
+            translucent: Vec::new(),
+            keep_alpha_modes: false,
+            plain: false,
+            dropped: 0,
+            cut: [0; 3],
+            crease,
+        }
+    }
+
+    /// A builder for a caller's own mesh, or for what has no triangles to make normals for (points, splats,
+    /// motion): triangles without normals stay without.
+    pub(crate) fn plain() -> Self {
+        Self {
+            plain: true,
+            ..Self::new(crate::formats::crease::DEFAULT_ANGLE)
+        }
+    }
+
     /// A primitive's JSON (attributes and indices, no material) for its triangles, its arrays
     /// moved into the buffer; `None` when it has no triangles. Its lines and points are left
     /// out: [`Builder::primitives`] writes them too.
@@ -1382,7 +1427,26 @@ impl Builder {
         if p.is_empty() {
             return Vec::new();
         }
-        let n = p.positions.len();
+        self.sound(&mut p.positions, [&mut p.indices, &mut p.lines, &mut p.points]);
+        if p.is_empty() {
+            return Vec::new();
+        }
+        let mut n = p.positions.len();
+        // A reader's triangles always have normals, the file's own or the default; lines and points alone get
+        // none.
+        if !self.plain && !p.indices.is_empty() {
+            if p.normals.len() == n {
+                geometry::normals(&p.positions, &p.indices, &mut p.normals, 1e-6);
+            } else {
+                // The default adds vertices where an edge is hard. A reader that keeps anything beside the
+                // primitive, one per vertex, gives it its normals itself, to know which.
+                geometry::default_normals(&mut p, self.crease);
+                n = p.positions.len();
+            }
+        } else if !self.plain && p.normals.len() == n && !geometry::unit(&mut p.normals, 1e-6) {
+            // Points or lines whose normals aren't all directions have none.
+            p.normals = Vec::new();
+        }
         let draws: [(u64, Vec<u32>); 3] = [
             (4, std::mem::take(&mut p.indices)),
             (1, std::mem::take(&mut p.lines)),
@@ -1390,7 +1454,7 @@ impl Builder {
         ];
         let pos = self.positions(p.positions);
         let mut attributes = json!({ "POSITION": pos });
-        // Without normals, glTF clients shade flat.
+        // Without normals (a caller's own mesh), glTF clients shade flat.
         let has_normals = p.normals.len() == n;
         if has_normals {
             let a = self.accessor(Part::f32(p.normals.into_flattened()), 5126, n, "VEC3", Some(34962));
@@ -1473,6 +1537,18 @@ impl Builder {
             out.push(prim);
         }
         out
+    }
+
+    /// Drops what can't be drawn from a primitive's triangles, line segments and points (see
+    /// [`crate::geometry`]), counting each, and leaves no position that isn't finite.
+    pub(crate) fn sound(&mut self, positions: &mut [[f32; 3]], lists: [&mut Vec<u32>; 3]) {
+        let finite = geometry::finite(positions);
+        for (k, list) in lists.into_iter().enumerate() {
+            self.cut[k] += geometry::sound(positions, finite, list, 3 - k);
+        }
+        if !finite {
+            geometry::settle(positions);
+        }
     }
 
     /// An index accessor for `idx`, on `n` vertices.
@@ -1639,6 +1715,12 @@ impl Builder {
         if asset.get("generator").is_none() {
             asset["generator"] = json!("polysmelt");
         }
+        let cut = self.cut.iter().sum::<usize>();
+        if self.dropped + cut > 0 {
+            let had = asset.pointer(&format!("/extras/source/{}", geometry::DROPPED));
+            let had = had.and_then(Value::as_u64).unwrap_or(0);
+            asset["extras"]["source"][geometry::DROPPED] = json!(had + (self.dropped + cut) as u64);
+        }
         let mut buffers = Vec::new();
         let mut tables = None;
         if !self.views.is_empty() {
@@ -1658,6 +1740,15 @@ impl Builder {
         }
         let mut doc = Document::new(json, buffers, facts, self.refs);
         doc.tables = tables;
+        if cut > 0 {
+            // The reader counted what it drew before the bad ones were dropped here: counted again, as drawn.
+            let c = doc.counts();
+            for (key, n) in [("triangles", c.triangles), ("lines", c.lines), ("points", c.points)] {
+                if doc.facts.contains_key(key) {
+                    doc.facts.insert(key.into(), json!(n));
+                }
+            }
+        }
         doc
     }
 
@@ -1733,7 +1824,15 @@ mod tests {
             cut,
         ];
         let prims = || vec![prim(0.5, 0), prim(1.0, 1), prim(0.5, 2)];
-        let read = Document::from_named(vec![(None, prims())], &materials, Vec::new(), None, Map::new(), &[]);
+        let read = Document::from_named(
+            vec![(None, prims())],
+            &materials,
+            Vec::new(),
+            None,
+            Map::new(),
+            &[],
+            30.0,
+        );
         let m = &read.json()["materials"];
         assert_eq!(m[0]["alphaMode"], "BLEND");
         assert!(m[1].get("alphaMode").is_none());

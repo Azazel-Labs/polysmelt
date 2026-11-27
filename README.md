@@ -148,6 +148,11 @@ Early. What exists today:
   `Keep { max_triangles: 120_000_000, ..Keep::ALL }`. Points and lines (point clouds, wireframes,
   curves) are drawn too, up to `Keep::max_points` of them (16 million by default,
   `mesh::MAX_POINTS`); `Keep { lines_and_points: false, ..Keep::ALL }` leaves them out.
+  Every mesh read from a file has normals: the file's own, or what its format's smoothing data
+  gives, or else ones made with a crease angle of 30 degrees, so a box keeps its hard edges and
+  a curved surface is smooth whatever format it came in. `Keep::with_crease_angle` changes the
+  angle (0 for flat faces, 180 for smooth everywhere); a file's own normals and smoothing always
+  win, and a glTF file keeps what it has.
   `Keep::threads` reads large OBJ files on several threads (`0` for one per core) and inflates
   SPZ files on one thread while unpacking them on another, with the same result as one thread;
   it is `1`, one thread, by default.

@@ -44,6 +44,7 @@
 //! | `byteOrder` | `"little"` or `"big"`, for a binary file of a format that comes in either |
 //! | `textEncoding` | the encoding of the file's text, where the file states it (`"UTF-8"`, `"UTF-16LE"`, `"Shift-JIS"`) |
 //! | `droppedTextures` | how many textures the file names that the document doesn't have: missing, unreadable or in a format that isn't decoded |
+//! | `droppedGeometry` | how many triangles, line segments and points were left out for naming a vertex that isn't there or one whose position isn't finite (a polygon a reader leaves out whole counts once) |
 //! | `missingFiles` | the names of the files the model refers to that weren't found |
 //!
 //! What a reader left out is counted here, under `dropped…` and `missing…` keys.

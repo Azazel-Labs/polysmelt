@@ -56,7 +56,8 @@ pub(crate) const MAX_INFLUENCES: usize = 16;
 pub struct Prim {
     /// Vertex positions.
     pub positions: Vec<[f32; 3]>,
-    /// Unit vertex normals; empty for a faceted model (STL), which glTF clients shade flat.
+    /// Unit vertex normals. Every mesh read from a file has them, but a glTF's that has none, which glTF clients
+    /// shade flat; empty there, and in a mesh built without.
     pub normals: Vec<[f32; 3]>,
     /// Unit tangents for normal mapping, as glTF stores them: `xyz` the direction, `w` ±1 the
     /// bitangent's handedness (`bitangent = cross(normal, xyz) * w`). Empty when the model has
@@ -524,26 +525,13 @@ pub(crate) fn linear_to_srgb(c: f32) -> f32 {
     }
 }
 
-/// Smooth normals from the triangles, for models that don't carry any.
+/// Smooth normals from the triangles: each vertex takes the normals of the triangles that share it, weighted
+/// by their areas, so vertices that aren't shared come out flat. A vertex with no triangle of any area around
+/// it points up, `[0, 1, 0]`. (A file read without normals gets these only across edges that turn less than 30
+/// degrees: its vertices are split where an edge is harder.)
 #[must_use]
 pub fn smooth_normals(positions: &[[f32; 3]], indices: &[u32]) -> Vec<[f32; 3]> {
-    let mut nrm = vec![[0.0f32; 3]; positions.len()];
-    for t in indices.as_chunks::<3>().0 {
-        let n = face_normal(
-            positions[t[0] as usize],
-            positions[t[1] as usize],
-            positions[t[2] as usize],
-        );
-        for &i in t {
-            for (a, b) in nrm[i as usize].iter_mut().zip(n) {
-                *a += b;
-            }
-        }
-    }
-    for n in &mut nrm {
-        *n = vec3::unit_or(*n, [0.0, 1.0, 0.0]);
-    }
-    nrm
+    crate::geometry::smooth(positions, indices)
 }
 
 /// One gray primitive.
@@ -558,14 +546,16 @@ pub(crate) fn single(p: Prim) -> Mesh {
     }
 }
 
+// Shared by the format readers; which ones use it depends on the enabled features.
+#[allow(dead_code)]
 pub(crate) fn face_normal(a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> [f32; 3] {
     vec3::unit_or(vec3::cross(vec3::sub(b, a), vec3::sub(c, a)), [0.0, 1.0, 0.0])
 }
 
 /// Builds a primitive from triangles given as corner positions, storing each distinct point
-/// once (by bit pattern; `-0.0` counts as `0.0`) and the triangles as indices into them. No
-/// normals: glTF clients shade a primitive without normals flat, which is what a triangle soup
-/// (STL) means.
+/// once (by bit pattern; `-0.0` counts as `0.0`) and the triangles as indices into them: what a
+/// triangle soup (STL) needs before it can be given normals. It has none of its own to keep, so
+/// the primitive takes the default ones as it is written (see [`crate::geometry`]).
 // Shared by the format readers; which ones use it depends on the enabled features.
 #[allow(dead_code)]
 pub(crate) struct Welder {

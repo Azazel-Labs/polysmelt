@@ -42,7 +42,8 @@
 //! `commandline` is kept as written.
 //!
 //! A file cut short, a number that isn't one, or an index past what its block holds (a vertex's weights, a weight's
-//! joint, a triangle's vertex, a joint's parent, a frame's components) is an error. Counts are checked against the
+//! joint, a joint's parent, a frame's components) is an error. A triangle naming a vertex past its block's is
+//! dropped and counted (`droppedGeometry` in the source extras), as in every format. Counts are checked against the
 //! file's size before anything is allocated for them.
 
 use std::collections::HashMap;
@@ -599,14 +600,9 @@ fn build_mesh(m: &MeshFile, stem: &str, input: &Input<'_>, assets: &dyn Assets, 
                 w.joint
             );
         }
-        for (ti, t) in block.tris.iter().enumerate() {
-            ensure!(
-                t.iter().all(|&i| i < block.verts.len()),
-                Corrupt,
-                "MD5 mesh {mi}: triangle {ti} names a vertex past numverts {}",
-                block.verts.len()
-            );
-        }
+        // A triangle naming a vertex that isn't there is dropped, as in every format.
+        let whole = |t: &&[usize; 3]| t.iter().all(|&i| i < block.verts.len());
+        scene.dropped += block.tris.iter().filter(|t| !whole(t)).count();
         if block.tris.is_empty() || block.verts.is_empty() {
             continue;
         }
@@ -643,7 +639,8 @@ fn build_mesh(m: &MeshFile, stem: &str, input: &Input<'_>, assets: &dyn Assets, 
             }
         }
         // Clockwise front faces in the file; glTF's are counterclockwise.
-        let indices: Vec<u32> = block.tris.iter().flat_map(|t| [t[0], t[2], t[1]].map(u32_of)).collect();
+        let tris = block.tris.iter().filter(whole);
+        let indices: Vec<u32> = tris.flat_map(|t| [t[0], t[2], t[1]].map(u32_of)).collect();
         let normals = smooth_normals(&positions, &indices);
         let material = if let Some(&i) = materials.get(&block.shader) {
             i
@@ -970,8 +967,10 @@ frame 1 {
                 .to_string()
                 .contains("joint 7")
         );
+        // A triangle naming a vertex that isn't there is dropped and counted, as in every format.
         let bad = MESH.replace("tri 0 0 2 1", "tri 0 0 2 9");
-        assert!(read(bad.as_bytes(), "t.md5mesh").is_err());
+        let doc = read(bad.as_bytes(), "t.md5mesh").unwrap();
+        assert_eq!(doc.json()["asset"]["extras"]["source"]["droppedGeometry"], 1);
         let bad = MESH.replace("vert 2 ( 0 1 ) 2 2", "vert 2 ( 0 1 ) 3 2");
         assert!(read(bad.as_bytes(), "t.md5mesh").is_err());
         let bad = MESH.replace("numverts 3", "numverts 99999999999");

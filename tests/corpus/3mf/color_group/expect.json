@@ -47,6 +47,7 @@
       -1
     ]
   ],
+  "default_normals": true,
   "faces_outward": true,
   "winding_matches_normals": true,
   "primitives": 6,

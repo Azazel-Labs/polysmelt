@@ -180,9 +180,12 @@ fn crease_angle_chooses_shading() {
         let text = CUBE_WRL.replace("coordIndex", &format!("creaseAngle {crease} coordIndex"));
         mesh(&read(&text, "c.wrl")).prims.remove(0)
     };
+    // No angle: every face's own normal at its corners, so 24 vertices.
     let flat = cube("0");
-    assert_eq!(flat.normals, Vec::<[f32; 3]>::new());
-    assert_eq!(flat.positions.len(), 8);
+    assert_eq!(flat.positions.len(), 24);
+    for n in &flat.normals {
+        assert!(n.iter().filter(|c| c.abs() > 0.99).count() == 1, "{n:?}");
+    }
     let smooth = cube("3.2");
     assert_eq!(smooth.positions.len(), 8);
     assert_eq!(smooth.normals.len(), 8);

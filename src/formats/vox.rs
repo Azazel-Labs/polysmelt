@@ -308,7 +308,7 @@ pub(crate) fn vox(data: &[u8], keep: Keep) -> Result<Document> {
         return Ok(Document::empty(facts));
     }
 
-    let mut b = Builder::default();
+    let mut b = Builder::new(keep.crease_angle());
     let mut meshes = Vec::new();
     let mut mesh_of = Vec::with_capacity(models.len());
     for (m, prims) in meshed.into_iter().enumerate() {

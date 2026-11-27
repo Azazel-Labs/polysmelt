@@ -665,6 +665,8 @@ struct Body {
     skipped: Vec<String>,
     /// Whether the data ends before the header's counts do.
     cut: bool,
+    /// Faces, strip triangles and edges left out for naming a vertex that isn't there.
+    dropped: usize,
     // Scratch, reused from record to record.
     vals: Vec<f64>,
     idx: Vec<u32>,
@@ -758,20 +760,24 @@ pub(crate) fn ply(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<D
         info.write(m);
     }
     let mut facts = Map::new();
-    let mut b = Builder::default();
+    let mut b = Builder::new(keep.crease_angle());
     let mut json = Map::new();
     json.insert("asset".into(), json!({ "extras": { "source": source } }));
     let names = std::mem::take(&mut body.extra_names);
     let nv = body.verts.pos.len();
-    let edges: Vec<u32> = body
+    // An edge to a vertex that isn't there, or to one that isn't a finite point, is dropped, as a triangle is.
+    let pos = &body.verts.pos;
+    let there = |i: u32| pos.get(i as usize).is_some_and(|p| p.iter().all(|c| c.is_finite()));
+    let mut edges: Vec<u32> = body
         .edges
         .as_chunks::<2>()
         .0
         .iter()
-        .filter(|e| e.iter().all(|&i| (i as usize) < nv))
+        .filter(|e| e.iter().all(|&i| there(i)))
         .flatten()
         .copied()
         .collect();
+    b.dropped += body.edges.len() / 2 - edges.len() / 2;
     let mut primitives = Vec::new();
     // The attributes the edges share: the triangles' when their vertices are the file's.
     let mut shared = None;
@@ -792,18 +798,26 @@ pub(crate) fn ply(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<D
                 e
             }
         })?;
+        b.dropped += body.dropped;
         facts.insert("triangles".into(), json!(mesh.triangles()));
-        facts.insert(
-            "vertices".into(),
-            json!(mesh.prims.iter().map(|p| p.positions.len()).sum::<usize>()),
-        );
         let Mesh { prims, materials, .. } = mesh;
-        for (k, p) in prims.into_iter().enumerate() {
+        let mut vertices = 0;
+        for (k, mut p) in prims.into_iter().enumerate() {
             let n = p.positions.len();
+            // Without normals in the file, the default ones; the vertices they add keep their other properties.
+            let added = if p.normals.len() == n || p.indices.is_empty() {
+                Vec::new()
+            } else {
+                crate::geometry::default_normals(&mut p, b.crease)
+            };
+            vertices += p.positions.len();
             let material = p.material;
             let src = srcs.as_ref().and_then(|s| s.get(k));
             if let Some(mut prim) = b.primitive(p) {
-                let columns = gather(&mut body.verts.extra, src.map(Vec::as_slice), n);
+                let mut columns = gather(&mut body.verts.extra, src.map(Vec::as_slice), n);
+                for column in &mut columns {
+                    crate::geometry::follow(column, n, &added);
+                }
                 custom(&mut b, &mut prim["attributes"], &names, columns);
                 prim["material"] = json!(material);
                 if src.is_none() {
@@ -812,6 +826,7 @@ pub(crate) fn ply(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<D
                 primitives.push(prim);
             }
         }
+        facts.insert("vertices".into(), json!(vertices));
         b.materials(&materials, images.list, &mut json);
     } else {
         facts.insert("points".into(), json!(body.points));
@@ -860,16 +875,24 @@ pub(crate) fn ply(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<D
             }
             facts.insert("points".into(), json!(n));
             facts.insert("splats".into(), json!(n));
-        } else if nv > 0 {
-            let attributes = vertex_attributes(&mut b, &mut body.verts, body.zero_normals, &names);
-            primitives.push(json!({ "attributes": attributes, "mode": 0 }));
+        } else if nv > 0
+            && let Some((attributes, indices)) = vertex_attributes(&mut b, &mut body.verts, body.zero_normals, &names)
+        {
+            let mut prim = json!({ "attributes": attributes, "mode": 0 });
+            if let Some(i) = indices {
+                prim["indices"] = json!(i);
+            }
+            primitives.push(prim);
             shared = Some(attributes);
         }
     }
     if !edges.is_empty() {
-        let attributes = match shared {
-            Some(a) => a,
-            None => json!({ "POSITION": b.positions(std::mem::take(&mut body.verts.pos)) }),
+        let attributes = if let Some(a) = shared {
+            a
+        } else {
+            let mut pos = std::mem::take(&mut body.verts.pos);
+            b.sound(&mut pos, [&mut Vec::new(), &mut edges, &mut Vec::new()]);
+            json!({ "POSITION": b.positions(pos) })
         };
         let count = edges.len();
         let indices = b.accessor(Part::u32(edges), 5125, count, "SCALAR", Some(34963));
@@ -917,12 +940,29 @@ fn custom(b: &mut Builder, attributes: &mut Value, names: &[String], columns: Ve
     }
 }
 
-/// A point cloud's attributes: everything its vertices carry.
-fn vertex_attributes(b: &mut Builder, v: &mut Vertices, zero_normals: usize, names: &[String]) -> Value {
+/// A point cloud's attributes: everything its vertices carry. With them, the indices of the points to draw when
+/// some aren't finite points and are left out; `None` when none is left.
+fn vertex_attributes(
+    b: &mut Builder,
+    v: &mut Vertices,
+    zero_normals: usize,
+    names: &[String],
+) -> Option<(Value, Option<usize>)> {
     let n = v.pos.len();
-    let mut attributes = json!({ "POSITION": b.positions(std::mem::take(&mut v.pos)) });
+    let mut pos = std::mem::take(&mut v.pos);
+    let mut indices = None;
+    if !crate::geometry::finite(&pos) {
+        let mut points: Vec<u32> = (0..u32_of(n)).collect();
+        b.sound(&mut pos, [&mut Vec::new(), &mut Vec::new(), &mut points]);
+        if points.is_empty() {
+            return None;
+        }
+        let count = points.len();
+        indices = Some(b.accessor(Part::u32(points), 5125, count, "SCALAR", Some(34963)));
+    }
+    let mut attributes = json!({ "POSITION": b.positions(pos) });
     others(b, &mut attributes, v, n, zero_normals < n, names, "COLOR_0");
-    attributes
+    Some((attributes, indices))
 }
 
 /// Adds what `n` points carry beyond their positions to `attributes`: normals (unless
@@ -1368,7 +1408,11 @@ fn face(cur: &mut Cursor, el: &Element, plan: &Plan, direct: bool, body: &mut Bo
     let idx = &body.idx;
     if direct {
         let nv = body.verts.pos.len();
-        if idx.len() < 3 || idx.iter().any(|&i| i as usize >= nv) {
+        if idx.len() < 3 {
+            return Ok(());
+        }
+        if idx.iter().any(|&i| i as usize >= nv) {
+            body.dropped += 1;
             return Ok(());
         }
         if idx.len() == 3 {
@@ -1426,7 +1470,10 @@ fn strip(cur: &mut Cursor, el: &Element, plan: &Plan, body: &mut Body) -> Got<()
     for run in body.idx.split(|&i| i == u32::MAX) {
         for k in 2..run.len() {
             let (a, b, c) = (run[k - 2], run[k - 1], run[k]);
-            body.strip_tris.push(if k % 2 == 0 { [a, b, c] } else { [b, a, c] });
+            // A strip's triangle on one vertex twice restarts the strip, and draws nothing.
+            if crate::geometry::distinct([a, b, c]) {
+                body.strip_tris.push(if k % 2 == 0 { [a, b, c] } else { [b, a, c] });
+            }
         }
     }
     Ok(())
@@ -1486,7 +1533,11 @@ fn build(
     for (f, &s) in faces.starts.iter().enumerate() {
         let end = faces.starts.get(f + 1).copied().unwrap_or(faces.corners.len());
         let face = &faces.corners[s..end];
-        if face.len() < 3 || face.iter().any(|&i| i as usize >= nv) {
+        if face.len() < 3 {
+            continue;
+        }
+        if face.iter().any(|&i| i as usize >= nv) {
+            body.dropped += 1;
             continue;
         }
 
@@ -1510,10 +1561,12 @@ fn build(
             "too many triangles to convert (more than {limit})"
         );
     }
+    let listed = strip_tris.len();
     let strips: Vec<[u32; 3]> = strip_tris
         .into_iter()
         .filter(|t| t.iter().all(|&i| (i as usize) < nv))
         .collect();
+    body.dropped += listed - strips.len();
     let total = tris.len() / 3 + corner_tris.len() + strips.len();
     ensure!(
         total <= limit,
@@ -1535,9 +1588,9 @@ fn build(
         .collect();
     let mut srcs: Vec<Vec<u32>> = vec![Vec::new(); slots];
     if per_corner {
-        // Generated normals are smoothed over the file's vertices, so splitting a vertex by its
-        // corners' data leaves no seam.
-        let smooth = if has_nrm && zero_normals == 0 {
+        // Normals made for placeholders are smoothed over the file's vertices, so splitting a vertex by
+        // its corners' data leaves no seam.
+        let smooth = if !has_nrm || zero_normals == 0 {
             Vec::new()
         } else {
             let mut by_vertex = Vec::with_capacity(total * 3);
@@ -1560,9 +1613,12 @@ fn build(
                 srcs[slot as usize].push(v);
                 let at = v as usize;
                 p.positions.push(verts.pos[at]);
-                let own = verts.nrm.get(at).copied().filter(|&n| has_nrm && !is_zero(n));
-                p.normals
-                    .push(own.or_else(|| smooth.get(at).copied()).unwrap_or([0.0, 1.0, 0.0]));
+                // Without normals in the file, the primitive takes the default ones as it's written.
+                if has_nrm {
+                    let own = verts.nrm.get(at).copied().filter(|&n| !is_zero(n));
+                    p.normals
+                        .push(own.or_else(|| smooth.get(at).copied()).unwrap_or([0.0, 1.0, 0.0]));
+                }
                 if has_uv {
                     p.uvs
                         .push(uv.or_else(|| verts.uv.get(at).copied()).unwrap_or([0.0, 1.0]));
@@ -1611,9 +1667,7 @@ fn build(
         if has_col {
             p.colors = std::mem::take(&mut verts.col);
         }
-        if !has_nrm {
-            p.normals = smooth_normals(&p.positions, &p.indices);
-        } else if zero_normals > 0 {
+        if has_nrm && zero_normals > 0 {
             // Only the vertices without a normal of their own take a smooth one.
             let smooth = smooth_normals(&p.positions, &p.indices);
             for (n, s) in p.normals.iter_mut().zip(smooth) {
@@ -1948,12 +2002,12 @@ end_header
 
     #[test]
     fn generated_normals_have_no_seam_where_texture_coordinates_split_a_vertex() {
-        // A folded strip: vertex 1 and 2 are split by their faces' texture coordinates, and
+        // A strip folded gently: vertex 1 and 2 are split by their faces' texture coordinates, and
         // still share one smooth normal.
         let m = mesh(
             "ply\nformat ascii 1.0\nelement vertex 4\nproperty float x\nproperty float y\nproperty float z\n\
              element face 2\nproperty list uchar int vertex_indices\nproperty list uchar float texcoord\n\
-             end_header\n0 0 0\n1 0 0\n1 1 0\n1 0 -1\n\
+             end_header\n0 0 0\n1 0 0\n1 1 0\n2 0 -0.3\n\
              3 0 1 2 6 0 0 1 0 1 1\n3 1 3 2 6 0.5 0 1 0 0.5 1\n",
         );
         let p = &m.prims[0];

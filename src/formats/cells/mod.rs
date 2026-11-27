@@ -482,8 +482,9 @@ struct Totals {
     skipped_arrays: Vec<String>,
 }
 
-/// The document `model` draws as. `format` is the format's name, for errors and the source notes.
-pub(super) fn build(model: Model, format: &'static str, limit: usize) -> Result<Document> {
+/// The document `model` draws as. `format` is the format's name, for errors and the source notes, and `crease`
+/// the crease angle of the normals made where the file has none ([`Keep::crease_angle`](crate::Keep::crease_angle)).
+pub(super) fn build(model: Model, format: &'static str, limit: usize, crease: f32) -> Result<Document> {
     let Model {
         pieces,
         tables,
@@ -502,7 +503,7 @@ pub(super) fn build(model: Model, format: &'static str, limit: usize) -> Result<
         .into_iter()
         .map(|(name, colors)| (name, colors.iter().map(|c| linear(c, 1.0)).collect()))
         .collect();
-    let mut b = Builder::default();
+    let mut b = Builder::new(crease);
     // Each mesh's name, extras and primitives.
     let mut meshes: Vec<(Option<String>, Option<Value>, Vec<Value>)> = Vec::new();
     let mut colored = false;
@@ -514,11 +515,25 @@ pub(super) fn build(model: Model, format: &'static str, limit: usize) -> Result<
         let Some(drawn) = draw(piece, &tables, format, limit, &mut totals)? else {
             continue;
         };
-        let Drawn { prim, custom } = drawn;
+        let Drawn { mut prim, custom } = drawn;
+        let points = prim.positions.len();
+        colored |= prim.colors.len() == points;
+        // Without normals in the file, the default ones; the vertices they add, after the file's own points,
+        // keep their points' values.
+        let added = if prim.normals.len() == points || prim.indices.is_empty() {
+            Vec::new()
+        } else {
+            crate::geometry::default_normals(&mut prim, b.crease)
+        };
         let n = prim.positions.len();
-        colored |= prim.colors.len() == n;
         let mut prims = b.primitives(prim);
-        for (name, comps, values) in custom {
+        for (name, comps, mut values) in custom {
+            if values.len() == points * comps {
+                for &s in &added {
+                    let at = s as usize * comps;
+                    values.extend_from_within(at..at + comps);
+                }
+            }
             let kind = match comps {
                 1 => "SCALAR",
                 2 => "VEC2",
@@ -566,7 +581,7 @@ pub(super) fn build(model: Model, format: &'static str, limit: usize) -> Result<
         source.insert("skippedCells".into(), Value::Object(skipped));
     }
     if totals.dropped > 0 {
-        source.insert("droppedCells".into(), json!(totals.dropped));
+        source.insert(crate::geometry::DROPPED.into(), json!(totals.dropped));
     }
     if !totals.skipped_arrays.is_empty() {
         source.insert("skippedArrays".into(), json!(totals.skipped_arrays));
@@ -1052,13 +1067,14 @@ fn range(values: &[f32]) -> (f32, f32) {
     finite.fold((f32::MAX, f32::MIN), |(min, max), &v| (min.min(v), max.max(v)))
 }
 
-/// A normal made unit length; one with no direction points up.
+/// A normal made unit length; one with no direction stays zero, and takes its faces' as the primitive is
+/// written.
 fn unit(v: [f32; 3]) -> [f32; 3] {
     let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
     if len.is_finite() && len > 1e-12 {
         v.map(|c| c / len)
     } else {
-        [0.0, 1.0, 0.0]
+        [0.0; 3]
     }
 }
 

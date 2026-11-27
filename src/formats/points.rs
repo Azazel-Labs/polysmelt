@@ -200,7 +200,7 @@ impl Cloud {
             doc.base_mut()["asset"]["extras"] = json!({ "source": source });
             return doc;
         }
-        let mut b = Builder::default();
+        let mut b = Builder::plain();
         let mut constant = std::mem::take(&mut self.constant);
         let mut attributes = json!({ "POSITION": b.positions(std::mem::take(&mut self.positions)) });
         if self.normals.len() == n {

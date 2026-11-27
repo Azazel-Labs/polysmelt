@@ -231,7 +231,7 @@ case(FMT, "texture", {"tri.amf": amf(obj(1, quad, ["<volume>" + triangle((0, 1, 
 
 case(FMT, "bad_index", {"cube.amf": amf(obj(1, CUBE_V, [volume(TRIS + [(0, 1, 42)])]), "meter")},
      {"spec": f"{SPEC}: a triangle naming a vertex that isn't there is dropped", "source": SRC, "triangles": 12,
-      "json": {"/asset/extras/source/droppedTriangles": 1}})
+      "json": {"/asset/extras/source/droppedGeometry": 1}})
 case(FMT, "truncated", {"cube.amf": amf(obj(1, CUBE_V, [volume(TRIS)]), "meter")[:-40]},
      {"spec": f"{SPEC}: a file cut short inside its last triangle's end tag: the triangles before it are kept",
       "source": SRC, "triangles": 11,

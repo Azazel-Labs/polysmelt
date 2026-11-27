@@ -492,7 +492,8 @@ fn lists(sub: &SubMesh, n: usize) -> (Vec<u32>, bool, bool) {
         5 => {
             let mut out = Vec::with_capacity(idx.len().saturating_sub(2) * 3);
             for (k, w) in idx.windows(3).enumerate() {
-                if w[0] == w[1] || w[1] == w[2] || w[0] == w[2] {
+                // A strip's triangle on one vertex twice restarts the strip, and draws nothing.
+                if !crate::geometry::distinct([w[0], w[1], w[2]]) {
                     continue;
                 }
                 if k % 2 == 0 {
@@ -507,7 +508,9 @@ fn lists(sub: &SubMesh, n: usize) -> (Vec<u32>, bool, bool) {
             let mut out = Vec::with_capacity(idx.len().saturating_sub(2) * 3);
             if let Some(&c) = idx.first() {
                 for w in idx[1.min(idx.len())..].windows(2) {
-                    out.extend_from_slice(&[c, w[0], w[1]]);
+                    if crate::geometry::distinct([c, w[0], w[1]]) {
+                        out.extend_from_slice(&[c, w[0], w[1]]);
+                    }
                 }
             }
             (out, false, false)

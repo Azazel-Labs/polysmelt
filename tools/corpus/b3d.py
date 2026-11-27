@@ -375,7 +375,8 @@ case(FMT, "index_out_of_range", {
     "spec": f"{SPEC}: a triangle with a vertex index past the end",
     "source": SRC,
     "triangles": 1,
-    "facts": {"triangles": 1, "nodes": 1, "brushes": 0, "dropped_triangles": 1},
+    "facts": {"triangles": 1, "nodes": 1, "brushes": 0},
+    "json": {"/asset/extras/source/droppedGeometry": 1},
 })
 
 # Broken files.

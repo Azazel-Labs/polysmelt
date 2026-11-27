@@ -13,7 +13,9 @@
 //!
 //! - `Frame` is a node, its `FrameTransformMatrix` the node's transform. A mesh outside any frame hangs from a node
 //!   of its own; a frame's reference to a named mesh instances it there.
-//! - `Mesh` becomes a mesh with a primitive per material. Faces of more than three corners are cut into fans.
+//! - `Mesh` becomes a mesh with a primitive per material. Faces of more than three corners are cut into
+//!   triangles in their plane, so one that isn't convex keeps its outline; one naming a vertex that isn't there
+//!   is dropped and counted (`droppedGeometry` in the source extras).
 //!   `MeshNormals` keeps its own face list, so a corner's vertex is its position and its normal together.
 //!   `MeshTextureCoords` (several sets), `MeshVertexColors` (sRGB, made linear), and the texture coordinates,
 //!   normals and colors in `DeclData` that the mesh doesn't already give, are carried, as are extra texture
@@ -1019,9 +1021,16 @@ impl<'a> Build<'a> {
         let mut sources: Vec<Vec<u32>> = Vec::new();
         let mut welds: Vec<HashMap<(u32, u32), u32>> = Vec::new();
         let mut by_slot: HashMap<Option<usize>, usize> = HashMap::new();
+        let mut outline: Vec<[f32; 3]> = Vec::new();
+        let mut cut: Vec<[u32; 3]> = Vec::new();
         for (f, &(start, n)) in faces.iter().enumerate() {
             let cs = &corners[start..start + n];
-            if n < 3 || cs.iter().any(|&c| c as usize >= nv) {
+            if n < 3 {
+                continue;
+            }
+            // A face naming a vertex that isn't there is left out, and counted.
+            if cs.iter().any(|&c| c as usize >= nv) {
+                self.scene.dropped += 1;
                 continue;
             }
             let slot = slots.get(f).copied().flatten();
@@ -1039,8 +1048,13 @@ impl<'a> Build<'a> {
             for (k, &c) in cs.iter().enumerate() {
                 tri.push(corner(p, src, weld, &attrs, c, start + k));
             }
-            for k in 1..n - 1 {
-                p.indices.extend([tri[0], tri[k], tri[k + 1]]);
+            // Cut into triangles in its plane, so one that isn't convex keeps its outline.
+            outline.clear();
+            outline.extend(cs.iter().map(|&c| attrs.positions[c as usize]));
+            cut.clear();
+            crate::mesh::triangulate(&outline, &mut cut);
+            for t in &cut {
+                p.indices.extend(t.map(|k| tri[k as usize]));
             }
         }
 

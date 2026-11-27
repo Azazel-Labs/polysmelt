@@ -316,8 +316,14 @@ fn number(s: &str) -> Num {
     {
         return Num::Int(i);
     }
-    // `1.#INF` and the like, from old Windows exporters, have no use here.
-    Num::Float(stream::f64_from(s.as_bytes()).unwrap_or(0.0))
+    // `1.#INF` and the like, from old Windows exporters, are the infinity or NaN they stand for, as a binary
+    // file holds them: a polygon on such a point is dropped either way.
+    let value = if s.contains('#') {
+        stream::f64_lenient(s.as_bytes())
+    } else {
+        stream::f64_from(s.as_bytes())
+    };
+    Num::Float(value.unwrap_or(0.0))
 }
 
 /// An array's values, as the type its node always has.

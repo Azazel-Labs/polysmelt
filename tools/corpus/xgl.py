@@ -195,7 +195,7 @@ case(FMT, "bad_references", {"bad.xgl": world(mesh(plist + face([{"PREF": 0}, {"
                                                     + face([{"PREF": 0}, {"PREF": 1}, {"PREF": 99}])
                                                     + face([{"PREF": 0}, {"PREF": 1}])))},
      {"spec": f"{SPEC}: a face referring to a point that isn't there, and one short of a vertex, are dropped",
-      "source": SRC, "triangles": 1, "facts": {"dropped_primitives": 2}})
+      "source": SRC, "triangles": 1, "json": {"/asset/extras/source/droppedGeometry": 2}})
 
 
 # Objects and transforms.

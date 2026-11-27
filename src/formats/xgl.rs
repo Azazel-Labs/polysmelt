@@ -168,9 +168,7 @@ fn read(text: &str, limit: usize, keep: Keep) -> Result<Document> {
     scene.info.format = Some("XGL".into());
     scene.info.up_axis = Fact::Assumed(Axis::PosY);
     scene.info.handedness = Fact::Assumed(Handedness::Right);
-    if dropped > 0 {
-        scene.facts.insert("dropped_primitives".into(), json!(dropped));
-    }
+    scene.dropped = dropped;
     if !unsupported.is_empty() {
         scene.facts.insert("unsupported_tags".into(), json!(unsupported));
     }
@@ -659,7 +657,7 @@ mod tests {
         let doc = load(CUBE.as_bytes(), "cube.xgl").unwrap();
         let j = &doc.json();
         assert_eq!(doc.counts().triangles, 2);
-        assert_eq!(doc.facts["dropped_primitives"], 1);
+        assert_eq!(doc.json()["asset"]["extras"]["source"]["droppedGeometry"], 1);
         let prims = j["meshes"][0]["primitives"].as_array().unwrap();
         assert_eq!(prims.len(), 3, "{prims:?}");
         let m = &j["materials"][0];

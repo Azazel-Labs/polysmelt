@@ -4,6 +4,10 @@
 //! FNV-1a hash of its soup, which is every triangle, line and point drawn as the positions of its corners with
 //! each attribute's values there, and where nothing splits vertices, a hash of the points drawn (in the file's
 //! order, bit for bit). What Polysmelt reads must hash the same, mesh by mesh.
+//!
+//! These files have no normals, so their meshes get the default ones, which add vertices after the file's own
+//! points: copies of points where an edge is hard. The points are the first `vertices` of a mesh's, and each
+//! vertex after them must be a copy of one of them in everything but its normal.
 
 #![cfg(all(feature = "fs", any(feature = "msh", feature = "medit")))]
 
@@ -125,13 +129,29 @@ fn check_mesh(doc: &Document, mesh: &Value, want: &Value) -> Result<(), String> 
     if want["soup"].as_str() != Some(&soup) {
         return Err(format!("what's drawn hashes to {soup}, expected {}", want["soup"]));
     }
+    // The file's own points, and how many vertices there are in all: more when the default normals added copies.
+    let all = d.positions.len();
+    let mut own = all;
     if let Some(points) = want["points"].as_str() {
-        let got = fnv(floats(d.positions.as_flattened()));
+        own = usize::try_from(want["vertices"].as_u64().unwrap_or(0)).unwrap();
+        if own > all {
+            return Err(format!("{all} vertices, expected {own}"));
+        }
+        let got = fnv(floats(d.positions[..own].as_flattened()));
         if got != points {
             return Err(format!("points hash to {got}, expected {points}"));
         }
-        if want["vertices"].as_u64() != Some(d.positions.len() as u64) {
-            return Err(format!("{} vertices, expected {}", d.positions.len(), want["vertices"]));
+        // What a vertex holds, its normal aside.
+        let held = |v: usize| -> Vec<u32> {
+            let others = d.attributes.iter().filter(|(name, _)| *name != "NORMAL");
+            let values = others.flat_map(|(_, (width, values))| &values[v * width..(v + 1) * width]);
+            d.positions[v].iter().chain(values).map(|x| x.to_bits()).collect()
+        };
+        let points: std::collections::BTreeSet<Vec<u32>> = (0..own).map(held).collect();
+        if let Some(v) = (own..all).find(|&v| !points.contains(&held(v))) {
+            return Err(format!(
+                "vertex {v}, past the file's {own} points, is a copy of none of them"
+            ));
         }
     }
     for (name, want) in want["approx"].as_object().into_iter().flatten() {
@@ -143,6 +163,7 @@ fn check_mesh(doc: &Document, mesh: &Value, want: &Value) -> Result<(), String> 
             .filter_map(Value::as_f64)
             .collect();
         // Worked out in floating point on both sides.
+        let values = &values[..(own * width).min(values.len())];
         let close = want["width"].as_u64() == Some(*width as u64)
             && theirs.len() == values.len()
             && theirs

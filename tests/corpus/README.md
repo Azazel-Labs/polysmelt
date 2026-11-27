@@ -593,6 +593,7 @@ are required. Every other key is optional and is checked only when present.
 | `uvs`, `colors` | Whether any primitive has `TEXCOORD_0` / `COLOR_0`. |
 | `positions_include`, `uvs_include`, `colors_include` | Lists of values that must each appear somewhere. Colors are linear RGBA. |
 | `normals_in` | Every normal must be one of these directions. |
+| `default_normals` | `true`: the file has no normals and nothing to say how it is shaded, so its normals are the default ones, made with a crease angle of 30 degrees. No vertex's normal may be further than that from the normal of a triangle that uses it. |
 | `winding_matches_normals` | Every triangle winds counter-clockwise when seen from the side its normals point to. |
 | `faces_outward` | For convex models: every triangle faces away from the center of the bounds. Catches mirrors that turn faces inside out. |
 | `tolerance` | Relative tolerance for the numeric checks (default `1e-4`). |
@@ -636,8 +637,9 @@ Whatever the format, the same thing is expected the same way (`tests/kinds.rs` a
   didn't, or what is guessed; what a format fixes for every file is declared. An assumed
   `frameRate` is there only when the model is animated. `encoding` is `ascii` or `binary` (or a
   format's own other way, in lower case), `byteOrder` is `little` or `big`, a text encoding is
-  `textEncoding`. Textures named and not in the document are counted as `droppedTextures`, and
-  files named and not found are listed as `missingFiles`.
+  `textEncoding`. Textures named and not in the document are counted as `droppedTextures`,
+  triangles, segments and points left out for a vertex that isn't there or isn't a finite point as
+  `droppedGeometry`, and files named and not found are listed as `missingFiles`.
 - **Names.** Text that isn't UTF-8 is Windows-1252. A thing with no name has no `name`, and a
   name the reader makes up for something the format numbers is the kind and the number
   together: `material3`, `object1`, `frame2`.

@@ -628,7 +628,14 @@ impl Reader<'_> {
             None => self.read_acc(&counted, [0.0; 3])?,
         };
         let n = positions.len();
-        let draws = self.draws(indices.map(|i| (i, &counted)), mode, n)?;
+        let mut draws = self.draws(indices.map(|i| (i, &counted)), mode, n)?;
+        // What's drawn on a position that isn't finite is dropped, as every reader drops it.
+        if !crate::geometry::finite(&positions) {
+            for (list, width) in [(&mut draws.triangles, 3), (&mut draws.lines, 2), (&mut draws.points, 1)] {
+                crate::geometry::sound(&positions, false, list, width);
+            }
+            crate::geometry::settle(&mut positions);
+        }
         if draws.is_empty() {
             return Ok(());
         }

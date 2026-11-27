@@ -20,7 +20,8 @@ fn read(bytes: &[u8], name: &str) -> Document {
     read_with(bytes, name, usize::MAX).unwrap()
 }
 
-/// What a document of one piece draws.
+/// What a document of one piece draws, as the file has it: the vertices the default normals add where an edge is
+/// hard (copies of a point, with another normal) are taken as the points they copy.
 #[derive(Debug, Default, PartialEq)]
 struct Got {
     positions: Vec<[f32; 3]>,
@@ -55,6 +56,40 @@ fn got(doc: &Document) -> Got {
             1 => out.lines = indices.as_chunks::<2>().0.to_vec(),
             _ => out.points = indices,
         }
+    }
+    // Each vertex as the first that holds what it does, its normal aside.
+    let count = out.positions.len();
+    let key = |v: usize| -> Vec<u32> {
+        let others = out.attributes.iter().filter(|(name, _)| *name != "NORMAL");
+        let held = others.flat_map(|(_, values)| {
+            let width = values.len() / count;
+            values[v * width..(v + 1) * width].iter().map(|x| x.to_bits())
+        });
+        out.positions[v].iter().map(|x| x.to_bits()).chain(held).collect()
+    };
+    let mut firsts: std::collections::HashMap<Vec<u32>, u32> = std::collections::HashMap::new();
+    let mut to = Vec::with_capacity(count);
+    let mut kept = Vec::new();
+    for v in 0..count {
+        let next = u32::try_from(kept.len()).unwrap();
+        let at = *firsts.entry(key(v)).or_insert(next);
+        if at == next {
+            kept.push(v);
+        }
+        to.push(at);
+    }
+    if kept.len() < count {
+        for values in out.attributes.values_mut() {
+            let width = values.len() / count;
+            *values = kept
+                .iter()
+                .flat_map(|&v| values[v * width..(v + 1) * width].to_vec())
+                .collect();
+        }
+        out.positions = kept.iter().map(|&v| out.positions[v]).collect();
+        out.tris.iter_mut().flatten().for_each(|i| *i = to[*i as usize]);
+        out.lines.iter_mut().flatten().for_each(|i| *i = to[*i as usize]);
+        out.points.iter_mut().for_each(|i| *i = to[*i as usize]);
     }
     out
 }
@@ -534,8 +569,8 @@ fn colors_normals_and_texture_coordinates() {
     assert_eq!(g.attributes["NORMAL"][..3], [0.0, 0.0, 1.0]);
     assert_eq!(
         g.attributes["NORMAL"][15..],
-        [0.0, 1.0, 0.0],
-        "a normal with no direction"
+        [0.0, 0.0, 1.0],
+        "a normal with no direction takes its faces'"
     );
     assert_eq!(g.attributes["TEXCOORD_0"][..4], [0.0, 1.0, 0.5, 1.0]);
     // Bytes of three components are colors too.

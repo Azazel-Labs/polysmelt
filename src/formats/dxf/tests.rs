@@ -152,8 +152,8 @@ fn faces_turn_y_up_in_meters() {
     assert_eq!(m.materials.len(), 1);
     assert_eq!(m.materials[0].name, "Walls");
     assert!(m.materials[0].double_sided);
-    // Shared corners are one vertex.
-    assert_eq!(m.prims[0].positions.len(), 8);
+    // The corners are welded, then split again where the cube's edges are hard: four to a face.
+    assert_eq!(m.prims[0].positions.len(), 24);
 }
 
 #[test]
@@ -164,7 +164,8 @@ fn a_three_corner_face_and_degenerate_ones() {
         &[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
     );
     let doc = read(&text(&drawing(0, "", "", &format!("{tri}{line}")), "\n"));
-    assert_eq!(triangles(&doc), 1);
+    // The triangle, and the two with no area the four corners in a line make, kept as the file has them.
+    assert_eq!(triangles(&doc), 3);
     // A unitless drawing isn't scaled, its units unknown.
     let info = doc.source_info();
     assert_eq!(info.meters_per_unit, Fact::Unknown);
@@ -218,7 +219,8 @@ fn polyface_mesh() {
     let doc = read(&text(&drawing(6, "", "", &polyface_cube("")), "\n"));
     assert_eq!(triangles(&doc), 12);
     let m = mesh(&doc);
-    assert_eq!(m.prims[0].positions.len(), 8);
+    // Its edges are hard: each face has corners of its own.
+    assert_eq!(m.prims[0].positions.len(), 24);
     let (lo, hi) = bounds(&m);
     assert!(near(lo, [0.0, 0.0, -1.0]) && near(hi, [1.0, 1.0, 0.0]), "{lo:?} {hi:?}");
     // A face with its own color goes in its own primitive.
@@ -278,7 +280,7 @@ fn a_mesh_entity() {
     s += "94 12 90 0 90 1 95 0 140 1 ";
     let doc = read(&text(&drawing(0, "", "", &s), "\n"));
     assert_eq!(triangles(&doc), 12);
-    assert_eq!(mesh(&doc).prims[0].positions.len(), 8);
+    assert_eq!(mesh(&doc).prims[0].positions.len(), 24);
     let notes = source(&doc)["notes"].to_string();
     assert!(notes.contains("control mesh"), "{notes}");
 }

@@ -217,7 +217,9 @@ def measure(points, groups, point_data=None, normals=None, ordered=True):
         if expect["triangles"]:
             expect["area"] = r(area)
         expect["facts"] = {"triangles": expect["triangles"]}
-        if exact_vertices:
+        # Without normals in the file, its triangles get the default ones, which add vertices where an edge is
+        # hard: copies of the file's points, after them.
+        if exact_vertices and (normals is not None or not expect["triangles"]):
             expect["vertices"] = vertices
         document = {"nodes": len(meshes)}
         if names:

@@ -387,7 +387,7 @@ pub(crate) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
         dirs: vec![dir],
         library,
         inline_of: HashMap::new(),
-        b: Builder::default(),
+        b: Builder::new(keep.crease_angle()),
         nodes: Vec::new(),
         meshes: Vec::new(),
         mesh_tris: Vec::new(),
@@ -650,7 +650,8 @@ impl Convert<'_> {
         };
         let app = graph.node(id, "appearance");
         let textured = texture(graph, app).is_some();
-        let Some((mut prim, double)) = geometry::geometry(graph, geo, textured, self.limit)? else {
+        let Some((mut prim, double)) = geometry::geometry(graph, geo, textured, self.limit, &mut self.b.dropped)?
+        else {
             let kind = graph.kind(geo).to_owned();
             self.skip(&kind);
             return Ok(None);

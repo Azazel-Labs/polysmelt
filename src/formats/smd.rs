@@ -140,9 +140,7 @@ pub(crate) fn load(input: super::Input<'_>, ext: &str, assets: &dyn Assets, keep
         scene.images = images.list;
         reference(&mut scene, &smd.ids, bones, &smd.triangles, &stem);
     }
-    if smd.dropped > 0 {
-        facts.insert("dropped_triangles".into(), json!(smd.dropped));
-    }
+    scene.dropped = smd.dropped;
 
     if !vta && frames.len() > 1 {
         let channels = animation(&frames, bones);
@@ -1012,7 +1010,7 @@ end
         let cut = &REFERENCE[..REFERENCE.find("1 0 1 0 0 0 1").unwrap()];
         let doc = read(cut, "t.smd");
         let doc = doc.unwrap();
-        assert_eq!(doc.facts["dropped_triangles"], json!(1));
+        assert_eq!(doc.json()["asset"]["extras"]["source"]["droppedGeometry"], json!(1));
         // Every prefix reads or fails without panicking.
         for k in 0..REFERENCE.len() {
             if REFERENCE.is_char_boundary(k) {

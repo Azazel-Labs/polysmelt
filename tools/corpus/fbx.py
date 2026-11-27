@@ -669,7 +669,8 @@ cube_with("uvs_direct", "UVs ByPolygonVertex, Direct",
           {"uvs": True, "uvs_include": [[0, 1], [1, 1], [1, 0], [0, 0]]})
 cube_with("uvs_by_control_point", "UVs ByControlPoint, Direct: one per corner",
           [layer_el("LayerElementUV", "ByControlPoint", "Direct", "UV", [c for v in CUBE_V for c in (v[0], v[1])])],
-          {"uvs": True, "vertices": 8, "uvs_include": [[0, 1], [1, 1], [1, 0], [0, 0]]})
+          # Eight control points, and no normals: the default ones split each at the cube's hard edges.
+          {"uvs": True, "vertices": 24, "uvs_include": [[0, 1], [1, 1], [1, 0], [0, 0]]})
 cube_with("uvs_second_layer_kept", "two UV layers: the first is TEXCOORD_0 and the second is kept as TEXCOORD_1",
           [layer_el("LayerElementUV", "ByPolygonVertex", "IndexToDirect", "UV", uv, "UVIndex", idx),
            layer_el("LayerElementUV", "ByPolygonVertex", "IndexToDirect", "UV", [0.25] * 8, "UVIndex", idx, typed=1)],
@@ -683,7 +684,7 @@ cube_with("vertex_colors_by_polygon_vertex", "LayerElementColor ByPolygonVertex,
           {"colors": True, "colors_include": lin, "tolerance": 1e-3})
 cube_with("vertex_colors_by_control_point", "LayerElementColor ByVertice, Direct (sRGB values)",
           [layer_el("LayerElementColor", "ByVertice", "Direct", "Colors", [c for i in range(8) for c in palette[i % 6]])],
-          {"colors": True, "vertices": 8, "colors_include": lin, "tolerance": 1e-3})
+          {"colors": True, "vertices": 24, "colors_include": lin, "tolerance": 1e-3})
 cube_with("smoothing_layer_ignored", "a LayerElementSmoothing beside explicit normals",
           [layer_el("LayerElementNormal", "ByPolygonVertex", "Direct", "Normals", ppv),
            layer_el("LayerElementSmoothing", "ByPolygon", "Direct", "Smoothing", [1] * 6, array=AI)],

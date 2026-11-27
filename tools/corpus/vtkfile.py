@@ -310,8 +310,10 @@ def measure(path, points_only=False, area=None):
     expect["colors"] = "COLOR_0" in names
     expect["uvs"] = "TEXCOORD_0" in names
     if not cell_attrs:
-        # No cell data: the vertices are the points used, in order.
-        expect["vertices"] = len(used)
+        # No cell data: the vertices are the points used, in order. Without normals in the file, more follow
+        # them: copies, where the default normals split a point at a hard edge.
+        if "NORMAL" in point_attrs or not d["tris"]:
+            expect["vertices"] = len(used)
         at = {p: k for k, p in enumerate(used)}
         ref["points"] = fnv(f32(drawn_points))
         if d["exact"]:

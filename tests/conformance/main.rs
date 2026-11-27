@@ -348,6 +348,94 @@ fn document(e: &Map<String, Value>, doc: &Document) -> Result<(), String> {
     Ok(())
 }
 
+/// What every reader's geometry is held to, in the document as it's read: no position that isn't finite, no
+/// index naming a vertex that isn't there, and unit normals on every triangle primitive. glTF files are read as
+/// they are, so only what's read from the other formats is held to it.
+///
+/// With `"default_normals": true`, the file has no normals and nothing to say how it's shaded, so its normals
+/// are the default ones, made with a crease angle of 30 degrees: each is a sum of normals of triangles within
+/// that angle of each triangle that uses its vertex, so it can't be further than that from any of them.
+fn geometry(case: &Case, doc: &Document) -> Result<(), String> {
+    let smooth = case.expect.get("default_normals").and_then(Value::as_bool) == Some(true);
+    let as_read = ["gltf/", "vrm/", "tiles/"].iter().any(|f| case.name.starts_with(f));
+    if as_read && !smooth {
+        return Ok(());
+    }
+    let json = doc.json();
+    let meshes = json.get("meshes").and_then(Value::as_array);
+    let prims = meshes
+        .into_iter()
+        .flatten()
+        .filter_map(|m| m.get("primitives").and_then(Value::as_array))
+        .flatten();
+    for prim in prims {
+        let attribute = |name: &str| prim.pointer(&format!("/attributes/{name}")).and_then(Value::as_u64);
+        let Some(position) = attribute("POSITION") else {
+            continue;
+        };
+        let read = |a: u64| doc.read_floats(a as usize).map_err(|e| format!("accessor {a}: {e}"));
+        let (_, pos) = read(position)?;
+        if let Some(x) = pos.iter().find(|x| !x.is_finite()) {
+            return Err(format!("a position holds {x}"));
+        }
+        let pos: Vec<[f64; 3]> = pos.chunks_exact(3).map(|p| [p[0], p[1], p[2]].map(f64::from)).collect();
+        let indices = match prim.get("indices").and_then(Value::as_u64) {
+            Some(a) => doc.read_indices(a as usize).map_err(|e| format!("indices {a}: {e}"))?,
+            None => (0..pos.len() as u32).collect(),
+        };
+        if let Some(i) = indices.iter().find(|&&i| i as usize >= pos.len()) {
+            return Err(format!("index {i} names no vertex of {}", pos.len()));
+        }
+        if prim.get("mode").and_then(Value::as_u64).unwrap_or(4) != 4 {
+            continue;
+        }
+        let Some(normal) = attribute("NORMAL") else {
+            return Err("a triangle primitive has no NORMAL".into());
+        };
+        let (_, normals) = read(normal)?;
+        if normals.len() != pos.len() * 3 {
+            return Err(format!("{} normals for {} vertices", normals.len() / 3, pos.len()));
+        }
+        let normals: Vec<[f64; 3]> = normals
+            .chunks_exact(3)
+            .map(|n| [n[0], n[1], n[2]].map(f64::from))
+            .collect();
+        let length = |v: [f64; 3]| (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+        if let Some(n) = normals.iter().find(|n| (length(**n) - 1.0).abs() > 1e-3) {
+            return Err(format!("normal {n:?} isn't unit length"));
+        }
+        if !smooth {
+            continue;
+        }
+        // No vertex's normal is further than the crease angle from the normal of a triangle that uses it.
+        let limit = (30.0f64 + 0.5).to_radians().cos();
+        for t in indices.chunks_exact(3) {
+            let [a, b, c] = [t[0], t[1], t[2]].map(|i| pos[i as usize]);
+            let (u, v) = ([0, 1, 2].map(|k| b[k] - a[k]), [0, 1, 2].map(|k| c[k] - a[k]));
+            let f = [
+                u[1] * v[2] - u[2] * v[1],
+                u[2] * v[0] - u[0] * v[2],
+                u[0] * v[1] - u[1] * v[0],
+            ];
+            let l = length(f);
+            if l <= 0.0 {
+                continue;
+            }
+            for &i in t {
+                let n = normals[i as usize];
+                let dot = (f[0] * n[0] + f[1] * n[1] + f[2] * n[2]) / l;
+                if dot < limit {
+                    return Err(format!(
+                        "vertex {i}'s normal {n:?} is {:.1} degrees from one of its triangles', past the crease angle",
+                        dot.clamp(-1.0, 1.0).acos().to_degrees()
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// `json` (or another `key`): values the glTF JSON holds, by JSON pointer
 /// (`/materials/0/extensions/KHR_materials_ior/ior`). Numbers match to within 1e-4 (relative), arrays and objects
 /// member by member; `null` means the pointer must lead nowhere.
@@ -1035,6 +1123,7 @@ fn run(case: &Case) -> Result<(), String> {
         }
     }
     document(e, &doc)?;
+    geometry(case, &doc)?;
     pointers(e, "json", doc.json())?;
     poses(e, &doc, tol)?;
     rig(e, &doc, tol)?;

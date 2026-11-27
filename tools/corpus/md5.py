@@ -195,8 +195,9 @@ errors("weight_joint_out_of_range", "w.md5mesh", MESH.replace("weight 4 1 1", "w
        "names joint 7", "a weight naming a joint past the skeleton", "Corrupt")
 errors("vertex_weights_past_end", "v.md5mesh", MESH.replace("vert 3 ( 0 0 ) 4 1", "vert 3 ( 0 0 ) 4 9"),
        "run past numweights", "a vertex whose weights run past the block's", "Corrupt")
-errors("triangle_index_out_of_range", "t.md5mesh", MESH.replace("tri 1 0 2 1", "tri 1 0 2 4"),
-       "names a vertex past numverts", "a triangle naming a vertex past the block's", "Corrupt")
+case(FMT, "triangle_index_out_of_range", {"t.md5mesh": MESH.replace("tri 1 0 2 1", "tri 1 0 2 4")},
+     {"spec": SPEC + ": a triangle naming a vertex past the block's is dropped and counted", "source": SRC,
+      "triangles": 1, "json": {"/asset/extras/source/droppedGeometry": 1}})
 errors("joint_parent_out_of_range", "p.md5mesh", MESH.replace('"arm"\t0', '"arm"\t5'), "has parent 5",
        "a joint whose parent is past the skeleton", "Corrupt")
 errors("not_a_number", "n.md5mesh", MESH.replace("weight 1 0 0.5", "weight 1 0 half"),

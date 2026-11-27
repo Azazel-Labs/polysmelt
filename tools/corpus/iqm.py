@@ -294,8 +294,9 @@ errors("not_iqm", b"INTERQUAKEMODEX\0" + skinned[16:], "no INTERQUAKEMODEL signa
 errors("bad_version", patch(skinned, field(0), "<I", 1), "only 2", "version 1", "Unsupported")
 errors("truncated", skinned[:-40], "cut short", "a file shorter than the size its header gives", "Truncated")
 errors("truncated_header", skinned[:80], "cut short", "a file cut short inside its header", "Truncated")
-errors("triangle_outside_mesh", patch(skinned, ofs_tris, "<3I", 0, 3, 4), "names a vertex outside the mesh",
-       "a triangle naming a vertex past its mesh", "Corrupt")
+case(FMT, "triangle_outside_mesh", {"triangle_outside_mesh.iqm": patch(skinned, ofs_tris, "<3I", 0, 3, 4)},
+     {"spec": SPEC + ": a triangle naming a vertex past its mesh is dropped and counted", "source": SRC,
+      "triangles": 1, "json": {"/asset/extras/source/droppedGeometry": 1}})
 errors("joint_parent_not_earlier", patch(skinned, ofs_joints + 4, "<i", 1), "isn't an earlier joint",
        "a joint whose parent comes after it", "Corrupt")
 errors("name_outside_text", patch(skinned, ofs_meshes, "<I", 100000), "outside the",

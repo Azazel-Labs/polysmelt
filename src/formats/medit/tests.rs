@@ -60,6 +60,41 @@ fn got(doc: &Document) -> BTreeMap<String, Got> {
                 _ => out.points = indices,
             }
         }
+        // Each vertex as the first that holds what it does, its normal aside: the vertices the default normals
+        // add where an edge is hard are copies of a point, and are taken as the point they copy.
+        let count = out.positions.len();
+        let key = |v: usize| -> Vec<u32> {
+            let others = out.attributes.iter().filter(|(name, _)| *name != "NORMAL");
+            let held = others.flat_map(|(_, values)| {
+                let width = values.len() / count;
+                values[v * width..(v + 1) * width].iter().map(|x| x.to_bits())
+            });
+            out.positions[v].iter().map(|x| x.to_bits()).chain(held).collect()
+        };
+        let mut firsts: std::collections::HashMap<Vec<u32>, u32> = std::collections::HashMap::new();
+        let mut to = Vec::with_capacity(count);
+        let mut kept = Vec::new();
+        for v in 0..count {
+            let next = u32::try_from(kept.len()).unwrap();
+            let at = *firsts.entry(key(v)).or_insert(next);
+            if at == next {
+                kept.push(v);
+            }
+            to.push(at);
+        }
+        if kept.len() < count {
+            for values in out.attributes.values_mut() {
+                let width = values.len() / count;
+                *values = kept
+                    .iter()
+                    .flat_map(|&v| values[v * width..(v + 1) * width].to_vec())
+                    .collect();
+            }
+            out.positions = kept.iter().map(|&v| out.positions[v]).collect();
+            out.tris.iter_mut().flatten().for_each(|i| *i = to[*i as usize]);
+            out.lines.iter_mut().flatten().for_each(|i| *i = to[*i as usize]);
+            out.points.iter_mut().for_each(|i| *i = to[*i as usize]);
+        }
         let name = mesh.get("name").and_then(Value::as_str).unwrap_or_default();
         assert!(all.insert(name.to_owned(), out).is_none(), "two meshes named {name:?}");
     }
@@ -279,8 +314,8 @@ fn normals_that_dont_cover_the_vertices_are_custom() {
         "NormalAtVertices\n2\n5 2\n1 1\n",
     );
     let meshes = got(&read(partial.as_bytes()));
+    // The mesh's normals are the default ones, as for a file with none; the file's two are kept beside them.
     let volume = &meshes["Volume 1"];
-    assert!(!volume.attributes.contains_key("NORMAL"));
     let mut want = [0.0; 15];
     want[2] = 2.0;
     want[13] = 3.0;
@@ -315,7 +350,7 @@ fn two_dimensions_and_higher_orders() {
     let short = TEXT.replace("2 3 4 5 1", "2 3 4 9 1").replace("1 5 0", "0 5 0");
     let doc = read(short.as_bytes());
     assert_eq!(got(&doc)["Volume 1"].tris.len(), 4);
-    assert_eq!(source(&doc)["droppedCells"], 2);
+    assert_eq!(source(&doc)["droppedGeometry"], 2);
 }
 
 #[test]

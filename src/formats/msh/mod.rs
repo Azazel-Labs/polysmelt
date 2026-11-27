@@ -341,7 +341,7 @@ struct Reader<'a> {
     skipped: usize,
 }
 
-pub(crate) fn load(input: Input<'_>) -> Result<Document> {
+pub(crate) fn load(input: Input<'_>, keep: crate::Keep) -> Result<Document> {
     let data = input.read()?;
     let data = data.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&data);
     ensure!(data.iter().any(|&b| !stream::space(b)), Empty, "Gmsh file is empty");
@@ -406,7 +406,7 @@ pub(crate) fn load(input: Input<'_>) -> Result<Document> {
         model.source.insert("skippedArrays".into(), json!(left_out));
     }
     model.pieces = el.pieces();
-    cells::build(model, "Gmsh", input.limit)
+    cells::build(model, "Gmsh", input.limit, keep.crease_angle())
 }
 
 impl<'a> Reader<'a> {

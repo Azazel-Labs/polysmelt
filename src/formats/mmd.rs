@@ -1263,9 +1263,7 @@ fn build(m: Model, input: &Input<'_>, stem: &str, assets: &dyn Assets, keep: Kee
         globals.push(used);
     }
     drop(remap);
-    if dropped > 0 {
-        facts.insert("dropped_triangles".into(), json!(dropped));
-    }
+    scene.dropped = dropped;
     if zw {
         facts.insert("additional_uv_zw_dropped".into(), json!(true));
     }

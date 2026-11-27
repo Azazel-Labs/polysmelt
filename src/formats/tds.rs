@@ -1504,6 +1504,8 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
     // Each mesh object's primitives, one per material.
     let mut triangles = 0usize;
     let mut prims_of = Vec::with_capacity(objects.len());
+    // Faces naming a vertex that isn't there, which are left out.
+    let mut dropped = 0;
     for o in &objects {
         let Body::Mesh(ts) = &o.body else {
             prims_of.push(None);
@@ -1527,6 +1529,8 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
                     }
                 }
             }
+            let past = |f: &&[u16; 3]| f.iter().any(|&i| usize::from(i) >= t.vertices.len());
+            dropped += t.faces.iter().filter(past).count();
             add_faces(t, &face_mat, &flat, &mut prims, &mut materials);
         }
         let mut prims: Vec<Prim> = prims.into_values().filter(|p| !p.indices.is_empty()).collect();
@@ -1554,7 +1558,8 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         super::guess_texture(&mut materials, &mut images, &textured, input.path, assets);
     }
 
-    let mut b = Builder::default();
+    let mut b = Builder::new(keep.crease_angle());
+    b.dropped = dropped;
     let mut nodes: Vec<Value> = Vec::new();
     let (mut cameras, mut lights) = (Vec::new(), Vec::new());
     let mut roots = Vec::new();
@@ -2135,10 +2140,8 @@ fn add_faces(
                     nrm = sum.map(|c| c / len);
                 }
             }
-            #[allow(clippy::float_cmp, reason = "exactly zero: no face in the group gave a normal")]
-            if nrm == [0.0; 3] {
-                nrm = [0.0, 0.0, 1.0];
-            }
+            // Still zero when no face in the group gave a normal: the vertex then takes the one every format's
+            // does, as the primitive is written.
             // -0.0 + 0.0 is 0.0: one key for both zeros.
             let nrm = nrm.map(|c| c + 0.0);
             let idx = *seen.entry((mat, vi, nrm.map(f32::to_bits))).or_insert_with(|| {

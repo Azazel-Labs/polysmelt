@@ -220,9 +220,7 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         prims.push(p);
         groups.push(json!(g.name));
     }
-    if dropped > 0 {
-        facts.insert("dropped_triangles".into(), json!(dropped));
-    }
+    scene.dropped = dropped;
     let has_mesh = prims.iter().any(|p| !p.indices.is_empty());
     if has_mesh {
         scene.meshes.push(SceneMesh {
@@ -790,7 +788,7 @@ mod tests {
         let tri = 14 + 2 + 45 + 2 + 2;
         v[tri..tri + 2].copy_from_slice(&9u16.to_le_bytes());
         let doc = read(&v).unwrap();
-        assert_eq!(doc.facts["dropped_triangles"], json!(1));
+        assert_eq!(doc.json()["asset"]["extras"]["source"]["droppedGeometry"], json!(1));
     }
 
     #[test]

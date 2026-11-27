@@ -182,12 +182,19 @@ def errors(name, data, text, what, kind):
 errors("not_md2", b"IDP3" + good[4:], "no IDP2 signature", "a file without the IDP2 signature", "UnknownFormat")
 errors("truncated_in_frames", good[:-30], "more than it holds", "a file cut short inside its last frame", "Truncated")
 errors("truncated_header", good[:40], "cut short", "a file cut short inside its header", "Truncated")
-errors("vertex_index_out_of_range",
-       build((8, 4), [], ST, [((0, 3, 9), (0, 3, 2))], frames),
-       "names a vertex past", "a triangle naming a vertex past the frame's", "Corrupt")
-errors("st_index_out_of_range",
-       build((8, 4), [], ST, [((0, 3, 2), (0, 3, 7))], frames),
-       "names a texture coordinate past", "a triangle naming a texture coordinate past the list", "Corrupt")
+
+
+def dropped(name, tris, what):
+    """A model whose last triangle can't be drawn: it is left out and counted, and the others are drawn."""
+    case(FMT, name, {name + ".md2": build((8, 4), [], ST, tris, frames)},
+         {"spec": SPEC + ": " + what, "source": SRC, "triangles": len(tris) - 1,
+          "json": {"/asset/extras/source/droppedGeometry": 1}})
+
+
+dropped("vertex_index_out_of_range", TRIS + [((0, 3, 9), (0, 3, 2))],
+        "a triangle naming a vertex past the frame's is dropped and counted")
+dropped("st_index_out_of_range", TRIS + [((0, 3, 2), (0, 3, 7))],
+        "a triangle naming a texture coordinate past the list is dropped and counted")
 errors("negative_count", build((8, 4), [], ST, TRIS, frames, header={7: -1}), "is negative",
        "a negative triangle count", "Corrupt")
 errors("frame_size_too_small", build((8, 4), [], ST, TRIS, frames, frame_size=40), "too few for",

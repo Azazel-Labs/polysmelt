@@ -76,9 +76,7 @@ fn irrmesh(text: &str, input: &super::Input<'_>, assets: &dyn Assets, keep: Keep
     let mut node = Node::named(stem, None);
     node.mesh = Some(0);
     scene.add(node);
-    if mesh.dropped > 0 {
-        scene.facts.insert("dropped_triangles".into(), json!(mesh.dropped));
-    }
+    scene.dropped = mesh.dropped;
     scene.facts.insert("buffers".into(), json!(mesh.buffers.len()));
     scene.info.format = Some("Irrlicht mesh".into());
     scene.info.version = mesh.version;

@@ -578,7 +578,7 @@ pub(super) fn load(input: Input<'_>, keep: Keep) -> Result<Document> {
     }
 
     let joints = &h.joints;
-    let mut b = Builder::default();
+    let mut b = Builder::plain();
     let nodes: Vec<Value> = joints
         .iter()
         .map(|j| {

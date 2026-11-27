@@ -274,7 +274,7 @@ rows = [["0", "0", "0", "0", "0", "-1", "ffffffff", "0", "0"], ["0", "1", "0", "
         ["1", "0", "0", "0", "0", "-1", "ffffffff", "1", "0"]]
 case(FMT, "mesh_bad_indices", {"tri.irrmesh": irrmesh(buffer(rows, [0, 1, 2, 0, 1, 7, 2, 1]))},
      {"spec": f"{SPEC}: a triangle with an index past the vertices and a last one cut short are dropped",
-      "source": SRC, "triangles": 1, "area": 0.5, "facts": {"dropped_triangles": 2},
+      "source": SRC, "triangles": 1, "area": 0.5, "json": {"/asset/extras/source/droppedGeometry": 2},
       "bounds": {"min": [0, 0, 0], "max": [1, 1, 0]}})
 
 case(FMT, "mesh_not_irrlicht", {"other.irrmesh": "<mesh><submeshes><submesh/></submeshes></mesh>\n"},

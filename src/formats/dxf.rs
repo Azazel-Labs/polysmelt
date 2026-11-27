@@ -368,6 +368,8 @@ struct Bucket {
     lines: Vec<[u32; 2]>,
     points: Vec<u32>,
     seen: FastMap<[u32; 3], u32>,
+    /// Faces, segments and points left out for a corner that isn't a finite point, or that names no vertex.
+    dropped: usize,
 }
 
 impl Bucket {
@@ -382,9 +384,15 @@ impl Bucket {
         })
     }
 
-    /// Adds a polygon; the triangles it made.
+    /// Adds a polygon; the triangles it made. Four corners whose last repeats the third are a triangle, which is
+    /// how DXF writes one. Otherwise the corners are taken as they are: a triangle with no area, or with a
+    /// corner twice, is kept.
     fn polygon(&mut self, pts: &[[f64; 3]], s: &mut Scratch) -> usize {
-        if pts.len() < 3 || pts.iter().flatten().any(|x| !x.is_finite()) {
+        if pts.len() < 3 {
+            return 0;
+        }
+        if pts.iter().flatten().any(|x| !x.is_finite()) {
+            self.dropped += 1;
             return 0;
         }
         s.ids.clear();
@@ -392,24 +400,18 @@ impl Bucket {
             let v = self.vertex(p);
             s.ids.push(v);
         }
-        s.ids.dedup();
-        if s.ids.len() > 1 && s.ids.first() == s.ids.last() {
+        if s.ids.len() == 4 && s.ids[3] == s.ids[2] {
             s.ids.pop();
         }
         let before = self.tris.len();
         if s.ids.len() == 3 {
             self.tris.push([s.ids[0], s.ids[1], s.ids[2]]);
-        } else if s.ids.len() > 3 {
+        } else {
             s.corners.clear();
             s.corners.extend(s.ids.iter().map(|&v| self.positions[v as usize]));
             s.tris.clear();
             triangulate(&s.corners, &mut s.tris);
-            for t in &s.tris {
-                let t = t.map(|k| s.ids[k as usize]);
-                if t[0] != t[1] && t[1] != t[2] && t[0] != t[2] {
-                    self.tris.push(t);
-                }
-            }
+            self.tris.extend(s.tris.iter().map(|t| t.map(|k| s.ids[k as usize])));
         }
         self.tris.len() - before
     }
@@ -420,6 +422,7 @@ impl Bucket {
         let mut last = None;
         for &p in pts {
             let v = p.iter().all(|x| x.is_finite()).then(|| self.vertex(p));
+            self.dropped += usize::from(v.is_none());
             if let (Some(a), Some(b)) = (last, v)
                 && a != b
             {
@@ -436,6 +439,8 @@ impl Bucket {
         if p.iter().all(|x| x.is_finite()) {
             let v = self.vertex(p);
             self.points.push(v);
+        } else {
+            self.dropped += 1;
         }
     }
 }
@@ -486,6 +491,7 @@ impl Space {
                 lines: Vec::new(),
                 points: Vec::new(),
                 seen: FastMap::default(),
+                dropped: 0,
             });
         }
         &mut self.buckets[k]
@@ -875,10 +881,14 @@ impl Model {
             }
             for v in faces {
                 pts.clear();
+                // A corner left out is 0; one naming a vertex that isn't there spoils the face.
+                let mut whole = true;
                 for &k in &v.ints[1..5] {
                     let k = usize::try_from(k.unsigned_abs()).unwrap_or(0);
-                    if let Some(&q) = k.checked_sub(1).and_then(|k| positions.get(k)) {
-                        pts.push(q);
+                    match k.checked_sub(1).map(|k| positions.get(k)) {
+                        Some(Some(&q)) => pts.push(q),
+                        Some(None) => whole = false,
+                        None => {}
                     }
                 }
                 let layer = if v.layer.is_empty() { layer } else { self.layer(v.layer) };
@@ -888,7 +898,11 @@ impl Model {
                     spec
                 };
                 let bucket = self.spaces[s].bucket(layer, spec);
-                self.triangles += bucket.polygon(&pts, &mut self.scratch);
+                if whole {
+                    self.triangles += bucket.polygon(&pts, &mut self.scratch);
+                } else {
+                    bucket.dropped += 1;
+                }
             }
         } else if flags & 16 != 0 {
             // M rows of N, or the surface fitted to them (`73` by `74`).
@@ -1150,6 +1164,8 @@ impl Model {
             );
             if pts.len() == n {
                 self.triangles += bucket.polygon(&pts, &mut self.scratch);
+            } else {
+                bucket.dropped += 1;
             }
         }
         self.scratch.pts = pts;
@@ -1187,7 +1203,7 @@ fn unit(units: i64) -> Option<(f64, &'static str)> {
     })
 }
 
-pub(crate) fn load(input: Input<'_>) -> Result<Document> {
+pub(crate) fn load(input: Input<'_>, keep: crate::Keep) -> Result<Document> {
     let data = input.read()?;
     let d = data.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&data);
     ensure!(!d.iter().all(u8::is_ascii_whitespace), Empty, "DXF file is empty");
@@ -1235,7 +1251,7 @@ pub(crate) fn load(input: Input<'_>) -> Result<Document> {
         }
     }
     ensure!(sections > 0, UnknownFormat, "not a DXF file: it has no sections");
-    Build::new(m, binary).finish()
+    Build::new(m, binary, keep.crease_angle()).finish()
 }
 
 /// The layer and color a block reference passes to what's in its block.
@@ -1278,7 +1294,7 @@ struct Build {
 }
 
 impl Build {
-    fn new(mut m: Model, binary: bool) -> Self {
+    fn new(mut m: Model, binary: bool, crease: f32) -> Self {
         let layer0 = m.layer(b"0");
         let insts = m
             .spaces
@@ -1306,12 +1322,17 @@ impl Build {
                 b.seen = FastMap::default();
             }
         }
+        let dropped = m.spaces.iter().flat_map(|s| &s.buckets).map(|b| b.dropped).sum();
         Self {
             m,
             binary,
             layer0,
             insts,
-            b: Builder::default(),
+            b: {
+                let mut b = Builder::new(crease);
+                b.dropped = dropped;
+                b
+            },
             nodes: Vec::new(),
             meshes: Vec::new(),
             mesh_tris: Vec::new(),

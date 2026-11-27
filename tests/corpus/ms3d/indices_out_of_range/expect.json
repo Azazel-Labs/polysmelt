@@ -16,12 +16,12 @@
     }
   ],
   "json": {
-    "/meshes/0/primitives/0/material": 0
+    "/meshes/0/primitives/0/material": 0,
+    "/asset/extras/source/droppedGeometry": 2
   },
   "facts": {
     "triangles": 2,
     "joints": 0,
-    "groups": 1,
-    "dropped_triangles": 2
+    "groups": 1
   }
 }

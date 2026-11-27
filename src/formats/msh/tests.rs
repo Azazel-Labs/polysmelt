@@ -55,6 +55,41 @@ fn got(doc: &Document) -> BTreeMap<String, Got> {
                 _ => out.points = indices,
             }
         }
+        // Each vertex as the first that holds what it does, its normal aside: the vertices the default normals
+        // add where an edge is hard are copies of a point, and are taken as the point they copy.
+        let count = out.positions.len();
+        let key = |v: usize| -> Vec<u32> {
+            let others = out.attributes.iter().filter(|(name, _)| *name != "NORMAL");
+            let held = others.flat_map(|(_, values)| {
+                let width = values.len() / count;
+                values[v * width..(v + 1) * width].iter().map(|x| x.to_bits())
+            });
+            out.positions[v].iter().map(|x| x.to_bits()).chain(held).collect()
+        };
+        let mut firsts: std::collections::HashMap<Vec<u32>, u32> = std::collections::HashMap::new();
+        let mut to = Vec::with_capacity(count);
+        let mut kept = Vec::new();
+        for v in 0..count {
+            let next = u32::try_from(kept.len()).unwrap();
+            let at = *firsts.entry(key(v)).or_insert(next);
+            if at == next {
+                kept.push(v);
+            }
+            to.push(at);
+        }
+        if kept.len() < count {
+            for values in out.attributes.values_mut() {
+                let width = values.len() / count;
+                *values = kept
+                    .iter()
+                    .flat_map(|&v| values[v * width..(v + 1) * width].to_vec())
+                    .collect();
+            }
+            out.positions = kept.iter().map(|&v| out.positions[v]).collect();
+            out.tris.iter_mut().flatten().for_each(|i| *i = to[*i as usize]);
+            out.lines.iter_mut().flatten().for_each(|i| *i = to[*i as usize]);
+            out.points.iter_mut().for_each(|i| *i = to[*i as usize]);
+        }
         let name = mesh.get("name").and_then(Value::as_str).unwrap_or_default();
         assert!(all.insert(name.to_owned(), out).is_none(), "two meshes named {name:?}");
     }
@@ -556,7 +591,7 @@ fn tags_need_not_run_from_one() {
     let missing = text.replace("3 4 2 7 1 2 3 4 5", "3 4 2 7 1 2 3 4 77");
     let doc = read(missing.as_bytes());
     assert_eq!(got(&doc)["body"].tris.len(), 4);
-    assert_eq!(source(&doc)["droppedCells"], 1);
+    assert_eq!(source(&doc)["droppedGeometry"], 1);
 }
 
 #[test]

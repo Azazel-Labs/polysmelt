@@ -258,7 +258,7 @@ pub(crate) fn load(input: super::Input<'_>, assets: &dyn Assets, keep: Keep) -> 
         assets,
         keep,
         limit: input.limit,
-        b: Builder::default(),
+        b: Builder::new(keep.crease_angle()),
         nodes: Vec::new(),
         node_of: HashMap::new(),
         meshes: Vec::new(),

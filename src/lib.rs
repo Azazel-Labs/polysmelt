@@ -117,6 +117,7 @@ mod error;
 mod flatten;
 mod formats;
 mod gaussian;
+mod geometry;
 pub mod gltf;
 pub mod images;
 mod json;

@@ -111,8 +111,9 @@ case(FMT, "inches", {"cube.dxf": text(drawing(1, cube_faces()))},
 
 case(FMT, "three_corner_and_degenerate_faces",
      {"faces.dxf": text(drawing(6, face("8 0", TRI) + face("8 0", [[0, 0, 0], [1, 0, 0], [1, 0, 0], [0, 0, 0]])))},
-     {"spec": SPEC + ": a 3DFACE whose fourth corner is its third is a triangle; one with no area is dropped",
-      "source": SRC, "triangles": 1, "area": 0.5, "facts": {"triangles": 1}})
+     {"spec": SPEC + ": a 3DFACE whose fourth corner is its third is a triangle; one of four corners with no area "
+                     "is kept, as its two triangles",
+      "source": SRC, "triangles": 3, "area": 0.5, "facts": {"triangles": 3}})
 
 case(FMT, "crlf_bom", {"cube.dxf": "﻿" + text(drawing(6, cube_faces()), "\r\n")},
      {"spec": SPEC + ": CRLF line ends and a UTF-8 byte order mark", "source": SRC, **CUBE})

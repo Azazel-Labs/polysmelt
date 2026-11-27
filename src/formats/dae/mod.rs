@@ -157,7 +157,7 @@ pub(super) fn load(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<
         keep,
         meters,
         archive,
-        b: Builder::default(),
+        b: Builder::new(keep.crease_angle()),
         sources: HashMap::new(),
         nodes: Vec::new(),
         parents: Vec::new(),
@@ -911,7 +911,7 @@ impl Reader<'_> {
             return Ok(None);
         };
         let budget = self.limit.saturating_sub(self.drawn);
-        let Ok(pieces) = geometry::mesh(dom, &mut self.sources, mesh_el, budget) else {
+        let Ok(pieces) = geometry::mesh(dom, &mut self.sources, mesh_el, budget, self.b.crease) else {
             bail!(LimitExceeded, "too many triangles (over {})", self.limit);
         };
         let mut prims = Vec::new();
@@ -921,6 +921,7 @@ impl Reader<'_> {
         let mut triangles = 0;
         let morphed = morph.is_some() && self.keep.morph_targets;
         for p in pieces {
+            self.b.dropped += p.dropped;
             let material = if self.keep.materials {
                 p.symbol
                     .as_deref()
@@ -1368,8 +1369,10 @@ impl Reader<'_> {
                 target_normals.push(normals);
             }
             let at = |acc: Option<&geometry::Acc<f32>>, p: u32| -> [f32; 3] {
+                // A coordinate that isn't finite moves nothing.
+                let finite = |x: f32| if x.is_finite() { x } else { 0.0 };
                 acc.and_then(|a| a.get(p)).map_or([0.0; 3], |v| {
-                    [v[0], v.get(1).copied().unwrap_or(0.0), v.get(2).copied().unwrap_or(0.0)]
+                    [v[0], v.get(1).copied().unwrap_or(0.0), v.get(2).copied().unwrap_or(0.0)].map(finite)
                 })
             };
             let mut per_prim = Vec::new();
@@ -1435,7 +1438,7 @@ impl Reader<'_> {
         base: &[Vec<[f32; 3]>],
     ) -> Option<Vec<Vec<[f32; 3]>>> {
         let budget = self.mesh_triangles.get(mesh).copied().unwrap_or(0);
-        let pieces = geometry::mesh(self.dom, &mut self.sources, target, budget).ok()?;
+        let pieces = geometry::mesh(self.dom, &mut self.sources, target, budget, self.b.crease).ok()?;
         if pieces.len() != points.len() || pieces.iter().zip(points).any(|(p, pts)| p.points != *pts) {
             return None;
         }

@@ -652,3 +652,39 @@ fn hostile_files_never_panic() {
         let _ = read(junk);
     }
 }
+
+#[test]
+fn a_quad_that_isnt_convex_keeps_its_outline() {
+    // An arrowhead, its notch at the second corner: cut from the first corner it would cover three times its
+    // area.
+    let text = r#"
+        GeometryNode $n { ObjectRef { ref { $g } } }
+        GeometryObject $g { Mesh (primitive = "quads") {
+            VertexArray (attrib = "position") { float[3] { {2, 0, 0}, {0.5, 0.5, 0}, {0, 2, 0}, {0, 0, 0} } }
+            IndexArray { unsigned_int16[4] { {0, 1, 2, 3} } }
+        } }
+    "#;
+    let doc = read(text).unwrap();
+    let m = flat(&doc);
+    assert_eq!(m.triangles(), 2);
+    let mut area = 0.0;
+    for p in &m.prims {
+        for t in p.indices.chunks(3) {
+            let [a, b, c] = [0, 1, 2].map(|k| p.positions[t[k] as usize]);
+            let (u, v) = ([0, 1, 2].map(|k| b[k] - a[k]), [0, 1, 2].map(|k| c[k] - a[k]));
+            let n = [
+                u[1] * v[2] - u[2] * v[1],
+                u[2] * v[0] - u[0] * v[2],
+                u[0] * v[1] - u[1] * v[0],
+            ];
+            area += 0.5 * (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+        }
+    }
+    assert!((area - 1.0).abs() < 1e-5, "{area}");
+    // Without normals in the file, the default ones.
+    assert!(
+        doc.json()["meshes"][0]["primitives"][0]["attributes"]
+            .get("NORMAL")
+            .is_some()
+    );
+}

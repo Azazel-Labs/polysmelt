@@ -197,7 +197,7 @@ fn load_capped(input: Input<'_>, assets: &dyn Assets, keep: Keep, max_nodes: usi
         time,
         meters,
         usdz: Usdz::open(input),
-        b: Builder::default(),
+        b: Builder::new(keep.crease_angle()),
         nodes: Vec::new(),
         meshes: Vec::new(),
         mesh_triangles: Vec::new(),
@@ -2192,13 +2192,16 @@ impl Reader<'_> {
         for (face, &n) in counts.iter().enumerate() {
             let n = usize::try_from(n).unwrap_or(0);
             let end = start.saturating_add(n);
-            let ok = n >= 3
-                && end <= corners.len()
-                && !shape.hole.get(face).copied().unwrap_or(false)
+            let hole = shape.hole.get(face).copied().unwrap_or(false);
+            let whole = end <= corners.len()
                 && corners[start..end]
                     .iter()
                     .all(|&c| usize::try_from(c).is_ok_and(|c| c < points.len()));
-            if ok {
+            // A face naming a point that isn't there is left out, and counted.
+            if n >= 3 && !hole && !whole {
+                self.b.dropped += 1;
+            }
+            if n >= 3 && whole && !hole {
                 faces.push((face, start, n));
                 triangles += n - 2;
                 ensure!(
@@ -2301,7 +2304,10 @@ impl Reader<'_> {
                 prim.positions.push(points[point]);
                 part.points.push(point);
                 let normal = match (&shape.normals, flat) {
-                    (Some(nv), _) => nv.at(face, point, c).map(|v| unit(v.map(f64::from), false)),
+                    // One with no length stays zero, and takes its faces' as the primitive is written.
+                    (Some(nv), _) => nv
+                        .at(face, point, c)
+                        .map(|v| vec3::unit_or(v.map(f64::from), [0.0; 3]).map(f32_of)),
                     (None, Some(f)) => Some(f),
                     (None, None) => point_normals.get(point).copied(),
                 };

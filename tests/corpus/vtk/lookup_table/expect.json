@@ -25,6 +25,5 @@
     ]
   },
   "colors": true,
-  "uvs": false,
-  "vertices": 4
+  "uvs": false
 }

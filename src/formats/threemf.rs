@@ -379,7 +379,7 @@ pub(crate) fn load(input: super::Input<'_>, keep: Keep) -> Result<Document> {
         names: HashMap::new(),
         textures: Vec::new(),
         distinct: HashSet::new(),
-        b: Builder::default(),
+        b: Builder::new(keep.crease_angle()),
         meshes: Vec::new(),
         mesh_triangles: Vec::new(),
         mesh_of: HashMap::new(),
@@ -792,7 +792,8 @@ impl Emit<'_> {
     /// printed); without, every triangle but those of such volumes.
     ///
     /// Corners share a vertex wherever the object's triangles do, unless their texture coordinates or colors
-    /// differ. There are no normals: printed models are faceted, which glTF clients shade flat.
+    /// differ. The format has no normals, so the mesh takes the default ones as it is written, made with a
+    /// crease angle (see [`crate::geometry`]).
     #[allow(clippy::too_many_arguments)]
     fn mesh(
         &mut self,
@@ -830,6 +831,7 @@ impl Emit<'_> {
                 self.limit
             );
             let [Some(a), Some(b), Some(c)] = t.v.map(|k| o.verts.get(k as usize)) else {
+                self.b.dropped += 1;
                 continue;
             };
             let volume = volume_of(volumes, u32::try_from(i).unwrap_or(u32::MAX));

@@ -624,6 +624,15 @@ pub(super) fn floats32(text: &[u8]) -> Vec<f32> {
     out
 }
 
+/// The numbers in whitespace-separated text, as `f32`, as they are: a mesh's sources, where a position that
+/// isn't finite takes what's drawn on it out of the model rather than moving it to the origin. Anything that
+/// isn't a number reads as 0.
+pub(super) fn floats32_raw(text: &[u8]) -> Vec<f32> {
+    let mut out = Vec::with_capacity(text.len() / 6);
+    out.extend(tokens(text).map(|t| stream::f32_from(t).or_else(|| f32_lenient(t)).unwrap_or(0.0)));
+    out
+}
+
 /// A number in one of the rarer spellings [`f32_lenient`] takes, finite, or else 0.
 #[cold]
 fn float32(t: &[u8]) -> f32 {

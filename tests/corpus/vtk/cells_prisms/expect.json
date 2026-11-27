@@ -19,6 +19,5 @@
     "triangles": 36
   },
   "colors": false,
-  "uvs": false,
-  "vertices": 22
+  "uvs": false
 }

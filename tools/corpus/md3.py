@@ -251,12 +251,18 @@ errors("not_md3", b"IDP2" + good[4:], "no IDP3 signature", "a file without the I
 errors("truncated_header", good[:60], "cut short", "a file cut short inside its header", "Truncated")
 errors("truncated_in_vertices", good[:-20], "more than it holds", "a file cut short inside its last surface",
        "Truncated")
-errors("vertex_index_out_of_range",
-       build("bad", [""], [], [surface("s", [], QUAD_ST, [(0, 3, 4)], [body_frame(0)])]),
-       "names a vertex past", "a triangle naming a vertex past the surface's", "Corrupt")
-errors("negative_vertex_index",
-       build("bad", [""], [], [surface("s", [], QUAD_ST, [(0, -1, 2)], [body_frame(0)])]),
-       "names a vertex past", "a triangle naming a negative vertex", "Corrupt")
+
+
+def dropped(name, bad, what):
+    """A surface whose last triangle can't be drawn: it is left out and counted, and the others are drawn."""
+    data = build("bad", [""], [], [surface("s", [], QUAD_ST, QUAD_TRIS + [bad], [body_frame(0)])])
+    case(FMT, name, {name + ".md3": data},
+         {"spec": SPEC + ": " + what, "source": SRC, "triangles": len(QUAD_TRIS),
+          "json": {"/asset/extras/source/droppedGeometry": 1}})
+
+
+dropped("vertex_index_out_of_range", (0, 3, 4), "a triangle naming a vertex past the surface's is dropped and counted")
+dropped("negative_vertex_index", (0, -1, 2), "a triangle naming a negative vertex is dropped and counted")
 errors("negative_count", build("bad", ["", "", ""], tags, [good_surface], header={4: -1}), "is negative",
        "a negative surface count", "Corrupt")
 errors("huge_triangle_count",

@@ -19,7 +19,6 @@
   "facts": {
     "triangles": 25
   },
-  "vertices": 25,
   "document": {
     "nodes": 5,
     "attributes": [

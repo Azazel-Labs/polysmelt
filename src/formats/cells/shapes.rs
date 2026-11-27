@@ -519,7 +519,10 @@ impl Draw {
                     } else {
                         [w[1], w[0], w[2]]
                     };
-                    self.tri(t, cell);
+                    // A strip's triangle on one point twice restarts the strip, and draws nothing.
+                    if crate::geometry::distinct(t) {
+                        self.tri(t, cell);
+                    }
                 }
             }
             Shape::Volume(volume) => {

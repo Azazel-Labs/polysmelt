@@ -44,7 +44,7 @@ const MAX_TEXTURE: usize = 1 << 28;
 const NONE: f32 = f32::NAN;
 
 /// Loads an AMF: an object's triangles as a mesh, constellations as nodes, and the facts worth keeping.
-pub(crate) fn load(input: super::Input<'_>) -> Result<Document> {
+pub(crate) fn load(input: super::Input<'_>, keep: crate::Keep) -> Result<Document> {
     let zipped = input.head(4)?.starts_with(b"PK\x03\x04");
     let amf = if zipped {
         let mut zip =
@@ -68,7 +68,7 @@ pub(crate) fn load(input: super::Input<'_>) -> Result<Document> {
     } else {
         parse(BufReader::with_capacity(1 << 16, input.seekable()?), input.limit)?
     };
-    build(&amf, zipped)
+    build(&amf, zipped, keep.crease_angle())
 }
 
 /// An object: its vertices and its volumes.
@@ -486,7 +486,8 @@ fn close(a: &mut Amf, s: &mut State, t: Tag, parent: Option<Tag>, limit: usize) 
         Tag::Leaf(leaf, k) => {
             let v = number(&s.text);
             match (leaf, parent) {
-                (Leaf::Coord, Some(Tag::Coordinates)) => s.position[k] = v.unwrap_or(0.0),
+                // A coordinate that isn't finite stays as it is: the triangles on its vertex are dropped.
+                (Leaf::Coord, Some(Tag::Coordinates)) => s.position[k] = stream::num(&s.text).unwrap_or(0.0),
                 (Leaf::Normal, Some(Tag::Normal)) => s.normal[k] = v,
                 (Leaf::Channel, Some(Tag::Color)) => {
                     s.formula |= v.is_none() && !s.text.trim_ascii().is_empty();
@@ -822,7 +823,7 @@ struct Look {
     blend: bool,
 }
 
-fn build(a: &Amf, zipped: bool) -> Result<Document> {
+fn build(a: &Amf, zipped: bool, crease: f32) -> Result<Document> {
     let unit = a.unit.clone().unwrap_or_else(|| "millimeter".to_owned());
     let known = crate::source::meters_in(&unit);
     let scale = known.unwrap_or(1e-3);
@@ -841,7 +842,7 @@ fn build(a: &Amf, zipped: bool) -> Result<Document> {
         wraps: Vec::new(),
         dropped: 0,
     };
-    let mut b = Builder::default();
+    let mut b = Builder::new(crease);
     let mut looks: HashMap<Look, usize> = HashMap::new();
     let mut materials: Vec<Full> = Vec::new();
     let mut meshes: Vec<Value> = Vec::new();
@@ -1089,7 +1090,7 @@ fn build(a: &Amf, zipped: bool) -> Result<Document> {
     for (key, n) in [
         ("droppedCurvedEdges", a.curved),
         ("droppedFormulas", a.formulas),
-        ("droppedTriangles", bad),
+        (crate::geometry::DROPPED, bad),
         ("droppedInstances", dropped),
         ("droppedTextures", tex.dropped + a.bad_textures),
     ] {
@@ -1302,7 +1303,7 @@ mod tests {
     }
 
     fn load_str(xml: &str) -> Result<Document> {
-        load(Input::memory(xml.as_bytes(), "t.amf"))
+        load(Input::memory(xml.as_bytes(), "t.amf"), crate::Keep::ALL)
     }
 
     fn flat(doc: &Document) -> crate::mesh::Mesh {
@@ -1365,7 +1366,7 @@ mod tests {
         assert_eq!(info.title.as_deref(), Some("Split Pyramid"));
         assert!(src.get("metadata").is_none(), "nothing else to keep");
         assert_eq!(src["droppedCurvedEdges"], 1);
-        assert_eq!(src["droppedTriangles"], 1);
+        assert_eq!(src["droppedGeometry"], 1);
         assert_eq!(src["droppedFormulas"], 1);
         assert_eq!(doc.facts["triangles"], 5);
         let mesh = &doc.json()["meshes"][0];
@@ -1387,8 +1388,8 @@ mod tests {
             .as_f64()
             .unwrap();
         assert!((c - 0.75).abs() < 1e-6, "{c}");
-        // Normals only where every vertex has one.
-        assert!(prims.iter().all(|p| p["attributes"].get("NORMAL").is_none()));
+        // No vertex has a normal: every primitive takes the default ones.
+        assert!(prims.iter().all(|p| p["attributes"].get("NORMAL").is_some()));
 
         let m = flat(&doc);
         assert_eq!(m.triangles(), 5);
@@ -1470,11 +1471,11 @@ mod tests {
     #[test]
     fn zipped_files_read_the_same() {
         let bytes = zipped("model.amf", PYRAMID);
-        let doc = load(Input::memory(&bytes, "t.amf")).unwrap();
+        let doc = load(Input::memory(&bytes, "t.amf"), crate::Keep::ALL).unwrap();
         assert_eq!(source(&doc)["zipped"], true);
         assert_eq!(doc.facts["triangles"], 5);
         let bytes = zipped("model.txt", "not xml at all");
-        assert!(load(Input::memory(&bytes, "t.amf")).is_err());
+        assert!(load(Input::memory(&bytes, "t.amf"), crate::Keep::ALL).is_err());
     }
 
     #[test]
@@ -1523,7 +1524,7 @@ mod tests {
             limit: 3,
             ..Input::memory(PYRAMID.as_bytes(), "t.amf")
         };
-        assert!(load(input).is_err());
+        assert!(load(input, crate::Keep::ALL).is_err());
         assert!(load_str("<model/>").is_err());
         assert!(load_str("").is_err());
         assert!(load_str("PK\u{3}\u{4}junk").is_err());
@@ -1539,7 +1540,10 @@ mod tests {
         assert_eq!(doc.facts["triangles"], 2);
         // Every prefix: an error or a document, never a panic.
         for n in 0..CONSTELLATIONS.len() {
-            if let Ok(doc) = load(Input::memory(&CONSTELLATIONS.as_bytes()[..n], "t.amf")) {
+            if let Ok(doc) = load(
+                Input::memory(&CONSTELLATIONS.as_bytes()[..n], "t.amf"),
+                crate::Keep::ALL,
+            ) {
                 doc.to_glb().unwrap();
             }
         }
@@ -1555,7 +1559,7 @@ mod tests {
                 }
                 let cut = rng.below(u32::try_from(b.len()).unwrap()) as usize;
                 for bytes in [&b[..], &b[..cut]] {
-                    if let Ok(doc) = load(Input::memory(bytes, "t.amf")) {
+                    if let Ok(doc) = load(Input::memory(bytes, "t.amf"), crate::Keep::ALL) {
                         doc.to_glb().unwrap();
                     }
                 }

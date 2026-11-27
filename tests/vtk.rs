@@ -3,6 +3,10 @@
 //! points drawn (in order, bit for bit), of the triangles, lines and points drawn (as indices into them), and of
 //! each attribute's values. Where cell data splits vertices, the triangles are hashed as corner positions with
 //! their cells' values instead. What Polysmelt reads must hash the same.
+//!
+//! A file without normals gets the default ones, which add vertices after VTK's points: copies of points where
+//! an edge is hard. They are told by being at the end and the same as an earlier vertex in everything but their
+//! normal, and each is taken as the point it copies.
 
 #![cfg(all(feature = "vtk", feature = "fs"))]
 
@@ -37,10 +41,14 @@ struct Drawn {
     verts: Vec<u32>,
     /// Each attribute's width and values.
     attributes: BTreeMap<String, (usize, Vec<f32>)>,
+    /// Whether the default normals added vertices, which are left out here.
+    copied: bool,
 }
 
-fn drawn(doc: &Document) -> Drawn {
+fn drawn(doc: &Document, reference_has_normals: bool) -> Drawn {
     let mut out = Drawn::default();
+    // Each vertex the default normals added, and the point it is a copy of.
+    let mut copies: std::collections::HashMap<(u64, u32), u32> = std::collections::HashMap::new();
     // Primitives of one piece share their attributes: each set of positions is taken once.
     let mut blocks: Vec<(u64, u32)> = Vec::new();
     let prims = doc.json()["meshes"][0]["primitives"].as_array().unwrap().clone();
@@ -50,14 +58,43 @@ fn drawn(doc: &Document) -> Drawn {
             offset
         } else {
             let offset = u32::try_from(out.positions.len()).unwrap();
+            // The block's vertices, each as the bits of everything it holds but its normal.
+            let mut read: Vec<(String, usize, Vec<f32>)> = Vec::new();
             for (name, accessor) in p["attributes"].as_object().unwrap() {
                 let (width, values) = doc
                     .read_floats(usize::try_from(accessor.as_u64().unwrap()).unwrap())
                     .unwrap();
+                read.push((name.clone(), width, values));
+            }
+            let count = read.iter().find(|r| r.0 == "POSITION").map_or(0, |r| r.2.len() / 3);
+            let key = |v: usize| -> Vec<u32> {
+                let kept = read.iter().filter(|r| r.0 != "NORMAL");
+                kept.flat_map(|(_, w, values)| values[v * w..(v + 1) * w].iter().map(|x| x.to_bits()))
+                    .collect()
+            };
+            // The copies the default normals added: at the end, each the same as an earlier vertex.
+            let mut firsts: std::collections::HashMap<Vec<u32>, usize> = std::collections::HashMap::new();
+            let generated = p["attributes"].get("NORMAL").is_some() && !reference_has_normals;
+            let mut own = count;
+            if generated {
+                for v in 0..count {
+                    firsts.entry(key(v)).or_insert(v);
+                }
+                while own > 0 && firsts[&key(own - 1)] < own - 1 {
+                    own -= 1;
+                }
+                for v in own..count {
+                    let to = u32::try_from(firsts[&key(v)]).unwrap() + offset;
+                    copies.insert((position, u32::try_from(v).unwrap()), to);
+                    out.copied = true;
+                }
+            }
+            for (name, width, values) in read {
+                let values = &values[..own * width];
                 if name == "POSITION" {
                     assert_eq!(width, 3);
                     out.positions.extend(values.as_chunks::<3>().0);
-                } else {
+                } else if name != "NORMAL" || !generated {
                     let entry = out.attributes.entry(name.clone()).or_insert((width, Vec::new()));
                     assert_eq!(entry.0, width, "{name} changes width between pieces");
                     entry.1.extend(values);
@@ -71,7 +108,10 @@ fn drawn(doc: &Document) -> Drawn {
             Some(a) => doc.read_indices(usize::try_from(a).unwrap()).unwrap(),
             None => (0..count).collect(),
         };
-        let indices: Vec<u32> = indices.iter().map(|i| i + offset).collect();
+        let indices: Vec<u32> = indices
+            .iter()
+            .map(|i| copies.get(&(position, *i)).copied().unwrap_or(i + offset))
+            .collect();
         match p.get("mode").and_then(Value::as_u64).unwrap_or(4) {
             4 => out.tris.extend(indices.as_chunks::<3>().0),
             1 => out.lines.extend(indices.as_chunks::<2>().0),
@@ -95,7 +135,7 @@ fn rotated<T: PartialOrd + Copy>(t: [T; 3]) -> [T; 3] {
 
 fn check(dir: &Path, model: &Path, reference: &Value) -> Result<(), String> {
     let doc = polysmelt::open(model).map_err(|e| format!("doesn't load: {e}"))?;
-    let d = drawn(&doc);
+    let d = drawn(&doc, reference["attributes"].get("NORMAL").is_some());
     let same = |what: &str, got: String, want: &Value| match want.as_str() {
         Some(want) if want != got => Err(format!("{what} hash to {got}, VTK's to {want}")),
         _ => Ok(()),
@@ -103,7 +143,11 @@ fn check(dir: &Path, model: &Path, reference: &Value) -> Result<(), String> {
     same("points", fnv(floats(d.positions.as_flattened())), &reference["points"])?;
     let mut tris: Vec<[u32; 3]> = d.tris.iter().map(|&t| rotated(t)).collect();
     tris.sort_unstable();
-    same("triangles", fnv(ints(tris.as_flattened())), &reference["triangles"])?;
+    // Where vertices were added and two of VTK's points are alike, which one a copy stands for can't be told:
+    // the triangles are then held to VTK's by their corners' positions alone, below.
+    if !(d.copied && reference["soup"].is_string()) {
+        same("triangles", fnv(ints(tris.as_flattened())), &reference["triangles"])?;
+    }
     if reference["points"].is_string() {
         let mut lines = d.lines.clone();
         lines.sort_unstable();

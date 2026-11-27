@@ -16,8 +16,9 @@
 //! library has, take the default material.
 //!
 //! Corners without a normal get one made from their faces: smooth within a smoothing group
-//! (`s 1`, the default), across texture seams, and flat for faces after `s off`. Corners with a
-//! normal keep it.
+//! (`s 1`), across texture seams, and flat for faces after `s off`. Corners with a normal keep
+//! it. A mesh with no normals in a file with no `s` at all takes the default normals every
+//! format's does, made with a crease angle (see `crate::geometry`).
 //!
 //! Each object (`o`) or group (`g`) is a node drawing its own mesh, with a primitive per material
 //! and its points (`p`) and lines (`l`) as primitives of their own. Every MTL statement goes in
@@ -49,7 +50,7 @@ use crate::images::{Images, Source, gray};
 use crate::keep::spawn;
 use crate::legacy_material::{self, Highlight, Phong, Rgb, Transparency};
 use crate::material::{self, Alpha, Clearcoat, Factor, Full, Sheen, Specular, Tex, UvTransform};
-use crate::mesh::{Image, Material, Prim, quad, smooth_normals, srgb_to_linear, triangulate};
+use crate::mesh::{Image, Material, Prim, quad, srgb_to_linear, triangulate};
 use crate::num::u32_of;
 use crate::source::{Axis, Fact, SourceInfo};
 use crate::vec3;
@@ -983,7 +984,7 @@ impl Piece {
             [b'v', b'n', b' ' | b'\t', ..] => {
                 let (f, n, next) = quick_nums::<3>(s, 3)?;
                 if n == 3 {
-                    self.nums.extend_from_slice(&vec3::unit_or(f, [0.0, 1.0, 0.0]));
+                    self.nums.extend_from_slice(&vec3::unit_or(f, [0.0; 3]));
                     self.run(Op::Vn);
                 }
                 next
@@ -1528,6 +1529,9 @@ struct Reader {
     mrgb: usize,
     /// The normal index of a corner without one: [`MADE`] and the smoothing group.
     smooth: u32,
+    /// Whether the file has an `s` statement: it says how its faces are smoothed. Without one (and without
+    /// normals) a mesh takes the default normals every format's does.
+    smoothed: bool,
     vt: Vec<[f32; 2]>,
     vn: Vec<[f32; 3]>,
     /// Output vertices, found by position: the newest output vertex at each position, and for
@@ -1568,6 +1572,8 @@ struct Reader {
     /// Faces read, and the file offset of the first, for sizing the arrays.
     faces: usize,
     face_from: usize,
+    /// Faces left out for a corner naming something that isn't there.
+    dropped: usize,
     /// The comments before the first statement.
     comments: Vec<String>,
     /// Statements read but not converted, by keyword.
@@ -1590,6 +1596,7 @@ impl Reader {
             colors: Vec::new(),
             mrgb: 0,
             smooth: MADE | 1,
+            smoothed: false,
             vt: Vec::new(),
             vn: Vec::new(),
             first: Vec::new(),
@@ -1619,6 +1626,7 @@ impl Reader {
             lines: 0,
             faces: 0,
             face_from: 0,
+            dropped: 0,
             comments: Vec::new(),
             skipped: Vec::new(),
             spare: Vec::new(),
@@ -1761,6 +1769,7 @@ impl Reader {
             stream::int::<i64>(w).map_or(1, |n| u32::try_from(n & 0x7FFF_FFFF).unwrap_or(1))
         };
         self.smooth = MADE | group;
+        self.smoothed = true;
     }
 
     /// A `#MRGB` block: a mask and an RGB color per position, in order, as eight hex digits
@@ -1892,6 +1901,8 @@ impl Reader {
         }
         if ok {
             self.add_face(&face, at, size);
+        } else {
+            self.dropped += 1;
         }
         self.face = face;
     }
@@ -2192,6 +2203,7 @@ impl Reader {
             })
         };
         if !some {
+            self.dropped += faces;
             return;
         }
         let group = u32_of(self.group());
@@ -2235,6 +2247,7 @@ impl Reader {
                     w[2] = smooth;
                 }
             } else if !resolve_face(&mut face, lens, smooth) {
+                self.dropped += 1;
                 continue;
             }
             self.add_face(&face, at, size);
@@ -2341,6 +2354,7 @@ impl Reader {
             g.2 += r.made;
             g.3 |= r.uv;
             self.faces += r.kept;
+            self.dropped += r.faces - r.kept;
             self.triangles += r.indices / 3;
         }
         let fresh = per_group.iter().map(|g| g.0).sum();
@@ -2534,7 +2548,8 @@ impl Reader {
     #[inline]
     fn normal(&mut self, f: [f32; 3], n: usize) {
         if n == 3 {
-            self.vn.push(vec3::unit_or(f, [0.0, 1.0, 0.0]));
+            // One with no length stays zero, and takes its faces' as the primitive is written.
+            self.vn.push(vec3::unit_or(f, [0.0; 3]));
         }
     }
 
@@ -2795,7 +2810,14 @@ fn trim_to_len<T>(v: &mut Vec<T>) {
 
 /// Points or lines on vertices of their own: the positions they use (with their colors), and
 /// for lines the pairs as indices into those.
-fn loose_prim(b: &mut Builder, at: &[u32], lines: bool, v: &[[f32; 3]], colors: &[[f32; 3]], scale: f32) -> Value {
+fn loose_prim(
+    b: &mut Builder,
+    at: &[u32],
+    lines: bool,
+    v: &[[f32; 3]],
+    colors: &[[f32; 3]],
+    scale: f32,
+) -> Option<Value> {
     let mut local: HashMap<u32, u32> = HashMap::new();
     let mut positions = Vec::new();
     let mut indices = Vec::with_capacity(at.len());
@@ -2806,8 +2828,18 @@ fn loose_prim(b: &mut Builder, at: &[u32], lines: bool, v: &[[f32; 3]], colors: 
         });
         indices.push(k);
     }
-    let pos: Vec<[f32; 3]> = positions.iter().map(|&p| v[p as usize]).collect();
+    let mut pos: Vec<[f32; 3]> = positions.iter().map(|&p| v[p as usize]).collect();
     let n = pos.len();
+    // A point or a segment at a position that isn't finite is dropped, as a triangle is.
+    let (mut segments, mut points) = if lines {
+        (indices, Vec::new())
+    } else {
+        (Vec::new(), indices)
+    };
+    b.sound(&mut pos, [&mut Vec::new(), &mut segments, &mut points]);
+    if segments.is_empty() && points.is_empty() {
+        return None;
+    }
     let mut attributes = json!({ "POSITION": b.positions(pos) });
     if !colors.is_empty() {
         let c: Vec<f32> = positions
@@ -2820,13 +2852,17 @@ fn loose_prim(b: &mut Builder, at: &[u32], lines: bool, v: &[[f32; 3]], colors: 
             .collect();
         attributes["COLOR_0"] = json!(b.accessor(Part::f32(c), 5126, n, "VEC4", Some(34962)));
     }
-    if lines {
-        let count = indices.len();
-        let i = b.accessor(Part::u32(indices), 5125, count, "SCALAR", Some(34963));
+    Some(if lines {
+        let count = segments.len();
+        let i = b.accessor(Part::u32(segments), 5125, count, "SCALAR", Some(34963));
         json!({ "attributes": attributes, "indices": i, "mode": 1 })
-    } else {
+    } else if points.len() == n {
         json!({ "attributes": attributes, "mode": 0 })
-    }
+    } else {
+        let count = points.len();
+        let i = b.accessor(Part::u32(points), 5125, count, "SCALAR", Some(34963));
+        json!({ "attributes": attributes, "indices": i, "mode": 0 })
+    })
 }
 
 /// OBJ, with MTL colors and textures (base color and normal map). Faces may mix corners with
@@ -2911,8 +2947,22 @@ pub(crate) fn obj(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<D
     } else {
         1.0
     };
+    // A mesh with no normals at all, in a file with no `s` to say how it's smoothed, takes the default normals
+    // as it's written: none are made for it here.
+    let plain: Vec<bool> = r
+        .groups
+        .iter()
+        .map(|g| !r.smoothed && g.made > 0 && g.made == g.prim.positions.len())
+        .collect();
+    for (g, _) in r.groups.iter_mut().zip(&plain).filter(|(_, plain)| **plain) {
+        g.made = 0;
+    }
     r.make_normals();
-    let mut b = Builder::default();
+    for (g, _) in r.groups.iter_mut().zip(&plain).filter(|(_, plain)| **plain) {
+        g.prim.normals = Vec::new();
+    }
+    let mut b = Builder::new(keep.crease_angle());
+    b.dropped = r.dropped;
     // Points and lines first, while the file's positions are here.
     let loose: Vec<Vec<Value>> = r
         .groups
@@ -2920,10 +2970,10 @@ pub(crate) fn obj(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<D
         .map(|g| {
             let mut out = Vec::new();
             if !g.points.is_empty() {
-                out.push(loose_prim(&mut b, &g.points, false, &r.v, &r.colors, scale));
+                out.extend(loose_prim(&mut b, &g.points, false, &r.v, &r.colors, scale));
             }
             if !g.lines.is_empty() {
-                out.push(loose_prim(&mut b, &g.lines, true, &r.v, &r.colors, scale));
+                out.extend(loose_prim(&mut b, &g.lines, true, &r.v, &r.colors, scale));
             }
             out
         })
@@ -3247,7 +3297,7 @@ pub(crate) fn obj(input: Input<'_>, assets: &dyn Assets, keep: Keep) -> Result<D
             if prim.normals.len() == nv {
                 trim_to_len(&mut prim.normals);
             } else {
-                prim.normals = smooth_normals(&prim.positions, &prim.indices);
+                prim.normals = Vec::new();
             }
             if let Some(mut p) = b.primitive(prim) {
                 p["material"] = json!(m);
@@ -3723,7 +3773,10 @@ f 1 2 3
 
     #[test]
     fn threaded_loads_keep_to_the_triangle_limit() {
+        // Every position finite: a triangle on one that isn't counts toward the limit as it's read, and is
+        // dropped only as the document is written.
         let text = mixed_lines(17, 4000).repeat(40);
+        let text = text.replace("nan", "5").replace("inf", "7").replace("1e39", "1e3");
         assert!(text.len() > 2 * PIECE, "too small for threads");
         let load = |limit, threads| {
             let input = Input {
@@ -3876,13 +3929,15 @@ f 1 2 3
 
     #[test]
     fn smoothing_groups_decide_which_faces_share_made_normals() {
-        // No `s`: smooth, so the fold's edge takes the faces' average.
-        let m = mesh(&format!("{FOLD}f 1 2 3\nf 1 4 2\n"));
+        // One group: smooth, so the fold's edge takes the faces' average.
+        let m = mesh(&format!("{FOLD}s 1\nf 1 2 3\nf 1 4 2\n"));
         assert_eq!(m.prims[0].positions.len(), 4);
         let h = std::f32::consts::FRAC_1_SQRT_2;
         assert!(near(normals_at(&m, [0.0; 3])[0], [0.0, h, h]));
-        // Flat, or two groups: each face its own.
+        // Flat, or two groups: each face its own. So too with no `s` at all, where the default normals keep a
+        // fold of a right angle hard.
         for text in [
+            format!("{FOLD}f 1 2 3\nf 1 4 2\n"),
             format!("{FOLD}s off\nf 1 2 3\nf 1 4 2\n"),
             format!("{FOLD}s 1\nf 1 2 3\ns 2\nf 1 4 2\n"),
         ] {
@@ -3909,7 +3964,7 @@ f 1 2 3
     #[test]
     fn made_normals_have_no_seam_where_texture_coordinates_split_a_vertex() {
         let m = mesh(&format!(
-            "{FOLD}vt 0 0\nvt 1 0\nvt 0 1\nvt 0.5 0.5\nf 1/1 2/2 3/3\nf 1/4 4/1 2/3\n"
+            "{FOLD}vt 0 0\nvt 1 0\nvt 0 1\nvt 0.5 0.5\ns 1\nf 1/1 2/2 3/3\nf 1/4 4/1 2/3\n"
         ));
         assert_eq!(m.prims[0].positions.len(), 6);
         let h = std::f32::consts::FRAC_1_SQRT_2;

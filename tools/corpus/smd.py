@@ -248,7 +248,8 @@ case(FMT, "cut_short_triangle", {"cut_short_triangle.smd": cut}, {
     "spec": f"{SPEC}: the file ends two corners into its last triangle, which is dropped",
     "source": SRC,
     "triangles": 1,
-    "facts": {"bones": 2, "frames": 1, "triangles": 1, "dropped_triangles": 1},
+    "facts": {"bones": 2, "frames": 1, "triangles": 1},
+    "json": {"/asset/extras/source/droppedGeometry": 1},
 })
 
 # Broken files.
