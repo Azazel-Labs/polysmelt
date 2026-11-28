@@ -1,24 +1,22 @@
 # Releasing polysmelt
 
-Versions and releases come from commit messages. After CI passes on a push to `main`, the
+The version in Cargo.toml is the one source of truth. After CI passes on a push to `main`, the
 [Auto release workflow](https://github.com/Azazel-Labs/polysmelt/actions/workflows/auto-release.yml)
-reads the messages:
+reads it: if no `vX.Y.Z` tag has that version yet, it tags the commit and publishes it to
+crates.io; otherwise it does nothing. So to release, raise the version and push:
 
-| Tag in a commit message | Effect |
-| --- | --- |
-| `#release` | Tags the next version (`vX.Y.Z`) and publishes it to crates.io. Counts commits since the last version tag. |
-| `#patch`, `#minor`, `#major` | How far that release moves the version from the last tag; the largest wins, and patch when none says. On its own it does nothing: it waits for a `#release`. |
+```sh
+scripts/bump.sh minor          # or patch, major, or an exact version such as 1.0.0-rc.1
+git commit -am "Release 0.24.0"
+git push
+```
 
-Put tags on a line of their own, alone or together, usually the last line of the message. A tag
-inside a sentence is ignored, so describing these tags in a commit message is safe.
-
-A `#minor #release` line releases 0.1.0 as 0.2.0. Leave out `#release` to let changes collect;
-the bump lines count once a later push releases.
-
-Nothing is committed to `main`, so there's never a bot commit to pull. The version is set in
-Cargo.toml and the lockfiles in a commit of its own that only the version tag points to, which is
-what's published. `main`'s Cargo.toml keeps the version it was last given by hand; the version tags
-are what count. If CI fails, nothing happens; the tags still count once a later push passes CI.
+`scripts/bump.sh` sets the version in Cargo.toml and moves polysmelt's entry in the three
+lockfiles (the crate's, `bench/` and `demo/`) with it. Add the version's section to CHANGELOG.md
+in the same commit. Leave the version alone to let changes collect; they go out with the next
+version pushed. Nothing is committed back to `main`, and if CI fails nothing is tagged: the next
+push that passes releases the version then. A version behind the newest tag fails the workflow
+rather than releasing.
 
 ## crates.io
 
