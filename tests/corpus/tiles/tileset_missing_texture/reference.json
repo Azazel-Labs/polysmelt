@@ -2,7 +2,7 @@
  "kind": "tileset",
  "placements": [
   {
-   "name": "gone.png",
+   "name": "tiles/a.gltf",
    "matrix": [
     1.0,
     0.0,
@@ -23,7 +23,7 @@
    ]
   },
   {
-   "name": "gone.png",
+   "name": "tiles/b.gltf",
    "matrix": [
     1.0,
     0.0,

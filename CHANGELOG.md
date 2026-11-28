@@ -30,7 +30,9 @@ Breaking changes are allowed in minor releases until 1.0.
   looking for the file it names in its place, where they counted it only when that file was
   missing, or not at all (COLLADA's `<hex>` and `data:` images, a `.usdz`'s entries). Only names
   looked up and not found are listed in `missingFiles`. A UDIM texture none of whose tiles is
-  found is counted once and listed by its pattern.
+  found is counted once and listed by its pattern. With `Keep::image_bytes` off, FBX and USD try
+  embedded bytes that don't start like a PNG or JPEG, so the file they fall back to is the one a
+  full read draws.
 - Irrlicht scenes and 3D Tiles tilesets report the `droppedTextures` and `missingFiles` of the
   files they place as their own, a name counted and listed once across all of them; before, a
   scene kept only its own and a tileset only its missing tiles.

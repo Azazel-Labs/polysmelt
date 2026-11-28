@@ -1190,14 +1190,15 @@ fn an_embedded_texture_that_is_not_an_image_is_counted_once_after_its_file_is_lo
     let unnamed = fbx_textured(&[(40, None)], NOT_AN_IMAGE, [40, 40, 40]);
     let doc = read_with(unnamed.as_bytes(), "pack/m.fbx", Memory::new(), Keep::ALL);
     assert_eq!(report(&doc), (1, vec![]), "no file named");
-    // Without reading images, an embedded texture isn't known not to be one.
-    let doc = read_with(
-        named.as_bytes(),
-        "pack/m.fbx",
-        Memory::new(),
-        Keep::ALL.with_image_bytes(false),
-    );
+    // Without reading images, bytes that don't say they are a PNG or JPEG are tried all the same, so that the
+    // file looked for in their place is the one a full read finds.
+    let lazy = Keep::ALL.with_image_bytes(false);
+    let doc = read_with(named.as_bytes(), "pack/m.fbx", Memory::new(), lazy);
+    assert_eq!(report(&doc), (1, strings(&["gone.png"])));
+    let with_png = Memory::new().with("pack/gone.png", png.clone());
+    let doc = read_with(named.as_bytes(), "pack/m.fbx", with_png, lazy);
     assert_eq!(report(&doc), (0, vec![]));
+    assert_eq!(doc.json()["images"][0]["uri"], "gone.png");
     // And a read without textures reports none.
     let doc = read_with(
         named.as_bytes(),

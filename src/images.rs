@@ -485,7 +485,7 @@ impl Images {
     ) -> Option<usize> {
         // The name of an archive's entry or a file is the texture's; one embedded may be made up.
         let named = !matches!(location, Location::Embedded);
-        let i = self.try_bytes(bytes, reference, location, convert);
+        let i = self.take(bytes, reference, location, convert, false);
         if i.is_none() {
             let missed = &mut self.list.missed;
             missed.dropped += 1;
@@ -497,9 +497,18 @@ impl Images {
         i
     }
 
+    #[cfg_attr(
+        not(any(feature = "fbx", feature = "usd", feature = "flt")),
+        allow(
+            dead_code,
+            reason = "only readers with a file to look for in an embedded texture's place use it"
+        )
+    )]
     /// [`bytes`](Self::bytes) without counting a texture `convert` makes no image of: for a reader
     /// that has somewhere else to look for it (a file of the name an embedded texture gives), and
-    /// counts it with [`drop`](Self::drop) when that gives none either.
+    /// counts it with [`drop`](Self::drop) when that gives none either. Collecting references,
+    /// bytes without a PNG or JPEG header are tried now, so that what the reader looks for in their
+    /// place is what a full read finds.
     pub fn try_bytes(
         &mut self,
         bytes: Cow<'_, [u8]>,
@@ -507,7 +516,22 @@ impl Images {
         location: Location,
         convert: impl FnOnce(&[u8]) -> Option<Image>,
     ) -> Option<usize> {
-        if !self.lazy {
+        self.take(bytes, reference, location, convert, true)
+    }
+
+    /// The image `convert` makes of `bytes`, or with `lazy` a reference to them, unread unless
+    /// `check` and they don't say they're a PNG or JPEG.
+    fn take(
+        &mut self,
+        bytes: Cow<'_, [u8]>,
+        reference: &str,
+        location: Location,
+        convert: impl FnOnce(&[u8]) -> Option<Image>,
+        check: bool,
+    ) -> Option<usize> {
+        if self.lazy && check && Image::mime_of(&bytes).is_none() {
+            convert(&bytes)?;
+        } else if !self.lazy {
             let img = convert(&bytes)?;
             return Some(self.push(Source::Image(img)));
         }

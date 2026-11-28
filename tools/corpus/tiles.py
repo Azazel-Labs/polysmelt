@@ -659,10 +659,10 @@ def tileset(name, files):
                         g = json.loads(data)
                         images = g.get("images", [])
                         for t in g.get("textures", []):
-                            uri = images[t["source"]].get("uri", "") if "source" in t else ""
-                            if uri and not uri.startswith("data:") and join(here, unquote(uri)) not in files \
-                                    and uri not in textures:
-                                textures.append(uri)
+                            image = images[t["source"]].get("uri", "") if "source" in t else ""
+                            if image and not image.startswith("data:") and join(here, unquote(image)) not in files \
+                                    and image not in textures:
+                                textures.append(image)
                     beside = {k[len(here) + 1 if here else 0:]: v for k, v in files.items()}
                     drawn, _ = content(data, beside, axis)
                     place = chain(Z_TO_Y, m, Y_TO_Z)
