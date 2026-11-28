@@ -2,7 +2,7 @@
 
 Breaking changes are allowed in minor releases until 1.0.
 
-## Unreleased
+## 0.23.0
 
 - OpenFlight animated groups play as the group record says. The last frame duration was taken as
   the last frame's whole length; it is how much longer than the others the last frame of the last

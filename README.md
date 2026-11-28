@@ -39,7 +39,7 @@ kind of document back, ready to write as GLB or FBX or to flatten into triangles
 
 ```toml
 [dependencies]
-polysmelt = "0.22"
+polysmelt = "0.23"
 ```
 
 ```rust no_run
