@@ -46,6 +46,9 @@ $newer || die "$next isn't newer than Cargo.toml's $current"
 git rev-parse -q --verify "refs/tags/v$next" >/dev/null && die "v$next is already released"
 
 sed -i "/^\[$SECTION\]/,/^\[/ s/^version = \"[^\"]*\"/version = \"$next\"/" Cargo.toml
+# A crate published beside another depends on it by path and version, and Cargo can't take that version from the
+# workspace, so those requirements move here too.
+sed -i -E "/path = /s/version = \"=?${current//./\\.}\"/version = \"$next\"/" $(git ls-files '*Cargo.toml')
 # CI and publishing build with --locked, so the lockfiles move with it; only this project's own entries change.
 cargo update --workspace --quiet
 for manifest in "${LOCKS[@]}"; do

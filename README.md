@@ -37,9 +37,8 @@ kind of document back, ready to write as GLB or FBX or to flatten into triangles
 
 ## Quick start
 
-```toml
-[dependencies]
-polysmelt = "0.23"
+```sh
+cargo add polysmelt
 ```
 
 ```rust no_run
